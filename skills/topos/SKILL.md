@@ -238,6 +238,14 @@ topos publish <skill>             # share: lands directly, or becomes a proposal
 topos publish --propose <skill>   # always propose (a reviewer approves first)
 ```
 
+A bundle a person has BOTH in this project and machine-wide publishes from whichever copy holds
+the edits; the describe and the receipt name that folder whenever it is not the one you stand in,
+and `-g` names the machine copy outright. When both copies hold edits the one you stand in ships
+and the other is named with the command that shares it. A copy already at the published version is
+not an error: `publish` says `already published — your copy matches current`, exits 0, and — when
+the edits are in the other scope's copy — prints the one command that shares them. Never retry a
+publish against that answer.
+
 `topos review` is the proposal inbox (approve, or reject with a reason). A draft may also stay
 local — divergence is allowed. For a NEW skill, meet the distill bar below, then
 `topos add <dir>` (local, reversible), bare `topos publish <name>` to describe, `--yes` to ship

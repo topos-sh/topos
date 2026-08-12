@@ -1,18 +1,28 @@
 {
   "schema_version": 1,
   "command": "publish",
-  "ok": false,
-  "data": {},
-  "warnings": [],
-  "next_actions": [],
-  "error": {
-    "code": "NO_CHANGES",
-    "outcome": "PERMANENT_FAILURE",
-    "retryable": false,
-    "affected": {
-      "skill": "deploy"
+  "ok": true,
+  "data": {
+    "other_scope_draft": {
+      "folder": "~/.claude/skills/deploy",
+      "machine": true
     },
-    "context": {},
-    "next_actions": []
-  }
+    "result": "no_changes",
+    "skill": "deploy"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "RUN_COMMAND",
+      "argv": [
+        "topos",
+        "publish",
+        "-g",
+        "deploy",
+        "--json"
+      ],
+      "mutates": false,
+      "needs_network": true
+    }
+  ]
 }

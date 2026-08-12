@@ -2472,7 +2472,13 @@ fn local_row_drafted(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path) -> bool {
     let Ok(Some(id)) = super::add::tracked_skill_at(&sctx, &canonical) else {
         return false;
     };
-    SkillId::parse(&id).is_ok_and(|sid| super::store_has_draft(&sctx, &sid))
+    let Ok(sid) = SkillId::parse(&id) else {
+        return false;
+    };
+    let Ok(Some(lock)) = doc::read_doc::<Lock>(sctx.fs, &sctx.layout.published(&sid).lock) else {
+        return false;
+    };
+    super::store_has_draft(&sctx, &sid, &lock)
 }
 
 /// Feed the scope's MCP demand list from a LOCAL path row: `server.json` read straight from the

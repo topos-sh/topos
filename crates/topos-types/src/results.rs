@@ -1648,6 +1648,32 @@ pub struct PublishData {
     /// **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Whether the shipped bytes came from the MACHINE copy while the command stood in a project
+    /// checkout — the cross-scope ship, which `from_placement` names the folder of. False for the
+    /// ordinary same-scope publish. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_machine: bool,
+    /// The OTHER scope's copy, when it carries edits this publish did not ship. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_scope_draft: Option<ScopeDraft>,
+}
+
+/// A bundle's copy in the scope this command did NOT act in — disclosed beside a publish that left
+/// it alone, so the edits it holds are never silently invisible. One command shares them, and which
+/// one it is follows from `machine`. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct ScopeDraft {
+    /// The folder that copy stands in, as a person reads it
+    /// (`~/.claude/skills/coolify-deploy` · `project/.agents/skills/coolify-deploy`).
+    pub folder: String,
+    /// Whether it is the MACHINE copy (`false` = a project checkout's) — which decides both the
+    /// word the line uses and whether the command that shares it carries `-g`.
+    pub machine: bool,
 }
 
 /// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
@@ -2172,6 +2198,51 @@ pub struct PublishDescribeData {
     /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Whether the bytes would come from the MACHINE copy while the command stands in a project
+    /// checkout — the cross-scope ship, which `from_placement` names the folder of. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_machine: bool,
+    /// The OTHER scope's copy, when it carries edits this publish would leave alone. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_scope_draft: Option<ScopeDraft>,
+    /// The whole `topos diff …` command that reads the exact copy this publish would ship —
+    /// spelled for the folder and the scope that resolved, so it is runnable as printed.
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+}
+
+/// `publish` when the copy already matches the published `current`: a SUCCESS with nothing to ship
+/// — not a failure, and never a reason for an agent to retry. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct PublishNoChangesData {
+    /// The branch key: this publish shipped nothing because there was nothing to ship.
+    pub result: PublishResult,
+    /// The skill the command named.
+    pub skill: String,
+    /// The OTHER scope's copy, when THAT is where the edits are — the pointer across, so a
+    /// "nothing to ship" answer never hides a draft one command away. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_scope_draft: Option<ScopeDraft>,
+}
+
+/// Why a `publish` moved nothing. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishResult {
+    /// The scanned copy is byte-identical to the version the workspace already serves.
+    NoChanges,
 }
 
 /// The gate a `publish` describe predicts. **INFERRED value set.**
@@ -2447,6 +2518,8 @@ mod tests {
             share_line: None,
             undo: None,
             from_placement: None,
+            from_machine: false,
+            other_scope_draft: None,
             other_edited: Vec::new(),
         };
         let v = serde_json::to_value(&done).unwrap();

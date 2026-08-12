@@ -55,7 +55,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   receipt (a dest row's undo reconstructs `-a`/`--dest`).
 - **Contribute:** `publish` (a landed publish of a path-ref item transfers governance — catalog
   entry + the manifest line rewritten to the workspace reference), `review`, `revert`, `protect`,
-  `invite` — op-WAL idempotent retry over each skill's session lane.
+  `invite` — op-WAL idempotent retry over each skill's session lane. `publish` resolves its copy
+  STANDING-FIRST across the per-scope stores (`ops::resolve_skill_stored`): the scope you stand in
+  when it holds a DRAFT — bytes ahead of the lock, settled or not (`ops::store_draft_dir`, the one
+  draft definition) — else the other reachable scope's drafted copy, else where you stand; `-g`
+  narrows to the machine store and misses honestly. A ship from outside the standing scope names
+  its folder on both surfaces, and the other scope's draft is disclosed with the command that
+  shares it. A copy already at `current` is a SUCCESS document (`result: no_changes`), never a
+  refusal.
 
 ## Module map (`src/`)
 

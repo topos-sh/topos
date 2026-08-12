@@ -2935,8 +2935,9 @@ enum DraftState {
 /// Whether the bundle a row delivers carries local edits, over the store that owns it (the home
 /// store, or the project store of a checkout on the cwd chain).
 fn draft_state(ctx: &Ctx<'_>, name: &str) -> DraftState {
-    let (layout, sid, _lock) = match super::resolve_skill_stored(ctx, name, None) {
-        Ok(v) => v,
+    let (layout, sid) = match super::resolve_skill_stored(ctx, name, None, super::StoreScope::Here)
+    {
+        Ok(hit) => (hit.layout, hit.id),
         Err(ClientError::NoSuchSkill { .. }) => return DraftState::Clean,
         // An ambiguous name (two stores hold it) cannot be classified — fail toward the gate.
         Err(_) => return DraftState::Indeterminate,

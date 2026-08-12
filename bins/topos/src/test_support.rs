@@ -124,6 +124,11 @@ pub enum PublishView {
     Proposed {
         proposal: String,
     },
+    /// The copy already matched `current` — a success with nothing to ship.
+    NoChanges {
+        /// The other scope's copy, when that is where the edits are.
+        other_scope_draft: Option<topos_types::results::ScopeDraft>,
+    },
 }
 
 /// One SESSION-MODEL installation: a fresh `~/.topos` + a work root for person-scope placements.
@@ -475,6 +480,7 @@ impl SessionInstall {
                 None,
                 message,
                 &ops::Selection::default(),
+                ops::StoreScope::Here,
             )
             .map_err(err_str)?
             {
@@ -486,6 +492,9 @@ impl SessionInstall {
                 }),
                 ops::PublishOutcome::Proposed(d) => Ok(PublishView::Proposed {
                     proposal: d.proposal,
+                }),
+                ops::PublishOutcome::NoChanges(d) => Ok(PublishView::NoChanges {
+                    other_scope_draft: d.other_scope_draft,
                 }),
             }
         })

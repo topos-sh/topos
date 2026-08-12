@@ -18,7 +18,9 @@ use topos_types::persisted::{ConflictState, Lock, OpKind, OpRecord, PlacementMap
 use topos_types::results::{AddedNote, ProposeData, PublishData};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
-use topos_types::results::{PublishDescribeData, PublishGate};
+use topos_types::results::{
+    PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult, ScopeDraft,
+};
 
 use super::connect::{DeliveryConnect, DirectoryConnect};
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
@@ -51,14 +53,28 @@ fn origin_to_wire(
     }
 }
 
-/// The result of `publish`: either `current` moved (a direct publish), or a proposal opened
-/// (`--propose`, or the protection gate's downgrade).
+/// The result of `publish`: `current` moved (a direct publish), a proposal opened (`--propose`, or
+/// the protection gate's downgrade), or there was nothing to ship.
 #[derive(Debug)]
 pub(crate) enum PublishOutcome {
     /// A direct publish moved `current` to the draft.
     Published(PublishData),
     /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
     Proposed(ProposeData),
+    /// The copy already matches `current` — a SUCCESS with nothing to ship. The converged state is
+    /// what the command asked for, so it is reported, never refused.
+    NoChanges(PublishNoChangesData),
+}
+
+/// What a bare (no `--yes`) publish yields: the preview of what shipping would do, or the same
+/// already-published answer the apply gives — a no-op has nothing to preview, and wrapping one in
+/// "Nothing has changed yet — apply with:" would offer a command that does nothing.
+#[derive(Debug)]
+pub(crate) enum PublishPreview {
+    /// What shipping this draft WOULD do.
+    Describe(Box<PublishDescribeData>),
+    /// The copy already matches `current`.
+    NoChanges(PublishNoChangesData),
 }
 
 /// The genesis base — a skill whose `current` does not exist yet is published as a zero-parent commit at
@@ -95,9 +111,9 @@ fn landed_undo_is_restorative(followed: bool, expected_generation: u64) -> bool 
 /// the `add`-family errors ([`ClientError::AmbiguousSource`] / [`ClientError::NoUntrackedSkill`] / …) when
 /// resolving an untracked source; [`ClientError::ApprovalMismatch`] if a `@<digest>` pin does not match the
 /// scanned bytes; [`ClientError::PublishBlocked`] if an unresolved merge conflict is present;
-/// [`ClientError::NoChanges`] when the draft is byte-identical to the published `current` (a published
-/// skill only — a genesis skill's first publish is never a no-op); [`ClientError::Conflict`] /
-/// [`ClientError::Denied`] on the plane's typed verdict; a transport / store failure otherwise.
+/// [`ClientError::Conflict`] / [`ClientError::Denied`] on the plane's typed verdict; a transport / store
+/// failure otherwise. A draft byte-identical to `current` is NOT an error — it settles as
+/// [`PublishOutcome::NoChanges`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
@@ -111,6 +127,7 @@ pub(crate) fn publish(
     workspace: Option<&str>,
     message: Option<&str>,
     sel: &super::Selection,
+    scope: super::StoreScope,
 ) -> Result<PublishOutcome, ClientError> {
     // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE.
     let (source_str, pin) = parse_target(target);
@@ -150,6 +167,7 @@ pub(crate) fn publish(
         workspace,
         message,
         sel,
+        scope,
     )?;
     Ok(stamp_added(outcome, added))
 }
@@ -245,9 +263,10 @@ pub(crate) struct PublishDescribeConnectors<'a> {
 /// composition root).
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::NoChanges`] when the draft equals current;
-/// [`ClientError::ApprovalMismatch`] on a failed `@<digest>` pin; [`ClientError::PublishBlocked`] on an
-/// unresolved merge; name-resolution / scan / transport errors.
+/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::ApprovalMismatch`] on a failed
+/// `@<digest>` pin; [`ClientError::PublishBlocked`] on an unresolved merge; name-resolution / scan /
+/// transport errors. A draft equal to `current` is not an error — it previews as
+/// [`PublishPreview::NoChanges`], the same answer the apply gives.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_describe(
     ctx: &Ctx<'_>,
@@ -259,19 +278,23 @@ pub(crate) fn publish_describe(
     channel: Option<&str>,
     workspace: Option<&str>,
     sel: &super::Selection,
-) -> Result<PublishDescribeData, ClientError> {
+    scope: super::StoreScope,
+) -> Result<PublishPreview, ClientError> {
     let (source_str, pin) = parse_target(target);
     let _ = roots;
     // A describe MUTATES NOTHING (the consent contract). An already-tracked target is scanned in place;
     // an UNTRACKED source is NOT adopted here — adopting mints a sidecar and arms the session-start hook,
     // a durable change the human has not confirmed. The apply (`--yes`) does the adoption and discloses
     // it; the describe points the user at that.
-    // The resolver spans the per-scope stores (home first, then the cwd chain's project stores) —
-    // a project-delivered bundle's draft is described against the checkout's own store.
-    let skill_name = match super::resolve_skill_stored(ctx, &source_str, None) {
-        Ok((_, _, lock)) => lock.name,
+    // The resolver spans the per-scope stores (standing first, then the drafted copy of the other
+    // scope) — a project-delivered bundle's draft is described against the checkout's own store.
+    let skill_name = match super::resolve_skill_stored(ctx, &source_str, None, scope) {
+        Ok(hit) => hit.lock.name,
         // Tracked ambiguously (2+ under this exact name) — the `--workspace`-filtered resolve below picks.
         Err(ClientError::AmbiguousName { .. }) => source_str.clone(),
+        Err(ClientError::NoSuchSkill { .. }) if scope == super::StoreScope::Machine => {
+            return Err(ClientError::NoSuchSkill { name: source_str });
+        }
         Err(ClientError::NoSuchSkill { .. }) => {
             return Err(ClientError::InvalidArgument(format!(
                 "'{source_str}' is not tracked yet — a describe will not adopt it (that would change \
@@ -282,7 +305,16 @@ pub(crate) fn publish_describe(
         Err(e) => return Err(e),
     };
 
-    let (store, id, lock) = super::resolve_skill_stored(ctx, &skill_name, workspace)?;
+    let super::StoredSkill {
+        layout: store,
+        id,
+        lock,
+        other,
+        cross_scope,
+    } = super::resolve_skill_stored(ctx, &skill_name, workspace, scope)?;
+    // The OTHER scope's copy, when it holds edits this publish will not ship — read before the ctx
+    // below is re-pointed at the resolved store, because it is that other store's own state.
+    let other_draft = other_scope_draft(ctx, other.as_ref());
     let lane = match session {
         Some(sc) => super::resolve_session_lane(ctx, sc, workspace, Some(id.as_str()))?,
         None => None,
@@ -375,7 +407,10 @@ pub(crate) fn publish_describe(
         .map(|(_, fc)| fc);
     let followed = follow_entry.is_some();
     if (followed || sync.observed != GENESIS) && digest_hex == lock.bundle_digest {
-        return Err(ClientError::NoChanges { skill: skill_name });
+        return Ok(PublishPreview::NoChanges(no_changes(
+            skill_name,
+            other_draft,
+        )));
     }
 
     // The gate the plane will apply: a reviewed bundle (or an explicit `--propose`) becomes a proposal;
@@ -402,8 +437,8 @@ pub(crate) fn publish_describe(
         PublishGate::Lands
     };
 
-    // GENESIS = no published `current` exists — the same signal the NO_CHANGES guard above keys
-    // on (never followed AND never published from here). It decides the default placement below.
+    // GENESIS = no published `current` exists — the same signal the no-op guard above keys on
+    // (never followed AND never published from here). It decides the default placement below.
     let genesis = !followed && sync.observed == GENESIS;
 
     // Network reads AFTER the local scan: the workspace address (the share line).
@@ -523,8 +558,13 @@ pub(crate) fn publish_describe(
         None => (None, None, None),
     };
 
-    let (from_placement, other_edited) = from_disclosure(picked.as_ref());
-    Ok(PublishDescribeData {
+    let from_machine = cross_scope && !store.is_project_scope();
+    let (from_placement, other_edited) = from_disclosure(
+        picked.as_ref(),
+        cross_scope.then(|| shipped_from(ctx, &placement)),
+    );
+    let review = Some(review_command(&skill_name, from_machine, picked.as_ref()));
+    Ok(PublishPreview::Describe(Box::new(PublishDescribeData {
         skill: skill_name,
         skill_id: id.into_string(),
         workspace_id,
@@ -533,6 +573,9 @@ pub(crate) fn publish_describe(
         bundle_digest: digest_hex,
         placements,
         from_placement,
+        from_machine,
+        other_scope_draft: other_draft,
+        review,
         other_edited,
         gate,
         // The full ancestor-bytes revert detection is the apply path's (the server treats a
@@ -549,7 +592,63 @@ pub(crate) fn publish_describe(
         reference: transfer_reference,
         converted_from: transfer_from,
         kind: bundle_kind.tag(),
+    })))
+}
+
+/// The already-published answer: nothing to ship, and — when the edits are in the OTHER scope's
+/// copy — where they are. Shared by the describe and the apply, which owe the reader the same
+/// answer.
+fn no_changes(skill: String, other_draft: Option<ScopeDraft>) -> PublishNoChangesData {
+    PublishNoChangesData {
+        result: PublishResult::NoChanges,
+        skill,
+        other_scope_draft: other_draft,
+    }
+}
+
+/// The other scope's DRAFT as a disclosure names it: the folder that copy stands in, spelled at ITS
+/// OWN scope (`project/…` inside the checkout, `~/…` on the machine), and which scope that is —
+/// which is also what decides whether the command that shares it carries `-g`.
+///
+/// `None` when the other store holds no edits: there is then nothing being left behind, and a line
+/// about a copy that matches `current` would be noise.
+fn other_scope_draft(ctx: &Ctx<'_>, other: Option<&super::OtherStore>) -> Option<ScopeDraft> {
+    let other = other.filter(|o| o.drafted)?;
+    let octx = super::pull::ctx_with_layout(ctx, &other.layout);
+    let dir = super::store_draft_dir(&octx, &other.id, &other.lock)?;
+    Some(ScopeDraft {
+        folder: super::dest_select::copy_spellings(&octx, &dir).display,
+        machine: !other.layout.is_project_scope(),
     })
+}
+
+/// The folder these bytes were read from, as a person reads it — spelled at the store that owns
+/// the copy, so a machine copy read from inside a checkout says `~/…` rather than a `project/`
+/// prefix that does not resolve.
+fn shipped_from(ctx: &Ctx<'_>, placement: &std::path::Path) -> String {
+    super::dest_select::copy_spellings(ctx, placement).display
+}
+
+/// The `topos diff …` the describe offers for reading the exact copy it would ship: `-g` when the
+/// machine copy answered from inside a checkout (a bare `diff` there reads the project's), and the
+/// picked copy's own `--dest` spelling when a selection named one — so the command reaches that
+/// folder however the selection was written.
+fn review_command(
+    skill: &str,
+    machine: bool,
+    picked: Option<&super::dest_select::SelectedCopy>,
+) -> String {
+    let mut cmd = "topos diff".to_owned();
+    if machine {
+        cmd.push_str(" -g");
+    }
+    cmd.push(' ');
+    cmd.push_str(skill);
+    if let Some(p) = picked {
+        cmd.push_str(" --dest ");
+        cmd.push_str(&p.spelling.dest);
+    }
+    cmd
 }
 
 /// The ONE copy a `-a`/`--dest` selection named, or `None` for a bare publish (which resolves the
@@ -570,18 +669,20 @@ fn pick_copy(
     super::dest_select::select_copy(ctx, sel, skill_name, map).map(Some)
 }
 
-/// The two disclosure fields a `--dest` publish carries — the folder shipped FROM and the other
-/// edited copies left alone — populated only when more than one copy is edited.
+/// The two disclosure fields a publish carries — the folder shipped FROM and the other edited
+/// copies left alone — populated when the folder was a CHOICE: a `--dest` among several edited
+/// copies, or (through `cross_scope`) a copy in a scope other than the one the command stands in.
 ///
-/// With a single edited copy there is nothing to say: that copy IS the draft, a `--dest` naming it
-/// asks for exactly what a bare publish would do, and a `from …` line would name a folder the
-/// reader never had to choose between.
+/// With a single edited copy in the standing scope there is nothing to say: that copy IS the draft,
+/// a `--dest` naming it asks for exactly what a bare publish would do, and a `from …` line would
+/// name a folder the reader never had to choose between.
 fn from_disclosure(
     picked: Option<&super::dest_select::SelectedCopy>,
+    cross_scope: Option<String>,
 ) -> (Option<String>, Vec<String>) {
     match picked.filter(|p| !p.others_edited.is_empty()) {
         Some(p) => (Some(p.spelling.display.clone()), p.others_edited.clone()),
-        None => (None, Vec::new()),
+        None => (cross_scope, Vec::new()),
     }
 }
 
@@ -825,6 +926,9 @@ fn stamp_added(mut outcome: PublishOutcome, added: Option<AddedNote>) -> Publish
         match &mut outcome {
             PublishOutcome::Published(data) => data.added = Some(note),
             PublishOutcome::Proposed(data) => data.added = Some(note),
+            // An adoption cannot end in "already published": a just-adopted bundle has no
+            // published `current` to match.
+            PublishOutcome::NoChanges(_) => {}
         }
     }
     outcome
@@ -846,13 +950,23 @@ fn enrolled_publish(
     workspace: Option<&str>,
     message: Option<&str>,
     sel: &super::Selection,
+    scope: super::StoreScope,
 ) -> Result<PublishOutcome, ClientError> {
     // The `--workspace` filter disambiguates a name shared across workspaces. A DELIVERED skill signs in
     // its OWN workspace (the pointer scope); a brand-new local skill (a genesis publish, no delivery)
     // is AMBIENT — the single session/membership or the `--workspace`-selected one. The resolver
     // spans the per-scope stores: a project-delivered bundle's state lives in the checkout's own
     // store, and its per-skill work below runs against that store.
-    let (store, id, lock) = super::resolve_skill_stored(ctx, skill_name, workspace)?;
+    let super::StoredSkill {
+        layout: store,
+        id,
+        lock,
+        other,
+        cross_scope,
+    } = super::resolve_skill_stored(ctx, skill_name, workspace, scope)?;
+    // The OTHER scope's copy, when it holds edits this publish will not ship — read before the ctx
+    // below is re-pointed at the resolved store, because it is that other store's own state.
+    let other_draft = other_scope_draft(ctx, other.as_ref());
     // The SESSION lane (the manifest model): the workspace + transports resolve from the
     // logged-in sessions; the legacy device enrollment keeps its instance.json path below.
     let lane = match session {
@@ -1008,13 +1122,13 @@ fn enrolled_publish(
             scanned.bundle_digest,
             message,
             bundle_kind.tag(),
-        ) {
-            Ok(rec) => rec,
+        )? {
+            Some(rec) => rec,
             // NO-CHANGE means an earlier publish of these bytes already LANDED — the retry a
             // failed local rewrite asks for resolves here, so the pending governance rewrite is
             // re-attempted (idempotent: with no matching path line it is a no-op) BEFORE the
-            // typed refusal propagates.
-            Err(ClientError::NoChanges { skill }) => {
+            // already-published answer is returned.
+            None => {
                 if let Some(l) = &lane {
                     let dirs: Vec<std::path::PathBuf> = map
                         .placements
@@ -1029,9 +1143,11 @@ fn enrolled_publish(
                         &dirs,
                     );
                 }
-                return Err(ClientError::NoChanges { skill });
+                return Ok(PublishOutcome::NoChanges(no_changes(
+                    lock.name.clone(),
+                    other_draft,
+                )));
             }
-            Err(e) => return Err(e),
         },
     };
 
@@ -1045,6 +1161,11 @@ fn enrolled_publish(
         }
         (None, None) => None,
     };
+    let disclosure = ScopeDisclosure {
+        cross_from: cross_scope.then(|| shipped_from(ctx, &placement)),
+        from_machine: cross_scope && !store.is_project_scope(),
+        other_draft,
+    };
     let mut outcome = map_outcome(
         ctx,
         &sp,
@@ -1056,6 +1177,7 @@ fn enrolled_publish(
         dir_ref,
         followed,
         picked.as_ref(),
+        &disclosure,
     )?;
     // GOVERNANCE TRANSFER, by default: a landed publish — OR an opened proposal (`--propose`,
     // the reviewed-bundle downgrade) — of a bundle some manifest referenced as a LOCAL PATH
@@ -1152,6 +1274,9 @@ fn enrolled_publish(
                     }
                 }
             }
+            // Unreachable here — the no-op arm returns above, having already re-attempted the
+            // rewrite itself (a landed publish of these bytes is what made it a no-op).
+            PublishOutcome::NoChanges(_) => {}
         }
     }
     Ok(outcome)
@@ -1401,10 +1526,13 @@ fn behind_guard(
 /// `enrolled_publish`'s WAL match — a crashed pending op replays untouched, so this is the right place for
 /// the no-op refusal (a settled-but-unacked publish must still replay to its byte-identical receipt).
 ///
+/// `Ok(None)` = there is NOTHING to ship: the draft is byte-identical to the published `current` (a
+/// published skill only — a genesis skill's first publish is never a no-op). The caller reports the
+/// converged state as the success it is.
+///
 /// # Errors
 /// [`ClientError::Conflict`] if the local state is behind (a newer `current` not yet applied — pull to
-/// rebase); [`ClientError::NoChanges`] when the draft is byte-identical to the published `current` (a
-/// published skill only — a genesis skill's first publish is never a no-op); a store / scan failure otherwise.
+/// rebase); a store / scan failure otherwise.
 #[allow(clippy::too_many_arguments)]
 fn build_publish_op(
     ctx: &Ctx<'_>,
@@ -1418,7 +1546,7 @@ fn build_publish_op(
     digest: [u8; 32],
     message: Option<&str>,
     bundle_kind: Option<String>,
-) -> Result<OpRecord, ClientError> {
+) -> Result<Option<OpRecord>, ClientError> {
     // The commit message: `-m <message>` when given (folded into `commit_id`, so it changes the version
     // identity), else the default. It also rides the local store commit, so a WAL replay re-renders the
     // byte-identical candidate (`render_candidate` reads the message back from the store).
@@ -1443,17 +1571,15 @@ fn build_publish_op(
 
     let digest_hex = to_hex(&digest);
 
-    // No-op refusal (the apply-path twin of the describe's guard): once a publish has advanced `observed`
-    // past GENESIS, a draft byte-identical to `current` (`lock.bundle_digest`) has nothing to ship — refuse
-    // rather than mint an empty version parented on the last. Placed AFTER the behind-check (a stale base
-    // must surface as CONFLICT, not NoChanges) and only in this fresh-op arm (a crashed op still replays).
+    // The no-op (the apply-path twin of the describe's guard): once a publish has advanced `observed`
+    // past GENESIS, a draft byte-identical to `current` (`lock.bundle_digest`) has nothing to ship — mint
+    // no op rather than an empty version parented on the last. Placed AFTER the behind-check (a stale base
+    // must surface as CONFLICT, not a no-op) and only in this fresh-op arm (a crashed op still replays).
     // A never-published GENESIS skill (`observed == GENESIS`) is exempt: its `lock.bundle_digest` equals the
-    // adopted draft by construction, so its first publish is never a no-op. This also refuses an
+    // adopted draft by construction, so its first publish is never a no-op. This also covers an
     // identical-bytes `--propose` (both kinds flow through here), matching the describe.
     if sync.observed != GENESIS && digest_hex == lock.bundle_digest {
-        return Err(ClientError::NoChanges {
-            skill: lock.name.clone(),
-        });
+        return Ok(None);
     }
 
     // Genesis (no `current` yet) is a zero-parent commit at generation 0; a normal publish parents on
@@ -1501,7 +1627,7 @@ fn build_publish_op(
         .ok()
         .flatten()
         .map(|o| origin_to_wire(&o.origin));
-    Ok(OpRecord {
+    Ok(Some(OpRecord {
         schema_version: PERSISTED_SCHEMA_VERSION,
         upstream,
         op_id,
@@ -1525,7 +1651,19 @@ fn build_publish_op(
         // the catalog can never learn a different answer from a retry than from the original.
         bundle_kind,
         last_receipt: None,
-    })
+    }))
+}
+
+/// What a publish's SCOPE choice owes the receipt: the folder it shipped from when that folder was
+/// not in the scope the command stood in, and the other scope's copy left holding its own edits.
+struct ScopeDisclosure {
+    /// The shipped folder, present only on a cross-scope ship (a same-scope publish leaves the
+    /// `--dest` disclosure to say whether the folder was a choice at all).
+    cross_from: Option<String>,
+    /// Whether that folder is the MACHINE copy's, read from inside a project checkout.
+    from_machine: bool,
+    /// The other scope's copy, when it carries edits this publish did not ship.
+    other_draft: Option<ScopeDraft>,
 }
 
 /// Map the plane's typed write outcome to a [`PublishOutcome`] (or a typed [`ClientError`]).
@@ -1544,6 +1682,7 @@ fn map_outcome(
     directory: Option<&dyn crate::plane::DirectorySource>,
     followed: bool,
     picked: Option<&super::dest_select::SelectedCopy>,
+    disclosure: &ScopeDisclosure,
 ) -> Result<PublishOutcome, ClientError> {
     // Both landed shapes name their destination from the workspace's own ADDRESS — ONE
     // best-effort read, AFTER the write; a failure just leaves the lines off, it never fails a
@@ -1607,7 +1746,8 @@ fn map_outcome(
                     crate::render::short(&lock.base_commit)
                 )
             });
-            let (from_placement, other_edited) = from_disclosure(picked);
+            let (from_placement, other_edited) =
+                from_disclosure(picked, disclosure.cross_from.clone());
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
                 name: skill_name.to_owned(),
@@ -1631,6 +1771,8 @@ fn map_outcome(
                 share_line,
                 undo,
                 from_placement,
+                from_machine: disclosure.from_machine,
+                other_scope_draft: disclosure.other_draft.clone(),
                 other_edited,
             }))
         }

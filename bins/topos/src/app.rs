@@ -1300,6 +1300,7 @@ fn run_command(
         }
         Command::Publish {
             target,
+            global,
             agent,
             dest,
             to,
@@ -1308,6 +1309,14 @@ fn run_command(
             yes,
         } => {
             let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
+            // The scope flag decides which STORE the name resolves in — and, since publish ships
+            // the copy it resolved, which bytes reach the team. Bare stands where you are; `-g`
+            // is the machine store alone.
+            let store_scope = if global {
+                ops::StoreScope::Machine
+            } else {
+                ops::StoreScope::Here
+            };
             // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
             // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
             let roots = list_discovery();
@@ -1331,12 +1340,18 @@ fn run_command(
                     to.as_deref(),
                     workspace.as_deref(),
                     &selection,
+                    store_scope,
                 );
                 // The paste-ready apply: this same publish plus `--yes` (preserving `--propose` / `--to`
                 // / `-m` — dropping the message would change the version's commit identity from what the
                 // describe computed, so an agent that runs this next action ships the wrong version —
-                // and the copy selector, without which the apply would face the freeze again).
-                let mut yes_argv = vec!["topos".to_owned(), "publish".to_owned(), target.clone()];
+                // and the copy selector, without which the apply would face the freeze again). The
+                // scope flag rides where a person writes it: right after the verb.
+                let mut yes_argv = vec!["topos".to_owned(), "publish".to_owned()];
+                if global {
+                    yes_argv.push("-g".to_owned());
+                }
+                yes_argv.push(target.clone());
                 yes_argv.extend(selection.argv_tail());
                 if propose {
                     yes_argv.push("--propose".to_owned());
@@ -1364,6 +1379,7 @@ fn run_command(
                 workspace.as_deref(),
                 message.as_deref(),
                 &selection,
+                store_scope,
             );
             finish_publish(json, cmd_name, result, &diag)
         }
@@ -3311,17 +3327,18 @@ fn block_on_pending<T>(
 }
 
 /// `publish`'s bare-DESCRIBE finisher — the enrolled two-phase preview (nothing landed on the plane) +
-/// the paste-ready `--yes` next-action. A typed refusal (NO_CHANGES / CONSENT_MISMATCH / …) flows through
-/// [`emit_err`].
+/// the paste-ready `--yes` next-action. A copy already at `current` has nothing to preview, so it
+/// settles through the same already-published document the apply prints. A typed refusal
+/// (CONSENT_MISMATCH / …) flows through [`emit_err`].
 fn finish_publish_describe(
     json: bool,
     command: &str,
-    result: Result<topos_types::results::PublishDescribeData, ClientError>,
+    result: Result<ops::PublishPreview, ClientError>,
     yes_argv: Vec<String>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(data) => {
+        Ok(ops::PublishPreview::Describe(data)) => {
             if json {
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
@@ -3332,8 +3349,28 @@ fn finish_publish_describe(
             }
             ExitCode::SUCCESS
         }
+        Ok(ops::PublishPreview::NoChanges(data)) => emit_publish_no_changes(json, command, &data),
         Err(e) => emit_err(json, command, &e, diag),
     }
+}
+
+/// The already-published answer, on both surfaces: exit 0, no error envelope. Its ONE offered
+/// command is the publish of the other scope's copy — present exactly when that copy holds edits
+/// this run did not ship, so the success never ends a session with unshared work unmentioned.
+fn emit_publish_no_changes(
+    json: bool,
+    command: &str,
+    data: &topos_types::results::PublishNoChangesData,
+) -> ExitCode {
+    if json {
+        let value = serde_json::to_value(data).unwrap_or_default();
+        let mut envelope = render::ok_envelope(command, value);
+        envelope.next_actions = render::publish_no_changes_actions(data);
+        outln!("{}", render::to_json(&envelope));
+    } else {
+        outln!("{}", render::publish_no_changes_tty(data));
+    }
+    ExitCode::SUCCESS
 }
 
 /// `publish`'s finisher — the verb yields a direct publish ([`PublishData`]) or an opened proposal
@@ -3365,6 +3402,7 @@ fn finish_publish(
             }
             ExitCode::SUCCESS
         }
+        Ok(ops::PublishOutcome::NoChanges(data)) => emit_publish_no_changes(json, command, &data),
         Err(e) => emit_err(json, command, &e, diag),
     }
 }

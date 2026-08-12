@@ -16,6 +16,10 @@
         "null"
       ]
     },
+    "from_machine": {
+      "description": "Whether the bytes would come from the MACHINE copy while the command stands in a project\ncheckout — the cross-scope ship, which `from_placement` names the folder of. **INFERRED**\n(additive-only).",
+      "type": "boolean"
+    },
     "from_placement": {
       "description": "The folder the bytes WOULD be read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection\nnamed ONE of several EDITED copies. A single edited copy needs no such line: it is the\ndraft, and naming its folder would say nothing. **INFERRED** (additive-only).",
       "type": [
@@ -77,6 +81,17 @@
         "type": "string"
       }
     },
+    "other_scope_draft": {
+      "description": "The OTHER scope's copy, when it carries edits this publish would leave alone. **INFERRED**\n(additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScopeDraft"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "placement_note": {
       "description": "The default placement's mode annotation: present when a brand-new skill's `everyone`\nplacement will be WITHHELD at the apply (the channel is curated and the caller is a\nmember) — the publish lands catalog-only and a curator places it afterwards. **INFERRED**\n(additive-only).",
       "type": [
@@ -93,6 +108,13 @@
     },
     "reference": {
       "description": "The canonical workspace reference the manifest would store. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "review": {
+      "description": "The whole `topos diff …` command that reads the exact copy this publish would ship —\nspelled for the folder and the scope that resolved, so it is runnable as printed.\n**INFERRED** (additive-only).",
       "type": [
         "string",
         "null"
@@ -192,6 +214,24 @@
           "type": "string",
           "const": "proposal"
         }
+      ]
+    },
+    "ScopeDraft": {
+      "description": "A bundle's copy in the scope this command did NOT act in — disclosed beside a publish that left\nit alone, so the edits it holds are never silently invisible. One command shares them, and which\none it is follows from `machine`. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The folder that copy stands in, as a person reads it\n(`~/.claude/skills/coolify-deploy` · `project/.agents/skills/coolify-deploy`).",
+          "type": "string"
+        },
+        "machine": {
+          "description": "Whether it is the MACHINE copy (`false` = a project checkout's) — which decides both the\nword the line uses and whether the command that shares it carries `-g`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "folder",
+        "machine"
       ]
     }
   }
