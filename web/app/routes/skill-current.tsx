@@ -31,12 +31,14 @@ import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { channelsCarrying } from "@/lib/db/queries.channels.server";
 import { assignBundle, assignedToEveryone, unassign } from "@/lib/db/queries.feed.server";
+import { mcpProbeFor } from "@/lib/db/queries.mcp.server";
 import { createInvitations, foldInviteEmail } from "@/lib/db/queries.roster.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { type AppliedOnSession, yourSessionsApplying } from "@/lib/db/queries.sessions.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
+import { probeStateLine } from "@/lib/mcp/probe-state";
 import { useWsPath } from "@/lib/ws-path";
 import { agentDocUrl, inviteUrl, wsPathServer } from "@/lib/ws-url.server";
 
@@ -82,7 +84,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // A member who addressed it under the other kind's base lands on the canonical page.
   requireCanonicalBase({ wsName: workspace.name, base, kind: row.kind, name: skill });
 
-  const [versionFiles, channels, yourSessions, everyoneAssigned] = await Promise.all([
+  const [versionFiles, channels, yourSessions, everyoneAssigned, probe] = await Promise.all([
     row.versionId !== null
       ? loadVersionFilesData(memberActor, row.skillId, row.versionId)
       : Promise.resolve(null),
@@ -91,6 +93,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     channelsCarrying(memberActor, row.skillId),
     yourSessionsApplying(memberActor, row.skillId),
     assignedToEveryone(memberActor, { bundleId: row.skillId }),
+    // WHAT THE PLANE SAW when it last asked this server. MCP only — a skill has nothing to ask —
+    // and advisory throughout: a version nobody probed reads "not checked yet", which says
+    // something about this plane and nothing about the server.
+    row.kind === "mcp" && row.versionId !== null
+      ? mcpProbeFor(memberActor, row.skillId, row.versionId)
+      : Promise.resolve(null),
   ]);
 
   return {
@@ -107,6 +115,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     channels,
     yourSessions,
     everyoneAssigned,
+    /** The probe line, resolved server-side: this kind has one, or it does not. */
+    probeLine: row.kind === "mcp" && row.versionId !== null ? probeStateLine(probe) : null,
     // The invite affordance's gates, resolved once here and never re-read client-side: armed mail
     // is the invitation's identity rung, and inviting is owner-only — the same two facts the
     // members page surfaces.
@@ -248,6 +258,7 @@ function SkillCurrentContent({
   channels,
   yourSessions,
   everyoneAssigned,
+  probeLine,
   mailArmed,
   isOwner,
 }: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
@@ -270,6 +281,11 @@ function SkillCurrentContent({
         showSettings={isOwner}
       />
       <PlacementNote />
+      {probeLine !== null && (
+        <p data-testid="mcp-probe" className="text-dim text-sm">
+          {probeLine}
+        </p>
+      )}
       {versionId !== null && versionFiles !== null ? (
         <VersionFiles skill={skill} versionId={versionId} currentChip {...versionFiles} />
       ) : (
