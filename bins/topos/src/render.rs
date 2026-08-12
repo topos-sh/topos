@@ -3377,20 +3377,35 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
         None => String::new(),
     };
     // The handle a reviewer pastes — SHORT, because the verdict path resolves a unique prefix of
-    // 8+ chars exactly as `revert --to` does.
-    let handle = match data.proposal.split_once('@') {
-        Some((skill, version)) => format!("{skill}@{}", short(version)),
-        None => data.proposal.clone(),
+    // 8+ chars exactly as `revert --to` does. The skill NAME rides out of the same split: the
+    // scope disclosure below spells a command with it.
+    let (skill, handle) = match data.proposal.split_once('@') {
+        Some((skill, version)) => (skill, format!("{skill}@{}", short(version))),
+        None => (data.title.as_str(), data.proposal.clone()),
     };
     let destination = match &data.workspace_address {
         Some(address) => format!(" to {address}"),
         None => String::new(),
     };
+    // WHICH copy these bytes came from — the same parenthetical the landed receipt prints, in the
+    // same place relative to where they went. A proposal ships bytes; the choice is the same one.
+    let from = match &data.from_placement {
+        Some(folder) => format!(" (from {folder})"),
+        None => String::new(),
+    };
     let mut out = format!(
-        "{prefix}Published {handle}{destination} for review.\n\
+        "{prefix}Published {handle}{destination}{from} for review.\n\
          Review required — a reviewer approves with: topos review {handle} --approve\n\
          withdraw it yourself:                       topos review {handle} --withdraw"
     );
+    // What becomes of the copies this proposal did not ship — one outcome, one sentence, wherever
+    // the reader meets it (the describe predicted these exact words).
+    if !data.other_edited.is_empty() {
+        out.push_str(&format!("\n{}", other_copies_clause(&data.other_edited)));
+    }
+    if let Some(other) = &data.other_scope_draft {
+        out.push_str(&format!("\n{}", other_scope_clause(other, skill)));
+    }
     if let Some(ch) = &data.placement_withheld {
         out.push_str(&format!(
             "\nchannel '{ch}' is curated — the reference was NOT placed (placement takes \
@@ -5765,6 +5780,10 @@ mod tests {
             rewrite_skipped: None,
             workspace_address: Some("topos.sh/ideamotive".to_owned()),
             share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
+            from_placement: None,
+            from_machine: false,
+            other_scope_draft: None,
+            other_edited: Vec::new(),
         }
     }
 
@@ -5791,6 +5810,71 @@ mod tests {
         );
         assert!(!s.contains("undo"), "{s}");
         assert!(!s.contains("revert"), "{s}");
+    }
+
+    /// A proposal ships bytes, so it owes the copy question the same answer a landed publish
+    /// gives: the folder chosen among several edited copies, and what the one left behind becomes
+    /// — the direct receipt's parenthetical and the direct receipt's sentence, byte for byte.
+    #[test]
+    fn a_per_copy_proposal_names_the_folder_and_what_the_other_copy_becomes() {
+        assert_eq!(
+            propose_tty(&ProposeData {
+                from_placement: Some("project/.agents/skills/coolify-deploy".to_owned()),
+                other_edited: vec!["project/.claude/skills/coolify-deploy".to_owned()],
+                ..proposed()
+            }),
+            "Published coolify-deploy@a1b2c3d4e5f6 to topos.sh/ideamotive (from \
+             project/.agents/skills/coolify-deploy) for review.\n\
+             Review required — a reviewer approves with: topos review coolify-deploy@a1b2c3d4e5f6 --approve\n\
+             withdraw it yourself:                       topos review coolify-deploy@a1b2c3d4e5f6 --withdraw\n\
+             your other copy in project/.claude/skills/coolify-deploy keeps its edits — it \
+             becomes a draft ahead of this version.\n\
+             share: https://topos.sh/ideamotive/skills/coolify-deploy"
+        );
+    }
+
+    /// The same across SCOPES: the proposal names the folder it shipped from and the other scope's
+    /// copy it left alone, with the one command that shares it — both directions, byte-exact.
+    #[test]
+    fn a_cross_scope_proposal_discloses_the_scope_it_left_alone() {
+        use topos_types::results::ScopeDraft;
+        let from_machine = ProposeData {
+            from_placement: Some("~/.claude/skills/coolify-deploy".to_owned()),
+            from_machine: true,
+            other_scope_draft: Some(ScopeDraft {
+                folder: "project/.agents/skills/coolify-deploy".to_owned(),
+                machine: false,
+            }),
+            ..proposed()
+        };
+        assert_eq!(
+            propose_tty(&from_machine),
+            "Published coolify-deploy@a1b2c3d4e5f6 to topos.sh/ideamotive (from \
+             ~/.claude/skills/coolify-deploy) for review.\n\
+             Review required — a reviewer approves with: topos review coolify-deploy@a1b2c3d4e5f6 --approve\n\
+             withdraw it yourself:                       topos review coolify-deploy@a1b2c3d4e5f6 --withdraw\n\
+             your project copy in project/.agents/skills/coolify-deploy keeps its edits — it \
+             becomes a draft ahead of this version (topos publish coolify-deploy shares it).\n\
+             share: https://topos.sh/ideamotive/skills/coolify-deploy"
+        );
+        let from_project = ProposeData {
+            from_placement: None,
+            from_machine: false,
+            other_scope_draft: Some(ScopeDraft {
+                folder: "~/.claude/skills/coolify-deploy".to_owned(),
+                machine: true,
+            }),
+            ..from_machine
+        };
+        assert_eq!(
+            propose_tty(&from_project),
+            "Published coolify-deploy@a1b2c3d4e5f6 to topos.sh/ideamotive for review.\n\
+             Review required — a reviewer approves with: topos review coolify-deploy@a1b2c3d4e5f6 --approve\n\
+             withdraw it yourself:                       topos review coolify-deploy@a1b2c3d4e5f6 --withdraw\n\
+             your machine copy in ~/.claude/skills/coolify-deploy keeps its edits — it becomes a \
+             draft ahead of this version (topos publish -g coolify-deploy shares it).\n\
+             share: https://topos.sh/ideamotive/skills/coolify-deploy"
+        );
     }
 
     #[test]

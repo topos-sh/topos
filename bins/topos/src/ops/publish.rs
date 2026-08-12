@@ -1795,6 +1795,11 @@ fn map_outcome(
             let share_line = address
                 .as_deref()
                 .map(|a| format!("{a}/skills/{skill_name}"));
+            // The copy question is the SAME on this arm: a proposal ships bytes, so which folder
+            // they came from and what the copies left behind become are the same two facts the
+            // describe predicted and the landed receipt states.
+            let (from_placement, other_edited) =
+                from_disclosure(picked, disclosure.cross_from.clone());
             Ok(PublishOutcome::Proposed(ProposeData {
                 proposal: format!("{skill_name}@{}", rec.candidate_commit),
                 base_version_id: lock.base_commit.clone(),
@@ -1812,6 +1817,10 @@ fn map_outcome(
                 rewrite_skipped: None,
                 workspace_address,
                 share_line,
+                from_placement,
+                from_machine: disclosure.from_machine,
+                other_scope_draft: disclosure.other_draft.clone(),
+                other_edited,
             }))
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {

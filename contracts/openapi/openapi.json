@@ -2838,12 +2838,41 @@
             ],
             "description": "The local-path spelling the manifest carried BEFORE the transfer. **INFERRED**\n(additive-only)."
           },
+          "from_machine": {
+            "type": "boolean",
+            "description": "Whether the proposed bytes came from the MACHINE copy while the command stood in a project\ncheckout — the cross-scope ship, which `from_placement` names the folder of. **INFERRED**\n(additive-only)."
+          },
+          "from_placement": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The folder these bytes were read from, present when it was a CHOICE — one of several edited\ncopies (`--dest`), or a copy in a scope other than the one the command stood in. The same\nfield the direct publish carries: a proposal ships bytes too, so it owes the same answer.\n**INFERRED** (additive-only)."
+          },
           "manifest": {
             "type": [
               "string",
               "null"
             ],
             "description": "The GOVERNANCE-TRANSFER receipt half on the PROPOSAL arm: the manifest whose local-path\nline this publish rewrote to the governed workspace reference (delivery follows once the\nproposal is approved). Absent when no manifest referenced the bundle by path. **INFERRED**\n(additive-only)."
+          },
+          "other_edited": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The edited copies in this scope the proposal left alone (populated beside\n`from_placement`). **INFERRED** (additive-only)."
+          },
+          "other_scope_draft": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScopeDraft",
+                "description": "The OTHER scope's copy, when it carries edits this proposal did not ship. **INFERRED**\n(additive-only)."
+              }
+            ]
           },
           "placement_missing": {
             "type": [

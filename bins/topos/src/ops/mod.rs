@@ -291,16 +291,77 @@ fn resolve_skill_stored(
     workspace: Option<&str>,
     scope: StoreScope,
 ) -> Result<StoredSkill, ClientError> {
-    let mut layouts: Vec<crate::sidecar::Layout> = Vec::new();
+    match scope {
+        StoreScope::Machine => resolve_skill_machine_stored(ctx, name, workspace),
+        StoreScope::Here => resolve_skill_standing_stored(ctx, name, workspace),
+    }
+}
+
+/// The cwd chain's project stores, NEAREST FIRST — the candidates beside the machine's home store.
+fn project_stores(ctx: &Ctx<'_>) -> Vec<crate::sidecar::Layout> {
+    let mut out: Vec<crate::sidecar::Layout> = Vec::new();
     if let Some(roots) = &ctx.roots
         && let Some(cwd) = roots.cwd.as_deref()
     {
         for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
             if let Some(playout) = crate::sidecar::existing_project_store(ctx.fs, &dir) {
-                layouts.push(playout);
+                out.push(playout);
             }
         }
     }
+    out
+}
+
+/// [`resolve_skill_stored`] under `-g`: the HOME store answers, and it answers ALONE. It is asked
+/// FIRST and its answer is the whole resolution, so a project store that cannot be read — an
+/// ambiguity inside it, a corrupt document — can neither fail the command nor change what it ships.
+///
+/// The cwd chain is then walked best-effort for the DISCLOSURE only (which scope the invocation
+/// stands in, and the copy it leaves holding its own edits). A store with no answer simply gives no
+/// disclosure, and the walk stops at the first unreadable one: nothing past it is what a bare
+/// publish standing here would resolve to either.
+fn resolve_skill_machine_stored(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+) -> Result<StoredSkill, ClientError> {
+    let (id, lock) = resolve_skill_in_workspace(ctx, name, workspace)?;
+    let mut other = None;
+    for layout in project_stores(ctx) {
+        let pctx = pull::ctx_with_layout(ctx, &layout);
+        match resolve_skill_in_workspace(&pctx, name, workspace) {
+            Ok((pid, plock)) => {
+                let drafted = store_has_draft(&pctx, &pid, &plock);
+                other = Some(OtherStore {
+                    layout,
+                    id: pid,
+                    lock: plock,
+                    drafted,
+                });
+                break;
+            }
+            Err(ClientError::NoSuchSkill { .. }) => {}
+            Err(_) => break,
+        }
+    }
+    Ok(StoredSkill {
+        layout: ctx.layout.clone(),
+        id,
+        lock,
+        // A project store tracking the name IS the scope the invocation stands in, so `-g` shipping
+        // the machine copy from there is the cross-scope ship both surfaces name.
+        cross_scope: other.is_some(),
+        other,
+    })
+}
+
+/// [`resolve_skill_stored`] bare: the standing-first walk over every reachable store.
+fn resolve_skill_standing_stored(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+) -> Result<StoredSkill, ClientError> {
+    let mut layouts = project_stores(ctx);
     // The machine store last — nearest-first ends at the widest scope.
     layouts.push(ctx.layout.clone());
 
@@ -330,17 +391,9 @@ fn resolve_skill_stored(
             name: name.to_owned(),
         });
     }
-    let resolved = match scope {
-        StoreScope::Machine => hits
-            .iter()
-            .position(|h| !h.layout.is_project_scope())
-            .ok_or_else(|| ClientError::NoSuchSkill {
-                name: name.to_owned(),
-            })?,
-        // Nearest-first over the drafted copies — and `hits[0]` IS the standing scope, so the
-        // rule reads off the walk's own order rather than a second comparison.
-        StoreScope::Here => hits.iter().position(|h| h.drafted).unwrap_or(0),
-    };
+    // Nearest-first over the drafted copies — and `hits[0]` IS the standing scope, so the rule
+    // reads off the walk's own order rather than a second comparison.
+    let resolved = hits.iter().position(|h| h.drafted).unwrap_or(0);
     // The OTHER copy a disclosure can NAME: the nearest hit in the other kind of scope. Two
     // project stores in one cwd chain are not that — the command that would share the second one
     // is the same bare `publish` that just resolved the first, so there is nothing to point at.
