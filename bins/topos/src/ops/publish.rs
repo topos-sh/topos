@@ -1004,7 +1004,8 @@ fn enrolled_publish(
     // below is re-pointed at the resolved store, because it is that other store's own state.
     let other_draft = other_scope_draft(ctx, other.as_ref());
     // The SESSION lane (the manifest model): the workspace + transports resolve from the
-    // logged-in sessions; the legacy device enrollment keeps its instance.json path below.
+    // logged-in sessions. No lane is a typed `SessionRequired` refusal just below — a publish has
+    // nowhere to go without one.
     let lane = match session {
         Some(sc) => super::resolve_session_lane(ctx, sc, workspace, Some(id.as_str()))?,
         None => None,

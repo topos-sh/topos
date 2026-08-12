@@ -219,14 +219,10 @@ pub(crate) trait FsOps {
     /// parent's writes use: a path swap after the proof cannot re-aim it.
     fn rename_at(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()>;
     /// [`FsOps::rename_at`] refusing an existing target (no-replace), by leaf names inside the
-    /// held directory. The check runs at the held fd (`statat`, no-follow); the caller's writer
-    /// lock closes the check→rename beat against topos's own writers.
-    #[allow(dead_code)] // Every current landing has a staged source and rides the `_src` variant
-    // (which inlines these exact beats so the leaf proof runs last); this unverified arm stays
-    // as the seam's no-replace primitive for a landing with no staging handle to prove.
-    fn rename_at_noreplace(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()>;
-    /// [`FsOps::rename_at_noreplace`] for a landing whose SOURCE `from` is a stage built under a
-    /// held handle: the parent re-proof and the no-replace probe run FIRST, then `from` is
+    /// held directory, for a landing whose SOURCE `from` is a stage built under a
+    /// held handle: the check runs at the held fd (`statat`, no-follow) and the caller's writer
+    /// lock closes the check→rename beat against topos's own writers. The parent re-proof and the
+    /// no-replace probe run FIRST, then `from` is
     /// re-opened from the parent's fd and proven `(dev, ino)`-identical to `src` — the staging
     /// handle captured at construction ([`DirHandle::verify_leaf_is`]) — as the LAST operation
     /// before the rename syscall, with nothing between them. A completed stage moved aside and
@@ -825,15 +821,6 @@ impl FsOps for RealFs {
 
     fn rename_at(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()> {
         h.verify_unmoved()?;
-        rustix::fs::renameat(&h.file, from, &h.file, to).map_err(io::Error::from)
-    }
-
-    fn rename_at_noreplace(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()> {
-        h.verify_unmoved()?;
-        // No-replace by an fd-anchored no-follow probe; the caller's writer lock closes the
-        // check→rename beat for topos's own writers (the same contract `rename_dir_noreplace`
-        // documents).
-        Self::probe_no_replace(h, to)?;
         rustix::fs::renameat(&h.file, from, &h.file, to).map_err(io::Error::from)
     }
 
@@ -1577,14 +1564,6 @@ mod hook {
             );
             self.inner.rename_at(h, from, to)
         }
-        fn rename_at_noreplace(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()> {
-            let joined = h.path().join(from);
-            self.maybe_fire(
-                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if *dir == joined),
-                1,
-            );
-            self.inner.rename_at_noreplace(h, from, to)
-        }
         fn rename_at_noreplace_src(
             &self,
             h: &DirHandle,
@@ -1592,8 +1571,8 @@ mod hook {
             to: &str,
             src: &DirHandle,
         ) -> io::Result<()> {
-            // The same before-move beat as the unverified op — fired BEFORE any of the op's
-            // checks run, so a test's substitution at this exact instant must still be refused.
+            // The before-move beat fires BEFORE any of the op's checks run, so a test's
+            // substitution at this exact instant must still be refused.
             let joined = h.path().join(from);
             self.maybe_fire(
                 matches!(&self.trigger, Trigger::FirstMoveOf { dir } if *dir == joined),
@@ -1835,10 +1814,6 @@ mod fault {
         fn rename_at(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()> {
             self.tick()?;
             self.inner.rename_at(h, from, to)
-        }
-        fn rename_at_noreplace(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()> {
-            self.tick()?;
-            self.inner.rename_at_noreplace(h, from, to)
         }
         fn rename_at_noreplace_src(
             &self,

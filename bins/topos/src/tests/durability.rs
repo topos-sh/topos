@@ -342,11 +342,16 @@ fn check_dispatch<T: Serialize + DeserializeOwned + std::fmt::Debug>(valid: T, m
         other => panic!("expected UnknownSchemaVersion, got {other:?}"),
     }
 
-    // = 0 -> below floor -> unsupported.
+    // = 0 -> below the floor -> refused unparsed, through the same fail-closed arm.
     let mut zero = base.clone();
     zero["schema_version"] = serde_json::json!(0);
     let err = load_versioned::<T>(&serde_json::to_vec(&zero).unwrap(), max).unwrap_err();
-    assert!(matches!(err, ClientError::UnsupportedLegacy { found: 0 }));
+    match err {
+        ClientError::UnknownSchemaVersion { found, max: m } => {
+            assert_eq!((found, m), (0, max));
+        }
+        other => panic!("expected UnknownSchemaVersion, got {other:?}"),
+    }
 
     // missing schema_version -> corrupt (never silently accepted).
     let mut missing = base.clone();

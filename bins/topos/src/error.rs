@@ -539,11 +539,6 @@ pub(crate) enum ClientError {
          reads up to {max}) — update this install with `topos self-update`"
     )]
     UnknownSchemaVersion { found: u32, max: u32 },
-    /// A persisted document carries a `schema_version` below the supported floor.
-    #[error(
-        "this machine's topos state is in a format this topos no longer reads (format {found})"
-    )]
-    UnsupportedLegacy { found: u32 },
     /// A persisted document could not be parsed or is internally inconsistent (genuine corruption — not a
     /// mere version mismatch). Recovery reports it; it never fabricates the missing state.
     #[error("topos's own state on this machine is unreadable — {0}")]
@@ -1244,7 +1239,6 @@ impl ClientError {
             ClientError::Gitstore(_) => "GIT_STORE_ERROR",
             ClientError::Verify(_) => "INTEGRITY_ERROR",
             ClientError::UnknownSchemaVersion { .. } => "UPGRADE_REQUIRED",
-            ClientError::UnsupportedLegacy { .. } => "UNSUPPORTED_SCHEMA",
             ClientError::Corrupt(_) => "CORRUPT_STATE",
             // Same closed-vocabulary code; only the safe MESSAGE differs (wire, not sidecar).
             ClientError::WireInvalid(_) => "CORRUPT_STATE",

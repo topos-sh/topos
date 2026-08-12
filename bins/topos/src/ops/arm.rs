@@ -1,7 +1,7 @@
 //! The TRIGGER half of the harness ports — the active agent's auto-update trigger, and the breadth
 //! sweep over every OTHER agent's.
 //!
-//! The placement engine delivers a followed skill's bytes to every detected agent (the shared
+//! The placement engine delivers a demanded bundle's bytes to every detected agent (the shared
 //! `~/.agents/skills` copy plus native dirs); this module keeps those copies CURRENT by
 //! (un)installing each agent's trigger. It iterates registry rows and asks
 //! [`topos_harness::triggers::adapter_for_slug`] for each row's trigger, so which machinery serves a
@@ -463,7 +463,6 @@ mod tests {
             .collect();
         out.push(Box::new(topos_harness::OpenClaw::new(
             home.join(".openclaw"),
-            cfg,
             run,
         )));
         out

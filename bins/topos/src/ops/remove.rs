@@ -132,44 +132,29 @@ pub(crate) fn remove(
 
     let mut items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, false)).collect();
 
-    // The gate: a followed CLEAN skill is a reversible per-device act — it applies immediately
-    // (`--yes` an accepted no-op). Everything else keeps the two-phase describe: a permanent
-    // delete (local-only / untracked / the built-in opt-out) destroys the only copy, and the
-    // LOSS-GUARD holds a followed skill with a draft ahead — the apply cleans the draft out of
-    // every agent dir (snapshot-first into the sidecar, but out of the working copies), so the
-    // disclosure comes first. A scan that cannot classify FAILS TOWARD THE GATE — a stale or
-    // unreadable copy must never lose a draft to an optimistic apply. One gated target gates the
-    // whole batch (all-or-none, like the resolution).
-    let mut gated = false;
-    // The followed removals whose PRE-apply state the `follow` inverse could not restore: a
-    // draft the apply cleans out of the working dirs (the inverse reinstalls only canonical
-    // bytes), an unscannable copy, or a FOREIGN recorded placement (the clean drops the
-    // reservation but leaves the occupied dir — the inverse re-plans around it, never restoring
-    // the prior record) — their receipts offer no undo.
+    // The gate holds the WHOLE verb: every shape that reaches this file is a permanent delete —
+    // a tracked local's only copy, an untracked dir topos never adopted, or the built-in's durable
+    // opt-out — so every one of them describes first and applies only under `--yes`. There is no
+    // ungated arm here; the reversible per-device acts live on the manifest verbs.
     for (removal, item) in removals.iter().zip(items.iter_mut()) {
-        match removal {
-            // A config-placed bundle's blast radius is not its dirs — the `--yes` gate must name
-            // the agent configs the apply will edit BEFORE consent, not only on the receipt after
-            // it. The list is knowable now: the bundle's own record names every entry topos placed.
-            Removal::TrackedLocal {
-                layout, skill_id, ..
-            } => {
-                gated = true;
-                let files = mcp_entry_files(ctx, layout, skill_id);
-                if let Some(line) = also_removes_line(&files) {
-                    item.note = Some(match item.note.take() {
-                        Some(prev) => format!("{prev} · {line}"),
-                        None => line,
-                    });
-                }
-            }
-            Removal::Untracked { .. } | Removal::Builtin { .. } => {
-                gated = true;
+        // A config-placed bundle's blast radius is not its dirs — the `--yes` gate must name
+        // the agent configs the apply will edit BEFORE consent, not only on the receipt after
+        // it. The list is knowable now: the bundle's own record names every entry topos placed.
+        if let Removal::TrackedLocal {
+            layout, skill_id, ..
+        } = removal
+        {
+            let files = mcp_entry_files(ctx, layout, skill_id);
+            if let Some(line) = also_removes_line(&files) {
+                item.note = Some(match item.note.take() {
+                    Some(prev) => format!("{prev} · {line}"),
+                    None => line,
+                });
             }
         }
     }
 
-    if gated && !yes {
+    if !yes {
         let mut yes_argv = vec!["topos".to_owned(), "remove".to_owned()];
         yes_argv.extend(targets.iter().cloned());
         for a in agents {
@@ -188,23 +173,7 @@ pub(crate) fn remove(
         });
     }
 
-    // ---- APPLY (immediate for followed clean skills; `--yes` for the gated shapes) ----
-    // The UNGATED path re-checks the loss-guard at the apply boundary: an edit landing between
-    // the classification above and this point must not slip through the gate it would have held.
-    // A residual window remains between this recheck and `snapshot_and_clean` acquiring the skill
-    // lock — an edit racing into those milliseconds is cleaned WITHOUT the describe, but never
-    // lost: the snapshot-first clean retains every distinct edited copy in the sidecar store
-    // under the lock before a byte leaves a dir. Closing the window whole would need the gate
-    // decision inside the shared lock (a `snapshot_and_clean` contract change shared with the
-    // withdrawal sweep) — deliberately not taken for a consent-courtesy race with no byte loss.
-    // The PRE-apply stances — the undo below is withheld from any skill whose LOCAL entry shows
-    // a standing stance going in: a repeat remove of an already-excluded skill is a no-op whose
-    // "undo" would change pre-existing state, and a remove of an UNFOLLOWED skill's frozen copy
-    // must not offer a `follow` that would clear the person's unfollow stance too. A followed
-    // skill with NO local entry (resolved through the universe — followed on the web, never
-    // received here) is likewise ineligible: after this exclusion the delivery reports it
-    // excluded, not detached, so the advertised `follow` would answer a first-trust DESCRIBE
-    // instead of the immediate re-attach only a local marker routes to.
+    // ---- APPLY (`--yes` only — the describe above is the one way in) ----
     // The APPLIED items re-derive so an orphan's note speaks in the right tense (the describe's
     // "doing nothing also resolves this" would be false on a receipt for an act just performed).
     let mut items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, true)).collect();
@@ -246,23 +215,13 @@ pub(crate) fn remove(
             }
         }
     }
-    // The literal inverse, offered ONLY when it restores the whole prior state: every removal a
-    // followed exclusion (a permanent delete has no inverse — the batch omits the undo rather
-    // than misstating a partial one), every exclusion flipped from a locally ACTIVE follow (a
-    // repeat remove, a stanced entry, or a web-followed skill with no local entry — whose
-    // `follow` would describe first-trust, not re-attach — all withhold), every pre-apply copy
-    // CLEAN (a consented
-    // draft removal cleans working edits the inverse would not reinstall — the snapshot keeps
-    // them recoverable, but recovery is not this one command), and one workspace (`follow` takes
-    // one per invocation). Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is
-    // known offline — a name followed in a second workspace would make the bare spelling an
-    // ambiguous refusal instead of the promised undo.
-    // A local delete is permanent — there is no one-command inverse to advertise.
-    let undo: Vec<String> = Vec::new();
+    // No undo command: every shape this file applies is a permanent delete, and a receipt offers
+    // an inverse only when the inverse restores the whole prior state. A wrong undo is worse than
+    // none.
     Ok(RemoveOutcome::Applied(RemoveData {
         items,
         applied: true,
-        undo,
+        undo: Vec::new(),
         uninstalled: Vec::new(),
     }))
 }

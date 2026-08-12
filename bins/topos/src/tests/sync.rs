@@ -876,8 +876,6 @@ fn pull_name_fallback_reaches_a_skill_literally_named_with_a_hex_at_suffix() {
         Some("docs@abcdef12".to_owned()),
         false,
         ops::StoreScope::Here,
-        None,
-        &ops::ReconcileOpts::default(),
     )
     .unwrap();
     assert_eq!(out.data.skills.len(), 1, "the @-named skill resolved");
@@ -888,8 +886,6 @@ fn pull_name_fallback_reaches_a_skill_literally_named_with_a_hex_at_suffix() {
         Some("nope@abcdef12".to_owned()),
         false,
         ops::StoreScope::Here,
-        None,
-        &ops::ReconcileOpts::default(),
     ) {
         Ok(_) => panic!("an untracked name must not resolve"),
         Err(e) => e,
@@ -919,8 +915,6 @@ fn pull_name_fallback_keeps_the_go_back_primary() {
         Some(format!("{name}@{}", to_hex(&genesis))),
         false,
         ops::StoreScope::Here,
-        None,
-        &ops::ReconcileOpts::default(),
     )
     .unwrap();
     assert_eq!(out.data.skills[0].action, PullAction::Held);
@@ -4685,15 +4679,6 @@ impl FsOps for RecordingFs {
     ) -> std::io::Result<()> {
         self.record("rename_at", &h.path().join(to));
         self.inner.rename_at(h, from, to)
-    }
-    fn rename_at_noreplace(
-        &self,
-        h: &crate::fs_seam::DirHandle,
-        from: &str,
-        to: &str,
-    ) -> std::io::Result<()> {
-        self.record("rename_at_noreplace", &h.path().join(to));
-        self.inner.rename_at_noreplace(h, from, to)
     }
     fn rename_at_noreplace_src(
         &self,

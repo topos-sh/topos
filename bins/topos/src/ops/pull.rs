@@ -1,14 +1,13 @@
-//! `pull` — the session-start auto-update entry point + the targeted accept / go-back.
+//! `update`'s per-skill arm — the targeted accept, the go-back, and `--reset`.
 //!
-//! The bare `topos pull` (the installed session-start hook) sweeps every followed skill toward its
-//! `current`. A targeted `topos pull <skill>` brings one skill current now instead of waiting for the
-//! next sweep; `topos pull <skill>@<hash>` goes back to
-//! a specific local version. The per-skill engine (check → plan → apply) lives in
-//! [`super::sync_engine`]; this module is the scope dispatch + aggregation.
+//! `topos update <skill>` brings one skill current now instead of waiting for the next sweep;
+//! `topos update <skill>@<hash>` puts that version's bytes back on this machine only. (`topos pull`
+//! still reaches the same verb — a hidden alias kept for hooks armed by older builds.) The
+//! per-skill engine (check → plan → apply) lives in [`super::sync_engine`]; this module is the
+//! scope dispatch + aggregation, plus the `--quiet` hook's stdout shapes. Everything the manifest
+//! rows demand is converged by [`super::reconcile`] instead.
 //!
-//! In production the follow-state comes from the enrollment docs (`follows.json`, written by `follow`)
-//! and the plane reads ride the real HTTP transport — this is exactly what the installed hook runs. With
-//! nothing followed the sweep reports an honestly empty state. The tests drive the same engine over
+//! The plane reads ride the real HTTP transport in production; the tests drive the same engine over
 //! fixture sources (no HTTP).
 //!
 //! **The sweep degrades fast when the plane is down.** The first connect-level failure trips a
@@ -278,11 +277,6 @@ impl PullOutcome {
         }
     }
 }
-
-/// RETIRED-surface placeholder kept for the targeted-pull call shape (the manifest reconcile has
-/// its own options).
-#[derive(Default)]
-pub(crate) struct ReconcileOpts {}
 
 /// Run the update check for `scope`.
 ///

@@ -69,9 +69,8 @@ fn wire_mode(mode: FileMode) -> WireFileMode {
     }
 }
 
-/// base64 **STANDARD** (padded) — the frozen wire codec for `content_base64`. DISTINCT from the
-/// URL_SAFE_NO_PAD the signature header uses; the wrong alphabet would corrupt every byte → a digest /
-/// commit-id mismatch → DENIED.
+/// base64 **STANDARD** (padded) — the frozen wire codec for `content_base64`. The wrong alphabet
+/// would corrupt every byte → a digest / commit-id mismatch → DENIED.
 fn content_b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }

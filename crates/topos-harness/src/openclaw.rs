@@ -43,10 +43,7 @@ use serde_json::Value;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::triggers::{TriggerAdapter, TriggerArtifact};
-use crate::{
-    CommandRunner, ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming,
-    PlacementTarget,
-};
+use crate::{CommandRunner, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// The user-scope layer label recorded for a discovered/placed OpenClaw skill (the resolved layer;
 /// a project/enterprise layer stays representable later — `DiscoveredPlacement.layer` is already
@@ -120,13 +117,12 @@ enum ListRead {
 }
 
 impl<'a> OpenClaw<'a> {
-    /// Construct over an explicit config home + the two seams every adapter is built with.
-    /// Production passes [`OpenClaw::resolve_home`] and the CLI crate's real process runner; tests
-    /// pass a temp dir and a fake so a real `~/.openclaw` (or a real `openclaw` binary) is never
-    /// touched. The [`ConfigStore`] arrives because the ONE construction shape carries it — this
-    /// adapter writes no file and never reads it.
+    /// Construct over an explicit config home + the process runner. Production passes
+    /// [`OpenClaw::resolve_home`] and the CLI crate's real runner; tests pass a temp dir and a fake
+    /// so a real `~/.openclaw` (or a real `openclaw` binary) is never touched. There is no config
+    /// seam here: this adapter drives the `openclaw` CLI and neither reads nor writes a file.
     #[must_use]
-    pub fn new(home: PathBuf, _cfg: &'a dyn ConfigStore, cli: &'a dyn CommandRunner) -> Self {
+    pub fn new(home: PathBuf, cli: &'a dyn CommandRunner) -> Self {
         Self { home, cli }
     }
 
@@ -321,22 +317,7 @@ mod tests {
     use crate::RunOutput;
     use std::cell::RefCell;
     use std::io;
-    use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// The config seam every adapter is constructed with. This one PANICS on both arms: the
-    /// suite's proof that the OpenClaw adapter never reaches for a file is that no test can
-    /// survive it doing so.
-    #[derive(Debug)]
-    struct NoConfig;
-    impl ConfigStore for NoConfig {
-        fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-            panic!("the OpenClaw adapter reads no config file (asked for {path:?})");
-        }
-        fn replace(&self, path: &Path, _bytes: &[u8]) -> io::Result<()> {
-            panic!("the OpenClaw adapter writes no config file (asked for {path:?})");
-        }
-    }
 
     /// How the fake OpenClaw CLI behaves.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,7 +459,7 @@ mod tests {
     #[test]
     fn install_registers_the_silent_cron_job_byte_exact() {
         let cli = FakeCli::new(CliMode::Healthy);
-        let report = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).install();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cli).install();
 
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.agent, "openclaw");
@@ -511,7 +492,7 @@ mod tests {
     #[test]
     fn install_is_idempotent_by_declaration_key() {
         let cli = FakeCli::new(CliMode::Healthy);
-        let a = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli);
+        let a = OpenClaw::new(PathBuf::from("/h"), &cli);
         a.install();
         let report = a.install();
         assert_eq!(
@@ -526,7 +507,7 @@ mod tests {
     fn install_degrades_honestly_without_the_binary_or_gateway() {
         for mode in [CliMode::NoBinary, CliMode::GatewayDown] {
             let cli = FakeCli::new(mode);
-            let report = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).install();
+            let report = OpenClaw::new(PathBuf::from("/h"), &cli).install();
             assert_eq!(report.state, TriggerState::Degraded, "{mode:?}");
             assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
             assert!(cli.keys().is_empty(), "nothing was registered");
@@ -536,7 +517,7 @@ mod tests {
     #[test]
     fn remove_unregisters_by_declaration_key() {
         let cli = FakeCli::with_job(CliMode::Healthy, MARKER_ID);
-        let report = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).remove();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cli).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert!(cli.keys().is_empty(), "our job was removed");
@@ -553,7 +534,7 @@ mod tests {
     fn remove_treats_missing_as_clean_and_never_touches_foreign_jobs() {
         // Another tool's job is registered; ours is not.
         let cli = FakeCli::with_job(CliMode::Healthy, "someone-else:job");
-        let report = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).remove();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cli).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cli.keys(),
@@ -570,12 +551,12 @@ mod tests {
         // Degraded, never a claimed clean.
         for mode in [CliMode::NoBinary, CliMode::GatewayDown] {
             let cli = FakeCli::new(mode);
-            let report = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).remove();
+            let report = OpenClaw::new(PathBuf::from("/h"), &cli).remove();
             assert_eq!(report.state, TriggerState::Degraded, "{mode:?}");
         }
         // A zero-exit `cron list` whose stdout does not parse proves nothing about the job.
         let cli = FakeCli::new(CliMode::UnreadableList);
-        let report = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).remove();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cli).remove();
         assert_eq!(report.state, TriggerState::Degraded);
         assert_eq!(cli.calls().len(), 1, "no blind rm was attempted");
     }
@@ -584,10 +565,10 @@ mod tests {
     fn trigger_present_is_a_live_scheduler_probe_never_faith() {
         // A registered job answers true…
         let cli = FakeCli::with_job(CliMode::Healthy, MARKER_ID);
-        assert!(OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).present());
+        assert!(OpenClaw::new(PathBuf::from("/h"), &cli).present());
         // …no job answers false…
         let cli = FakeCli::new(CliMode::Healthy);
-        assert!(!OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).present());
+        assert!(!OpenClaw::new(PathBuf::from("/h"), &cli).present());
         // …and anything unprovable answers false (health is never claimed on faith).
         for mode in [
             CliMode::NoBinary,
@@ -596,7 +577,7 @@ mod tests {
         ] {
             let cli = FakeCli::new(mode);
             assert!(
-                !OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli).present(),
+                !OpenClaw::new(PathBuf::from("/h"), &cli).present(),
                 "{mode:?}"
             );
         }
@@ -619,7 +600,7 @@ mod tests {
     fn the_scheduler_job_is_the_only_disclosed_artifact() {
         let home = TempHome::new();
         let cli = FakeCli::new(CliMode::Healthy);
-        let a = OpenClaw::new(home.0.clone(), &NoConfig, &cli);
+        let a = OpenClaw::new(home.0.clone(), &cli);
         let job = TriggerArtifact::OutOfProcess {
             harness: DISPLAY_NAME,
         };
@@ -653,7 +634,7 @@ mod tests {
     #[test]
     fn reports_label_scheduled_only_when_active() {
         let cli = FakeCli::new(CliMode::Healthy);
-        let a = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli);
+        let a = OpenClaw::new(PathBuf::from("/h"), &cli);
         let active = a.install();
         assert_eq!(active.currency_kind, CurrencyKind::Scheduled);
         let inactive = a.remove();
@@ -683,7 +664,7 @@ mod tests {
         std::fs::write(home.0.join("skills").join("loose.txt"), b"x").unwrap();
 
         let cli = FakeCli::new(CliMode::NoBinary);
-        let found = OpenClaw::new(home.0.clone(), &NoConfig, &cli).discover();
+        let found = OpenClaw::new(home.0.clone(), &cli).discover();
         let names: Vec<String> = found
             .iter()
             .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned())
@@ -699,15 +680,14 @@ mod tests {
     #[test]
     fn discover_on_absent_home_is_empty_not_an_error() {
         let cli = FakeCli::new(CliMode::NoBinary);
-        let found =
-            OpenClaw::new(PathBuf::from("/no-such-openclaw-home-xyz"), &NoConfig, &cli).discover();
+        let found = OpenClaw::new(PathBuf::from("/no-such-openclaw-home-xyz"), &cli).discover();
         assert!(found.is_empty());
     }
 
     #[test]
     fn placement_for_reuses_a_discovered_dir_and_defaults_to_the_skills_dir() {
         let cli = FakeCli::new(CliMode::NoBinary);
-        let a = OpenClaw::new(PathBuf::from("/h"), &NoConfig, &cli);
+        let a = OpenClaw::new(PathBuf::from("/h"), &cli);
         let disc = DiscoveredPlacement {
             path: PathBuf::from("/h/skills/pr-describe"),
             layer: Some(LAYER_USER.to_owned()),

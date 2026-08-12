@@ -332,7 +332,7 @@ pub fn adapter_for_slug<'a>(
         // The two harnesses whose trigger lives in a program of their own (OpenClaw's scheduler;
         // Hermes's own config surface) implement this port on the same type that carries their
         // placement half — no wrapper, and the offline/live-harness knobs are theirs to declare.
-        "openclaw" => Box::new(crate::OpenClaw::new(home.join(".openclaw"), cfg, run)),
+        "openclaw" => Box::new(crate::OpenClaw::new(home.join(".openclaw"), run)),
         "hermes-agent" => Box::new(crate::Hermes::new(
             crate::registry::config_root(crate::registry::Root::HermesHome, home),
             crate::Hermes::resolve_accept_hooks(),

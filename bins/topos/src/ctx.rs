@@ -80,8 +80,9 @@ pub(crate) struct Ctx<'a> {
     /// when enrolled; the inert no-op before any enrollment; fixture-driven in tests. Integrity is the
     /// content-addressed `version_id`, re-verified by digest on every apply — never a pointer signature.
     pub plane: &'a dyn PlaneSource,
-    /// The durable follow-state (which skills are followed, in which mode/workspace) — `follows.json`
-    /// when enrolled; the inert source (nothing followed) before that; fixture-driven in tests.
+    /// Which bundles this machine holds from a workspace, and in which mode — read in production
+    /// from the offline delivery cache ([`crate::ops::CacheFollow`]); the inert source (nothing
+    /// held) before any login; fixture-driven in tests.
     pub follow: &'a dyn FollowSource,
     /// The machine roots the placement engine detects agents against (`None` = no detection: the
     /// classic active-adapter placement — production with no `$HOME`, and every test that does not

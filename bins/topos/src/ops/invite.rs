@@ -10,14 +10,14 @@
 //! as a member (roles are raised later, on the web). Owner-only: only a workspace owner may send
 //! (and revoke) invitations.
 //!
-//! Requires prior enrollment: the plane (`base_url`) and the workspace (`workspace_id`) come from the
-//! sidecar `follow` wrote; the acting device rides the transport's ONE **Bearer credential** (the
-//! server resolves credential → device → user → the owner gate). Nothing is signed —
+//! Requires a live session: the plane (`base_url`) and the workspace (`workspace_id`) come from the
+//! session lane `login` minted, and the write rides that session's own **Bearer credential** (the
+//! server resolves credential → session → user → the owner gate). Nothing is signed —
 //! the trust level is git/GitHub-level. Emails are folded to the canonical (ASCII-lowercase)
 //! form so the roster rows carry one identity per human.
 //!
-//! Bare `invite` (no emails) is the no-mutation read (the workspace address) — a MARKED SEAM until
-//! the two-phase describe leg lands.
+//! Bare `invite` (no emails) is the no-mutation read: one `/me` for the workspace address, nothing
+//! sent and nothing changed.
 
 use topos_types::requests::{InvitationData, InvitationRequest};
 use topos_types::results::{InviteDescribeData, InviteReadData};
@@ -27,9 +27,9 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::plane::GovernanceSource;
 
-/// Builds the governance-write transport for a plane base URL — known only after reading `instance.json`,
-/// so it can't be pre-built in the composition root (mirrors `follow`'s enroll connector). Production wires
-/// `UreqDeviceClient`; the tests wire a fake (no HTTP).
+/// Builds the governance-write transport for a plane base URL — known only once a session lane
+/// resolves, so it can't be pre-built in the composition root. Production wires `UreqDeviceClient`;
+/// the tests wire a fake (no HTTP).
 pub(crate) type GovernanceConnect<'a> = dyn Fn(&str) -> Box<dyn GovernanceSource> + 'a;
 
 /// The seams `invite` needs — the governance connector (the roster POST) and the directory connector
@@ -61,8 +61,8 @@ pub(crate) enum InviteOutcome {
 /// workspace address and change nothing.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled (no `instance.json`) or the workspace can't be inferred
-/// (no `identity/user.json`); a transport failure otherwise (a policy-DENIED surfaces as
+/// [`ClientError::SessionRequired`] when no session lane resolves (not logged in, or `--workspace`
+/// names none); a transport failure otherwise (a policy-DENIED surfaces as
 /// [`ClientError::Plane`] — "not authorized").
 pub(crate) fn invite(
     ctx: &Ctx<'_>,

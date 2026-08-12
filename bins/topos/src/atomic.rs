@@ -188,14 +188,15 @@ pub(crate) fn temp_path(target: &Path) -> PathBuf {
 
 /// Deserialize a persisted document **fail-closed** on its `schema_version`.
 ///
-/// The `schema_version` is probed FIRST; a value newer than `max` is **never** handed to serde (a newer
-/// client wrote it — the caller must report "upgrade required", never silently parse or delete it). A
-/// missing/non-integer `schema_version`, or a value below the floor, is rejected too. Real `vN-1 → vN`
-/// migrations slot into the `1..=max` arm when a v2 schema exists.
+/// The `schema_version` is probed FIRST; only a value INSIDE `1..=max` is handed to serde. Anything
+/// else — newer than `max`, or below the floor (`0`) — is refused unparsed and undeleted (a newer
+/// client wrote it, or a format this build no longer reads did; either way the caller reports
+/// "upgrade required", never silently parses or deletes it). A missing/non-integer `schema_version`
+/// is rejected too. Real `vN-1 → vN` migrations slot into the `1..=max` arm when a v2 schema exists.
 ///
 /// # Errors
-/// [`ClientError::UnknownSchemaVersion`] for a newer doc; [`ClientError::UnsupportedLegacy`] below the
-/// floor; [`ClientError::Corrupt`] if the probe or the full parse fails.
+/// [`ClientError::UnknownSchemaVersion`] for any version outside `1..=max`; [`ClientError::Corrupt`]
+/// if the probe or the full parse fails.
 pub(crate) fn load_versioned<T: DeserializeOwned>(
     bytes: &[u8],
     max: u32,
@@ -207,8 +208,7 @@ pub(crate) fn load_versioned<T: DeserializeOwned>(
     let probe: Probe = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::Corrupt(format!("missing/invalid schema_version: {e}")))?;
     match probe.schema_version {
-        0 => Err(ClientError::UnsupportedLegacy { found: 0 }),
-        v if v <= max => serde_json::from_slice(bytes)
+        v if (1..=max).contains(&v) => serde_json::from_slice(bytes)
             .map_err(|e| ClientError::Corrupt(format!("document parse: {e}"))),
         v => Err(ClientError::UnknownSchemaVersion { found: v, max }),
     }

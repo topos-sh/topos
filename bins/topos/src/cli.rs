@@ -151,9 +151,7 @@ pub(crate) enum Command {
         /// Re-create managed skill folders that exist but are damaged — topos normally protects a
         /// changed folder as your own edit. Deleted folders come back on an ordinary `topos
         /// update`.
-        // `--rebuild` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never reaches
-        // the help or the generated reference) so anything already in flight keeps working.
-        #[arg(long = "force", alias = "rebuild")]
+        #[arg(long = "force")]
         force: bool,
     },
     /// Log this machine in to topos. Opens your browser for a one-click approval, where you
@@ -793,20 +791,13 @@ mod tests {
     }
 
     #[test]
-    fn update_force_parses_under_both_spellings() {
-        // The disclosed name.
+    fn update_force_parses_and_is_taught() {
         let out = Cli::try_parse_from(["topos", "update", "--force"]).unwrap();
         assert!(matches!(
             out.command,
             Some(Command::Update { force: true, .. })
         ));
-        // …and the prior spelling, which stays a working (hidden) alias so nothing in flight breaks.
-        let aliased = Cli::try_parse_from(["topos", "update", "--rebuild"]).unwrap();
-        assert!(matches!(
-            aliased.command,
-            Some(Command::Update { force: true, .. })
-        ));
-        // The disclosed spelling is the ONE the help and the generated reference teach.
+        // `--force` is the ONE spelling the help and the generated reference teach.
         let help = super::cli_command()
             .get_subcommands()
             .find(|c| c.get_name() == "update")
@@ -815,7 +806,6 @@ mod tests {
             .render_help()
             .to_string();
         assert!(help.contains("--force"), "{help}");
-        assert!(!help.contains("--rebuild"), "{help}");
     }
 
     /// The one flag help of a verb or an arg, flattened the way the generated reference flattens
@@ -945,8 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn add_uses_agent_not_harness_and_accepts_multiples() {
-        // `--harness` is gone; `-a`/`--agent` replace it (repeatable).
+    fn add_takes_repeated_agents_and_a_forge_skill_selector() {
         assert!(
             Cli::try_parse_from(["topos", "add", "deploy", "-a", "cursor", "-a", "windsurf"])
                 .is_ok()
@@ -961,31 +950,21 @@ mod tests {
             ])
             .is_ok()
         );
-        let removed =
-            Cli::try_parse_from(["topos", "add", "deploy", "--harness", "cursor"]).unwrap_err();
-        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn revert_replaces_confirm_with_yes() {
+    fn revert_takes_a_version_and_yes() {
         let hash = "ab".repeat(32);
         assert!(Cli::try_parse_from(["topos", "revert", "docs", "--to", &hash, "--yes"]).is_ok());
-        // The old `--confirm` flag is gone.
-        let removed = Cli::try_parse_from(["topos", "revert", "docs", "--to", &hash, "--confirm"])
-            .unwrap_err();
-        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn the_retired_verbs_are_gone_and_auth_keeps_status_only() {
-        // `follow`/`unfollow` folded into `add`/`remove -g`; the `channel` verb left with
-        // channel-membership; sessions are managed by the top-level `login`/`logout`.
+    fn follow_and_unfollow_are_gone_and_auth_keeps_status_only() {
+        // The two verbs a person may still type from muscle memory: `follow`/`unfollow` folded
+        // into `add`/`remove -g`, and neither spelling parses any more.
         for retired in [
             &["topos", "follow", "acme"][..],
             &["topos", "unfollow", "docs"][..],
-            &["topos", "channel", "add", "eng", "deploy"][..],
-            &["topos", "auth", "login"][..],
-            &["topos", "auth", "logout"][..],
         ] {
             assert!(
                 Cli::try_parse_from(retired.iter().copied()).is_err(),

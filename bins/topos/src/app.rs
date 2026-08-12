@@ -477,8 +477,8 @@ fn run_command(
             UreqDeviceClient::new(base_url.to_owned(), None).with_progress(Rc::clone(&progress)),
         )
     };
-    // The default WEB origin the enrollment doors dial on a fresh install (`follow <bare-ws>`,
-    // `auth login`): the env override, else the hosted web origin (the card re-roots onto the API).
+    // The default WEB origin `login` dials on a fresh install: the env override, else the hosted
+    // web origin (the card re-roots onto the API).
     let web_origin = resolve_web_origin(std::env::var("TOPOS_PLANE_URL").ok());
 
     match command {
@@ -1623,8 +1623,6 @@ fn run_command(
                         targets.into_iter().next(),
                         keep_mine,
                         store_scope,
-                        None,
-                        &ops::ReconcileOpts::default(),
                     )
                 }
             } else {
@@ -1856,8 +1854,8 @@ fn run_command(
             let result = ops::remove(&ctx, &connectors, &skill, &agent, roots.as_ref(), yes);
             finish_remove(json, cmd_name, result, &diag)
         }
-        // `channel add|remove <channel> <skill>...` dispatches to the two-phase op; a bare `channel` (or an
-        // unrecognized subword / `create`) teaches usage without touching the network.
+        // `protect <target> [<level>]` — the two-phase protection change for a skill or a channel
+        // (bare tightens to the kind's protected level; an explicit `open` loosens).
         Command::Protect { target, level, yes } => {
             let connectors = ops::ProtectConnectors {
                 directory: &connect_directory,
@@ -3080,7 +3078,6 @@ impl PendingDisclosure {
     }
 }
 
-/// The pending disclosure for a `follow` outcome (None ⇒ not a pending device-auth).
 /// The pending disclosure for a `login` (session) outcome (None ⇒ the login settled).
 fn session_login_pending_disclosure(
     out: &topos_types::results::LoginData,
@@ -3149,7 +3146,6 @@ fn finish_session_logout(
     }
 }
 
-/// The pending disclosure for an `auth login` outcome (None ⇒ the sign-in settled).
 /// Parse the client's own RFC 3339 UTC spelling (`YYYY-MM-DDTHH:MM:SSZ` — what the pending
 /// disclosures carry) back to epoch millis. Anything else answers `None` (the waiting line then
 /// shows elapsed time only).
@@ -3608,11 +3604,8 @@ pub(crate) fn pull_with_name_fallback(
     skill: Option<String>,
     keep_mine: bool,
     store: ops::StoreScope,
-    delivery: Option<&dyn crate::plane::DeliverySource>,
-    reconcile: &ops::ReconcileOpts,
 ) -> Result<ops::PullOutcome, ClientError> {
     let arg = skill.clone();
-    let _ = (delivery, reconcile);
     let first = build_pull_scope(skill, keep_mine, store).and_then(|scope| ops::pull(ctx, scope));
     match first {
         Err(ClientError::NoSuchSkill { .. })
@@ -3761,9 +3754,9 @@ fn adapter_for<'a>(
     match id {
         // Claude Code's placement half needs no ports at all — it reads dirs and writes nothing.
         HarnessId::ClaudeCode => Box::new(ClaudeCode::new(ClaudeCode::resolve_home())),
-        // These two carry BOTH ports on one type, so they still hold the seams their trigger half
-        // writes through.
-        HarnessId::OpenClaw => Box::new(OpenClaw::new(OpenClaw::resolve_home(), fs, cli)),
+        // These two carry BOTH ports on one type, so they still hold the seam their trigger half
+        // drives: OpenClaw's own CLI, and Hermes's config surface.
+        HarnessId::OpenClaw => Box::new(OpenClaw::new(OpenClaw::resolve_home(), cli)),
         HarnessId::Hermes => Box::new(topos_harness::Hermes::new(
             topos_harness::Hermes::resolve_home(),
             topos_harness::Hermes::resolve_accept_hooks(),

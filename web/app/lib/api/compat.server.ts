@@ -17,9 +17,11 @@ import { upgradeRequired } from "./wire.server";
  */
 
 /**
- * The oldest CLI release this server still speaks to. The floor sits at the release that made the
- * login wire server-first — the last wire-breaking change; every wire type and lane route has
- * been additive since. A wire-breaking release moves this floor in the same change as the break.
+ * The oldest CLI release this server still speaks to. The floor sits at the last release that
+ * broke the wire in a way a client CANNOT DEGRADE THROUGH — the login wire going server-first.
+ * Later removals that a client rides out on its own do not move it: a lane route has since been
+ * deleted whose loss costs an older client one best-effort field and no more. A break with no
+ * graceful degradation moves this floor in the same change as the break.
  */
 export const MIN_CLI_VERSION = "0.1.15";
 

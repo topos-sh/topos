@@ -25,7 +25,7 @@ struct HostIdentity {
 /// error, never silently used).
 ///
 /// # Errors
-/// [`ClientError::UnknownSchemaVersion`] / [`ClientError::UnsupportedLegacy`] for an unsupported identity;
+/// [`ClientError::UnknownSchemaVersion`] for an unsupported identity;
 /// [`ClientError::Corrupt`] if it cannot be parsed; otherwise an io failure.
 pub(crate) fn load_or_create_device_id(
     fs: &dyn FsOps,

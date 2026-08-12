@@ -1,15 +1,20 @@
 //! The verb layer — one file per CLI verb — plus the shared engine machinery those verbs compose.
 //!
-//! **Verbs** (each maps 1:1 to a `cli::Command` arm): [`add`], [`follow`], [`unfollow`], [`invite`],
-//! [`list`], [`diff`], [`publish`], [`review`], [`revert`], [`log`], [`update`](pull), [`self_update`].
+//! **Verbs** (each maps 1:1 to a `cli::Command` arm): [`status`](mod@status),
+//! [`login`]/[`logout`](login), [`init`](mod@init), [`fmt`], [`add`](mod@add),
+//! [`remove`](mod@remove), [`list`], [`diff`](mod@diff), [`log`](mod@log),
+//! [`publish`](mod@publish), [`review`], [`revert`](mod@revert), [`protect`](mod@protect),
+//! [`invite`](mod@invite), [`self_update`](mod@self_update), [`auth`],
+//! [`uninstall`](mod@uninstall) — plus `update`, whose manifest reconcile is [`reconcile`] and
+//! whose per-skill arm is [`pull`](mod@pull).
 //!
 //! **Shared machinery** (no verb of its own — the verbs above drive it):
 //! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` sync machine over the kernel's
-//!   four-state transition. `pull` is its scope dispatch; the `follow <skill>` path drives it too.
+//!   four-state transition; [`pull`](mod@pull) and [`reconcile`] are its two scope dispatches.
 //! - [`merge_resolve`] — the author-side resolution of a diverged draft (three-way merge / conflict
 //!   materialization / the `--keep-mine` escape), reachable only through the engine's witness token.
-//! - [`contribute`] — the device-signed write plumbing `publish`/`review`/`revert` share: the fresh-current
-//!   read, identity re-derivation, the op-WAL replay, and the all-outcome receipt mapping.
+//! - [`contribute`] — the write plumbing `publish`/`review`/`revert` share: the fresh-current
+//!   read, the op-WAL replay, and the all-outcome receipt mapping.
 //! - [`crate::materialize`] (at the crate root, beside the other placement seams) — the engine's
 //!   byte-writing half: the crash-safe staged-then-swapped install into a harness dir.
 //!
@@ -85,6 +90,7 @@ pub(crate) use init::init;
 pub(crate) use inventory::ScopeView;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListOutcome, ListRequest, list_with};
+pub(crate) use log::{LogConnectors, log};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 #[cfg(test)]
 pub(crate) use manifest_edit::AddScope;
@@ -95,7 +101,6 @@ pub(crate) use manifest_edit::{
 };
 // The scope-flag form of the path row-write: the composition root always resolves the target
 // itself (see `add_scope`), so this backstop exists for the fixture rig and its own tests.
-pub(crate) use log::{LogConnectors, log};
 #[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) use manifest_edit::note_added_path;
 pub(crate) use publish::{
@@ -106,7 +111,7 @@ pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
-    PendingDecision, PullOutcome, PullScope, ReconcileOpts, ResetOutcome, StaleReason, TargetMode,
+    PendingDecision, PullOutcome, PullScope, ResetOutcome, StaleReason, TargetMode,
     ctx_with_layout, pull, quiet_hook_lines, quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
