@@ -320,6 +320,13 @@ pub(crate) fn project_stores(ctx: &Ctx<'_>) -> Vec<crate::sidecar::Layout> {
 /// stands in, and the copy it leaves holding its own edits). A store with no answer simply gives no
 /// disclosure, and the walk stops at the first unreadable one: nothing past it is what a bare
 /// publish standing here would resolve to either.
+///
+/// The candidate is matched on the RECORD IDENTITY, never the name (the rule every cross-scope
+/// surface keeps — `list`'s twin, the machine-copy add disclosure): two scopes can track two
+/// DIFFERENT bundles under one name, and a nearer store holding somebody else's `deploy` is where
+/// a bare `topos publish deploy` would land — so a line pointing at it would name the wrong bytes.
+/// That case stops the walk with no disclosure at all, which is what "this is a different bundle"
+/// honestly looks like.
 fn resolve_skill_machine_stored(
     ctx: &Ctx<'_>,
     name: &str,
@@ -330,7 +337,7 @@ fn resolve_skill_machine_stored(
     for layout in project_stores(ctx) {
         let pctx = pull::ctx_with_layout(ctx, &layout);
         match resolve_skill_in_workspace(&pctx, name, workspace) {
-            Ok((pid, plock)) => {
+            Ok((pid, plock)) if pid == id => {
                 let drafted = store_has_draft(&pctx, &pid, &plock);
                 other = Some(OtherStore {
                     layout,
@@ -340,6 +347,8 @@ fn resolve_skill_machine_stored(
                 });
                 break;
             }
+            // The name, but another bundle: nothing here is a second copy of what `-g` resolved.
+            Ok(_) => break,
             Err(ClientError::NoSuchSkill { .. }) => {}
             Err(_) => break,
         }
@@ -393,13 +402,26 @@ fn resolve_skill_standing_stored(
     }
     // Nearest-first over the drafted copies — and `hits[0]` IS the standing scope, so the rule
     // reads off the walk's own order rather than a second comparison.
-    let resolved = hits.iter().position(|h| h.drafted).unwrap_or(0);
-    // The OTHER copy a disclosure can NAME: the nearest hit in the other kind of scope. Two
-    // project stores in one cwd chain are not that — the command that would share the second one
-    // is the same bare `publish` that just resolved the first, so there is nothing to point at.
+    //
+    // The jump crosses scopes only for the SAME RECORD. Two stores can track two different bundles
+    // under one name; shipping a farther store's `deploy` because it happens to be edited would
+    // publish another bundle's bytes into the one the standing row names. Identity is the gate
+    // every cross-scope surface uses, and it is the gate here.
+    let standing = hits[0].id.clone();
+    let resolved = hits
+        .iter()
+        .position(|h| h.drafted && h.id == standing)
+        .unwrap_or(0);
+    // The OTHER copy a disclosure can NAME: the nearest hit in the other kind of scope THAT IS THE
+    // SAME BUNDLE. Two project stores in one cwd chain are not that — the command that would share
+    // the second one is the same bare `publish` that just resolved the first, so there is nothing
+    // to point at — and neither is a same-named stranger, for the reason the jump refuses it.
     let other = hits
         .iter()
-        .position(|h| h.layout.is_project_scope() != hits[resolved].layout.is_project_scope())
+        .position(|h| {
+            h.id == hits[resolved].id
+                && h.layout.is_project_scope() != hits[resolved].layout.is_project_scope()
+        })
         .map(|i| OtherStore {
             layout: hits[i].layout.clone(),
             id: hits[i].id.clone(),
@@ -484,8 +506,16 @@ fn resolve_skill_here(
     Ok((ctx.layout.clone(), id, lock))
 }
 
-/// The FOLDER holding a store's draft of `sid`, or `None` when that store's copy is at the
-/// published version.
+/// A store's DRAFT of one bundle: the folder holding the unshipped bytes, and the digest those
+/// bytes carry — the pair a cross-scope disclosure needs, because naming a second copy is only
+/// honest while its bytes differ from the ones being shipped.
+pub(crate) struct StoreDraft {
+    pub dir: std::path::PathBuf,
+    /// The 64-hex bundle digest of the bytes in `dir`.
+    pub digest: String,
+}
+
+/// The DRAFT a store holds of `sid`, or `None` when that store's copy is at the published version.
 ///
 /// A draft is bytes that differ from the LOCK — the same rule the sync engine classifies work
 /// trees by ([`sync_engine::compute_work`]), and the reason a per-placement `Modified` alone will
@@ -496,11 +526,7 @@ fn resolve_skill_here(
 ///
 /// An EDITED copy is preferred over a settled one when both are present: it is the folder a person
 /// has open, and the one a disclosure should name.
-pub(crate) fn store_draft_dir(
-    ctx: &Ctx<'_>,
-    sid: &SkillId,
-    lock: &Lock,
-) -> Option<std::path::PathBuf> {
+pub(crate) fn store_draft(ctx: &Ctx<'_>, sid: &SkillId, lock: &Lock) -> Option<StoreDraft> {
     use crate::placement::ScanStatus;
     let sp = ctx.layout.published(sid);
     let map = crate::doc::read_map(ctx.fs, &sp.map).ok()??;
@@ -511,7 +537,10 @@ pub(crate) fn store_draft_dir(
             ScanStatus::Modified { scanned } => topos_core::digest::to_hex(&scanned.bundle_digest),
             ScanStatus::Absent | ScanStatus::Foreign | ScanStatus::Unscannable => return None,
         };
-        (digest != lock.bundle_digest).then(|| s.dir.clone())
+        (digest != lock.bundle_digest).then(|| StoreDraft {
+            dir: s.dir.clone(),
+            digest,
+        })
     };
     scans
         .iter()
@@ -520,9 +549,9 @@ pub(crate) fn store_draft_dir(
         .or_else(|| scans.iter().find_map(&ahead))
 }
 
-/// Whether a store's copy of `sid` is a DRAFT — see [`store_draft_dir`], the one definition.
+/// Whether a store's copy of `sid` is a DRAFT — see [`store_draft`], the one definition.
 pub(crate) fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId, lock: &Lock) -> bool {
-    store_draft_dir(ctx, sid, lock).is_some()
+    store_draft(ctx, sid, lock).is_some()
 }
 
 /// The LOCK a store holds for ONE record identity — the proof that this store tracks that bundle

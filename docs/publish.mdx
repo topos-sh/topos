@@ -101,7 +101,9 @@ A skill can sit both in a project checkout and machine-wide, each with its own d
 publish ships the copy you are standing in when it has edits, and the other one when that is where
 the edits are — the preview and the receipt name the folder whenever it is not the one you stand
 in. `-g` names your machine-wide copy outright. When both copies have edits, the one you stand in
-ships and the other is named with the command that shares it too.
+ships and the other is named with what it takes to share it too: after a landed publish that copy
+is behind the version that just landed, so the receipt names the update and the publish, in that
+order. A proposal moves nothing, so there the other copy is still one publish away.
 
 ```bash
 topos publish pr-describe -g --yes    # the machine-wide copy, from inside a checkout

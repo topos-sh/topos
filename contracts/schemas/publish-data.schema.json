@@ -38,7 +38,7 @@
       "type": "boolean"
     },
     "from_placement": {
-      "description": "The folder the published bytes were read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection\nnamed ONE of several EDITED copies. A single edited copy needs no such line: it is the\ndraft, and naming its folder would say nothing. **INFERRED** (additive-only).",
+      "description": "The folder the published bytes were read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`), present when it was a CHOICE — one of several\nedited copies (`--dest`), or a copy in a scope other than the one the command stood in. A\nsingle edited copy in the standing scope needs no such line: it is the draft, and naming its\nfolder would say nothing. **INFERRED** (additive-only).",
       "type": [
         "string",
         "null"
@@ -77,7 +77,7 @@
       ]
     },
     "other_edited": {
-      "description": "The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an\nordinary draft ahead of the version just published. Populated on the same condition as\n`from_placement`. **INFERRED** (additive-only).",
+      "description": "The other EDITED copies IN THIS SCOPE, untouched by this publish — each keeps its bytes and\nbecomes an ordinary draft ahead of the version just published. Populated by a `--dest`\nselection among several edited copies (a cross-scope ship discloses the other scope's copy\nthrough `other_scope_draft` instead). **INFERRED** (additive-only).",
       "type": "array",
       "items": {
         "type": "string"

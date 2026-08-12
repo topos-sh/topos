@@ -31,6 +31,16 @@ fn cell(s: &str) -> String {
         .replace('|', "\\|")
 }
 
+/// A prose paragraph, terminated. Restores the sentence-final `.` `clap` removes from a derived
+/// `about` — and only that: text already ending in terminal punctuation (or in nothing at all) is
+/// returned untouched, so this can never double a full stop or punctuate an empty string.
+fn sentence(s: &str) -> String {
+    match s.chars().last() {
+        Some('.' | '!' | '?' | ':') | None => s.to_owned(),
+        Some(_) => format!("{s}."),
+    }
+}
+
 /// Does the arg carry a value (an option or a positional), vs a bare boolean flag?
 fn takes_value(arg: &clap::Arg) -> bool {
     matches!(
@@ -116,9 +126,13 @@ fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usiz
     let hashes = "#".repeat(level);
     out.push_str(&format!("\n{hashes} `{path}`\n\n"));
 
-    // The about text — the long form when present (the full description), collapsed to one paragraph.
+    // The about text — the long form when present (the full description), collapsed to one
+    // paragraph and RE-TERMINATED. `clap` strips one trailing `.` off a derived `about` (the help
+    // screen's own convention), which is right there and wrong in prose: every paragraph in this
+    // reference is several full sentences, and the last one was arriving without its full stop.
+    // The source doc comments already end in one — this puts back exactly what was taken.
     if let Some(about) = cmd.get_long_about().or_else(|| cmd.get_about()) {
-        out.push_str(&format!("{}\n\n", cell(&about.to_string())));
+        out.push_str(&format!("{}\n\n", sentence(&cell(&about.to_string()))));
     }
 
     // The usage line — rendered only when it says more than the heading already does (the command

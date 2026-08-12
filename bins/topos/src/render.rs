@@ -56,6 +56,17 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
             let candidates: Vec<String> = candidates.iter().map(|c| c.spelling()).collect();
             serde_json::json!({ "candidates": candidates })
         }
+        // The divergent-copies freeze is a CHOICE, and choosing takes the `--dest` value that names
+        // each copy back to a verb. The TTY prints one per line beside the folder; without them on
+        // the wire an agent would have to parse those sentences to build `topos diff … --dest …`,
+        // so both spellings ride structurally — the same pair, from the same source, as the prose.
+        ClientError::PlacementsDiverged { copies, .. } => {
+            let copies: Vec<serde_json::Value> = copies
+                .iter()
+                .map(|c| serde_json::json!({ "folder": c.display, "dest": c.dest }))
+                .collect();
+            serde_json::json!({ "copies": copies })
+        }
         _ => serde_json::json!({}),
     };
     JsonEnvelope {
@@ -131,9 +142,12 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
             vec!["topos".into(), "review".into(), "--json".into()],
         )],
         // A stale base — update to rebase, then re-show the diff and retry. Never a silent retry.
-        ClientError::Conflict { skill, .. } => vec![crate::actions::next_action(
+        // Spelled for the copy that refused, from the error's own field rather than rebuilt out of
+        // the invocation: a bare `publish` resolves across scopes, so the argv it was typed with
+        // does not say which copy the plane just refused.
+        ClientError::Conflict { skill, global, .. } => vec![crate::actions::next_action(
             ActionCode::RebaseAndRetry,
-            update_rebuild(command, argv, skill, &[]),
+            update_at_scope(*global, skill, &[]),
         )],
         // An unresolved author merge blocks publish. The block only ever exists with a RECORDED
         // conflict, and a plain `update <skill>` merely RE-DISCLOSES a recorded conflict (it never
@@ -2573,6 +2587,11 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         StatusItemState::LocalEdits if !detail.diverged.is_empty() => {
             diverged_copies_block(&detail.name, flag, &detail.diverged)
         }
+        // The DRAFT LINE above already said this, three lines earlier and better — it names the
+        // read that shows the edits. One state, one sentence: the second telling reads as a second
+        // fact. (The line is withheld only where that one printed; a `local edits` row whose store
+        // proves no draft still says what it is.)
+        StatusItemState::LocalEdits if detail.drafted => String::new(),
         StatusItemState::LocalEdits => "local edits ahead of the applied version".to_owned(),
         // The SAME two lines the inventory row prints, indented into the dive's own body: one
         // bundle, one answer, whichever command asked — plus the folder the merge stopped in,
@@ -2589,7 +2608,9 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
             format!("not applied here yet (`topos update{flag}` applies it)")
         }
     };
-    s.push_str(&format!("\n  {state}"));
+    if !state.is_empty() {
+        s.push_str(&format!("\n  {state}"));
+    }
     // The OTHER scope's checkout, LAST — everything above is about the copy that answered, and
     // this is the one line that says there is a second one. A separate copy, with its own draft
     // state and its own history; the command that opens it is the same `list` in the other scope.
@@ -3202,9 +3223,13 @@ pub(crate) fn publish_describe_tty(
         s.push_str(&format!("\n  {}", other_copies_clause(&data.other_edited)));
     }
     // The same fact across SCOPES: the other scope's copy is not being shipped and is not being
-    // touched, and one command shares it when the reader wants that too.
+    // touched, and the way to share it too — which the gate decides (a landed publish leaves that
+    // copy BEHIND; a proposal leaves it an ordinary draft).
     if let Some(other) = &data.other_scope_draft {
-        s.push_str(&format!("\n  {}", other_scope_clause(other, &data.skill)));
+        s.push_str(&format!(
+            "\n  {}",
+            other_scope_clause(other, &data.skill, data.gate == PublishGate::Proposal)
+        ));
     }
     if data.is_revert {
         s.push_str("\n  this restores earlier bytes (a revert), shipped through the same gate");
@@ -3254,17 +3279,36 @@ pub(crate) fn publish_describe_tty(
 }
 
 /// The OTHER scope's copy, in the words the same-scope sentence uses ([`other_copies_clause`]) plus
-/// the two things only a scope crossing adds: WHOSE copy it is, and the command that shares it —
-/// which differs from the one just run by exactly the `-g` that names the machine.
-fn other_scope_clause(other: &topos_types::results::ScopeDraft, skill: &str) -> String {
+/// the two things only a scope crossing adds: WHOSE copy it is, and the way to share it — which
+/// differs from the command just run by exactly the `-g` that names the machine.
+///
+/// The way out DEPENDS ON THE ARM, because the state the other copy is left in does:
+///
+/// - A DIRECT publish moves `current` past that copy. It is then BEHIND, and a publish of it is
+///   refused (the lineage fence — `topos publish` there answers "update first"). Offering that
+///   command alone was offering one that immediately refuses, so both steps are named: update onto
+///   the version that just landed, then share.
+/// - A PROPOSAL moves no pointer. The other copy is still an ordinary draft on the unchanged
+///   `current`, and one publish shares it — the sentence this clause has always printed.
+fn other_scope_clause(
+    other: &topos_types::results::ScopeDraft,
+    skill: &str,
+    proposal: bool,
+) -> String {
     let (whose, flag) = if other.machine {
         ("your machine copy", " -g")
     } else {
         ("your project copy", "")
     };
+    if proposal {
+        return format!(
+            "{whose} in {} keeps its edits (topos publish{flag} {skill} shares it).",
+            other.folder
+        );
+    }
     format!(
-        "{whose} in {} keeps its edits — it becomes a draft ahead of this version (topos \
-         publish{flag} {skill} shares it).",
+        "{whose} in {} keeps its edits — update it onto this version, then share it (topos \
+         update{flag} {skill}, then topos publish{flag} {skill}).",
         other.folder
     )
 }
@@ -3362,10 +3406,13 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     if !data.other_edited.is_empty() {
         out.push_str(&format!("\n{}", other_copies_clause(&data.other_edited)));
     }
-    // The same fact across SCOPES, in the same words: the other scope's copy kept its edits, and
-    // the one command that shares them is named beside the one that just ran.
+    // The same fact across SCOPES, in the same words the describe predicted: the other scope's copy
+    // kept its edits, and — `current` having just moved past it — the two steps that share them.
     if let Some(other) = &data.other_scope_draft {
-        out.push_str(&format!("\n{}", other_scope_clause(other, &data.name)));
+        out.push_str(&format!(
+            "\n{}",
+            other_scope_clause(other, &data.name, false)
+        ));
     }
     // The KIND the catalog now records — stated because it is what decides how every receiving
     // machine places these bytes (an mcp bundle lands in each agent's MCP config, not a folder).
@@ -3468,8 +3515,10 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
     if !data.other_edited.is_empty() {
         out.push_str(&format!("\n{}", other_copies_clause(&data.other_edited)));
     }
+    // A proposal moved no pointer, so the other scope's copy is exactly what it was: an ordinary
+    // draft on the unchanged `current`, one publish away from being shared.
     if let Some(other) = &data.other_scope_draft {
-        out.push_str(&format!("\n{}", other_scope_clause(other, skill)));
+        out.push_str(&format!("\n{}", other_scope_clause(other, skill, true)));
     }
     if let Some(ch) = &data.placement_withheld {
         out.push_str(&format!(
@@ -4238,10 +4287,15 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                 .as_ref()
                 .map(|m| short(&m.result_version_id))
                 .unwrap_or("?");
+            // The read is spelled for the copy that was merged, like every other command a row
+            // prints: `diff` answers the scope you are standing in, so a machine-wide merge offered
+            // without `-g` sends a reader inside a checkout to the project's copy — a different
+            // draft, or none at all.
+            let g = if row_takes_g(s, scope) { " -g" } else { "" };
             (
                 format!(
                     "merged — your draft was rebased onto the new current as @{v}; review with \
-                     `topos diff {name}`, then publish"
+                     `topos diff{g} {name}`, then publish"
                 ),
                 Vec::new(),
             )
@@ -4902,6 +4956,27 @@ mod tests {
         // Every command in the one-sentence message is RUNNABLE as printed — no elided middle a
         // person or an agent has to reconstruct.
         assert!(!message.contains('…'), "{message}");
+        // …and the CHOICE itself rides structurally. The way out is `--dest <folder>`, and an agent
+        // that had to recover those values by parsing the sentence above would be reconstructing
+        // what the client already computed. Both spellings, in the order the menu prints them.
+        let envelope = super::err_envelope("publish", &typed(&["publish", "coolify-deploy"]), &err);
+        assert_eq!(
+            envelope.data,
+            serde_json::json!({
+                "copies": [
+                    {
+                        "folder": "project/.agents/skills/coolify-deploy",
+                        "dest": ".agents/skills"
+                    },
+                    {
+                        "folder": "project/.claude/skills/coolify-deploy",
+                        "dest": ".claude/skills"
+                    },
+                ]
+            }),
+            "{:?}",
+            envelope.data
+        );
     }
 
     /// A MACHINE-scope freeze spells every command it offers with `-g` — on the refusal and in the
@@ -5695,7 +5770,9 @@ mod tests {
 
     /// BOTH scopes drafted: the standing copy ships and the other one is disclosed — the same
     /// sentence the same-scope case uses, plus the two things a scope crossing adds (whose copy it
-    /// is, and the one command that shares it). Both directions, byte-exact.
+    /// is, and the way to share it too). After a LANDED publish that way is two steps: `current`
+    /// has moved past that copy, so a publish of it would refuse until it is updated. Both
+    /// directions, byte-exact.
     #[test]
     fn a_double_draft_discloses_the_scope_it_left_alone() {
         use topos_types::results::{PublishGate, ScopeDraft};
@@ -5715,9 +5792,9 @@ mod tests {
         };
         assert!(
             publish_tty(&landed).contains(
-                "\nyour machine copy in ~/.claude/skills/coolify-deploy keeps its edits — it \
-                 becomes a draft ahead of this version (topos publish -g coolify-deploy shares \
-                 it)."
+                "\nyour machine copy in ~/.claude/skills/coolify-deploy keeps its edits — update \
+                 it onto this version, then share it (topos update -g coolify-deploy, then topos \
+                 publish -g coolify-deploy)."
             ),
             "{}",
             publish_tty(&landed)
@@ -5730,8 +5807,8 @@ mod tests {
         assert!(
             publish_tty(&landed).contains(
                 "\nyour project copy in project/.agents/skills/coolify-deploy keeps its edits — \
-                 it becomes a draft ahead of this version (topos publish coolify-deploy shares \
-                 it)."
+                 update it onto this version, then share it (topos update coolify-deploy, then \
+                 topos publish coolify-deploy)."
             ),
             "{}",
             publish_tty(&landed)
@@ -5751,10 +5828,63 @@ mod tests {
         assert!(
             text.contains(
                 "\n  your project copy in project/.agents/skills/coolify-deploy keeps its edits — \
-                 it becomes a draft ahead of this version (topos publish coolify-deploy shares \
-                 it)."
+                 update it onto this version, then share it (topos update coolify-deploy, then \
+                 topos publish coolify-deploy)."
             ),
             "{text}"
+        );
+    }
+
+    /// The PROPOSAL arm of the same disclosure. A proposal moves no pointer, so the other scope's
+    /// copy is left exactly as it was — an ordinary draft on the unchanged `current`, one publish
+    /// away. It must NOT be told to update onto "this version": no version landed.
+    #[test]
+    fn a_proposals_disclosure_leaves_the_other_copy_one_publish_away() {
+        use topos_types::results::{PublishGate, ScopeDraft};
+        let machine = ScopeDraft {
+            folder: "~/.claude/skills/coolify-deploy".to_owned(),
+            machine: true,
+        };
+        let project = ScopeDraft {
+            folder: "project/.agents/skills/coolify-deploy".to_owned(),
+            machine: false,
+        };
+        // The describe of a review-gated publish predicts the proposal's own sentence.
+        let mut described = describing(PublishGate::Proposal);
+        described.other_scope_draft = Some(machine.clone());
+        let text = super::publish_describe_tty(&described, &yes_argv());
+        assert!(
+            text.contains(
+                "\n  your machine copy in ~/.claude/skills/coolify-deploy keeps its edits (topos \
+                 publish -g coolify-deploy shares it)."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("update it onto this version"), "{text}");
+        // And the proposal RECEIPT says it in the same words, both directions.
+        let proposed = ProposeData {
+            other_scope_draft: Some(machine),
+            ..proposed()
+        };
+        assert!(
+            propose_tty(&proposed).contains(
+                "\nyour machine copy in ~/.claude/skills/coolify-deploy keeps its edits (topos \
+                 publish -g coolify-deploy shares it)."
+            ),
+            "{}",
+            propose_tty(&proposed)
+        );
+        let proposed = ProposeData {
+            other_scope_draft: Some(project),
+            ..proposed
+        };
+        assert!(
+            propose_tty(&proposed).contains(
+                "\nyour project copy in project/.agents/skills/coolify-deploy keeps its edits \
+                 (topos publish coolify-deploy shares it)."
+            ),
+            "{}",
+            propose_tty(&proposed)
         );
     }
 
@@ -5920,7 +6050,9 @@ mod tests {
     }
 
     /// The same across SCOPES: the proposal names the folder it shipped from and the other scope's
-    /// copy it left alone, with the one command that shares it — both directions, byte-exact.
+    /// copy it left alone, with the ONE command that shares it — a proposal moved no pointer, so
+    /// that copy is still an ordinary draft on the unchanged `current`. Both directions,
+    /// byte-exact.
     #[test]
     fn a_cross_scope_proposal_discloses_the_scope_it_left_alone() {
         use topos_types::results::ScopeDraft;
@@ -5939,8 +6071,8 @@ mod tests {
              ~/.claude/skills/coolify-deploy) for review.\n\
              Review required — a reviewer approves with: topos review coolify-deploy@a1b2c3d4e5f6 --approve\n\
              withdraw it yourself:                       topos review coolify-deploy@a1b2c3d4e5f6 --withdraw\n\
-             your project copy in project/.agents/skills/coolify-deploy keeps its edits — it \
-             becomes a draft ahead of this version (topos publish coolify-deploy shares it).\n\
+             your project copy in project/.agents/skills/coolify-deploy keeps its edits (topos \
+             publish coolify-deploy shares it).\n\
              share: https://topos.sh/ideamotive/skills/coolify-deploy"
         );
         let from_project = ProposeData {
@@ -5957,8 +6089,8 @@ mod tests {
             "Published coolify-deploy@a1b2c3d4e5f6 to topos.sh/ideamotive for review.\n\
              Review required — a reviewer approves with: topos review coolify-deploy@a1b2c3d4e5f6 --approve\n\
              withdraw it yourself:                       topos review coolify-deploy@a1b2c3d4e5f6 --withdraw\n\
-             your machine copy in ~/.claude/skills/coolify-deploy keeps its edits — it becomes a \
-             draft ahead of this version (topos publish -g coolify-deploy shares it).\n\
+             your machine copy in ~/.claude/skills/coolify-deploy keeps its edits (topos publish \
+             -g coolify-deploy shares it).\n\
              share: https://topos.sh/ideamotive/skills/coolify-deploy"
         );
     }
@@ -7466,6 +7598,59 @@ mod tests {
                 .contains("your draft: edited, not shared yet (topos diff -g coolify-deploy)"),
             "{}",
             render(detail("machine", true, None))
+        );
+    }
+
+    /// ONE STATE, ONE SENTENCE. A drafted copy resolves as `local edits`, and the draft line three
+    /// lines up already says so — with the read that shows them. Saying it twice, in different
+    /// words, reads as two facts about one copy, so the state line stands down where the draft line
+    /// spoke. Byte-exact both ways: the drafted answer, and the `local edits` row whose store
+    /// proved no draft (which still says what it is).
+    #[test]
+    fn a_drafted_dive_states_its_edits_once() {
+        use topos_types::results::{ListDetail, StatusItemState as S};
+        let detail = |drafted| ListDetail {
+            name: "coolify-deploy".to_owned(),
+            scope: Some("project".to_owned()),
+            source_file: None,
+            source_key: None,
+            feed: Some("topos.sh/acme".to_owned()),
+            attribution: None,
+            version: Some("a".repeat(64)),
+            pin: None,
+            placements: Vec::new(),
+            state: S::LocalEdits,
+            kind: None,
+            harnesses: Vec::new(),
+            mcp_unreachable: None,
+            managed: true,
+            folders: Vec::new(),
+            diverged: Vec::new(),
+            conflict_copy: None,
+            conflict_reason: None,
+            drafted,
+            twin: None,
+        };
+        let render = |d| {
+            list_tty(&ListOutcome {
+                data: ListData {
+                    detail: Some(d),
+                    signed_in: false,
+                    ..ListData::default()
+                },
+                warnings: Vec::new(),
+                untracked_view: false,
+            })
+        };
+        assert_eq!(
+            render(detail(true)),
+            "coolify-deploy — in this project\n  from the topos.sh/acme feed\n  version \
+             aaaaaaaaaaaa\n  your draft: edited, not shared yet (topos diff coolify-deploy)"
+        );
+        assert_eq!(
+            render(detail(false)),
+            "coolify-deploy — in this project\n  from the topos.sh/acme feed\n  version \
+             aaaaaaaaaaaa\n  local edits ahead of the applied version"
         );
     }
 
@@ -9306,11 +9491,12 @@ mod tests {
         );
     }
 
-    /// Both publish refusals are spelled for the copy that REFUSED, not for the directory the
-    /// reader happened to stand in. `publish` takes no scope flag and resolves a bare name
-    /// home-first, so from inside a checkout the machine copy is what refuses — and an offered
-    /// `topos update <skill>` would drive the project copy and refuse all over again. The screen
-    /// and the machine-readable action say the same thing, because they are one computation.
+    /// Every publish refusal is spelled for the copy that REFUSED, not for the directory the reader
+    /// happened to stand in. `publish` resolves a bare name across scopes (and `-g` names the
+    /// machine's outright), so from inside a checkout the machine copy is routinely what refuses —
+    /// and an offered `topos update <skill>` would drive the project copy and refuse all over
+    /// again. The screen and the machine-readable action say the same thing, because they are one
+    /// computation.
     #[test]
     fn both_publish_refusals_carry_the_scope_of_the_copy_that_refused() {
         use crate::error::ClientError;
@@ -9395,6 +9581,44 @@ mod tests {
                 .expect("a blocked publish offers its two exits"),
             "try:\n  topos update -g coolify-deploy --keep-mine\n  topos update -g coolify-deploy \
              --reset"
+        );
+
+        // THE THIRD REFUSAL, and the one that only the server can raise: the plane's lineage fence,
+        // reached when this machine's `observed` was current until the write asked. It is the one
+        // the reader meets under a `try:` block, and it used to be rebuilt out of the invocation —
+        // so a `-g` publish of the machine copy was answered with a bare update of the project's,
+        // which refuses again, forever. It carries the scope like its two siblings now.
+        let conflict = |global: bool| ClientError::Conflict {
+            skill: "coolify-deploy".to_owned(),
+            current: Some(7),
+            global,
+        };
+        assert_eq!(
+            super::next_actions(
+                "publish",
+                &typed(&["publish", "-g", "coolify-deploy"]),
+                &conflict(true)
+            )[0]
+            .argv,
+            typed(&["topos", "update", "-g", "coolify-deploy", "--json"])
+        );
+        assert_eq!(
+            super::err_hint_tty(
+                "publish",
+                &typed(&["publish", "-g", "coolify-deploy"]),
+                &conflict(true)
+            ),
+            Some("try:\n  topos update -g coolify-deploy".to_owned())
+        );
+        // …and a project copy's conflict still answers bare, whatever the argv said.
+        assert_eq!(
+            super::next_actions(
+                "publish",
+                &typed(&["publish", "-g", "coolify-deploy"]),
+                &conflict(false)
+            )[0]
+            .argv,
+            typed(&["topos", "update", "coolify-deploy", "--json"])
         );
     }
 

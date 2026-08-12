@@ -291,7 +291,7 @@ pub(crate) fn list_with(
             // store the answering section resolved against — the rows above say what is DEMANDED,
             // and neither question is answerable from a row.
             if let Some(id) = record.as_ref() {
-                fill_checkout(ctx, section, id, &mut detail);
+                fill_checkout(ctx, &resolved, section, id, &mut detail);
             }
         }
         // A one-skill answer names THIS skill's external source and NO other. Every line above it
@@ -662,15 +662,22 @@ fn scope_layout(ctx: &Ctx<'_>, section: &ScopeResolution) -> Option<sidecar::Lay
 /// Both are read from the STORES, because a manifest row cannot answer either: it says what is
 /// demanded, not what the bytes on disk are, and a second scope's row is not this answer's row at
 /// all. The draft rule is the one every surface shares (bytes against the lock —
-/// [`super::store_draft_dir`]), so a settled draft the last sweep re-recorded still reads as
+/// [`super::store_draft`]), so a settled draft the last sweep re-recorded still reads as
 /// unshared work here, exactly as `publish` treats it.
 ///
 /// The twin is matched on the RECORD IDENTITY, never the name: two scopes can each track a
 /// different bundle under one name, and "you also have this on your machine" about somebody else's
 /// bundle is worse than silence. Best-effort throughout — a store that cannot be read holds no
 /// answer, and the dive says nothing rather than guessing one.
+///
+/// It is also gated on the other scope's own RESOLUTION, because the line ends in a command:
+/// `topos list -g <name>` (or its bare twin) answers from MANIFEST ROWS, and a store record with no
+/// row behind it — a publish-adopt writes one, a demand nobody records — makes that command answer
+/// "not managed on this machine". A line whose offered command contradicts it is worse than no
+/// line, so the twin is claimed only where the other scope would answer for the SAME record.
 fn fill_checkout(
     ctx: &Ctx<'_>,
+    resolved: &Resolved,
     section: &ScopeResolution,
     record: &crate::id::SkillId,
     detail: &mut ListDetail,
@@ -682,18 +689,26 @@ fn fill_checkout(
     if let Some(lock) = super::store_lock(&sctx, record) {
         detail.drafted = super::store_has_draft(&sctx, record, &lock);
     }
-    // The other KIND of scope: a project answer looks at the machine, a machine answer at the cwd
-    // chain's checkouts (nearest first — the one a bare `topos list` here would answer from).
-    let others: Vec<sidecar::Layout> = if section.scope == "project" {
-        vec![ctx.layout.clone()]
-    } else {
-        super::project_stores(ctx)
-    };
+    // The other KIND of scope, as `list` itself resolves it: a project answer looks at the machine,
+    // a machine answer at the checkout covering the cwd — the one a bare `topos list` here answers
+    // from. A scope with no row for this record is not a twin, whatever its store holds.
+    let others: Vec<&ScopeResolution> = resolved
+        .scopes
+        .iter()
+        .filter(|s| (s.scope == "project") != (section.scope == "project"))
+        .filter(|s| {
+            s.inventory_rows()
+                .any(|row| row.record.as_ref() == Some(record))
+        })
+        .collect();
     for other in others {
-        let octx = super::pull::ctx_with_layout(ctx, &other);
+        let Some(olayout) = scope_layout(ctx, other) else {
+            continue;
+        };
+        let octx = super::pull::ctx_with_layout(ctx, &olayout);
         if let Some(lock) = super::store_lock(&octx, record) {
             detail.twin = Some(topos_types::results::ScopeTwin {
-                machine: !other.is_project_scope(),
+                machine: !olayout.is_project_scope(),
                 drafted: super::store_has_draft(&octx, record, &lock),
             });
             return;
@@ -1628,6 +1643,70 @@ mod tests {
         .expect("a detail");
         assert_eq!(detail.scope.as_deref(), Some("machine"));
         assert!(detail.twin.is_none(), "{detail:?}");
+    }
+
+    /// The twin line ENDS IN A COMMAND, and that command answers from manifest ROWS. A store record
+    /// the other scope holds but no row of its own demands — real state: a publish-adopt writes the
+    /// record and no row — makes `topos list -g deploy` answer "not managed on this machine". A
+    /// line whose own offered command contradicts it is worse than no line, so the twin is claimed
+    /// only where the other scope would answer for that record. Add the row and it comes back.
+    #[test]
+    fn a_twin_needs_a_row_the_other_scope_would_answer_for() {
+        let home = TempHome::new();
+        let repo = home.0.join("rowless-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let manifest = repo.join(crate::manifest::MANIFEST_FILE);
+        // A checkout that demands NOTHING …
+        std::fs::write(&manifest, "[bundles]\n").unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let id = skill_id_of("deploy");
+        home.store_applied(&id, "deploy", &"d".repeat(64), &[]);
+        // … whose STORE holds a copy of the machine's bundle anyway.
+        lay_record(
+            &crate::sidecar::project_store_layout(&repo),
+            &id,
+            "deploy",
+            &[],
+        );
+        let dive = || {
+            run(
+                &home,
+                &repo,
+                &ListRequest {
+                    name: Some("deploy".to_owned()),
+                    view: ScopeView::Machine,
+                    ..request()
+                },
+            )
+            .unwrap()
+            .data
+            .detail
+            .expect("a detail")
+        };
+        let detail = dive();
+        assert_eq!(detail.scope.as_deref(), Some("machine"));
+        assert!(
+            detail.twin.is_none(),
+            "a store with no row behind it is not a twin: {detail:?}"
+        );
+        // THE CONTROL: the same store, now with the row that makes `topos list deploy` answer for
+        // it — and the line is true again.
+        std::fs::write(&manifest, "[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n").unwrap();
+        let twin = dive().twin.expect("the checkout's copy");
+        assert!(!twin.machine, "{twin:?}");
     }
 
     /// The SECOND CHECKOUT a machine-wide add creates is disclosed only where a checkout in reach

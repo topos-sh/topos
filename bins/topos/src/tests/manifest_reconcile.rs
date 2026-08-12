@@ -9865,7 +9865,7 @@ fn a_name_this_scope_already_records_answers_already_added_not_ambiguous() {
         err.to_string(),
         format!(
             "alpha is already added machine-wide (~/.topos/topos.toml)\nsource: \
-             {HOST}/{WS_NAME}/alpha\n'alpha' is in 1 folder here:\n  \
+             {HOST}/{WS_NAME}/alpha\n'alpha' is also in 1 unmanaged folder here:\n  \
              ~/.aider-desk/skills/alpha — edited (adopting it makes these your draft)\nname the \
              one to adopt: topos add -g <folder> --as {HOST}/{WS_NAME}/alpha"
         )
@@ -15401,7 +15401,7 @@ fn a_settled_copy_is_a_draft_and_a_genesis_adopt_is_not() {
     crate::doc::write_map(&rig.fs, &sp.map, &map).unwrap();
     assert!(ops::store_has_draft(&ctx, &id, &lock));
     assert_eq!(
-        ops::store_draft_dir(&ctx, &id, &lock),
+        ops::store_draft(&ctx, &id, &lock).map(|d| d.dir),
         Some(src.canonicalize().unwrap()),
         "and the folder it names is the one holding those bytes"
     );
@@ -15542,10 +15542,12 @@ fn a_double_draft_ships_where_you_stand_and_discloses_the_other() {
         .expect("the machine copy is disclosed");
     assert!(other.machine, "{other:?}");
     let receipt = crate::render::publish_tty(&data);
+    // `current` just moved past that copy, so sharing it takes two steps — a bare publish of it
+    // would be refused by the lineage fence until it is updated onto what just landed.
     assert!(
         receipt.contains(&format!(
-            "\nyour machine copy in {} keeps its edits — it becomes a draft ahead of this version \
-             (topos publish -g deploy shares it).",
+            "\nyour machine copy in {} keeps its edits — update it onto this version, then share \
+             it (topos update -g deploy, then topos publish -g deploy).",
             other.folder
         )),
         "{receipt}"
@@ -15565,8 +15567,8 @@ fn a_double_draft_ships_where_you_stand_and_discloses_the_other() {
     assert!(!other.machine, "{other:?}");
     assert!(
         crate::render::publish_tty(&data).contains(&format!(
-            "\nyour project copy in {} keeps its edits — it becomes a draft ahead of this version \
-             (topos publish deploy shares it).",
+            "\nyour project copy in {} keeps its edits — update it onto this version, then share \
+             it (topos update deploy, then topos publish deploy).",
             other.folder
         )),
         "{}",
@@ -15756,12 +15758,192 @@ fn a_cross_scope_proposal_carries_the_disclosure_a_landed_publish_does() {
         receipt.contains(&format!("(from {}) for review.", machine_dir.display())),
         "{receipt}"
     );
+    // The PROPOSAL's own way out: no pointer moved, so that copy is still an ordinary draft on the
+    // unchanged `current` and one publish shares it.
     assert!(
         receipt.contains(&format!(
-            "\nyour project copy in {} keeps its edits — it becomes a draft ahead of this version \
-             (topos publish deploy shares it).",
+            "\nyour project copy in {} keeps its edits (topos publish deploy shares it).",
             other.folder
         )),
         "{receipt}"
     );
+}
+
+/// **IDENTITY, NEVER THE NAME.** Two scopes can track two DIFFERENT bundles under one display
+/// name — the same skill followed from two workspaces, a local one beside a delivered one. Neither
+/// is the other's second copy, so nothing may bind them: `-g` must not point at the checkout's
+/// stranger, and a bare publish must not disclose the machine's. The rule the sibling surfaces
+/// already keep (`list`'s twin, the machine-copy add disclosure), kept here.
+#[test]
+fn two_bundles_sharing_a_name_never_bind_across_scopes() {
+    let rig = Rig::new("pubscope-identity");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let seams = publish_seams(&v);
+    let (proj, machine_dir, project_dir) =
+        both_scopes("pubscope-identity-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // The checkout's record becomes a DIFFERENT bundle that merely shares the name.
+    let playout =
+        crate::sidecar::existing_project_store(&rig.fs, &proj.0).expect("the checkout's store");
+    let skills = playout.skills_dir();
+    duplicate_record(&skills.join("s_deploy"), &skills.join("s_deploytwin"));
+    std::fs::remove_dir_all(skills.join("s_deploy")).unwrap();
+    // …and it is the one carrying edits. The machine's copy is pristine.
+    let stranger = b"# deploy\nanother bundle's edit\n";
+    std::fs::write(project_dir.join("SKILL.md"), stranger).unwrap();
+    assert_eq!(
+        std::fs::read(machine_dir.join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+        "the machine twin is pristine"
+    );
+
+    // `-g`: the machine copy matches current and there is NOTHING across the way to point at —
+    // the drafted folder in the checkout belongs to somebody else's bundle.
+    let quiet = match publish_at(&ctx, &seams, ops::StoreScope::Machine).unwrap() {
+        ops::PublishOutcome::NoChanges(d) => d,
+        other => panic!("the machine copy matches current: {other:?}"),
+    };
+    assert!(quiet.other_scope_draft.is_none(), "{quiet:?}");
+    assert_eq!(
+        crate::render::publish_no_changes_tty(&quiet),
+        "'deploy' is already published — your copy matches current"
+    );
+
+    // Bare: the standing scope's own bundle ships — and the machine's same-named copy is neither
+    // the folder it came from nor a copy it left behind.
+    let data = landed(publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap());
+    assert_eq!(
+        data.bundle_digest,
+        topos_core::digest::to_hex(&one_file(stranger).digest),
+        "the copy you stand in is what shipped"
+    );
+    assert_eq!(data.from_placement, None, "{data:?}");
+    assert!(!data.from_machine, "{data:?}");
+    assert!(data.other_scope_draft.is_none(), "{data:?}");
+    let receipt = crate::render::publish_tty(&data);
+    assert!(!receipt.contains("machine copy"), "{receipt}");
+}
+
+/// A copy BEHIND the served current is refused, and the one command the refusal offers must drive
+/// THE COPY THAT REFUSED. `-g` from inside a checkout resolves the machine store, so its refusal
+/// spells `-g` too — offered bare, the update would run the project's copy and the publish would
+/// refuse all over again.
+#[test]
+fn a_behind_copy_refuses_in_the_scope_the_flag_resolved() {
+    let rig = Rig::new("pubscope-behind");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let seams = publish_seams(&v);
+    let (proj, machine_dir, _project_dir) =
+        both_scopes("pubscope-behind-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    std::fs::write(machine_dir.join("SKILL.md"), b"# deploy\nmachine edit\n").unwrap();
+
+    // The MACHINE store alone learns of a newer current it has not applied.
+    let sp = rig.layout().published(&sid("s_deploy"));
+    let mut sync: topos_types::persisted::SyncState =
+        crate::doc::read_doc(&rig.fs, &sp.sync).unwrap().unwrap();
+    sync.observed = sync.applied + 1;
+    sync.observed_version_id = "b".repeat(64);
+    crate::doc::write_doc(&rig.fs, &sp.sync, &sync).unwrap();
+
+    let refusals = [
+        publish_at(&ctx, &seams, ops::StoreScope::Machine).unwrap_err(),
+        describe_at(&ctx, &seams, ops::StoreScope::Machine).unwrap_err(),
+    ];
+    for err in &refusals {
+        assert!(
+            matches!(
+                err,
+                ClientError::PublishBehind { global: true, skill } if skill == "deploy"
+            ),
+            "the refusal names the MACHINE copy: {err:?}"
+        );
+        assert!(
+            crate::render::err_tty(err).ends_with("\n  update first: topos update -g deploy"),
+            "{}",
+            crate::render::err_tty(err)
+        );
+    }
+}
+
+/// The SAME edit made in both scopes is ONE edit. This publish carries those bytes, the other copy
+/// already holds them, and the next sweep settles it clean — so every sentence the cross-scope
+/// disclosure could print there would be false. It prints nothing.
+#[test]
+fn an_identical_edit_in_both_scopes_earns_no_disclosure() {
+    let rig = Rig::new("pubscope-same");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let seams = publish_seams(&v);
+    let (proj, machine_dir, project_dir) =
+        both_scopes("pubscope-same-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let same = b"# deploy\nthe same edit\n";
+    std::fs::write(project_dir.join("SKILL.md"), same).unwrap();
+    std::fs::write(machine_dir.join("SKILL.md"), same).unwrap();
+
+    let preview = describe_at(&ctx, &seams, ops::StoreScope::Here).unwrap();
+    let ops::PublishPreview::Describe(d) = preview else {
+        panic!("there are bytes to ship");
+    };
+    assert!(d.other_scope_draft.is_none(), "{d:?}");
+    let data = landed(publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap());
+    assert_eq!(
+        data.bundle_digest,
+        topos_core::digest::to_hex(&one_file(same).digest)
+    );
+    assert!(data.other_scope_draft.is_none(), "{data:?}");
+    let receipt = crate::render::publish_tty(&data);
+    assert!(!receipt.contains("keeps its edits"), "{receipt}");
+}
+
+/// A GENESIS publish has nothing to diff against — the lock names exactly the bytes the adopt
+/// recorded — so the describe withholds the `review:` line rather than offering a command that
+/// prints nothing.
+#[test]
+fn a_genesis_publish_offers_no_read_of_an_empty_diff() {
+    let rig = Rig::new("pubscope-genesis");
+    rig.seed_session();
+    let src = rig.work.0.join("fresh");
+    skill_source(&src, b"# fresh\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add(&ctx, &src).unwrap();
+
+    let seams = publish_seams(&one_file(b"# fresh\n"));
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(seams.plane.clone()),
+        directory: Box::new(seams.dir.clone()),
+        contribute: Box::new(OkPublish),
+        governance: Box::new(NoGovernance),
+    };
+    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(seams.dir.clone()) };
+    let delivery =
+        |_: &str| -> Box<dyn crate::plane::ReconcileTransport> { Box::new(seams.plane.clone()) };
+    let connectors = ops::PublishDescribeConnectors {
+        directory: &dirs,
+        delivery: &delivery,
+    };
+    let preview = ops::publish_describe(
+        &ctx,
+        &connectors,
+        Some(&session_connect),
+        None,
+        "fresh",
+        false,
+        None,
+        None,
+        &ops::Selection::default(),
+        ops::StoreScope::Here,
+    )
+    .unwrap();
+    let ops::PublishPreview::Describe(d) = preview else {
+        panic!("a first publish previews");
+    };
+    assert!(d.review.is_none(), "{d:?}");
+    let text = crate::render::publish_describe_tty(&d, &["topos".into(), "publish".into()]);
+    assert!(!text.contains("\nreview: "), "{text}");
 }

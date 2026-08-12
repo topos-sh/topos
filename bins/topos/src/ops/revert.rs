@@ -232,6 +232,9 @@ fn map_outcome(
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
             skill: name.to_owned(),
             current: receipt.error.as_ref().and_then(|e| e.current_generation),
+            // `revert` acts on the store this ctx names — no cross-scope resolution — so the
+            // rebase it offers is spelled for that same store.
+            global: !ctx.layout.is_project_scope(),
         }),
         TerminalOutcome::Denied => Err(ClientError::Denied(
             receipt
