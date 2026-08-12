@@ -19,7 +19,7 @@ what only a cross-crate composed run can prove.
   (`provision_pg` — two roles/schemas, both migration lineages, mirroring
   `scripts/compose-init-db.sh`; needs `node` on PATH for the app's migrator); the composed stack
   (`start_stack`); HTTP ceremonies (`Session`, a manual-cookie-jar `ureq` browser stand-in:
-  claim / sign-in / the `/verify` approval / `mint_session`); the raw session lane
+  claim / sign-up / the `/verify` approval / `mint_session`); the raw session lane
   (`device_get`/`device_put`/…); row-level witnesses (superuser pool); named mail-less
   arrangement helpers (`seat`, `add_workspace`, `open_registration`, `set_session_approval` —
   direct rows only for steps whose OSS surface is the invitation mailbox rung); and the real-CLI

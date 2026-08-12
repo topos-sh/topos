@@ -11,14 +11,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
 use topos_core::identity::{self, Commit};
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::SyncState;
 use topos_types::results::{PullAction, PullData};
-use topos_types::{
-    CurrencyKind, CurrentRecord, HarnessId, PointerScope, TriggerReport, TriggerState,
-    WireCurrentRecord,
-};
+use topos_types::{CurrentRecord, PointerScope, WireCurrentRecord};
 
 use crate::ctx::Ctx;
 use crate::fs_seam::{FaultFs, FsOps, RealFs};
@@ -28,6 +23,7 @@ use crate::plane::{
     PointerFetch,
 };
 use crate::sidecar::Layout;
+use crate::test_support::MockHarness;
 use crate::{doc, ops};
 
 const WS: &str = "w_acme";
@@ -54,59 +50,10 @@ impl Drop for Scratch {
     }
 }
 
-/// A minimal harness stub — the engine reads the placement from `map.json`, never the adapter, so these
-/// methods are never reached during a pull (and `add` of a plain dir does not recognize it).
-struct NoHarness;
-impl HarnessAdapter for NoHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::ClaudeCode
-    }
-    fn discover(&self) -> Vec<DiscoveredPlacement> {
-        Vec::new()
-    }
-    fn placement_for(
-        &self,
-        skill_id: &str,
-        _n: topos_harness::PlacementNaming<'_>,
-        _d: Option<&DiscoveredPlacement>,
-    ) -> PlacementTarget {
-        PlacementTarget {
-            dir: PathBuf::from(skill_id),
-        }
-    }
-}
-
-impl TriggerAdapter for NoHarness {
-    fn slug(&self) -> &'static str {
-        HarnessId::ClaudeCode.slug()
-    }
-
-    fn install(&self) -> TriggerReport {
-        report()
-    }
-
-    fn remove(&self) -> TriggerReport {
-        report()
-    }
-
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        Vec::new()
-    }
-
-    fn present(&self) -> bool {
-        !self.artifacts().is_empty()
-    }
-}
-fn report() -> TriggerReport {
-    TriggerReport {
-        agent: "claude-code".to_owned(),
-        currency_kind: CurrencyKind::ExplicitPullOnly,
-        touched_path: None,
-        marker_id: "test".into(),
-        state: TriggerState::Inactive,
-
-        note: None,
-    }
+/// A minimal harness stub — the engine reads the placement from `map.json`, never the adapter, so it
+/// is never asked for a dir during a pull (and `add` of a plain dir does not recognize it).
+fn no_harness() -> MockHarness {
+    MockHarness::joining("")
 }
 
 #[derive(Default)]
@@ -236,7 +183,7 @@ struct Rig {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
-    harness: NoHarness,
+    harness: MockHarness,
 }
 impl Rig {
     fn new(tag: &str) -> Self {
@@ -246,7 +193,7 @@ impl Rig {
             fs: RealFs,
             ids: SeqIds::new("s"),
             clock: FixedClock(1),
-            harness: NoHarness,
+            harness: no_harness(),
         }
     }
     fn layout(&self) -> Layout {
@@ -283,7 +230,7 @@ impl Rig {
             device_id: DEVICE.to_owned(),
             layout: self.layout(),
             harness: &self.harness,
-            triggers: crate::ops::Triggers::active_only(&self.harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane,
             follow,
             roots: None,

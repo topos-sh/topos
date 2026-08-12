@@ -15,14 +15,11 @@ use std::sync::{Arc, Mutex};
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
     WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::results::{ExchangeFault, PullAction};
-use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::error::{ClientError, FetchFault};
@@ -35,6 +32,7 @@ use crate::plane::{
 };
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, Session};
 use crate::sidecar::Layout;
+use crate::test_support::{MockHarness, native_skills_root};
 use crate::{ops, sync_status};
 
 const WS: &str = "w_eng";
@@ -64,89 +62,9 @@ impl Drop for Scratch {
     }
 }
 
-struct TmpHarness {
-    skills_root: PathBuf,
-}
-impl HarnessAdapter for TmpHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::ClaudeCode
-    }
-    fn discover(&self) -> Vec<DiscoveredPlacement> {
-        Vec::new()
-    }
-    fn placement_for(
-        &self,
-        skill_id: &str,
-        naming: topos_harness::PlacementNaming<'_>,
-        _d: Option<&DiscoveredPlacement>,
-    ) -> PlacementTarget {
-        PlacementTarget {
-            dir: topos_harness::choose_skill_dir(
-                &self.skills_root,
-                skill_id,
-                naming,
-                &topos_harness::dir_taken,
-                &|_| false,
-            ),
-        }
-    }
-}
-
-impl TriggerAdapter for TmpHarness {
-    fn slug(&self) -> &'static str {
-        HarnessId::ClaudeCode.slug()
-    }
-
-    fn install(&self) -> TriggerReport {
-        no_trigger()
-    }
-
-    fn remove(&self) -> TriggerReport {
-        no_trigger()
-    }
-
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        Vec::new()
-    }
-
-    fn present(&self) -> bool {
-        !self.artifacts().is_empty()
-    }
-}
-fn no_trigger() -> TriggerReport {
-    TriggerReport {
-        agent: "claude-code".to_owned(),
-        currency_kind: CurrencyKind::ExplicitPullOnly,
-        touched_path: None,
-        marker_id: "test".into(),
-        state: TriggerState::Inactive,
-
-        note: None,
-    }
-}
-
-/// The active harness's USER skills root under a fixture `home`, resolved the one way the
-/// placement engine resolves it (the registry row through the registry's resolver).
-///
-/// It asserts the answer stays inside the fixture, which is a real fence and not a formality: the
-/// row's root honors `$CLAUDE_CONFIG_DIR`, and this suite writes actual bytes into the dir it
-/// computes. With that variable set, a silent pass would mean a test had just written into the
-/// developer's own skills folder — so the whole file requires it unset, and says so here rather
-/// than finding out afterwards.
-fn native_skills_root(home: &std::path::Path) -> PathBuf {
-    let root = topos_harness::registry::skills_root(
-        HarnessId::ClaudeCode.slug(),
-        topos_harness::registry::SkillScope::User,
-        home,
-        None,
-    )
-    .expect("claude-code has a user skills root");
-    assert!(
-        root.starts_with(home),
-        "this suite needs $CLAUDE_CONFIG_DIR unset — the active harness's skills root resolved to \
-         {root:?}, outside the fixture home {home:?}"
-    );
-    root
+/// The placement adapter for this suite: the naming ladder under the fixture's own skills root.
+fn tmp_harness(skills_root: PathBuf) -> MockHarness {
+    MockHarness::ladder(skills_root)
 }
 
 /// The rig: a fake $HOME (with `.claude/` so claude-code detects), a sidecar under `<home>/.topos`,
@@ -157,7 +75,7 @@ struct Rig {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
-    harness: TmpHarness,
+    harness: MockHarness,
 }
 impl Rig {
     fn new(tag: &str) -> Self {
@@ -170,9 +88,7 @@ impl Rig {
         // resolves, which is the one source of a target dir. (An adapter naming some other
         // directory would not move a byte; it would only make this rig disagree with the engine
         // about where to look.)
-        let harness = TmpHarness {
-            skills_root: native_skills_root(&home.0),
-        };
+        let harness = tmp_harness(native_skills_root(&home.0));
         Self {
             home,
             work,
@@ -208,7 +124,7 @@ impl Rig {
             device_id: "d_test".into(),
             layout: self.layout(),
             harness: &self.harness,
-            triggers: crate::ops::Triggers::active_only(&self.harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &InertPlane,
             follow: &InertFollow,
             roots: Some(crate::ctx::AgentRoots {

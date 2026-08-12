@@ -106,6 +106,95 @@ fn no_trigger() -> TriggerReport {
     }
 }
 
+/// The PLACEMENT port every in-crate suite rigs its `Ctx` with — one adapter, parameterized on the
+/// only thing those rigs ever differed on: where a bundle's bytes land. It discovers nothing (so a
+/// plain temp source is never harness-tagged) and answers `placement_for` alone; the TRIGGER port is
+/// the shared inert one (`crate::ops::INERT_TRIGGER`), which is why nothing here reports a trigger.
+#[derive(Debug)]
+pub struct MockHarness {
+    dir: MockDir,
+}
+
+/// The two placement shapes the suites need.
+#[derive(Debug)]
+enum MockDir {
+    /// `<base>/<skill id>` verbatim — an empty base gives the bare id (the suites that read the
+    /// placement out of `map.json` and never write through the adapter), a temp dir gives an
+    /// absolute one.
+    Join(PathBuf),
+    /// Through the REAL naming ladder under a fixture skills root — for the suites that place bytes
+    /// and assert the dir a collision lands in.
+    Ladder(PathBuf),
+}
+
+impl MockHarness {
+    /// Placement is `<base>/<skill id>`, no ladder: `""` gives the bare id.
+    pub fn joining(base: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: MockDir::Join(base.into()),
+        }
+    }
+
+    /// Placement resolves through the real naming ladder under a fixture skills `root`.
+    pub fn ladder(root: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: MockDir::Ladder(root.into()),
+        }
+    }
+}
+
+impl HarnessAdapter for MockHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::ClaudeCode
+    }
+    fn discover(&self) -> Vec<DiscoveredPlacement> {
+        Vec::new()
+    }
+    fn placement_for(
+        &self,
+        skill_id: &str,
+        naming: topos_harness::PlacementNaming<'_>,
+        _d: Option<&DiscoveredPlacement>,
+    ) -> PlacementTarget {
+        PlacementTarget {
+            dir: match &self.dir {
+                MockDir::Join(base) => base.join(skill_id),
+                MockDir::Ladder(root) => topos_harness::choose_skill_dir(
+                    root,
+                    skill_id,
+                    naming,
+                    &topos_harness::dir_taken,
+                    &|_| false,
+                ),
+            },
+        }
+    }
+}
+
+/// The active harness's USER skills root under a fixture `home`, resolved the one way the placement
+/// engine resolves it (the registry row through the registry's resolver).
+///
+/// It asserts the answer stays inside the fixture, which is a real fence and not a formality: the
+/// row's root honors `$CLAUDE_CONFIG_DIR`, and the suites write actual bytes into the dir it
+/// computes. With that variable set, a silent pass would mean a test had just written into the
+/// developer's own skills folder — so a rig that calls this requires it unset, and says so here
+/// rather than finding out afterwards.
+pub fn native_skills_root(home: &Path) -> PathBuf {
+    let root = topos_harness::registry::skills_root(
+        HarnessId::ClaudeCode.slug(),
+        topos_harness::registry::SkillScope::User,
+        home,
+        None,
+    )
+    .expect("claude-code has a user skills root");
+    assert!(
+        root.starts_with(home),
+        "this rig needs $CLAUDE_CONFIG_DIR unset — the skills root resolved to {root:?}, \
+         outside the fixture home {home:?}"
+    );
+    root
+}
+
 /// One error surface for the suites: `"<CODE>: <display>"` — matchable on either half.
 fn err_str(e: ClientError) -> String {
     format!("{}: {e}", e.code())
@@ -163,20 +252,7 @@ impl SessionInstall {
     /// The person-scope skills ROOT itself — for a suite that scans placements rather than
     /// naming one.
     pub fn skills_root(&self) -> PathBuf {
-        let home = self.root.0.join("home");
-        let root = topos_harness::registry::skills_root(
-            HarnessId::ClaudeCode.slug(),
-            topos_harness::registry::SkillScope::User,
-            &home,
-            None,
-        )
-        .expect("claude-code has a user skills root");
-        assert!(
-            root.starts_with(&home),
-            "this rig needs $CLAUDE_CONFIG_DIR unset — the skills root resolved to {root:?}, \
-             outside the fixture home {home:?}"
-        );
-        root
+        native_skills_root(&self.root.0.join("home"))
     }
 
     fn layout(&self) -> Layout {

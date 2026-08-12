@@ -19,14 +19,11 @@ use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
 use topos_harness::mcp::{self, AuthHint, McpDialect, McpEntry, plugin_dir};
 use topos_harness::registry::{self, KnownHarness};
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
     WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::results::TargetOutcome;
-use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::config_custody::{self, ScopeEntries};
 use crate::ctx::Ctx;
@@ -41,6 +38,7 @@ use crate::plane::{
 };
 use crate::sessions::{self, SESSION_ACTIVE, Session};
 use crate::sidecar::Layout;
+use crate::test_support::MockHarness;
 use crate::{ops, sync_status};
 
 const WS: &str = "w_eng";
@@ -70,65 +68,9 @@ impl Drop for Scratch {
     }
 }
 
-struct TmpHarness {
-    skills_root: PathBuf,
-}
-impl HarnessAdapter for TmpHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::ClaudeCode
-    }
-    fn discover(&self) -> Vec<DiscoveredPlacement> {
-        Vec::new()
-    }
-    fn placement_for(
-        &self,
-        skill_id: &str,
-        naming: topos_harness::PlacementNaming<'_>,
-        _d: Option<&DiscoveredPlacement>,
-    ) -> PlacementTarget {
-        PlacementTarget {
-            dir: topos_harness::choose_skill_dir(
-                &self.skills_root,
-                skill_id,
-                naming,
-                &topos_harness::dir_taken,
-                &|_| false,
-            ),
-        }
-    }
-}
-
-impl TriggerAdapter for TmpHarness {
-    fn slug(&self) -> &'static str {
-        HarnessId::ClaudeCode.slug()
-    }
-
-    fn install(&self) -> TriggerReport {
-        no_trigger()
-    }
-
-    fn remove(&self) -> TriggerReport {
-        no_trigger()
-    }
-
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        Vec::new()
-    }
-
-    fn present(&self) -> bool {
-        !self.artifacts().is_empty()
-    }
-}
-fn no_trigger() -> TriggerReport {
-    TriggerReport {
-        agent: "claude-code".to_owned(),
-        currency_kind: CurrencyKind::ExplicitPullOnly,
-        touched_path: None,
-        marker_id: "test".into(),
-        state: TriggerState::Inactive,
-
-        note: None,
-    }
+/// The placement adapter for this suite: the naming ladder under a fixture skills root.
+fn tmp_harness(skills_root: PathBuf) -> MockHarness {
+    MockHarness::ladder(skills_root)
 }
 
 struct Rig {
@@ -137,15 +79,13 @@ struct Rig {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
-    harness: TmpHarness,
+    harness: MockHarness,
 }
 impl Rig {
     fn new(tag: &str) -> Self {
         let home = Scratch::new(&format!("{tag}-home"));
         let work = Scratch::new(&format!("{tag}-work"));
-        let harness = TmpHarness {
-            skills_root: work.0.join("skills"),
-        };
+        let harness = tmp_harness(work.0.join("skills"));
         Self {
             home,
             work,
@@ -167,7 +107,7 @@ impl Rig {
             device_id: "d_test".into(),
             layout: self.layout(),
             harness: &self.harness,
-            triggers: crate::ops::Triggers::active_only(&self.harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &InertPlane,
             follow: &InertFollow,
             roots: Some(crate::ctx::AgentRoots {
@@ -5331,7 +5271,7 @@ fn a_targeted_accept_updates_the_configs_before_reporting_success() {
         device_id: "d_test".into(),
         layout: rig.layout(),
         harness: &rig.harness,
-        triggers: crate::ops::Triggers::active_only(&rig.harness),
+        triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
         plane: &serves,
         follow: &follow,
         roots: Some(crate::ctx::AgentRoots {

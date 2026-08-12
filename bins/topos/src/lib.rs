@@ -63,8 +63,11 @@ pub(crate) mod visited_stores;
 
 /// Test-only public facade (feature `test-fixtures`) — lets an EXTERNAL integration crate drive the real
 /// pull engine over the real transport without reaching the `pub(crate)` internals. Never compiled into a
-/// production build (the feature is off by default; a `check-arch` guard asserts it stays off).
-#[cfg(feature = "test-fixtures")]
+/// production build (the feature is off by default; a `check-arch` guard asserts it stays off). It is also
+/// compiled under `cfg(test)`, where this crate's OWN suites borrow the rig pieces that live here (the
+/// parameterized harness-adapter mock, the fixture skills-root resolver) — one fixture answer per
+/// question, whichever side of the feature asks it.
+#[cfg(any(test, feature = "test-fixtures"))]
 pub mod test_support;
 
 #[cfg(test)]

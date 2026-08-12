@@ -2,7 +2,7 @@
 //! the PRODUCTION recipe (two roles, two schemas, two migration lineages), an in-process vault (the
 //! `topos_plane::router` custody lane, internal-token-armed, loopback-only), and the REAL web app
 //! spawned from its production build in front of it. The app is the ONE public surface: the harness
-//! drives every ceremony over HTTP exactly as a person (cookie sessions: claim, sign-in, the /verify
+//! drives every ceremony over HTTP exactly as a person (cookie sessions: claim, sign-up, the /verify
 //! device approval) or a device (the Bearer lane under `/api/v1`) would.
 //!
 //! Each e2e runs a **blocking `ureq` client** on the test thread alongside the vault server on a
@@ -13,7 +13,7 @@
 //! disposable (a container), and dropping a database while its pool still holds connections is racy.
 //!
 //! Write-path discipline: everything the product has a surface for goes THROUGH that surface (claim,
-//! sign-in, /verify, the device lane, the admin pages). The superuser pool is for row-level witnesses,
+//! sign-up, /verify, the device lane, the admin pages). The superuser pool is for row-level witnesses,
 //! plus the few arrangement steps the OSS product deliberately has no mail-less surface for (seating an
 //! extra account, flipping the registration knob) — each such helper says so.
 
@@ -39,8 +39,6 @@ use topos_plane::{PlaneState, router};
 
 /// The boot-minted workspace's ADDRESS slug (`TOPOS_WORKSPACE_NAME`) — what a `follow` targets.
 pub(crate) const WS_NAME: &str = "acme";
-/// The one skill most scenarios distribute.
-pub(crate) const SKILL: &str = "s-deploy";
 /// The preset first-boot claim code (`TOPOS_SETUP_CODE` — stable across boots, like CI/IaC).
 pub(crate) const SETUP_CODE: &str = "e2e-setup-code-0123456789abcdef";
 /// The one password every harness account uses (better-auth minimum is 8).
@@ -217,7 +215,6 @@ fn spawn_app(
     plane_base: &str,
     app_port: u16,
     link_file: &std::path::Path,
-    mail_armed: bool,
 ) -> AppServer {
     let web_dir = repo_root().join("web");
     let build = web_dir.join("build").join("server").join("index.js");
@@ -254,18 +251,6 @@ fn spawn_app(
         .env("TOPOS_WORKSPACE_NAME", WS_NAME)
         .env("TOPOS_SETUP_CODE", SETUP_CODE)
         .env("TOPOS_SETUP_LINK_FILE", link_file);
-    if mail_armed {
-        // Dummy relay coordinates: `APP_ENV=test` records every mail to the dev outbox files in
-        // the web dir and never dials a socket — but an ARMED transport flips the mail-rung
-        // gates on (inviting requires it, and the invitation page's account mint goes
-        // passwordless through the magic-link rung the composition arms alongside it). The
-        // default suites stay SMTP-UNSET: the whole enrolled loop must work with zero delivery.
-        cmd.env("TOPOS_MAIL_SMTP_HOST", "127.0.0.1")
-            .env("TOPOS_MAIL_SMTP_PORT", "2525")
-            .env("TOPOS_MAIL_SMTP_USER", "e2e")
-            .env("TOPOS_MAIL_SMTP_PASS", "e2e")
-            .env("TOPOS_MAIL_SMTP_FROM", "Topos <no-reply@e2e.test>");
-    }
     let child = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
@@ -319,12 +304,11 @@ pub(crate) struct Session {
     cookies: Mutex<BTreeMap<String, String>>,
 }
 
-/// A response the session hands back: the status + the body text (empty when unreadable) + the
-/// redirect target when the answer was one (redirects are OFF — a 302 is an asserted outcome).
+/// A response the session hands back: the status (redirects are OFF — a 302 is an asserted
+/// outcome) + the body text (empty when unreadable).
 pub(crate) struct HttpAnswer {
     pub(crate) status: u16,
     pub(crate) body: String,
-    pub(crate) location: Option<String>,
 }
 
 fn blocking_agent() -> ureq::Agent {
@@ -389,22 +373,13 @@ impl Session {
     fn read(&self, mut resp: ureq::http::Response<ureq::Body>) -> HttpAnswer {
         self.absorb_cookies(&resp);
         let status = resp.status().as_u16();
-        let location = resp
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
         let mut body = String::new();
         let _ = resp
             .body_mut()
             .as_reader()
             .take(4 * 1024 * 1024)
             .read_to_string(&mut body);
-        HttpAnswer {
-            status,
-            body,
-            location,
-        }
+        HttpAnswer { status, body }
     }
 
     /// GET a path (an in-app path like `/login`, or `?`-suffixed) with the browser `Accept`.
@@ -496,8 +471,6 @@ pub(crate) struct Stack {
     pub(crate) api_base: String,
     /// The boot-minted workspace's row id (`w_…`).
     pub(crate) workspace_id: String,
-    /// Where the printed claim link also lands (`TOPOS_SETUP_LINK_FILE`).
-    pub(crate) setup_link_file: PathBuf,
     _dir: Scratch,
 }
 
@@ -506,17 +479,6 @@ pub(crate) struct Stack {
 /// of it, and poke ONE document request so first-boot setup mints the workspace (with the preset
 /// claim code). The workspace is returned UNCLAIMED — `claim_owner` is the first ceremony.
 pub(crate) fn start_stack(tag: &str) -> Stack {
-    start_stack_with(tag, false)
-}
-
-/// [`start_stack`] with the app's mail transport ARMED (dummy coordinates; `APP_ENV=test` records
-/// to the web dir's dev outbox files instead of dialing) — for the invitation-redemption suite,
-/// whose invite ceremony and passwordless account mint both ride the mail rung.
-pub(crate) fn start_stack_mailed(tag: &str) -> Stack {
-    start_stack_with(tag, true)
-}
-
-fn start_stack_with(tag: &str, mail_armed: bool) -> Stack {
     let dir = Scratch::new("topos-e2e", tag);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -544,13 +506,7 @@ fn start_stack_with(tag: &str, mail_armed: bool) -> Stack {
 
     let app_port = free_port();
     let setup_link_file = dir.0.join("setup-link.txt");
-    let app = spawn_app(
-        &web_url,
-        &plane_base,
-        app_port,
-        &setup_link_file,
-        mail_armed,
-    );
+    let app = spawn_app(&web_url, &plane_base, app_port, &setup_link_file);
     let origin = app.origin.clone();
     let api_base = format!("{origin}/api");
 
@@ -578,7 +534,6 @@ fn start_stack_with(tag: &str, mail_armed: bool) -> Stack {
         origin,
         api_base,
         workspace_id,
-        setup_link_file,
         _dir: dir,
     }
 }
@@ -618,18 +573,6 @@ impl Stack {
             claimed.body
         );
         assert!(session.signed_in(), "the claimant lands with a session");
-        session
-    }
-
-    /// Sign an EXISTING account in through better-auth's email+password rung.
-    pub(crate) fn sign_in(&self, email: &str) -> Session {
-        let session = Session::new(&self.origin);
-        let answer = session.post_json(
-            "/api/auth/sign-in/email",
-            &serde_json::json!({ "email": email, "password": PASSWORD }),
-        );
-        assert_eq!(answer.status, 200, "sign-in for {email}: {}", answer.body);
-        assert!(session.signed_in(), "sign-in lands a session cookie");
         session
     }
 
@@ -696,15 +639,6 @@ impl Stack {
             .expect("the pending arm carries the verification handle")
             .user_code;
         self.approve_device(approver, &user_code);
-    }
-
-    /// [`login_begin_and_approve`](Self::login_begin_and_approve) plus the resume: the granted
-    /// second call persists the session row. Returns the resumed receipt's workspace id.
-    pub(crate) fn login_complete(&self, client: &SessionInstall, approver: &Session) -> String {
-        self.login_begin_and_approve(client, approver);
-        let granted = client.login(None).expect("login resume");
-        assert!(granted.pending.is_none(), "the resume settles the flow");
-        granted.workspace_id
     }
 
     /// Mint a PROBE session grant for the harness itself over the real login flow — for wire-level
@@ -795,11 +729,7 @@ impl Stack {
             .as_reader()
             .take(4 * 1024 * 1024)
             .read_to_string(&mut text);
-        HttpAnswer {
-            status,
-            body: text,
-            location: None,
-        }
+        HttpAnswer { status, body: text }
     }
 
     /// GET a device-lane path (e.g. `/v1/workspaces/{ws}/delivery`) under `credential`.
@@ -826,11 +756,7 @@ impl Stack {
             .as_reader()
             .take(4 * 1024 * 1024)
             .read_to_string(&mut body);
-        HttpAnswer {
-            status,
-            body,
-            location: None,
-        }
+        HttpAnswer { status, body }
     }
 
     /// PUT a bodyless device-lane row op.
@@ -983,17 +909,6 @@ impl Stack {
 
     // ── row-level witnesses ─────────────────────────────────────────────────────────────────────
 
-    /// The `user.id` behind an email (panics if absent — a test-precondition error).
-    pub(crate) fn user_id(&self, email: &str) -> String {
-        self.rt
-            .block_on(
-                sqlx::query_scalar::<_, String>("SELECT id FROM web.\"user\" WHERE email = $1")
-                    .bind(email)
-                    .fetch_one(&self.pool),
-            )
-            .expect("the account row exists")
-    }
-
     /// One COUNT(*) witness over an arbitrary condition (superuser; read-only).
     pub(crate) fn count(&self, sql: &str) -> i64 {
         self.rt
@@ -1111,36 +1026,4 @@ pub(crate) fn run_cli(
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
-}
-
-// ── shared bundle expectations ──────────────────────────────────────────────────────────────────────
-
-/// The standard genesis bundle the distribute scenarios publish: a regular doc + an EXECUTABLE script
-/// (the exec bit must survive end to end).
-pub(crate) fn genesis_files() -> Vec<(&'static str, bool, &'static [u8])> {
-    vec![
-        (
-            "SKILL.md",
-            false,
-            b"# deploy\nDeploy the service.\n" as &[u8],
-        ),
-        ("run.sh", true, b"#!/bin/sh\necho deploying\n" as &[u8]),
-    ]
-}
-
-/// The placement-snapshot shape (`(path, mode & 0o777, bytes)`, sorted) a bundle must materialize to:
-/// regular files at 0o644, executable files at 0o755.
-pub(crate) fn expected(files: &[(&str, bool, &[u8])]) -> Vec<(String, u32, Vec<u8>)> {
-    let mut out: Vec<(String, u32, Vec<u8>)> = files
-        .iter()
-        .map(|(p, exec, b)| {
-            (
-                (*p).to_owned(),
-                if *exec { 0o755 } else { 0o644 },
-                b.to_vec(),
-            )
-        })
-        .collect();
-    out.sort();
-    out
 }

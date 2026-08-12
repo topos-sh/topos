@@ -11,9 +11,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
-use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::{AgentRoots, Ctx};
 use crate::fs_seam::RealFs;
@@ -22,6 +19,7 @@ use crate::ops;
 use crate::plane::{InertFollow, InertPlane};
 use crate::scan::{ScannedBundle, ScannedFile};
 use crate::sidecar::Layout;
+use crate::test_support::MockHarness;
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -43,65 +41,8 @@ impl Drop for Scratch {
 /// A harness stub whose native placement is `<agent home>/.claude/skills/<dir>` (the active
 /// adapter is never detected here — no `.claude` detect dir is created — so plans come from the
 /// registry-detected agents alone).
-struct StubClaude {
-    skills: PathBuf,
-}
-impl HarnessAdapter for StubClaude {
-    fn id(&self) -> HarnessId {
-        HarnessId::ClaudeCode
-    }
-    fn discover(&self) -> Vec<DiscoveredPlacement> {
-        Vec::new()
-    }
-    fn placement_for(
-        &self,
-        skill_id: &str,
-        naming: topos_harness::PlacementNaming<'_>,
-        _d: Option<&DiscoveredPlacement>,
-    ) -> PlacementTarget {
-        PlacementTarget {
-            dir: topos_harness::choose_skill_dir(
-                &self.skills,
-                skill_id,
-                naming,
-                &topos_harness::dir_taken,
-                &|_| false,
-            ),
-        }
-    }
-}
-
-impl TriggerAdapter for StubClaude {
-    fn slug(&self) -> &'static str {
-        HarnessId::ClaudeCode.slug()
-    }
-
-    fn install(&self) -> TriggerReport {
-        stub_report()
-    }
-
-    fn remove(&self) -> TriggerReport {
-        stub_report()
-    }
-
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        Vec::new()
-    }
-
-    fn present(&self) -> bool {
-        !self.artifacts().is_empty()
-    }
-}
-fn stub_report() -> TriggerReport {
-    TriggerReport {
-        agent: "claude-code".to_owned(),
-        currency_kind: CurrencyKind::ExplicitPullOnly,
-        touched_path: None,
-        marker_id: "test".into(),
-        state: TriggerState::Inactive,
-
-        note: None,
-    }
+fn stub_claude(agent_home: &std::path::Path) -> MockHarness {
+    MockHarness::ladder(agent_home.join(".claude").join("skills"))
 }
 
 struct Rig {
@@ -110,15 +51,13 @@ struct Rig {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
-    harness: StubClaude,
+    harness: MockHarness,
 }
 
 impl Rig {
     fn new(tag: &str) -> Self {
         let agent_home = Scratch::new(&format!("{tag}-agents"));
-        let harness = StubClaude {
-            skills: agent_home.0.join(".claude").join("skills"),
-        };
+        let harness = stub_claude(&agent_home.0);
         Self {
             home: Scratch::new(&format!("{tag}-home")),
             agent_home,
@@ -143,7 +82,7 @@ impl Rig {
             device_id: "d_test".to_owned(),
             layout: self.layout(),
             harness: &self.harness,
-            triggers: crate::ops::Triggers::active_only(&self.harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane,
             follow,
             roots: Some(AgentRoots {

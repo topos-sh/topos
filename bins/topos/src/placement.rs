@@ -1861,7 +1861,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::HarnessId;
 
     /// A self-cleaning temp dir (RAII) — a stand-in machine home.
@@ -1883,33 +1882,6 @@ mod tests {
         }
     }
 
-    /// An adapter whose placement answer is a dir NO registry row names — the stand-in for a
-    /// compiled spelling that has fallen behind the table (a machine-local registry that moved
-    /// this harness's skills dir leaves exactly this gap: detection follows the row, and a
-    /// placement asking the adapter would not).
-    #[derive(Debug)]
-    struct AdapterElsewhere {
-        elsewhere: PathBuf,
-    }
-    impl HarnessAdapter for AdapterElsewhere {
-        fn id(&self) -> HarnessId {
-            HarnessId::ClaudeCode
-        }
-        fn discover(&self) -> Vec<DiscoveredPlacement> {
-            Vec::new()
-        }
-        fn placement_for(
-            &self,
-            skill_id: &str,
-            _naming: PlacementNaming<'_>,
-            _d: Option<&DiscoveredPlacement>,
-        ) -> PlacementTarget {
-            PlacementTarget {
-                dir: self.elsewhere.join(skill_id),
-            }
-        }
-    }
-
     /// **The active harness's target dir is its registry ROW's, never the compiled adapter's.**
     /// The row is what detection, attribution and every sibling harness's placement already read;
     /// a machine carrying a table that moved this agent's skills dir must move the bytes with it,
@@ -1921,9 +1893,11 @@ mod tests {
     fn the_active_harnesss_target_dir_comes_from_its_registry_row() {
         let home = Scratch::new("row-home");
         let elsewhere = Scratch::new("row-adapter");
-        let harness = AdapterElsewhere {
-            elsewhere: elsewhere.0.clone(),
-        };
+        // An adapter whose placement answer is a dir NO registry row names — the stand-in for a
+        // compiled spelling that has fallen behind the table (a machine-local registry that moved
+        // this harness's skills dir leaves exactly this gap: detection follows the row, and a
+        // placement asking the adapter would not).
+        let harness = crate::test_support::MockHarness::joining(elsewhere.0.clone());
         let fs = crate::fs_seam::RealFs;
         let ids = crate::ids::test_sources::SeqIds::new("p");
         let clock = crate::ids::test_sources::FixedClock(1);

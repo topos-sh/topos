@@ -24,14 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use topos_core::digest::ManifestEntry;
-use topos_core::digest::{self, FileMode};
-use topos_core::identity::Commit;
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
-
-use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
-
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::RealFs;
@@ -40,6 +32,10 @@ use crate::ops::{self};
 use crate::plane::{InertFollow, InertPlane};
 use crate::sessions::{self, SESSION_ACTIVE, Session};
 use crate::sidecar::Layout;
+use crate::test_support::MockHarness;
+use topos_core::digest::ManifestEntry;
+use topos_core::digest::{self, FileMode};
+use topos_core::identity::Commit;
 // The directory + governance fakes are the manifest suite's — one pair of stand-ins for the whole
 // test tree, so a trait's growth is felt in one place.
 use super::manifest_reconcile::{FakeDirectory, NoGovernance};
@@ -72,58 +68,8 @@ impl Drop for Scratch {
 }
 
 /// A no-op adapter: discovers nothing, touches no config.
-#[derive(Debug)]
-struct NoHarness;
-impl HarnessAdapter for NoHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::ClaudeCode
-    }
-    fn discover(&self) -> Vec<DiscoveredPlacement> {
-        Vec::new()
-    }
-    fn placement_for(
-        &self,
-        skill_id: &str,
-        _n: topos_harness::PlacementNaming<'_>,
-        _: Option<&DiscoveredPlacement>,
-    ) -> PlacementTarget {
-        PlacementTarget {
-            dir: PathBuf::from(skill_id),
-        }
-    }
-}
-
-impl TriggerAdapter for NoHarness {
-    fn slug(&self) -> &'static str {
-        HarnessId::ClaudeCode.slug()
-    }
-
-    fn install(&self) -> TriggerReport {
-        report()
-    }
-
-    fn remove(&self) -> TriggerReport {
-        report()
-    }
-
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        Vec::new()
-    }
-
-    fn present(&self) -> bool {
-        !self.artifacts().is_empty()
-    }
-}
-fn report() -> TriggerReport {
-    TriggerReport {
-        agent: "claude-code".to_owned(),
-        currency_kind: CurrencyKind::ExplicitPullOnly,
-        touched_path: None,
-        marker_id: "test:none".to_owned(),
-        state: TriggerState::Inactive,
-
-        note: None,
-    }
+fn no_harness() -> MockHarness {
+    MockHarness::joining("")
 }
 
 struct Rig {
@@ -132,7 +78,7 @@ struct Rig {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
-    harness: NoHarness,
+    harness: MockHarness,
 }
 impl Rig {
     fn new(tag: &str) -> Self {
@@ -142,7 +88,7 @@ impl Rig {
             fs: RealFs,
             ids: SeqIds::new("s"),
             clock: FixedClock(1_700_000_000_000),
-            harness: NoHarness,
+            harness: no_harness(),
         }
     }
     fn layout(&self) -> Layout {
@@ -157,7 +103,7 @@ impl Rig {
             device_id: "d_test".into(),
             layout: self.layout(),
             harness: &self.harness,
-            triggers: crate::ops::Triggers::active_only(&self.harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &InertPlane,
             follow: &InertFollow,
             roots: Some(crate::ctx::AgentRoots {

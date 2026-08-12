@@ -7,11 +7,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::to_hex;
 use topos_gitstore::Store;
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::results::{ClaimState, RemoveKind};
-use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::{AgentRoots, Ctx};
 use crate::doc;
@@ -20,6 +17,7 @@ use crate::id::SkillId;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::ops;
 use crate::sidecar::Layout;
+use crate::test_support::MockHarness;
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -42,48 +40,10 @@ impl Drop for Scratch {
     }
 }
 
-struct NoHarness;
-impl HarnessAdapter for NoHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::ClaudeCode
-    }
-    fn discover(&self) -> Vec<DiscoveredPlacement> {
-        Vec::new()
-    }
-    fn placement_for(
-        &self,
-        skill_id: &str,
-        _naming: topos_harness::PlacementNaming<'_>,
-        _d: Option<&DiscoveredPlacement>,
-    ) -> PlacementTarget {
-        PlacementTarget {
-            dir: std::env::temp_dir().join(skill_id),
-        }
-    }
-}
-impl TriggerAdapter for NoHarness {
-    fn slug(&self) -> &'static str {
-        HarnessId::ClaudeCode.slug()
-    }
-    fn install(&self) -> TriggerReport {
-        TriggerReport {
-            agent: "claude-code".to_owned(),
-            currency_kind: CurrencyKind::ExplicitPullOnly,
-            touched_path: None,
-            marker_id: "test".into(),
-            state: TriggerState::Inactive,
-            note: None,
-        }
-    }
-    fn remove(&self) -> TriggerReport {
-        self.install()
-    }
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        Vec::new()
-    }
-    fn present(&self) -> bool {
-        false
-    }
+/// A no-op adapter: discovers nothing, and places under the temp dir (the claim suite names every
+/// folder it cares about itself).
+fn no_harness() -> MockHarness {
+    MockHarness::joining(std::env::temp_dir())
 }
 
 /// A machine-scope rig: a `~/.topos` home, a `work/` tree the folders live in, and a cwd that is
@@ -94,7 +54,7 @@ struct Rig {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
-    harness: NoHarness,
+    harness: MockHarness,
     plane: crate::plane::InertPlane,
     follow: crate::plane::InertFollow,
 }
@@ -107,7 +67,7 @@ impl Rig {
             fs: RealFs,
             ids: SeqIds::new("c"),
             clock: FixedClock(1_700_000_000_000),
-            harness: NoHarness,
+            harness: no_harness(),
             plane: crate::plane::InertPlane,
             follow: crate::plane::InertFollow,
         }
@@ -121,7 +81,7 @@ impl Rig {
             device_id: "d_claim".to_owned(),
             layout: Layout::new(&self.home.0),
             harness: &self.harness,
-            triggers: crate::ops::Triggers::active_only(&self.harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &self.plane,
             follow: &self.follow,
             // The cwd is deliberately a SEPARATE folder from the home tree: with the two equal,

@@ -5,16 +5,17 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+use topos_harness::triggers::TriggerAdapter;
+use topos_harness::{ClaudeCode, HarnessAdapter};
 use topos_types::persisted::Lock;
-use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
+use topos_types::{CurrencyKind, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::doc;
 use crate::fs_seam::{FaultFs, RealFs};
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::sidecar::Layout;
+use crate::test_support::MockHarness;
 use crate::{ops, render};
 
 const DEVICE_ID: &str = "d_test";
@@ -33,63 +34,11 @@ fn pull_data(
     ops::pull(ctx, scope).map(|o| o.data)
 }
 
-/// A borrow-free no-op harness for the tests that don't exercise harness recognition: it discovers
-/// nothing (so `add` never tags a plain temp source as a harness skill) and installs/removes nothing.
-/// The Claude Code adapter itself is tested directly (its own crate tests + the dedicated tests below).
-#[derive(Debug)]
-struct NoHarness;
-
-impl HarnessAdapter for NoHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::ClaudeCode
-    }
-    fn discover(&self) -> Vec<DiscoveredPlacement> {
-        Vec::new()
-    }
-    fn placement_for(
-        &self,
-        skill_id: &str,
-        _n: topos_harness::PlacementNaming<'_>,
-        _: Option<&DiscoveredPlacement>,
-    ) -> PlacementTarget {
-        PlacementTarget {
-            dir: PathBuf::from(skill_id),
-        }
-    }
-}
-
-impl TriggerAdapter for NoHarness {
-    fn slug(&self) -> &'static str {
-        HarnessId::ClaudeCode.slug()
-    }
-
-    fn install(&self) -> TriggerReport {
-        no_harness_report()
-    }
-
-    fn remove(&self) -> TriggerReport {
-        no_harness_report()
-    }
-
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        Vec::new()
-    }
-
-    fn present(&self) -> bool {
-        !self.artifacts().is_empty()
-    }
-}
-
-fn no_harness_report() -> TriggerReport {
-    TriggerReport {
-        agent: "claude-code".to_owned(),
-        currency_kind: CurrencyKind::SessionStart,
-        touched_path: None,
-        marker_id: "test:none".to_owned(),
-        state: TriggerState::Inactive,
-
-        note: None,
-    }
+/// The no-op harness for the tests that don't exercise harness recognition: it discovers nothing (so
+/// `add` never tags a plain temp source as a harness skill) and places at the bare skill id. The
+/// Claude Code adapter itself is tested directly (its own crate tests + the dedicated tests below).
+fn no_harness() -> MockHarness {
+    MockHarness::joining("")
 }
 
 struct Scratch(PathBuf);
@@ -151,7 +100,7 @@ struct Harness {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
-    harness: NoHarness,
+    harness: MockHarness,
     plane: crate::plane::InertPlane,
     follow: crate::plane::InertFollow,
 }
@@ -162,13 +111,13 @@ impl Harness {
             fs: RealFs,
             ids: SeqIds::new("t"),
             clock: FixedClock(FIXED_MILLIS),
-            harness: NoHarness,
+            harness: no_harness(),
             plane: crate::plane::InertPlane,
             follow: crate::plane::InertFollow,
         }
     }
     fn ctx(&self) -> Ctx<'_> {
-        self.ctx_with(&self.harness, &self.harness)
+        self.ctx_with(&self.harness, &crate::ops::INERT_TRIGGER)
     }
     /// A context over an explicit pair of ports — the placement adapter and the trigger — so the
     /// Claude Code recognition tests can swap either half alone.
@@ -2241,8 +2190,8 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
     let root = src.0.join("pr-describe");
     let before = fs_hashes(&root);
     // The temp source is not under any harness home, so recognition is a no-op (no extra durable ops);
-    // a borrow-free stub keeps the fault sweep's op count exactly the sidecar adoption's.
-    let no_harness = NoHarness;
+    // a stub that touches nothing keeps the fault sweep's op count exactly the sidecar adoption's.
+    let no_harness = no_harness();
     // `add` never reads the plane/follow seams; the inert pair satisfies `Ctx` without extra durable ops.
     let no_plane = crate::plane::InertPlane;
     let no_follow = crate::plane::InertFollow;
@@ -2260,7 +2209,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         device_id: DEVICE_ID.to_owned(),
         layout: Layout::new(&probe_home.0),
         harness: &no_harness,
-        triggers: crate::ops::Triggers::active_only(&no_harness),
+        triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
         plane: &no_plane,
         follow: &no_follow,
         roots: None,
@@ -2282,7 +2231,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
             harness: &no_harness,
-            triggers: crate::ops::Triggers::active_only(&no_harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &no_plane,
             follow: &no_follow,
             roots: None,
@@ -2308,7 +2257,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
             harness: &no_harness,
-            triggers: crate::ops::Triggers::active_only(&no_harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &no_plane,
             follow: &no_follow,
             roots: None,
@@ -2587,6 +2536,23 @@ fn pull_is_an_honest_empty_no_op() {
     let data = pull_data(&h.ctx(), ops::PullScope::AllFollowed).unwrap();
     assert!(data.skills.is_empty(), "nothing is followed yet");
     assert_eq!(data.proposals_awaiting, 0);
+}
+
+#[test]
+fn reset_without_a_named_skill_is_refused() {
+    // `update --reset` throws away edits — it must never blanket-reset every followed skill.
+    let h = Harness::new("reset-bare");
+    let ctx = h.ctx();
+    let err = ops::reset(
+        &ctx,
+        &[],
+        false,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(err.to_string().contains("needs a skill name"), "{err}");
 }
 
 /// Every path under a directory (files + dirs), for the footprint oracle.

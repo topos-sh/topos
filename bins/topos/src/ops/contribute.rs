@@ -577,12 +577,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
-    use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
-    use topos_types::{
-        CurrencyKind, HarnessId, Receipt, TerminalOutcome, TriggerReport, TriggerState,
-    };
+    use topos_types::{Receipt, TerminalOutcome};
 
     use crate::fs_seam::RealFs;
     use crate::ids::test_sources::{FixedClock, SeqIds};
@@ -607,57 +603,10 @@ mod tests {
         }
     }
 
-    struct NullHarness;
-    impl HarnessAdapter for NullHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::ClaudeCode
-        }
-        fn discover(&self) -> Vec<DiscoveredPlacement> {
-            Vec::new()
-        }
-        fn placement_for(
-            &self,
-            skill_id: &str,
-            _n: topos_harness::PlacementNaming<'_>,
-            _d: Option<&DiscoveredPlacement>,
-        ) -> PlacementTarget {
-            PlacementTarget {
-                dir: PathBuf::from("/nonexistent").join(skill_id),
-            }
-        }
-    }
-
-    impl TriggerAdapter for NullHarness {
-        fn slug(&self) -> &'static str {
-            HarnessId::ClaudeCode.slug()
-        }
-
-        fn install(&self) -> TriggerReport {
-            no_trigger()
-        }
-
-        fn remove(&self) -> TriggerReport {
-            no_trigger()
-        }
-
-        fn artifacts(&self) -> Vec<TriggerArtifact> {
-            Vec::new()
-        }
-
-        fn present(&self) -> bool {
-            !self.artifacts().is_empty()
-        }
-    }
-    fn no_trigger() -> TriggerReport {
-        TriggerReport {
-            agent: "claude-code".to_owned(),
-            currency_kind: CurrencyKind::ExplicitPullOnly,
-            touched_path: None,
-            marker_id: "t".into(),
-            state: TriggerState::Inactive,
-
-            note: None,
-        }
+    /// The placement port for these rigs: it targets nothing real (no bytes move here — the op
+    /// orchestration is what's under test). The trigger port is the shared inert one.
+    fn null_harness() -> crate::test_support::MockHarness {
+        crate::test_support::MockHarness::joining("/nonexistent")
     }
 
     // ── op_id idempotent replay: an UNCERTAIN send keeps the WAL + replays the SAME op_id ──
@@ -738,7 +687,7 @@ mod tests {
         let fs = RealFs;
         let ids = SeqIds::new("s");
         let clock = FixedClock(1);
-        let harness = NullHarness;
+        let harness = null_harness();
         let inert_p = InertPlane;
         let inert_f = InertFollow;
         let layout = crate::sidecar::Layout::new(&scratch.0);
@@ -750,7 +699,7 @@ mod tests {
             device_id: "d_author".to_owned(),
             layout: layout.clone(),
             harness: &harness,
-            triggers: crate::ops::Triggers::active_only(&harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &inert_p,
             follow: &inert_f,
             roots: None,
@@ -825,7 +774,7 @@ mod tests {
         let fs = RealFs;
         let ids = SeqIds::new("s");
         let clock = FixedClock(1);
-        let harness = NullHarness;
+        let harness = null_harness();
         let inert_p = InertPlane;
         let inert_f = InertFollow;
         let layout = crate::sidecar::Layout::new(&scratch.0);
@@ -837,7 +786,7 @@ mod tests {
             device_id: "d_author".to_owned(),
             layout: layout.clone(),
             harness: &harness,
-            triggers: crate::ops::Triggers::active_only(&harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &inert_p,
             follow: &inert_f,
             roots: None,
@@ -965,7 +914,7 @@ mod tests {
         let fs = RealFs;
         let ids = SeqIds::new("s");
         let clock = FixedClock(1);
-        let harness = NullHarness;
+        let harness = null_harness();
         let inert_p = InertPlane;
         let inert_f = InertFollow;
         let layout = crate::sidecar::Layout::new(&scratch.0);
@@ -977,7 +926,7 @@ mod tests {
             device_id: "d_author".to_owned(),
             layout: layout.clone(),
             harness: &harness,
-            triggers: crate::ops::Triggers::active_only(&harness),
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &inert_p,
             follow: &inert_f,
             roots: None,
