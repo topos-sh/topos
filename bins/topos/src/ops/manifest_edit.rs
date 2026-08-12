@@ -3893,7 +3893,7 @@ fn converge_removed_mcp(
         };
         let outcome = crate::mcp_engine::remove_bundle(
             &io,
-            &topos_harness::mcp::descriptor::mcp_harnesses(),
+            &topos_harness::mcp::descriptor::mcp_harnesses_for_teardown(),
             &detected,
             &bundle_id,
             &item.name,

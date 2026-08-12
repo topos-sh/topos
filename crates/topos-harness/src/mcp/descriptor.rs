@@ -47,11 +47,41 @@ pub fn mcp_harness(slug: &str) -> Option<&'static KnownHarness> {
     registry::known_harness(slug).filter(|h| h.mcp().is_some())
 }
 
+/// The MCP view a TEARDOWN iterates — the same filter over
+/// [`registry::teardown_harnesses`]'s loaded-∪-bundled union, so an entry topos placed under a
+/// row a downloaded table later dropped is still found, named, and retired. Placement and
+/// converge keep reading [`mcp_harnesses`]: a dropped row gains nothing new, it only stays
+/// cleanable.
+#[must_use]
+pub fn mcp_harnesses_for_teardown() -> Vec<&'static KnownHarness> {
+    registry::teardown_harnesses()
+        .into_iter()
+        .filter(|h| h.mcp().is_some())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::Root;
     use std::path::{Path, PathBuf};
+
+    /// The teardown view never sees LESS than placement does — it is the same filter over the
+    /// union that keeps a dropped row cleanable, so every placeable surface stays scrubbable.
+    #[test]
+    fn the_teardown_view_covers_every_placement_surface() {
+        let placement: Vec<&str> = mcp_harnesses().iter().map(|h| h.slug).collect();
+        let teardown: Vec<&str> = mcp_harnesses_for_teardown()
+            .iter()
+            .map(|h| h.slug)
+            .collect();
+        for slug in &placement {
+            assert!(
+                teardown.contains(slug),
+                "{slug} placeable but not scrubbable"
+            );
+        }
+    }
 
     /// The MCP view over the BUNDLED table — [`mcp_harnesses`]'s own filter, over the rows this
     /// BUILD ships. A shape pin answers for the commit under test, so it must not be movable by

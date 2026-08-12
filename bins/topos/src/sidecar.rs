@@ -844,9 +844,11 @@ fn within_managed_namespace(root: &Path, path: &Path) -> bool {
         root.join(PROJECT_STORE_DIR),
         root.join(".agents").join("skills"),
     ];
+    // The union view, not the loaded table alone: a park written under a row a newer downloaded
+    // table later dropped must still restore — a shrink never strands parked bytes.
     namespaces.extend(
-        topos_harness::registry::known_harnesses()
-            .iter()
+        topos_harness::registry::teardown_harnesses()
+            .into_iter()
             .filter_map(|h| {
                 let dir = h.project_dir();
                 (!dir.is_empty()).then(|| root.join(dir))
