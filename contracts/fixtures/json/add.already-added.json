@@ -5,23 +5,12 @@
   "data": {
     "candidates": [
       "/home/ada/.agents/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy",
+      "/home/ada/.claude/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy",
       "/home/ada/.codex/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy"
     ]
   },
   "warnings": [],
   "next_actions": [
-    {
-      "code": "RUN_COMMAND",
-      "argv": [
-        "topos",
-        "add",
-        "-g",
-        "/home/ada/.agents/skills/coolify-deploy",
-        "--as",
-        "topos.sh/ideamotive/coolify-deploy",
-        "--json"
-      ]
-    },
     {
       "code": "RUN_COMMAND",
       "argv": [
@@ -41,21 +30,9 @@
     "retryable": false,
     "affected": {},
     "context": {
-      "message": "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: topos.sh/ideamotive/coolify-deploy\n2 unmanaged copies look like it — manage any as the same skill:"
+      "message": "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: topos.sh/ideamotive/coolify-deploy\n'coolify-deploy' is in 3 folders here:\n  ~/.agents/skills/coolify-deploy — edited (adopting it makes these your draft)\n  ~/.claude/skills/coolify-deploy — edited differently\n  ~/.codex/skills/coolify-deploy — matches the published current\nname the one to adopt: topos add -g <folder> --as topos.sh/ideamotive/coolify-deploy"
     },
     "next_actions": [
-      {
-        "code": "RUN_COMMAND",
-        "argv": [
-          "topos",
-          "add",
-          "-g",
-          "/home/ada/.agents/skills/coolify-deploy",
-          "--as",
-          "topos.sh/ideamotive/coolify-deploy",
-          "--json"
-        ]
-      },
       {
         "code": "RUN_COMMAND",
         "argv": [

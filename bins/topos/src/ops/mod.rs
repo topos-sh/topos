@@ -298,7 +298,7 @@ fn resolve_skill_stored(
 }
 
 /// The cwd chain's project stores, NEAREST FIRST — the candidates beside the machine's home store.
-fn project_stores(ctx: &Ctx<'_>) -> Vec<crate::sidecar::Layout> {
+pub(crate) fn project_stores(ctx: &Ctx<'_>) -> Vec<crate::sidecar::Layout> {
     let mut out: Vec<crate::sidecar::Layout> = Vec::new();
     if let Some(roots) = &ctx.roots
         && let Some(cwd) = roots.cwd.as_deref()
@@ -523,6 +523,20 @@ pub(crate) fn store_draft_dir(
 /// Whether a store's copy of `sid` is a DRAFT — see [`store_draft_dir`], the one definition.
 pub(crate) fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId, lock: &Lock) -> bool {
     store_draft_dir(ctx, sid, lock).is_some()
+}
+
+/// The LOCK a store holds for ONE record identity — the proof that this store tracks that bundle
+/// at all, in the shape every draft question needs beside it. A RETIRED record tracks nothing (it
+/// left every surface when the one-time orphan resolution released it), and an unreadable document
+/// answers `None` rather than half a fact: this is what the cross-scope disclosures ask before
+/// they claim a second copy exists.
+pub(crate) fn store_lock(ctx: &Ctx<'_>, sid: &SkillId) -> Option<Lock> {
+    if crate::sidecar::record_retired(ctx.fs, &ctx.layout, sid) {
+        return None;
+    }
+    doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(sid).lock)
+        .ok()
+        .flatten()
 }
 
 /// The NAME a cwd-chain PROJECT store tracks for `source` when the home store does not — the

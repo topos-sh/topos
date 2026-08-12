@@ -972,6 +972,10 @@ pub(crate) fn detail_for(
             // where the reader stands like every other path the dive prints.
             conflict_copy: None,
             conflict_reason: None,
+            // The CHECKOUT facts are the dive caller's too: they are store reads, and only the
+            // caller knows which store the answering section resolved against.
+            drafted: false,
+            twin: None,
         },
     })
 }

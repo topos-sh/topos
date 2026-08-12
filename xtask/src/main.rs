@@ -476,6 +476,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_change: None,
             claim: None,
             unchanged: false,
+            machine_copy: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -524,6 +525,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_change: None,
             claim: None,
             unchanged: false,
+            machine_copy: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -576,6 +578,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_change: None,
             claim: None,
             unchanged: false,
+            machine_copy: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -671,6 +674,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 }),
             }),
             unchanged: false,
+            machine_copy: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -682,15 +686,19 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // THE ALREADY-ADDED ANSWER, with its options — a bare `topos add -g coolify-deploy` for a
-    // bundle this machine already has, beside two unmanaged folders whose bytes are PROVABLY a
-    // version of it. Each rides `data.candidates` and one runnable claim, spelled whole.
+    // THE ALREADY-ADDED ANSWER, with its FOLDER LISTING — a bare `topos add -g coolify-deploy` for
+    // a bundle this machine already has, beside the three unmanaged folders the name also sits in.
+    // Every folder rides `data.candidates` (the listing's machine-readable half); only the copy
+    // whose bytes a version of the bundle EXPLAINS rides a runnable claim, because an argv handed
+    // to an agent is run.
     let claim_candidates = [
         "/home/ada/.agents/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy",
+        "/home/ada/.claude/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy",
         "/home/ada/.codex/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy",
     ];
     let claim_actions: Vec<_> = claim_candidates
         .iter()
+        .skip(2)
         .map(|c| {
             let mut tokens = vec!["topos".to_owned(), "add".to_owned(), "-g".to_owned()];
             tokens.extend(c.split(' ').map(str::to_owned));
@@ -715,7 +723,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             expected_generation: None,
             current_generation: None,
             context: serde_json::json!({
-                "message": "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: topos.sh/ideamotive/coolify-deploy\n2 unmanaged copies look like it — manage any as the same skill:"
+                "message": "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: topos.sh/ideamotive/coolify-deploy\n'coolify-deploy' is in 3 folders here:\n  ~/.agents/skills/coolify-deploy — edited (adopting it makes these your draft)\n  ~/.claude/skills/coolify-deploy — edited differently\n  ~/.codex/skills/coolify-deploy — matches the published current\nname the one to adopt: topos add -g <folder> --as topos.sh/ideamotive/coolify-deploy"
             }),
             next_actions: claim_actions,
         }),
@@ -827,6 +835,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_change: None,
             claim: None,
             unchanged: false,
+            machine_copy: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -886,6 +895,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }),
             claim: None,
             unchanged: false,
+            machine_copy: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],

@@ -127,6 +127,44 @@ pub(crate) struct TargetCandidate {
     /// The flag that narrows the reference to exactly this candidate. `None` for a candidate the
     /// reference alone names.
     pub selector: Option<CandidateSelector>,
+    /// How this FOLDER's bytes stand against the bundle the answer is about, where that was
+    /// provable. `None` wherever it was not — no bundle resolves under the name, or the folder
+    /// holds a version the bundle's own history explains, which none of the three words describes.
+    pub relation: Option<CopyRelation>,
+}
+
+/// What a folder's bytes ARE, relative to the version a bundle stands at. The three states a
+/// listing can prove by comparing digests — and it prints nothing at all for anything else,
+/// because a same-named folder is evidence of nothing and a guess here would invite a person to
+/// merge two histories that never met.
+///
+/// Order is the reading order of a listing, not a ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CopyRelation {
+    /// Byte-for-byte the version this bundle stands at.
+    Current,
+    /// Different from it.
+    Edited,
+    /// Different from it AND from every edited folder listed before this one.
+    EditedDifferently,
+}
+
+impl CopyRelation {
+    /// The clause a listing prints after the folder.
+    fn clause(self) -> &'static str {
+        match self {
+            Self::Current => "matches the published current",
+            Self::Edited => "edited",
+            Self::EditedDifferently => "edited differently",
+        }
+    }
+
+    /// Whether adopting this folder would land bytes no version of the bundle explains — the one
+    /// thing a listing states and an unattended RUNNABLE offer withholds (see
+    /// [`TargetCandidate::offerable`]).
+    fn is_a_draft(self) -> bool {
+        matches!(self, Self::Edited | Self::EditedDifferently)
+    }
 }
 
 impl TargetCandidate {
@@ -136,6 +174,7 @@ impl TargetCandidate {
             reference: reference.into(),
             display: None,
             selector: None,
+            relation: None,
         }
     }
 
@@ -148,6 +187,7 @@ impl TargetCandidate {
             display: (display != absolute).then_some(display),
             reference: absolute,
             selector: None,
+            relation: None,
         }
     }
 
@@ -161,7 +201,23 @@ impl TargetCandidate {
                 value: set.into(),
                 display: None,
             }),
+            relation: None,
         }
+    }
+
+    /// The same candidate carrying what its bytes ARE — see [`CopyRelation`].
+    pub(crate) fn with_relation(mut self, relation: Option<CopyRelation>) -> Self {
+        self.relation = relation;
+        self
+    }
+
+    /// Whether this candidate may be handed over as a RUNNABLE command, as opposed to merely
+    /// listed. A folder whose bytes no version of the bundle explains is listed — with what
+    /// adopting it would mean written beside it — and never offered: an agent that execs an
+    /// offered argv unattended would merge two histories that never met, which is the one thing
+    /// the listing exists to let a PERSON decide.
+    pub(crate) fn offerable(&self) -> bool {
+        !self.relation.is_some_and(CopyRelation::is_a_draft)
     }
 
     /// A CLAIM candidate: the folder to bring under management (absolute in argv, `~/`-abbreviated
@@ -267,8 +323,7 @@ pub(crate) fn scope_file(scope: ReceiptScope) -> &'static str {
 }
 
 /// The [`ClientError::AlreadyAdded`] answer — the add receipt's own two lines, in the past tense,
-/// plus the offer line when unmanaged copies on this machine PROVABLY hold this bundle's bytes.
-/// The offered commands themselves ride the candidates (one runnable line each, both surfaces).
+/// plus the FOLDER LISTING when unmanaged copies of the name sit on this machine.
 fn already_added_message(
     name: &str,
     scope: ReceiptScope,
@@ -279,14 +334,103 @@ fn already_added_message(
     if let Some(source) = from {
         out.push_str(&format!("\nsource: {source}"));
     }
-    match candidates.len() {
-        0 => {}
-        1 => out.push_str("\n1 unmanaged copy looks like it — manage it as the same skill:"),
-        n => out.push_str(&format!(
-            "\n{n} unmanaged copies look like it — manage any as the same skill:"
-        )),
+    if let Some(block) = folder_listing(name, candidates, scope == ReceiptScope::Machine) {
+        out.push_str(&format!("\n{block}"));
     }
     out
+}
+
+/// THE FOLDER LISTING — the one answer every surface gives when a bare name stands in more than
+/// one folder here: what was found, one folder per line with what its bytes are, then the ONE
+/// command that adopts whichever the reader picks.
+///
+/// It lists rather than offers. A command per folder read as a menu of nine acts by the time three
+/// folders each carried one, and the choice a person actually has to make is WHICH FOLDER — a
+/// question they answer by reading the relation clause, not by picking a pre-built line. The
+/// commands themselves are unchanged on the agent surface: every candidate still rides
+/// `next_actions` as its own runnable argv.
+///
+/// A relation is printed only where it was proved by comparing bytes (see [`CopyRelation`]); a
+/// folder with none listed is listed bare, which is what a name no bundle answers to looks like all
+/// the way down. `(adopting it makes these your draft)` rides the FIRST edited folder alone: it
+/// explains what adopting edits means, and repeating it under every edited line would be noise
+/// three folders deep.
+///
+/// `None` when there is nothing to list — the answer above it is then the whole answer.
+fn folder_listing(name: &str, candidates: &[TargetCandidate], global: bool) -> Option<String> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let plural = if candidates.len() == 1 { "" } else { "s" };
+    let mut out = format!("'{name}' is in {} folder{plural} here:", candidates.len());
+    let mut said_draft = false;
+    for candidate in candidates {
+        let folder = candidate.display.as_deref().unwrap_or(&candidate.reference);
+        out.push_str(&format!("\n  {folder}"));
+        let Some(relation) = candidate.relation else {
+            continue;
+        };
+        out.push_str(&format!(" — {}", relation.clause()));
+        if relation != CopyRelation::Current && !said_draft {
+            out.push_str(" (adopting it makes these your draft)");
+            said_draft = true;
+        }
+    }
+    // The one command, with the folder left as the choice only the reader can make. The `--as`
+    // rides it wherever the candidates carry one — the bundle every folder would become a copy of.
+    let as_bundle = candidates
+        .iter()
+        .find_map(|c| c.selector.as_ref())
+        .filter(|s| s.flag == "--as")
+        .map(|s| format!(" --as {}", s.display.as_deref().unwrap_or(&s.value)))
+        .unwrap_or_default();
+    out.push_str(&format!(
+        "\nname the one to adopt: topos add {}<folder>{as_bundle}",
+        if global { "-g " } else { "" }
+    ));
+    Some(out)
+}
+
+/// Whether an ambiguity is the FOLDER LISTING's case: a bare `add` whose name stands in several
+/// folders right here. A single folder is not a choice, a workspace spelling among the candidates
+/// is a different question (two bundles, not two copies), and another verb's chooser is not about
+/// adopting anything.
+fn lists_folders(verb: &str, candidates: &[TargetCandidate]) -> bool {
+    verb == "add"
+        && candidates.len() > 1
+        // A folder candidate's reference is the ABSOLUTE path (the argv form every one of them
+        // carries); no reference spelling — a workspace bundle, a channel, a repo — is absolute.
+        && candidates
+            .iter()
+            .all(|c| std::path::Path::new(&c.reference).is_absolute())
+}
+
+/// Whether THIS error's message is the folder listing — the one question the TTY's hint block asks
+/// before deciding whether it has anything to add under it.
+pub(crate) fn listed_as_folders(err: &ClientError) -> bool {
+    match err {
+        ClientError::AmbiguousSource {
+            verb, candidates, ..
+        } => lists_folders(verb, candidates),
+        _ => false,
+    }
+}
+
+/// The [`ClientError::AmbiguousSource`] statement: the folder listing where the candidates are
+/// folders on this machine, and the plain pick-one statement everywhere else (several workspaces
+/// publishing one name, several records standing under it, any mix).
+fn ambiguous_source_message(
+    name: &str,
+    verb: &str,
+    candidates: &[TargetCandidate],
+    global: bool,
+) -> String {
+    if lists_folders(verb, candidates)
+        && let Some(block) = folder_listing(name, candidates, global)
+    {
+        return block;
+    }
+    format!("{name} is ambiguous, pick one:")
 }
 
 /// The [`ClientError::ClaimTaken`] sentence: a folder another record already manages. Two shapes,
@@ -527,7 +671,7 @@ pub(crate) enum ClientError {
     /// `verb` and `global` serve the FALLBACK spelling, for the surface that has no argv to rebuild
     /// from: the verb that refused (so a `publish` never sends its reader to `add`) and the `-g`
     /// that decides which of the two manifests the offered command would edit.
-    #[error("{name} is ambiguous, pick one:")]
+    #[error("{}", ambiguous_source_message(.name, .verb, .candidates, *.global))]
     AmbiguousSource {
         name: String,
         token: String,

@@ -734,6 +734,28 @@ pub struct ListDetail {
     /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_reason: Option<crate::persisted::ConflictReason>,
+    /// THIS checkout carries a draft — bytes ahead of the version it stands at, in any of its
+    /// folders. The one draft rule every surface reads (bytes against the lock), so a settled
+    /// draft nobody has touched since the last sweep still counts as unshared work.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drafted: bool,
+    /// The OTHER reachable scope's checkout of the SAME bundle, when it holds one — a separate
+    /// copy with its own draft state, which the answer names so a reader never mistakes one
+    /// checkout for both. Absent whenever only this scope tracks it. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twin: Option<ScopeTwin>,
+}
+
+/// The OTHER scope's checkout of one bundle: which scope holds it, and whether it carries edits.
+/// No folder — the answer sends a reader to that scope's own `list`, which names its folders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ScopeTwin {
+    /// `true` = the MACHINE's copy (`-g`), `false` = this project's.
+    pub machine: bool,
+    /// Whether that copy carries edits of its own.
+    pub drafted: bool,
 }
 
 /// ONE copy of a bundle whose edits disagree with another copy's, in the two spellings every
@@ -1154,6 +1176,13 @@ pub struct AddData {
     /// head the answer. `note` carries the sentence. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unchanged: bool,
+    /// The MACHINE folder this add's own copy landed in, disclosed when a checkout at or above
+    /// this folder ALREADY delivers the same bundle — a machine-wide add then gives you a second
+    /// checkout beside the project's, which is a surprise worth stating at the moment it is
+    /// created. Absolute (the wire's form; the receipt abbreviates it under the home). Absent for
+    /// every add that creates no second copy. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_copy: Option<String>,
 }
 
 /// `add <path> --as <bundle>` — the folder is recorded as one of the bundle's places, byte for

@@ -41,7 +41,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   with the record's own source, and one the OTHER scope records is added here from that same source
   — and only then discovery: the untracked local inventory ∪ the connected workspaces' catalogs,
   where exactly one candidate acts and two or more become THE CHOOSER (`AMBIGUOUS_NAME`, one
-  runnable `topos add <full-reference>` per candidate on both surfaces). `-a <agent>`/`--dest
+  runnable `topos add <full-reference>` per candidate on both surfaces). Several FOLDERS of one
+  name are the chooser's own shape: the answer lists every folder with what its bytes are against
+  the bundle (`matches the published current` / `edited` / `edited differently`, proved by digest
+  or withheld) and closes with the one `topos add <folder> [--as <bundle>]` — a runnable claim
+  still rides the agent surface for every folder a version EXPLAINS, and never for one it does
+  not. `-a <agent>`/`--dest
   <folder>` on `add` freeze the row's `dest` and EXTEND it on a re-add (the `ops/dest_select`
   resolution: `-a` is registry/descriptor sugar for the scope-correct folder or config file;
   unknown slugs refuse with the registry list, closing `nothing changed`);
