@@ -27,9 +27,15 @@
 //! UNDECIPHERABLE IS NOT EMPTY: a corrupt document — or one written by a NEWER build — answers no
 //! entries and REFUSES writes; an ownership question fails closed, and an empty re-seed would turn
 //! every managed entry foreign.
+//!
+//! ONE SPELLING PER FILE: every path a row is written with, and every path a row is compared
+//! against, is RESOLVED first ([`canonical_file`]). Custody keyed on a string would read the two
+//! spellings of one config file — a symlinked home, a `/tmp` that is really `/private/tmp` — as two
+//! surfaces, and disown the entry topos itself had just written.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use topos_types::PERSISTED_SCHEMA_VERSION;
@@ -68,9 +74,11 @@ pub(crate) struct EntryCustody {
 pub(crate) struct EntryPlacement {
     /// The registry slug of the harness whose config file holds this entry.
     pub agent: String,
-    /// The config file the entry lives in. A row recorded at another file is not custody of THIS
-    /// surface: a surface path that moves leaves a disclosed stale row rather than re-pointed
-    /// custody.
+    /// The config file the entry lives in, in its resolved spelling ([`canonical_file`]). A row
+    /// recorded at another file is not custody of THIS surface: a surface path that moves leaves a
+    /// disclosed stale row rather than re-pointed custody. "Another file" is decided by the
+    /// resolved path and never by the string — two spellings of one file (a symlinked home) are
+    /// one surface, or topos disowns the entry it just wrote.
     pub file: String,
     /// The immutable config key topos minted for this bundle. Once minted the key never changes —
     /// several harnesses key OAuth tokens to the server name, so a rename would strand a sign-in.
@@ -254,6 +262,41 @@ pub(crate) fn placement_key(slug: &str, entry_key: &str) -> String {
     format!("{slug}/{entry_key}")
 }
 
+/// **The ONE spelling of a config file.** A recorded row and a freshly-resolved surface can name
+/// the same file two ways — one through a symlinked home (`$CLAUDE_CONFIG_DIR` pointing at a link,
+/// a macOS `/tmp`), one through the resolved directory — and a lexical compare then reads topos's
+/// own entry as somebody else's: no prior, so the drivers call it foreign, leave it, and the row
+/// stands as a stale-path warning while every later update refuses to touch a file topos wrote.
+/// Resolving both sides through `realpath` is what makes "the same file" mean the same object.
+///
+/// The file itself may not exist yet (a surface topos is about to create), so the nearest EXISTING
+/// ancestor is resolved and the remaining components re-joined onto it. A resolution that fails
+/// outright answers the path AS GIVEN — an unresolvable spelling is compared literally, exactly as
+/// it always was, rather than being guessed into a different file.
+pub(crate) fn canonical_file(fs: &dyn FsOps, path: &Path) -> PathBuf {
+    if let Ok(resolved) = fs.canonicalize(path) {
+        return resolved;
+    }
+    let mut tail: Vec<OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        let (Some(name), Some(parent)) = (
+            cur.file_name().map(std::ffi::OsStr::to_owned),
+            cur.parent().map(Path::to_path_buf),
+        ) else {
+            return path.to_path_buf();
+        };
+        tail.push(name);
+        if let Ok(mut out) = fs.canonicalize(&parent) {
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        cur = parent;
+    }
+}
+
 /// The custody identity of a LOCAL bundle no store record answers for — a folder adopted by hand,
 /// a document imported by name, a row someone wrote into `topos.toml` themselves. It is keyed by
 /// the MANIFEST LINE, which is unique per scope by construction, and never by the display name:
@@ -279,8 +322,11 @@ pub(crate) fn local_identity(reference: &str) -> String {
 ///
 /// Loading is bounded by the key registry: a bundle with no minted key has never had an entry in
 /// this scope, so only the registry's bundles are read.
-#[derive(Debug)]
-pub(crate) struct ScopeEntries {
+pub(crate) struct ScopeEntries<'a> {
+    /// The seam every path comparison resolves through — a row's recorded spelling and a
+    /// freshly-resolved surface are the same file only when `realpath` says so (see
+    /// [`canonical_file`]).
+    fs: &'a dyn FsOps,
     /// The scope document — the key registry and the journal.
     pub doc: ConfigCustody,
     /// `"<slug>/<key>"` → the bundle it belongs to + the row itself.
@@ -298,7 +344,21 @@ pub(crate) struct ScopeEntries {
     doc_dirty: bool,
 }
 
-impl ScopeEntries {
+/// The seam is a port, not state — the debug rendering is the CUSTODY (what a failing test needs
+/// to read), and `&dyn FsOps` has no `Debug` to derive from anyway.
+impl std::fmt::Debug for ScopeEntries<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopeEntries")
+            .field("doc", &self.doc)
+            .field("rows", &self.rows)
+            .field("dirty", &self.dirty)
+            .field("promoted", &self.promoted)
+            .field("doc_dirty", &self.doc_dirty)
+            .finish()
+    }
+}
+
+impl<'a> ScopeEntries<'a> {
     /// Load the scope's whole custody picture.
     ///
     /// # Errors
@@ -306,7 +366,7 @@ impl ScopeEntries {
     /// nothing. A single bundle record that cannot be read is NOT an error: its rows are absent,
     /// which loses no bytes (its entries read as foreign and are left byte-identical) where failing
     /// the whole scope would strand every other bundle.
-    pub(crate) fn load(fs: &dyn FsOps, layout: &Layout) -> Result<Self, ClientError> {
+    pub(crate) fn load(fs: &'a dyn FsOps, layout: &Layout) -> Result<Self, ClientError> {
         let doc = read(fs, layout)?;
         let mut rows: BTreeMap<String, (String, EntryPlacement)> = BTreeMap::new();
         for bundle_id in doc.keys.keys() {
@@ -318,12 +378,28 @@ impl ScopeEntries {
             }
         }
         Ok(Self {
+            fs,
             doc,
             rows,
             dirty: BTreeSet::new(),
             promoted: BTreeMap::new(),
             doc_dirty: false,
         })
+    }
+
+    /// The ONE spelling of `path` for this scope's records — [`canonical_file`] through the seam
+    /// this view holds. Every path a row is written with, and every path a row is compared
+    /// against, goes through here.
+    pub(crate) fn canonical(&self, path: &Path) -> PathBuf {
+        canonical_file(self.fs, path)
+    }
+
+    /// Whether a row RECORDED at `recorded` names the same file as the already-canonicalized
+    /// `canon`. The lexical compare answers first (the ordinary case, no syscall); only a
+    /// different spelling is resolved.
+    fn at_file(&self, recorded: &str, canon: &Path) -> bool {
+        let recorded = Path::new(recorded);
+        recorded == canon || self.canonical(recorded) == canon
     }
 
     /// The rows under one harness slug RECORDED IN `file`, as the driver's `entry_key → fingerprint`
@@ -333,9 +409,10 @@ impl ScopeEntries {
     /// at the old path. [`Self::stale_rows`] names those rows for disclosure instead.
     pub(crate) fn prior_for(&self, slug: &str, file: &Path) -> BTreeMap<String, String> {
         let prefix = format!("{slug}/");
+        let canon = self.canonical(file);
         self.rows
             .iter()
-            .filter(|(_, (_, e))| Path::new(&e.file) == file)
+            .filter(|(_, (_, e))| self.at_file(&e.file, &canon))
             .filter_map(|(k, (_, e))| {
                 k.strip_prefix(&prefix)
                     .map(|key| (key.to_owned(), e.fingerprint.clone()))
@@ -350,9 +427,10 @@ impl ScopeEntries {
     /// minted for it.
     pub(crate) fn stale_rows(&self, slug: &str, file: &Path) -> Vec<(String, String, String)> {
         let prefix = format!("{slug}/");
+        let canon = self.canonical(file);
         self.rows
             .iter()
-            .filter(|(_, (_, e))| Path::new(&e.file) != file)
+            .filter(|(_, (_, e))| !self.at_file(&e.file, &canon))
             .filter_map(|(k, (bundle, e))| {
                 k.strip_prefix(&prefix)
                     .map(|key| (key.to_owned(), bundle.clone(), e.file.clone()))
@@ -401,9 +479,10 @@ impl ScopeEntries {
     /// Every row under `slug` recorded at `file`, as `(custody_key, row)` — the surface's own rows.
     pub(crate) fn rows_at(&self, slug: &str, file: &Path) -> Vec<(String, EntryPlacement)> {
         let prefix = format!("{slug}/");
+        let canon = self.canonical(file);
         self.rows
             .iter()
-            .filter(|(k, (_, e))| k.starts_with(&prefix) && Path::new(&e.file) == file)
+            .filter(|(k, (_, e))| k.starts_with(&prefix) && self.at_file(&e.file, &canon))
             .map(|(k, (_, e))| (k.clone(), e.clone()))
             .collect()
     }
@@ -437,11 +516,12 @@ impl ScopeEntries {
     /// the ownership discipline (see [`crate::mcp_engine`]).
     pub(crate) fn clear_owns_file(&mut self, slug: &str, path: &Path) -> bool {
         let prefix = format!("{slug}/");
+        let canon = self.canonical(path);
         let hits: Vec<String> = self
             .rows
             .iter()
             .filter(|(k, (_, e))| {
-                k.starts_with(&prefix) && Path::new(&e.file) == path && e.owns_file
+                k.starts_with(&prefix) && self.at_file(&e.file, &canon) && e.owns_file
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -1042,6 +1122,89 @@ mod tests {
         assert_eq!(map.placements.len(), 1);
         assert!(!sp.entries.exists(), "an old record has no entry document");
         assert!(entries_of(&fs, &layout, sid.as_str()).is_empty());
+    }
+
+    /// **A row recorded under a DIFFERENT SPELLING of this surface is still this surface's.** The
+    /// spelling on disk is whatever the run that wrote it resolved (an older build recorded the
+    /// path as given, and `$CLAUDE_CONFIG_DIR`/`$TMPDIR` can be a symlink today), so custody is
+    /// decided by the file the two spellings RESOLVE to. Lexically they differ; they are one file,
+    /// and reading them as two disowns topos's own entry — the drivers would leave it as foreign
+    /// and the row would stand as a stale path forever.
+    #[test]
+    fn a_row_recorded_under_another_spelling_of_one_file_is_that_surfaces_custody() {
+        let fs = RealFs;
+        let layout = scratch("canon");
+        let real = layout.home().to_path_buf();
+        let link = real.parent().expect("a parent").join("linked-home");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::fs::create_dir_all(real.join(".cursor")).unwrap();
+        std::fs::write(real.join(".cursor/mcp.json"), b"{}\n").unwrap();
+
+        let mut doc = ConfigCustody::default();
+        doc.keys.insert("local:a".into(), "topos-ws-a".into());
+        doc.unrecorded.insert(
+            "local:a".into(),
+            vec![EntryPlacement {
+                agent: "cursor".into(),
+                // Recorded through the LINK — the spelling an older run resolved.
+                file: link.join(".cursor/mcp.json").display().to_string(),
+                key: "topos-ws-a".into(),
+                fingerprint: "fp".into(),
+                owns_file: true,
+                version_id: "v1".into(),
+            }],
+        );
+        write(&fs, &layout, &doc).unwrap();
+        let scope = ScopeEntries::load(&fs, &layout).unwrap();
+
+        let resolved = real.join(".cursor/mcp.json");
+        assert_eq!(
+            scope
+                .prior_for("cursor", &resolved)
+                .get("topos-ws-a")
+                .map(String::as_str),
+            Some("fp"),
+            "the resolved spelling finds the row recorded through the link"
+        );
+        assert!(
+            scope.stale_rows("cursor", &resolved).is_empty(),
+            "one file is never its own stale path"
+        );
+        assert_eq!(scope.rows_at("cursor", &resolved).len(), 1);
+
+        // A genuinely DIFFERENT file still reads as stale — resolving is not merging.
+        let elsewhere = real.join(".other/mcp.json");
+        assert!(scope.prior_for("cursor", &elsewhere).is_empty());
+        assert_eq!(scope.stale_rows("cursor", &elsewhere).len(), 1);
+    }
+
+    /// A path that does not exist yet resolves through its nearest EXISTING ancestor, and one
+    /// nothing at all resolves under answers exactly what it was given.
+    #[test]
+    fn an_unwritten_file_resolves_through_the_directory_that_does_exist() {
+        let fs = RealFs;
+        let layout = scratch("canon-tail");
+        // The scratch root itself may be reached through a link (macOS's `/tmp`), so the
+        // expectation is the RESOLVED dir — that is the whole point of the helper.
+        let real = layout.home().canonicalize().expect("the scratch root");
+        let link = real.parent().expect("a parent").join("linked-tail");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // The file is not there; the directory is.
+        assert_eq!(
+            canonical_file(&fs, &link.join("mcp.json")),
+            real.join("mcp.json")
+        );
+        // Nor is the directory: the deeper tail rides along.
+        assert_eq!(
+            canonical_file(&fs, &link.join("deep/nested/mcp.json")),
+            real.join("deep/nested/mcp.json")
+        );
+        // Nothing on the way resolves: the path AS GIVEN, never a guess.
+        let nowhere = Path::new("/no-such-root-here/mcp.json");
+        assert_eq!(canonical_file(&fs, nowhere), nowhere.to_path_buf());
     }
 
     /// Priors are scoped to the FILE they were recorded at; a row at another file is named for

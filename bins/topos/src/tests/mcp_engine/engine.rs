@@ -488,6 +488,93 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
     assert_eq!(before, after, "the second converge moved bytes");
 }
 
+/// **One file, two spellings, one custody.** A machine can reach the same config file through a
+/// symlinked home (`$CLAUDE_CONFIG_DIR` aimed at a link, a `/tmp` that is really `/private/tmp`),
+/// and a lexical path compare then reads topos's own entry as somebody else's: no prior, so the
+/// drivers call it foreign and leave it, the row is reported as a stale path, and every later
+/// update refuses to touch a file topos wrote. Both sides resolve through the seam now, so the
+/// second spelling finds the entry it placed under the first — CURRENT, no warning, no drift.
+#[test]
+fn a_surface_reached_through_a_symlinked_home_is_still_topos_own_entry() {
+    let real = Scratch::new("canon-home");
+    let links = Scratch::new("canon-links");
+    let linked_home = links.0.join("home");
+    std::os::unix::fs::symlink(&real.0, &linked_home).unwrap();
+    let fs = RealFs;
+    // ONE store, whichever spelling the surfaces are resolved through.
+    let layout = Layout::new(&real.0.join(".topos"));
+    let d = demand(
+        "s_linear",
+        "linear",
+        Some("eng"),
+        &server_json("https://mcp.example/linear"),
+    );
+
+    // Placed through the LINK.
+    let io = person_io(&fs, &layout, &linked_home);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(state_of(&out, "s_linear", "cursor").state.wrote());
+
+    // The row records the RESOLVED spelling — one file, one name for it.
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
+    let row = custody
+        .row(&config_custody::placement_key("cursor", "topos-eng-linear"))
+        .expect("cursor row");
+    assert_eq!(Path::new(&row.file), real.0.join(".cursor/mcp.json"));
+
+    // Reached through the RESOLVED path: the same entry, already in order.
+    let io2 = person_io(&fs, &layout, &real.0);
+    let out2 = mcp_engine::converge(
+        &io2,
+        &plan(&io2, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(
+        out2.warnings.is_empty(),
+        "no stale-path disclosure for one file: {:?}",
+        out2.warnings
+    );
+    for h in synthetic() {
+        assert_eq!(
+            state_of(&out2, "s_linear", h.slug).state,
+            TargetOutcome::Current,
+            "{}",
+            h.slug
+        );
+    }
+
+    // …and back through the LINK once more: still current, still one row per surface.
+    let out3 = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(out3.warnings.is_empty(), "{:?}", out3.warnings);
+    assert_eq!(
+        state_of(&out3, "s_linear", "cursor").state,
+        TargetOutcome::Current
+    );
+    assert_eq!(
+        ScopeEntries::load(&fs, &layout).unwrap().row_count(),
+        synthetic().len(),
+        "one row per surface, never one per spelling"
+    );
+}
+
 #[test]
 fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
     let home = Scratch::new("removal");

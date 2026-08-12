@@ -1210,6 +1210,9 @@ impl FsOps for RecordingFs {
     fn exists(&self, path: &Path) -> bool {
         self.inner.exists(path)
     }
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        self.inner.canonicalize(path)
+    }
     fn path_kind(&self, path: &Path) -> std::io::Result<Option<crate::fs_seam::PathKind>> {
         self.inner.path_kind(path)
     }
