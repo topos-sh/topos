@@ -11,3 +11,10 @@ xtask = "run -p xtask --"
 # tests. NON-forced: a variable already set in the process environment wins (CI's sqlx-drift job sets
 # SQLX_OFFLINE=false explicitly to regenerate the metadata, and a developer can do the same).
 SQLX_OFFLINE = "true"
+# Read the harness table this CHECKOUT ships, never the one on the developer's machine. Everything
+# cargo runs here — the suites, the xtask generators and drift gates, the CLI the composed e2e
+# spawns — answers for the commit under test; without this the first data-only version bump makes a
+# dogfooding developer's own `~/.topos/harness-registry/registry.toml` the table their `cargo test`
+# reads, and shape pins start failing on a property of their laptop. Installed binaries set nothing
+# and resolve all three levels as usual. NON-forced, like SQLX_OFFLINE above.
+TOPOS_HARNESS_REGISTRY = "bundled"

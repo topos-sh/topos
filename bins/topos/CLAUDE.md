@@ -82,9 +82,11 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   clock's rhythm and its fail-open discipline: the bare sweep downloads
   `TOPOS_HARNESS_REGISTRY_URL` (default `https://topos.sh/harness-registry.toml`), runs
   `topos_harness::registry`'s fences, and writes `~/.topos/harness-registry/registry.toml`
-  atomically — a strictly-newer version only, an equal version with different bytes an error.
-  Nothing here can fail a sweep, and there is NO hot reload: the next process reads the table.
-  `TOPOS_NO_HARNESS_REGISTRY_UPDATE` switches the lane off.
+  atomically — a strictly-newer version only, an equal version with different bytes an error, and
+  a cached copy the fences now refuse DELETED in the round that finds it (the loader would warn
+  about it on every command otherwise). A landing table's skipped rows are said HERE, once, and
+  nowhere else. Nothing here can fail a sweep, and there is NO hot reload: the next process reads
+  the table. `TOPOS_NO_HARNESS_REGISTRY_UPDATE` switches the lane off.
 - `manifest/` (`keys`, `document`, `dest`, `normal`, `scopes`) — the reference grammar, the
   format-preserving `toml_edit` editor (property-tested exact inverse), the `dest` vocabulary
   (default destination spellings, the retired-`path`/`harness`/`[defaults]` rewrites, the

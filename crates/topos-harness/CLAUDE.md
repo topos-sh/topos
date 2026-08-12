@@ -113,10 +113,15 @@ never learns which machinery served which harness.
   `schema_version` equality, a `min_engine_version` ceiling (`REGISTRY_ENGINE_VERSION`),
   strictly-greater dotted-numeric versions with equal-version-different-bytes an ERROR, the
   known-slugs-only rule (a downloaded row naming a slug the BUNDLED table does not define is
-  warned about and skipped — remote data never adds a write target, and a new harness still needs
-  a release), path validation on every downloaded dir, no absolute root outside the bundled
+  skipped — remote data never adds a write target, and a new harness still needs a release; the
+  skip is the REFRESHER's line to say, once as the table lands, so an older binary does not warn
+  on every command until it self-updates — an OVERRIDE's skipped row is warned about by the loader,
+  because that file is one a person wrote), path validation on every downloaded dir (including the
+  bare home dir, which is never a dir a fenced row may name), no absolute root outside the bundled
   table, and a 256 KB ceiling. The refresher is the client's (`topos::harness_registry`, on the
   forge lane's clock); there is no hot reload — the next process reads what landed.
+  `TOPOS_HARNESS_REGISTRY=bundled` skips both machine-local levels — the workspace's
+  `.cargo/config.toml` sets it, so everything cargo runs in a checkout answers for the commit.
   **THREE accessors, three questions.** `known_harnesses()` is what THIS MACHINE reads today, and
   everything acting on it joins there: discovery, detection, attribution, placement, arming.
   `teardown_harnesses()` is that table UNIONED with the bundled one (dedup by slug, the loaded row

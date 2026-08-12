@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readdir } from "node:fs/promises";
+import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { installTestEnv } from "./helpers/test-env";
 
@@ -81,6 +83,17 @@ describe("the agent-skills discovery index", () => {
       expect(miss).toBeInstanceOf(Response);
       expect((miss as Response).status).toBe(404);
     }
+  });
+
+  it("serves every file that sits in the skill's source directory", async () => {
+    // A sibling added to skills/topos/ and not to this list is one the CLI places into every
+    // agent's folder and this lane never serves — so a skill installer downloading the entry
+    // document dead-ends on the deferral that names it. The CLI pins the same directory against
+    // its own bundle render from the Rust side.
+    const { SKILL_FILES } = await import("@/lib/agent-skills.server");
+    const dir = path.resolve(process.cwd(), "../skills/topos");
+    const onDisk = (await readdir(dir)).filter((name) => name.endsWith(".md")).sort();
+    expect([...SKILL_FILES].sort()).toEqual(onDisk);
   });
 
   it("the legacy /.well-known/skills/index.json is byte-identical to the canonical path", async () => {

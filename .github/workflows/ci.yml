@@ -55,6 +55,10 @@ jobs:
         run: cargo run -p xtask --locked -- gen-schema --check
       - name: contract drift gate (fixtures)
         run: cargo run -p xtask --locked -- gen-fixtures --check
+      # `docs/cli.md` and the built-in skill's `reference.md` both render from the real clap tree —
+      # and their agent tables render from registry.toml, so table churn moves them too.
+      - name: contract drift gate (cli reference)
+        run: cargo run -p xtask --locked -- gen-cli-ref --check
       # The harness table the binary embeds and the copy the web app serves are one file — a byte
       # compare, because a client compares the served version against the one it was compiled with.
       - name: contract drift gate (harness registry)
@@ -97,6 +101,50 @@ jobs:
         run: bun install --frozen-lockfile && bun run build
       - name: test
         run: cargo test --workspace --locked
+
+  # A machine decides whether to keep a downloaded harness table by comparing its `version` against
+  # the one it already holds, and refuses an EQUAL version whose bytes changed — so a table edited
+  # without a bump is a table that either never lands or lands as an error, depending on which
+  # machine sees it first. The bump is a hand edit; this is what remembers it. Needs full history:
+  # the comparison is against the merge base, and a shallow checkout has no such commit.
+  registry-version:
+    name: harness registry version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: an edited harness table carries a greater version
+        run: |
+          set -eu
+          file=crates/topos-harness/registry.toml
+          git fetch --no-tags --quiet origin main
+          base=$(git merge-base HEAD FETCH_HEAD)
+          if git diff --quiet "$base" HEAD -- "$file"; then
+            echo "$file is unchanged since $base — nothing to check"
+            exit 0
+          fi
+          read_version() { sed -n 's/^version = "\(.*\)"$/\1/p' | head -1; }
+          before=$(git show "$base:$file" | read_version)
+          after=$(read_version < "$file")
+          echo "$file changed: $before -> $after"
+          python3 - "$before" "$after" <<'PY'
+          import sys
+          def parts(v):
+              if not v or any(not s.isdigit() for s in v.split(".")):
+                  sys.exit(f"harness registry version {v!r} is not dotted-numeric")
+              return [int(s) for s in v.split(".")]
+          before, after = parts(sys.argv[1]), parts(sys.argv[2])
+          width = max(len(before), len(after))
+          before += [0] * (width - len(before))
+          after += [0] * (width - len(after))
+          if after <= before:
+              sys.exit(
+                  f"harness registry edited without a version bump: {sys.argv[2]} is not greater "
+                  f"than {sys.argv[1]} — clients keep the copy they have, and an equal version "
+                  f"with different bytes is refused as an error"
+              )
+          PY
 
   deny:
     name: cargo-deny (advisories + licenses)

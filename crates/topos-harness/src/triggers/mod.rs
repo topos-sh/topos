@@ -122,12 +122,15 @@ pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
 /// operator that opens one) and END at a token boundary, which is what [`invokes_at_command_start`]
 /// decides.
 ///
-/// Two residuals, both deliberate, both failing toward the safer side (a duplicate entry a person
+/// Three residuals, all deliberate, all failing toward the safer side (a duplicate entry a person
 /// can see, never a silently absent trigger): a PATH-spelled invocation (`/usr/local/bin/topos
 /// update`) reads as not-hand-rolled, because accepting `/` as an opener would take
-/// `notify-send "logs/topos update failed"` with it; and a command wrapped in an interpreter
+/// `notify-send "logs/topos update failed"` with it; a command wrapped in an interpreter
 /// (`sh -c "topos update"`) does too, since knowing which arguments of which programs are
-/// themselves commands is a shell parser's job, not this predicate's.
+/// themselves commands is a shell parser's job, not this predicate's; and on the TOML surfaces
+/// (codex, kimi) a command written as a LITERAL string — `command = 'topos update'` — never
+/// reaches this predicate at all, because [`toml_lines::basic_string_value`] reads only basic
+/// (double-quoted) strings and reports nothing for a value it cannot delimit exactly.
 pub(crate) fn is_hand_rolled_sweep(cmd: &str) -> bool {
     ["topos update", "topos pull"]
         .iter()

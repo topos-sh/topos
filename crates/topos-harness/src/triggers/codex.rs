@@ -48,8 +48,8 @@ use crate::registry::{self, Root};
 
 use super::cc_hooks::{JsonHooks, JsonHooksSpec};
 use super::toml_lines::{
-    HeaderStated, header_stated, is_key_line, root_defines_key, shape_is_unprovable, split_lines,
-    table_header, terminator,
+    HeaderStated, KeyStated, append_at_eof, header_stated, key_stated, root_defines_key,
+    shape_is_unprovable, split_lines, table_header, terminator, value_tail,
 };
 use super::{TriggerAdapter, TriggerArtifact, TriggerReport};
 
@@ -230,13 +230,18 @@ const ROOT_FEATURES_REASON: &str =
 const ARRAY_FEATURES_REASON: &str =
     "config.toml defines `features` as an array of tables, where topos cannot add `hooks = true`";
 
-/// Whether an assignment line already states `true` — the value read up to a trailing comment (a
-/// boolean can hold neither a quote nor a `#`). A switch already on is left ALONE rather than
-/// re-stated, so a person's indentation and their comment beside it survive every re-arm.
-fn states_true(line: &str) -> bool {
-    line.split_once('=')
-        .is_some_and(|(_, value)| value.split('#').next().unwrap_or("").trim() == "true")
-}
+/// The reason a `[features]` table topos CAN find is still one it will not write into: `hooks` is
+/// already a TABLE there — `hooks.experimental = true`, or an inline `hooks = { … }` — so the
+/// `hooks = true` line this edit would state redefines the name, and codex loses its whole config
+/// rather than one setting. There is nowhere legal to put the switch, so the receipt names the
+/// shape a person has to resolve themselves.
+const TABLE_HOOKS_REASON: &str = "config.toml defines `hooks` under `[features]` as a table, where topos cannot set it to `true`";
+
+/// The reason a `hooks` line topos found is still one it will not rewrite: its value runs past the
+/// end of the line (`hooks = [`, whose elements and closing bracket sit below), and replacing the
+/// line would strand them — the same unparsable config, reached from the other direction.
+const SPREAD_HOOKS_REASON: &str = "config.toml spreads the `hooks` value under `[features]` across lines, where topos cannot set \
+     it to `true`";
 
 /// Plan the `[features] hooks = true` edit over the existing `config.toml` bytes.
 ///
@@ -256,6 +261,17 @@ fn states_true(line: &str) -> bool {
 /// quoted key or header). A `[features.sub]` header WITHOUT a `[features]` of its own is
 /// deliberately not one of them: TOML lets the super-table be defined afterward, so the EOF
 /// append stays legal — and that holds for `[[features.sub]]` the same way.
+///
+/// Two more refuse INSIDE the table a person already has, and for the same reason the root-level
+/// shapes do — the line this edit would state cannot coexist with what is there:
+///
+/// - `hooks` is already a TABLE under `[features]` (`hooks.experimental = true`, or an inline
+///   `hooks = { … }`): a `hooks = true` beside it redefines the name;
+/// - the `hooks` line's value RUNS ON past its own line (`hooks = [` with its elements below):
+///   rewriting the line would strand the lines that finish the value.
+///
+/// The rewrite of a `hooks` line topos does take keeps the person's trailing comment and the
+/// line's own terminator, so nothing but the value moves.
 fn plan_feature(current: Option<&[u8]>) -> FeaturePlan {
     let text = match current {
         None => return FeaturePlan::Write(FEATURE_TABLE.into()),
@@ -282,6 +298,7 @@ fn plan_feature(current: Option<&[u8]>) -> FeaturePlan {
     }
     let mut header_at = None;
     let mut key_at = None;
+    let mut hooks_is_a_table = false;
     let mut in_features = false;
     for (i, line) in lines.iter().enumerate() {
         if table_header(line).is_some() {
@@ -295,17 +312,37 @@ fn plan_feature(current: Option<&[u8]>) -> FeaturePlan {
             }
             continue;
         }
-        if in_features && key_at.is_none() && is_key_line(line, "hooks") {
-            key_at = Some(i);
+        if !in_features {
+            continue;
         }
+        match key_stated(line, "hooks") {
+            Some(KeyStated::Whole) if key_at.is_none() => key_at = Some(i),
+            // `hooks.experimental = true` defines `hooks` as a table with no header to anchor on —
+            // the in-table twin of the root-context shape, and the switch has nowhere to go.
+            Some(KeyStated::DottedHead) => hooks_is_a_table = true,
+            _ => {}
+        }
+    }
+    if hooks_is_a_table {
+        return FeaturePlan::Refuse(TABLE_HOOKS_REASON);
     }
 
     if let Some(i) = key_at {
-        if states_true(lines[i]) {
+        // The value has to END on this line for the line to be replaceable at all, and an inline
+        // table is the same shape the dotted spelling above refuses.
+        let Some(tail) = value_tail(lines[i]) else {
+            return FeaturePlan::Refuse(SPREAD_HOOKS_REASON);
+        };
+        if tail.value.starts_with('{') {
+            return FeaturePlan::Refuse(TABLE_HOOKS_REASON);
+        }
+        if tail.value == "true" {
             return FeaturePlan::Leave; // already on → a true no-op, whatever its spelling
         }
         // The switch is codex's, and this is the line that states it: set it, never duplicate it.
-        let replacement = format!("{FEATURE_KEY_LINE}{}", terminator(lines[i]));
+        // Only the VALUE moves — a person's comment beside it, and the line's own terminator, come
+        // through verbatim on the tail.
+        let replacement = format!("{FEATURE_KEY_LINE}{}", tail.trailing);
         let mut out = String::with_capacity(text.len() + replacement.len());
         for (idx, line) in lines.iter().enumerate() {
             if idx == i {
@@ -334,14 +371,9 @@ fn plan_feature(current: Option<&[u8]>) -> FeaturePlan {
         return FeaturePlan::Write(out.into_bytes());
     }
 
-    // No `[features]` table at all: append one at EOF, separated by a blank line (a top-level
-    // table header is absolute, so an EOF append can never land inside another table).
-    let mut out = text.trim_end_matches('\n').to_owned();
-    if !out.is_empty() {
-        out.push_str("\n\n");
-    }
-    out.push_str(FEATURE_TABLE);
-    FeaturePlan::Write(out.into_bytes())
+    // No `[features]` table at all: append one at EOF, separated by a blank line, in the file's own
+    // line endings.
+    FeaturePlan::Write(append_at_eof(&lines, FEATURE_TABLE).into_bytes())
 }
 
 #[cfg(test)]
@@ -598,7 +630,8 @@ mod tests {
         );
     }
 
-    /// CRLF in, CRLF out: an inserted line takes the terminator of the line it follows.
+    /// CRLF in, CRLF out — for the inserted line, for a rewritten one, and for a whole table
+    /// appended at EOF. A config that gained LF lines halfway down is a config topos mangled.
     #[test]
     fn an_inserted_line_keeps_the_files_own_line_endings() {
         let cfg = MemConfig::with_file(CONFIG, "[features]\r\nweb_search = true\r\n");
@@ -606,6 +639,106 @@ mod tests {
         assert_eq!(
             cfg.text(CONFIG).as_deref(),
             Some("[features]\r\nhooks = true\r\nweb_search = true\r\n")
+        );
+
+        let cfg = MemConfig::with_file(CONFIG, "[features]\r\nhooks = false\r\n");
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[features]\r\nhooks = true\r\n")
+        );
+
+        let cfg = MemConfig::with_file(CONFIG, "model = \"gpt-5-codex\"\r\n");
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("model = \"gpt-5-codex\"\r\n\r\n[features]\r\nhooks = true\r\n"),
+            "the appended table is CRLF too"
+        );
+    }
+
+    /// The rewrite moves the VALUE and nothing else: a person's note beside the switch is theirs,
+    /// and a receipt that silently dropped it would be one more thing they have to notice.
+    #[test]
+    fn setting_the_switch_keeps_a_persons_comment_beside_it() {
+        let cfg = MemConfig::with_file(CONFIG, "[features]\n  hooks = false  # was off\n");
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[features]\nhooks = true  # was off\n")
+        );
+    }
+
+    /// Review follow-up: `hooks` under `[features]` may already be a TABLE — spelled dotted, or
+    /// inline — and the `hooks = true` this edit states would redefine it. Both degrade untouched;
+    /// a dotted key of somebody else's is not this shape.
+    #[test]
+    fn a_hooks_table_under_features_degrades_instead_of_being_redefined() {
+        for defined_as_a_table in [
+            "[features]\nhooks.experimental = true\n",
+            "[features]\nweb_search = true\nhooks.experimental = true\n",
+            "[features]\nhooks = { experimental = true }\n",
+        ] {
+            let cfg = MemConfig::with_file(CONFIG, defined_as_a_table);
+            let report = a(&cfg).install();
+            assert_eq!(
+                report.state,
+                TriggerState::Degraded,
+                "{defined_as_a_table:?}"
+            );
+            assert!(
+                report.note.as_deref().unwrap().contains("hooks"),
+                "the note names the key that collides"
+            );
+            assert_eq!(
+                cfg.text(CONFIG).as_deref(),
+                Some(defined_as_a_table),
+                "byte-untouched"
+            );
+            assert_eq!(cfg.writes(), 1, "the entry only");
+        }
+
+        // A dotted `hooks` in some OTHER table is a different key entirely.
+        let cfg = MemConfig::with_file(CONFIG, "[sandbox]\nhooks.experimental = true\n");
+        assert_eq!(a(&cfg).install().state, TriggerState::Inactive);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[sandbox]\nhooks.experimental = true\n\n[features]\nhooks = true\n")
+        );
+    }
+
+    /// Review follow-up: a `hooks` value spread over several lines cannot be replaced by replacing
+    /// ONE line — the elements below it would be stranded, and codex could read none of its config.
+    #[test]
+    fn a_multi_line_hooks_value_degrades_instead_of_being_half_rewritten() {
+        let spread = "[features]\nhooks = [\n  1,\n]\n";
+        let cfg = MemConfig::with_file(CONFIG, spread);
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Degraded);
+        assert!(report.note.as_deref().unwrap().contains("hooks"));
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(spread), "byte-untouched");
+        assert_eq!(cfg.writes(), 1, "the entry only");
+
+        // Closed on its own line, it is a value the anchors CAN replace.
+        let cfg = MemConfig::with_file(CONFIG, "[features]\nhooks = [1, 2]\n");
+        assert_eq!(a(&cfg).install().state, TriggerState::Inactive);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[features]\nhooks = true\n")
+        );
+    }
+
+    /// Review follow-up: `["a]b"]` is a legal header, and a reader that missed it would leave the
+    /// `[features]` scope open — writing the switch into somebody else's table.
+    #[test]
+    fn a_header_holding_a_bracket_in_its_key_still_closes_the_features_table() {
+        let before = "[features]\nweb_search = true\n\n[\"a]b\"]\nhooks = false\n";
+        let cfg = MemConfig::with_file(CONFIG, before);
+        assert_eq!(a(&cfg).install().state, TriggerState::Inactive);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[features]\nhooks = true\nweb_search = true\n\n[\"a]b\"]\nhooks = false\n"),
+            "their table's own `hooks` key is left exactly as they wrote it"
         );
     }
 

@@ -25,21 +25,75 @@ pub(super) fn terminator(line: &str) -> &'static str {
 
 /// The TOML table header a line states (`[features]`, `[[hooks]]`), if it states one — a comment,
 /// an assignment, or a header with anything but a comment trailing it is not one.
+///
+/// **The closing bracket is found OUTSIDE quoted segments.** `["a]b"]` is a legal header naming
+/// the key `a]b`, and a search for the first `]` in the line lands inside the quotes — which
+/// would leave the header unread, and a header a caller does not see is a table boundary it walks
+/// straight past (kimi's managed region would swallow the table, codex's `[features]` scope would
+/// never close). A line whose quote never closes is not decided here at all:
+/// [`shape_is_unprovable`] fails the whole file over it.
 pub(super) fn table_header(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    if trimmed.starts_with('#') || !trimmed.starts_with('[') {
+    let (double, interior) = header_open(trimmed)?;
+    let open = if double { 2 } else { 1 };
+    let BracketScan::At(at) = scan_to_bracket(interior) else {
         return None;
-    }
-    let end = if trimmed.starts_with("[[") {
-        trimmed.find("]]").map(|i| i + 2)?
+    };
+    let end = if double {
+        if !interior[at..].starts_with("]]") {
+            return None; // `[[key]` closes one bracket too few
+        }
+        open + at + 2
     } else {
-        trimmed.find(']').map(|i| i + 1)?
+        open + at + 1
     };
     let rest = trimmed[end..].trim_start();
     if !rest.is_empty() && !rest.starts_with('#') {
         return None;
     }
     Some(&trimmed[..end])
+}
+
+/// A line's opening bracket(s): whether it opened two of them (an array of tables) plus the bytes
+/// after them. `None` for a comment, or a line that opens no bracket at all.
+fn header_open(trimmed: &str) -> Option<(bool, &str)> {
+    if trimmed.starts_with('#') {
+        return None;
+    }
+    let double = trimmed.starts_with("[[");
+    let interior = trimmed.strip_prefix(if double { "[[" } else { "[" })?;
+    Some((double, interior))
+}
+
+/// What a walk for a header's closing bracket found.
+enum BracketScan {
+    /// The byte offset (into the walked slice) of the `]` that closes the key path.
+    At(usize),
+    /// No `]` outside a quoted segment — not a header line these anchors read.
+    Absent,
+    /// The walk ran out INSIDE a quote, so no `]` on the line can be told from one in a string.
+    Unterminated,
+}
+
+/// Walk to the `]` that closes a header's key path, tracking a simple in-quote state. Escapes are
+/// deliberately not resolved: a backslash anywhere in a bracket-opening line fails the whole file
+/// via [`shape_is_unprovable`], so a `\"` can never reach this walk.
+fn scan_to_bracket(interior: &str) -> BracketScan {
+    let mut quote: Option<char> = None;
+    for (i, c) in interior.char_indices() {
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, ']') => return BracketScan::At(i),
+            (None, _) => {}
+        }
+    }
+    if quote.is_some() {
+        BracketScan::Unterminated
+    } else {
+        BracketScan::Absent
+    }
 }
 
 /// What a table header states about `key` — matched on the HEAD segment of the header's dotted
@@ -149,7 +203,7 @@ pub(super) fn root_defines_key(lines: &[&str], key: &str) -> bool {
 /// Whether a config's SHAPE is one no line anchor can stand on — the whole-file screen an engine
 /// runs BEFORE planning any edit, so a file it cannot read exactly is a file it never writes.
 ///
-/// Two shapes fail here, both because a line inside them would be read as structure it is not:
+/// Three shapes fail here, all because a line inside them would be read as structure it is not:
 ///
 /// - **A multiline string** (`"""` or `'''`) anywhere in the file. Its content lines are ordinary
 ///   text to a line anchor, so somebody's `[features]` or `[[hooks]]` written INSIDE their own
@@ -158,16 +212,31 @@ pub(super) fn root_defines_key(lines: &[&str], key: &str) -> bool {
 ///   do not do — a degraded registration with an honest note beats a clever parse.
 /// - **A quoted key carrying a backslash** — `"ho\u006Fks" = false` is a legal spelling of the
 ///   very key an edit is about to write, and only TOML's escape rules say so. A key that cannot be
-///   spelled out cannot be ruled out. A table HEADER holding a backslash fails for the same
-///   reason: [`header_stated`] refuses to spell its head out, and a header that cannot be
-///   spelled out cannot be ruled out either.
+///   spelled out cannot be ruled out. A line OPENING A BRACKET fails on a backslash for two
+///   reasons at once: [`header_stated`] refuses to spell its head out, and only the escape rules
+///   say which `]` closes it — a header holding an escaped quote is one a walk without them would
+///   end in the wrong place.
+/// - **A bracket-opening line whose quote never closes** (`["a]`). Past it, no `]` on the line can
+///   be told from one inside the string, so where the header ENDS — and therefore whether the line
+///   is a table boundary at all — is undecidable. A boundary that cannot be placed is a file that
+///   is never edited.
 pub(super) fn shape_is_unprovable(text: &str) -> bool {
     text.contains("\"\"\"")
         || text.contains("'''")
-        || split_lines(text).iter().any(|line| {
-            escaped_quoted_key(line)
-                || table_header(line).is_some_and(|header| header.contains('\\'))
-        })
+        || split_lines(text)
+            .iter()
+            .any(|line| escaped_quoted_key(line) || bracket_line_is_unreadable(line))
+}
+
+/// Whether a line that OPENS a bracket is one no anchor can read: a backslash anywhere in it, or a
+/// quote it never closes. Asked of the RAW line rather than of a parsed header, deliberately — a
+/// header these anchors fail to parse is exactly the one whose boundary would be missed.
+fn bracket_line_is_unreadable(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some((_, interior)) = header_open(trimmed) else {
+        return false;
+    };
+    trimmed.contains('\\') || matches!(scan_to_bracket(interior), BracketScan::Unterminated)
 }
 
 /// The first key segment a line names, unquoted, plus the rest of the line after it. `None` where
@@ -225,6 +294,90 @@ pub(super) fn basic_string_value(line: &str) -> Option<&str> {
     None // an unterminated string is not a value these anchors can prove
 }
 
+/// An assignment line's tail, split where an in-place edit has to split it: the VALUE as written,
+/// and everything from the whitespace before its trailing comment to the end of the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ValueTail<'a> {
+    /// The value between the `=` and any trailing comment, trimmed.
+    pub(super) value: &'a str,
+    /// The raw bytes after it — the spacing, a `# …` comment, and the line's own terminator —
+    /// re-emitted verbatim, so a person's note beside the setting (and a CRLF file's line
+    /// endings) survive an edit that replaces the value.
+    pub(super) trailing: &'a str,
+}
+
+/// What an assignment line states after its `=`, WHEN a line anchor can prove where the value
+/// ends. `None` for a value that runs past this line — an array or inline table left open
+/// (`hooks = [`, whose elements and `]` live on the lines below) or a string that never closes —
+/// because a value this cannot delimit is one it must never rewrite: replacing the line would
+/// strand the lines that finish the value and cost the harness its whole config.
+///
+/// The walk is the same discipline as everything else here: quotes are tracked (a `#` inside one
+/// is not a comment, a `]` inside one closes nothing), escapes are honored only inside a basic
+/// string, and a bracket or brace still open at the line's end is the refusal.
+pub(super) fn value_tail(line: &str) -> Option<ValueTail<'_>> {
+    let trimmed = line.trim_start();
+    let (_, rest) = key_segment(trimmed)?;
+    let after = rest.trim_start().strip_prefix('=')?;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth: usize = 0;
+    let mut comment_at = None;
+    for (i, c) in after.char_indices() {
+        match quote {
+            Some(open) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' && open == '"' {
+                    escaped = true;
+                } else if c == open {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '[' | '{' => depth += 1,
+                ']' | '}' => depth = depth.checked_sub(1)?,
+                '#' => {
+                    comment_at = Some(i);
+                    break;
+                }
+                _ => {}
+            },
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        return None; // the value continues on the lines below
+    }
+    let raw = &after[..comment_at.unwrap_or(after.len())];
+    Some(ValueTail {
+        value: raw.trim(),
+        trailing: &after[raw.trim_end().len()..],
+    })
+}
+
+/// Append a block as a new top-level table at EOF, one blank line after whatever was there.
+///
+/// A top-level header is absolute, so an EOF append can never land inside somebody else's table —
+/// and the separator and the block are written in the FILE's own line endings (the terminator of
+/// its last line decides), so a CRLF config never gains LF lines halfway down.
+pub(super) fn append_at_eof(lines: &[&str], block: &str) -> String {
+    let term = lines.last().copied().map_or("\n", terminator);
+    let mut out: String = lines.concat();
+    while out.ends_with('\n') || out.ends_with('\r') {
+        out.pop();
+    }
+    if !out.is_empty() {
+        out.push_str(term);
+        out.push_str(term);
+    }
+    for line in block.lines() {
+        out.push_str(line);
+        out.push_str(term);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,9 +395,25 @@ mod tests {
             "model = \"gpt\"\n",       // an assignment
             "[features] hooks = true", // a header with content trailing it
             "[unterminated\n",
+            "[[hooks]\n", // one closing bracket too few
         ] {
             assert_eq!(table_header(not_a_header), None, "{not_a_header:?}");
         }
+    }
+
+    /// A `]` INSIDE a quoted key segment closes nothing: `["a]b"]` is a legal header naming the
+    /// key `a]b`, and a header a reader misses is a table boundary it walks straight past.
+    #[test]
+    fn a_bracket_inside_a_quoted_key_does_not_close_the_header() {
+        assert_eq!(table_header("[\"a]b\"]\n"), Some("[\"a]b\"]"));
+        assert_eq!(table_header("[[\"a]b\"]]\n"), Some("[[\"a]b\"]]"));
+        assert_eq!(table_header("['x]y'.sub]  # mine\n"), Some("['x]y'.sub]"));
+        assert_eq!(
+            header_stated("[\"fea]tures\"]\n", "fea]tures"),
+            Some(HeaderStated::Table { whole: true })
+        );
+        // …and the quoted key is still only that key: a header naming something else is not ours.
+        assert_eq!(header_stated("[\"a]b\"]\n", "features"), None);
     }
 
     #[test]
@@ -331,8 +500,19 @@ mod tests {
             "model = \"gpt-5-codex\"\n[features]\nhooks = true\n",
             "command = \"say \\\"hi\\\"\"\n", // escapes inside a VALUE are ordinary
             "roots = [\n  \"C:\\\\Users\\\\me\",\n]\n", // a quoted array element is not a key
+            "[\"a]b\"]\nx = 1\n",             // a quoted key holding a bracket reads fine
+            "[unterminated\nx = 1\n",         // no bracket to close, and no quote left open
         ] {
             assert!(!shape_is_unprovable(provable), "{provable:?}");
+        }
+    }
+
+    /// A bracket-opening line whose quote never closes leaves the header's END undecidable — and a
+    /// boundary that cannot be placed fails the WHOLE file rather than being guessed at.
+    #[test]
+    fn a_header_line_that_never_closes_its_quote_makes_the_shape_unprovable() {
+        for unprovable in ["[\"a]\nx = 1\n", "[[ 'oops ]]\nx = 1\n"] {
+            assert!(shape_is_unprovable(unprovable), "{unprovable:?}");
         }
     }
 
@@ -395,6 +575,76 @@ mod tests {
                 "{not_a_basic_string:?}"
             );
         }
+    }
+
+    /// The two halves an in-place value edit needs: the value as written, and the trailing bytes
+    /// (the spacing, a person's comment, the line's own terminator) re-emitted verbatim.
+    #[test]
+    fn a_value_tail_keeps_the_comment_and_the_terminator_it_found() {
+        let tail = value_tail("hooks = false  # off on purpose\n").expect("a scalar");
+        assert_eq!(tail.value, "false");
+        assert_eq!(tail.trailing, "  # off on purpose\n");
+
+        let tail = value_tail("  \"hooks\"   =   false\r\n").expect("a scalar");
+        assert_eq!(tail.value, "false");
+        assert_eq!(tail.trailing, "\r\n", "CRLF rides the trailing half");
+
+        let tail = value_tail("hooks = \"a # b\"").expect("a scalar");
+        assert_eq!(
+            tail.value, "\"a # b\"",
+            "a `#` inside a string is not a comment"
+        );
+        assert_eq!(
+            tail.trailing, "",
+            "an unterminated last line stays unterminated"
+        );
+
+        let tail = value_tail("hooks = [1, 2]\n").expect("closed on this line");
+        assert_eq!(tail.value, "[1, 2]");
+    }
+
+    /// A value that RUNS ON is one no anchor may rewrite: replacing the line would strand the
+    /// lines that finish it and leave the file unparsable.
+    #[test]
+    fn a_value_that_runs_past_its_line_is_not_a_value_these_anchors_prove() {
+        for runs_on in [
+            "hooks = [\n",
+            "hooks = { a = 1,\n",
+            "hooks = \"unterminated\n",
+            "hooks\n", // no assignment at all
+        ] {
+            assert_eq!(value_tail(runs_on), None, "{runs_on:?}");
+        }
+    }
+
+    /// An appended table lands after exactly one blank line, in the FILE's own line endings.
+    #[test]
+    fn an_appended_table_takes_the_files_own_line_endings() {
+        assert_eq!(
+            append_at_eof(
+                &split_lines("model = \"x\"\n"),
+                "[features]\nhooks = true\n"
+            ),
+            "model = \"x\"\n\n[features]\nhooks = true\n"
+        );
+        assert_eq!(
+            append_at_eof(
+                &split_lines("model = \"x\"\r\n\r\n"),
+                "[features]\nhooks = true\n"
+            ),
+            "model = \"x\"\r\n\r\n[features]\r\nhooks = true\r\n",
+            "CRLF in, CRLF out — separator and block alike"
+        );
+        assert_eq!(
+            append_at_eof(&split_lines("model = \"x\""), "[features]\n"),
+            "model = \"x\"\n\n[features]\n",
+            "an unterminated last line gets one before the separator"
+        );
+        assert_eq!(
+            append_at_eof(&[], "[features]\n"),
+            "[features]\n",
+            "nothing to separate from"
+        );
     }
 
     #[test]

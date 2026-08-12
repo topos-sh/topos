@@ -1,5 +1,6 @@
 //! `qoder` — the session-start auto-update hook in `<root>/settings.json` (production root:
-//! `~/.qoder`): a Claude-Code-COMPATIBLE schema — top-level `"hooks"` → `"SessionStart"` →
+//! `$QODER_CONFIG_DIR` else `~/.qoder`): a Claude-Code-COMPATIBLE schema — top-level `"hooks"` →
+//! `"SessionStart"` →
 //! matcher groups wrapping handler arrays — with the handler `{"type": "command", "command": …,
 //! "timeout": 60}`.
 //!
@@ -19,8 +20,17 @@ use std::path::{Path, PathBuf};
 use topos_types::{CurrencyKind, TriggerState};
 
 use crate::ConfigStore;
+use crate::registry;
 
 use super::cc_hooks::{JsonHooks, JsonHooksSpec};
+
+/// Qoder's own config-dir override, the one herdr's integration reads.
+///
+/// It resolves through [`registry::env_override`] — the crate's ONE env read — rather than a
+/// [`registry::Root`] variant of its own: `Root` is the vocabulary of the DIRECTORY SPECS baked
+/// into registry rows, and no row names this config dir. A variant nothing resolves would be
+/// vocabulary with no referent.
+const ENV_VAR: &str = "QODER_CONFIG_DIR";
 
 pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     slug: "qoder",
@@ -41,9 +51,15 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     note: Some("vendor docs, unverified"),
 };
 
-/// Production root: `~/.qoder` under the passed home (no env override in the registry table).
+/// Production root: `$QODER_CONFIG_DIR` else `~/.qoder` under the passed home.
 pub(crate) fn resolve_root(home: &Path) -> PathBuf {
-    home.join(".qoder")
+    root_under(registry::env_override(ENV_VAR), home)
+}
+
+/// The root an override decides — split out so a test can state both answers without touching the
+/// process environment.
+fn root_under(override_dir: Option<PathBuf>, home: &Path) -> PathBuf {
+    override_dir.unwrap_or_else(|| home.join(".qoder"))
 }
 
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a> {
@@ -180,5 +196,19 @@ mod tests {
         assert!(adapter.present());
         adapter.remove();
         assert!(!adapter.present());
+    }
+
+    /// The entry lands under Qoder's own config dir, and its own override moves it — a hook
+    /// written where the harness never reads is a trigger reported Active that fires for nobody.
+    #[test]
+    fn the_config_lives_under_qoders_own_root_or_its_override() {
+        let home = Path::new("/home/me");
+        assert_eq!(root_under(None, home), PathBuf::from("/home/me/.qoder"));
+        assert_eq!(
+            root_under(Some(PathBuf::from("/elsewhere/qoder")), home),
+            PathBuf::from("/elsewhere/qoder"),
+            "the override wins outright"
+        );
+        assert_eq!(ENV_VAR, "QODER_CONFIG_DIR");
     }
 }
