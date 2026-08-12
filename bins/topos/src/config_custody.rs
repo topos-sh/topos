@@ -14,7 +14,11 @@
 //!   an OAuth trust surface: several harnesses file a sign-in token under the server name, so a key
 //!   is IMMUTABLE once minted, and a RETIRED key is never minted for a different bundle — the token
 //!   it may still index must never come to point at someone else's server. That reservation must
-//!   outlive the bundle's record, so it cannot live inside it.
+//!   outlive the bundle's record, so it cannot live inside it. It does NOT outlive the entry: a
+//!   reservation is held while something still STANDS under that key in one of this scope's config
+//!   files (drifted, unrecorded, foreign — anything a new bundle taking the name would inherit),
+//!   and is released once nothing is left to inherit ([`ScopeEntries::release_retired`]). Absence
+//!   has to be PROVEN: a surface that would not read keeps every reservation.
 //! - **The pending-intent journal** ([`ConfigCustody::pending`]). ONE config write covers MANY
 //!   bundles' entries, so the intent that guards it spans bundles by construction. It is written
 //!   durably BEFORE every config write and cleared after; a crash in between is healed at the next
@@ -103,7 +107,8 @@ pub(crate) struct ConfigCustody {
     #[serde(default)]
     pub keys: BTreeMap<String, String>,
     /// Retired key → the bundle it belonged to. A key here is NEVER minted for a different bundle;
-    /// re-demanding the same bundle takes its key back out.
+    /// re-demanding the same bundle takes its key back out. A reservation lives exactly as long as
+    /// something stands under the key ([`ScopeEntries::release_retired`]).
     #[serde(default)]
     pub retired: BTreeMap<String, String>,
     /// The intent journal: written BEFORE a config write, cleared after (see the module doc).
@@ -555,10 +560,39 @@ impl<'a> ScopeEntries<'a> {
         self.doc.keys.get(bundle_id).map(String::as_str)
     }
 
-    /// Retire `bundle_id`'s key (see [`ConfigCustody::retire_key`]).
+    /// Retire `bundle_id`'s key (see [`ConfigCustody::retire_key`]). The reservation it takes is
+    /// given back by [`Self::release_retired`] when nothing stands under the key — ONE rule, run
+    /// over every reservation rather than only over the one just made.
     pub(crate) fn retire_key(&mut self, bundle_id: &str) {
         if self.doc.keys.contains_key(bundle_id) {
             self.doc.retire_key(bundle_id);
+            self.doc_dirty = true;
+        }
+    }
+
+    /// **Give back every reserved name with nothing left under it.** A retired key is held so a
+    /// DIFFERENT bundle can never inherit what the old one left behind: an entry still standing in
+    /// some config file, and with it whatever sign-in the harness filed under that name. Once no
+    /// entry under the key remains anywhere in this scope there is nothing to inherit — and a
+    /// reservation kept past that only pushes every later mint of the same natural name onto a
+    /// `-2`, `-3` spelling nobody asked for.
+    ///
+    /// `standing` is every managed-looking key this scope's config files were OBSERVED to hold,
+    /// or `None` when that could not be established (a surface that would not read). Absence must
+    /// be proven: an unknown answer releases nothing.
+    pub(crate) fn release_retired(&mut self, standing: Option<&BTreeSet<String>>) {
+        let Some(standing) = standing else {
+            return;
+        };
+        let released: Vec<String> = self
+            .doc
+            .retired
+            .keys()
+            .filter(|k| !standing.contains(*k))
+            .cloned()
+            .collect();
+        for key in released {
+            self.doc.retired.remove(&key);
             self.doc_dirty = true;
         }
     }

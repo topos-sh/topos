@@ -1217,12 +1217,9 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
     );
     let custody = ScopeEntries::load(&rig.fs, &rig.layout()).unwrap();
     assert!(!custody.has_entries_for("s_a"));
-    assert_eq!(
-        custody
-            .doc
-            .retired
-            .get("topos-eng-alpha")
-            .map(String::as_str),
-        Some("s_a")
+    assert_eq!(custody.key_of("s_a"), None, "the key is given up");
+    assert!(
+        custody.doc.retired.is_empty(),
+        "and the name is not reserved against an entry that is gone: {custody:?}"
     );
 }

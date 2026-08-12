@@ -1412,17 +1412,15 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
             "the entry outlived the record it belonged to, in {f:?}: {text}"
         );
     }
-    // The scope RETIRES the key rather than forgetting it — a retired key is never re-minted —
-    // and the bundle's own record no longer carries a config entry.
+    // The scope gives the key up, and reserves the NAME against nothing: both entries left, so
+    // there is no standing entry a bundle re-minted onto the name could inherit.
     let custody = crate::config_custody::read(&rig.fs, &rig.layout()).unwrap();
     assert!(
         crate::config_custody::entries_of(&rig.fs, &rig.layout(), "s_linear").is_empty(),
         "the record's config entries left with the row"
     );
-    assert_eq!(
-        custody.retired.get("topos-eng-linear").map(String::as_str),
-        Some("s_linear")
-    );
+    assert!(!custody.keys.contains_key("s_linear"), "{custody:?}");
+    assert!(custody.retired.is_empty(), "{custody:?}");
     // And the receipt names the files it touched — a removal that edited somebody's agent config
     // says so.
     let note = data.items[0].note.clone().unwrap_or_default();
