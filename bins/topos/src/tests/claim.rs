@@ -1427,7 +1427,6 @@ impl crate::plane::FollowSource for DeliveredFollow {
             self.0.clone(),
             crate::plane::FollowContext {
                 workspace_id: "w_eng".to_owned(),
-                mode: crate::plane::FollowMode::Auto,
                 review_required: false,
                 following: true,
             },

@@ -14,17 +14,15 @@ use crate::error::ClientError;
 use crate::fs_seam::FsOps;
 use crate::sidecar::Layout;
 
-/// Which verb owns a pending flow. The session login is the ONE live variant; the retired
-/// spellings still parse (a leftover WAL from an older binary is swept, not a crash).
+/// Which verb owns a pending flow. The session login is the only one there is; a document naming
+/// anything else fails the parse, which is the right answer for a transient file — the flow it
+/// describes cannot be resumed by this binary anyway.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum EnrollIntentDoc {
     /// A `topos login [<address>]` SESSION login (the grant mints ONE workspace-scoped session
     /// into `identity/sessions.json`).
     Session,
-    /// RETIRED (parse-tolerated): the device-era `follow` enrollment.
-    #[serde(other)]
-    Retired,
 }
 
 /// The enrollment WAL document — ONE live device-authorization flow, awaiting the human's approval.
@@ -35,31 +33,22 @@ pub(crate) struct PendingEnrollment {
     /// The API base the flow runs against (the card's declared base, re-root-gated).
     pub base_url: String,
     /// The ADDRESS host the human typed (`topos.sh`, `topos.example.com[:port]`) — the manifest
-    /// grammar's host half, recorded so the minted session carries it. ADDITIVE with a serde
-    /// default (a pre-field WAL reads as empty; the session persist falls back to the base URL's
-    /// host).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// grammar's host half, recorded so the minted session carries it. Empty when the flow names
+    /// only an origin; the session persist then falls back to the base URL's host.
     pub host: String,
     /// The workspace ADDRESS slug a `login <workspace>` shortcut PRESELECTED for the browser
     /// chooser (empty = none: the human picks or creates the workspace at the approval). Whether
     /// it exists is never disclosed pre-approval; the granted poll carries the authoritative
-    /// workspace. Serde-defaulted, and it still reads the pre-rename `workspace_name` spelling:
-    /// a WAL written by the previous binary carries the SAME fact, and losing it across an
-    /// upgrade would read as a target mismatch and restart the flow the person is mid-approval on.
-    #[serde(
-        default,
-        alias = "workspace_name",
-        skip_serializing_if = "String::is_empty"
-    )]
+    /// workspace. The bare login is the headline usage, so the empty case stays out of the bytes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub preselect: String,
-    /// Which verb owns the resume (and, for a follow, the intent to continue into).
+    /// Which verb owns the resume.
     pub intent: EnrollIntentDoc,
     /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
     pub device_code: String,
     /// The short user code (the cross-check shown on the approval page).
     pub user_code: String,
     /// The SERVER-built approval URL with the code embedded — re-emitted verbatim while pending.
-    #[serde(alias = "verification_uri_complete")]
     pub verification_uri: String,
     /// The minimum poll interval, in seconds.
     pub interval_secs: u64,
@@ -68,8 +57,7 @@ pub(crate) struct PendingEnrollment {
     /// This flow was started LOOPBACK-bound: a browser on this machine approves it and the
     /// redirect wakes our listener. A wake-up only — the poll is the completion mechanism either
     /// way; the flag exists so a resume knows whether the approval page pre-arms itself (and the
-    /// terminal therefore never printed the short code). ADDITIVE with a serde default.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// terminal therefore never printed the short code).
     pub loopback: bool,
 }
 
@@ -171,38 +159,32 @@ mod tests {
     use crate::fs_seam::RealFs;
     use crate::sidecar::Layout;
 
-    /// A WAL written by the PREVIOUS binary still reads whole. The preselection was spelled
-    /// `workspace_name` then: losing it across an upgrade would read as a target mismatch and
-    /// restart a flow the person may be standing in front of, mid-approval. The retired
-    /// `auth_code` field simply falls away.
+    /// The WAL round-trips whole, and its SECRET never surfaces in a Debug dump — the document is
+    /// held in memory across the whole pending flow, so a panic or a log line must not carry the
+    /// device code out with it.
     #[test]
-    fn a_pre_rename_wal_keeps_its_preselection() {
+    fn the_wal_round_trips_and_never_debugs_its_secret() {
         let fs = RealFs;
-        let dir = std::env::temp_dir().join(format!("topos-wal-alias-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("topos-wal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let layout = Layout::new(&dir);
-        fs.create_dir_all(&layout.identity_dir()).unwrap();
-        let doc = format!(
-            r#"{{"schema_version":{PERSISTED_SCHEMA_VERSION},"base_url":"https://topos.sh/api",
-               "host":"topos.sh","workspace_name":"acme","intent":{{"kind":"session"}},
-               "device_code":"dc_secret","user_code":"AB12-CD34",
-               "verification_uri":"https://topos.sh/verify","interval_secs":5,
-               "expires_at_millis":9000,"loopback":true,"auth_code":"ac_secret"}}"#
-        );
-        // 0600 — `read_doc_private` refuses a permissive secret before parsing a byte.
-        crate::atomic::atomic_write_private(&fs, &layout.enrollment_path(), doc.as_bytes())
-            .unwrap();
+        let written = PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            base_url: "https://topos.sh/api".to_owned(),
+            host: "topos.sh".to_owned(),
+            preselect: "acme".to_owned(),
+            intent: EnrollIntentDoc::Session,
+            device_code: "dc_secret".to_owned(),
+            user_code: "AB12-CD34".to_owned(),
+            verification_uri: "https://topos.sh/verify".to_owned(),
+            interval_secs: 5,
+            expires_at_millis: 9_000,
+            loopback: true,
+        };
+        write_wal(&fs, &layout, &written).unwrap();
 
         let wal = read_wal(&fs, &layout).unwrap().unwrap();
-        assert_eq!(
-            wal.preselect, "acme",
-            "the old spelling still names the same fact"
-        );
-        assert_eq!(wal.host, "topos.sh");
-        assert!(wal.loopback);
-        assert_eq!(wal.device_code, "dc_secret");
-        assert!(matches!(wal.intent, EnrollIntentDoc::Session));
-        // The secret never surfaces in a Debug dump, on any vintage of the document.
+        assert_eq!(wal, written);
         assert!(!format!("{wal:?}").contains("dc_secret"), "{wal:?}");
     }
 }

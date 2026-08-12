@@ -221,27 +221,16 @@ pub(crate) fn login(
     };
     // A pending WAL first — re-invoking IS the resume.
     if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
-        match wal.intent {
-            enroll::EnrollIntentDoc::Session => {
-                let same = named
-                    .as_ref()
-                    .is_none_or(|t| t.host == wal.host && t.preselect == wal.preselect);
-                if same {
-                    return resume(ctx, connectors, &wal);
-                }
-                // `login <B>` while a flow toward A is pending: THE LATEST COMMAND WINS — refusing
-                // would strand the person behind a ceremony they have already moved on from. The
-                // old flow is SETTLED first, never merely dropped: it may already have minted.
-                settle_abandoned(ctx, connectors, &wal)?;
-            }
-            enroll::EnrollIntentDoc::Retired => {
-                return Err(ClientError::Enrollment(
-                    "a retired login flow is still on disk — it is swept when it expires; start \
-                     fresh with `topos login <workspace-address>`"
-                        .into(),
-                ));
-            }
+        let same = named
+            .as_ref()
+            .is_none_or(|t| t.host == wal.host && t.preselect == wal.preselect);
+        if same {
+            return resume(ctx, connectors, &wal);
         }
+        // `login <B>` while a flow toward A is pending: THE LATEST COMMAND WINS — refusing would
+        // strand the person behind a ceremony they have already moved on from. The old flow is
+        // SETTLED first, never merely dropped: it may already have minted.
+        settle_abandoned(ctx, connectors, &wal)?;
     }
     // No address at all: the default server, nothing preselected — the headline usage.
     let target = named.unwrap_or_else(|| LoginTarget::origin_only(&connectors.web_origin));

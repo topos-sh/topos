@@ -31,7 +31,7 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::materialize::{self, MaterializeReport, MaterializeReq};
 use crate::placement::{self, ScanStatus};
-use crate::plane::{FollowContext, FollowMode, KnownCurrent, PlaneError, PointerFetch};
+use crate::plane::{FollowContext, KnownCurrent, PlaneError, PointerFetch};
 use crate::scan::ScannedBundle;
 use crate::{doc, logfile, sidecar};
 
@@ -1032,9 +1032,7 @@ fn situation_for(follow: &FollowContext, explicit: bool) -> topos_core::consent:
     } else if follow.review_required {
         Situation::ReviewRequiredApproved
     } else {
-        match follow.mode {
-            FollowMode::Auto => Situation::FollowedAutoNewVersion,
-        }
+        Situation::FollowedAutoNewVersion
     }
 }
 

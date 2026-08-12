@@ -972,7 +972,7 @@ mod tests {
         use crate::error::ClientError;
         use crate::fs_seam::{FsOps, RealFs};
         use crate::ids::{RealClock, RealIds};
-        use crate::plane::{FollowContext, FollowMode, FollowSource, InertPlane};
+        use crate::plane::{FollowContext, FollowSource, InertPlane};
         use crate::sidecar::Layout;
 
         const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -1018,7 +1018,6 @@ mod tests {
                 id.to_owned(),
                 FollowContext {
                     workspace_id: ws.to_owned(),
-                    mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
                 },

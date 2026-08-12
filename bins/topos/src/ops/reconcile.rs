@@ -49,8 +49,8 @@ use crate::id::SkillId;
 use crate::manifest::keys::KeyShape;
 use crate::manifest::scopes::{self, PlanRow, ResolvedScope, ScopePlan};
 use crate::plane::{
-    DeliverySkill, DeliverySnapshot, DirectorySource, FollowContext, FollowMode, FollowSource,
-    LinkStatus, PlaneError, PlaneSource, ReconcileTransport,
+    DeliverySkill, DeliverySnapshot, DirectorySource, FollowContext, FollowSource, LinkStatus,
+    PlaneError, PlaneSource, ReconcileTransport,
 };
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Session};
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
@@ -288,7 +288,6 @@ impl CacheFollow {
                     skill_id.clone(),
                     FollowContext {
                         workspace_id: ws.clone(),
-                        mode: FollowMode::Auto,
                         review_required: ds.review_required,
                         following: true,
                     },
@@ -1400,7 +1399,6 @@ pub(crate) fn manifest_update(
                     &ds.skill_id,
                     FollowContext {
                         workspace_id: run.session.workspace_id.clone(),
-                        mode: FollowMode::Auto,
                         review_required: ds.review_required,
                         following: true,
                     },
@@ -2836,7 +2834,6 @@ fn reconcile_feed<'a>(
                 }
                 let fc = FollowContext {
                     workspace_id: run.session.workspace_id.clone(),
-                    mode: FollowMode::Auto,
                     review_required: ds.review_required,
                     following: true,
                 };
@@ -3073,7 +3070,6 @@ fn sync_workspace_skill<'a>(
     };
     let fc = FollowContext {
         workspace_id: run.session.workspace_id.clone(),
-        mode: FollowMode::Auto,
         review_required: target.review_required,
         following: true,
     };

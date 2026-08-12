@@ -47,9 +47,9 @@ pub(crate) struct SkillPaths {
     /// adoption (never part of the atomic core), so its absence just means "no recorded upstream."
     pub origin: PathBuf,
     /// The durable bundle-KIND marker — written at the first sync/adopt of EVERY bundle in this
-    /// scope, and the first rung [`crate::bundle_kind::classify`] reads. Absent only for a record
-    /// whose store was written before it (and for one whose best-effort write failed, which
-    /// classification answers by refusing, never by guessing).
+    /// scope, and the first rung [`crate::bundle_kind::classify`] reads. The write is best-effort,
+    /// so it can be absent for a record that has one; classification answers that by refusing,
+    /// never by guessing.
     pub kind: PathBuf,
     /// The CONFIG-ENTRY custody document (`skills/<id>/entries.json`) — the entries this bundle
     /// owns inside agents' own MCP config files. A SIBLING of `map.json`, never part of it: the two

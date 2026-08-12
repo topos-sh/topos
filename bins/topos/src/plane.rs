@@ -150,24 +150,16 @@ pub(crate) trait PlaneSource {
     fn bind_skill(&self, _workspace_id: &str, _skill_id: &str) {}
 }
 
-/// How a delivered skill tracks `current` — the engine consults this to choose the consent
-/// situation. Derived from the delivery cache (`state/sync_status.json`): every session-delivered
-/// item is [`FollowMode::Auto`], because login was the acceptance event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FollowMode {
-    /// Auto-apply a new `current` (the standing pre-authorization a session carries).
-    Auto,
-}
-
 /// The per-skill delivery context the engine needs. The `workspace_id` is the EXPECTED scope — a
 /// served pointer whose scope names a different workspace (even with the same skill id) is a
-/// mis-scoped response and is rejected. (The read credential lives with the TRANSPORT — a
-/// [`crate::plane_http::SkillCred`] — never here: creds in the transport, consent in this seam.)
+/// mis-scoped response and is rejected. Every session-delivered item auto-applies a new `current`
+/// — login was the acceptance event — so how a skill tracks the pointer is not a field here.
+/// (The read credential lives with the TRANSPORT — a [`crate::plane_http::SkillCred`] — never
+/// here: creds in the transport, consent in this seam.)
 #[derive(Debug, Clone)]
 pub(crate) struct FollowContext {
     /// The workspace delivering this skill — the expected pointer scope.
     pub workspace_id: String,
-    pub mode: FollowMode,
     /// Whether the workspace gates moves behind review (the receiver still only ever receives an
     /// already-approved `current`; this only selects the consent satisfier).
     pub review_required: bool,

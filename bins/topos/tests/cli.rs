@@ -331,7 +331,6 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     );
     assert!(ok, "add should exit 0");
     assert_eq!(v["data"]["name"], "pr-describe");
-    assert_eq!(v["data"]["harness"], "claude-code");
     assert_eq!(v["data"]["currency"]["state"], "active");
     assert_eq!(v["data"]["currency"]["currency_kind"], "session_start");
 
@@ -542,7 +541,6 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     assert_eq!(v["command"], "add");
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["data"]["name"], "deploy");
-    assert_eq!(v["data"]["harness"], "claude-code");
     assert_eq!(v["data"]["tracked"], true);
 
     // Now tracked → discovery no longer lists it as untracked, and the machine scope carries it.

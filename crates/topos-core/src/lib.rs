@@ -11,7 +11,7 @@
 //!
 //! Modules:
 //! - [`digest`]   — canonical bundle manifest + the byte-exact sha256 digest + path reject rules.
-//! - [`consent`]  — the consent-satisfier truth-table as a pure decision function.
+//! - [`consent`]  — the consent truth-table as a pure decision function.
 //! - [`identity`] — the content-addressed identity derivation: the frozen `commit_id` construction
 //!   (the user-facing `version_id`). No keys, no crypto — pure content-addressing, written once so
 //!   every component agrees.

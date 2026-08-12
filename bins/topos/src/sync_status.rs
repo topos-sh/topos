@@ -75,8 +75,8 @@ pub(crate) struct WorkspaceSync {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DeliveredSkill {
     /// The catalog's user-facing name at the last delivery — the offline name↔id join the
-    /// cache-backed follow seam and `status`/`list` read. Absent on pre-session records.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// cache-backed follow seam and `status`/`list` read. Every writer of a row knows it, so it is
+    /// a required field: a row that cannot say which bundle it caches is not a cache entry.
     pub name: String,
     /// Whether the bundle was effectively `reviewed` at the last delivery (the offline publish
     /// preflight; the server re-decides authoritatively on every write).

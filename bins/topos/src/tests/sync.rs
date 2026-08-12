@@ -24,8 +24,8 @@ use crate::ctx::Ctx;
 use crate::fs_seam::{FaultFs, FsOps, RealFs};
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
-    FollowContext, FollowMode, FollowSource, InertFollow, InertPlane, KnownCurrent, PlaneError,
-    PlaneSource, PointerFetch,
+    FollowContext, FollowSource, InertFollow, InertPlane, KnownCurrent, PlaneError, PlaneSource,
+    PointerFetch,
 };
 use crate::sidecar::Layout;
 use crate::{doc, ops};
@@ -359,13 +359,12 @@ fn pull_data(ctx: &Ctx<'_>, scope: ops::PullScope) -> Result<PullData, crate::er
     ops::pull(ctx, scope).map(|o| o.data)
 }
 
-fn follow(skill_id: &str, mode: FollowMode) -> FixtureFollow {
+fn follow(skill_id: &str) -> FixtureFollow {
     FixtureFollow {
         entries: vec![(
             skill_id.to_owned(),
             FollowContext {
                 workspace_id: WS.to_owned(),
-                mode,
                 review_required: false,
                 following: true,
             },
@@ -494,7 +493,7 @@ fn clean_follower_auto_fast_forwards() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let ctx = rig.ctx(&plane, &foll);
     let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
@@ -546,7 +545,7 @@ fn a_never_received_bundle_installs_on_the_bare_sweep() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // ONE bare sweep. The bytes are on disk when it returns.
     let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
@@ -631,7 +630,7 @@ fn a_conflict_marks_up_a_sidecar_copy_and_leaves_every_agent_folder_alone() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let ctx = rig.ctx(&plane, &foll);
     let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
@@ -748,7 +747,7 @@ fn a_re_disclosed_block_never_names_a_folder_that_is_no_longer_there() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // The block is raised, and the folder that holds this person's version is named on it.
     let raised = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
@@ -797,7 +796,7 @@ fn go_back_then_resume() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // Fast-forward to v1.
     let ctx = rig.ctx(&plane, &foll);
@@ -906,7 +905,7 @@ fn pull_name_fallback_keeps_the_go_back_primary() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
 
@@ -935,7 +934,7 @@ fn go_back_resolves_a_unique_short_prefix_and_refuses_a_no_match() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let ctx = rig.ctx(&plane, &foll);
     pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
@@ -1006,7 +1005,7 @@ fn server_restore_backward_move_applies() {
     );
     // The client had applied v1 @ (1,2); the plane is then restored and re-serves genesis @ (1,1).
     plane.set_current(&id, served(WS, &id, v1.id, 2));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     {
         let ctx = rig.ctx(&plane, &foll);
         pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
@@ -1040,7 +1039,7 @@ fn mis_scoped_pointer_is_a_wire_error() {
     plane.add_version(&id, &v1);
     plane.set_current(&id, served("w_other", &id, v1.id, 1)); // wrong workspace scope
 
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     let ctx = rig.ctx(&plane, &foll);
     let err = pull_data(
         &ctx,
@@ -1082,7 +1081,7 @@ fn crash_after_swap_heals_without_false_divergence() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     let ctx = rig.ctx(&plane, &foll);
     let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
@@ -1110,7 +1109,7 @@ fn an_accept_applies_a_version_that_moved_during_the_pull() {
     plane.add_version(&id, &v1);
     plane.add_version(&id, &v2);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     // The sweep lands v1.
     {
         let ctx = rig.ctx(&plane, &foll);
@@ -1154,7 +1153,7 @@ fn go_back_snapshots_an_unsaved_draft_before_overwriting() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     // Fast-forward to v1 (so v1 is in the store + recorded; the placement is clean at v1).
     {
         let ctx = rig.ctx(&plane, &foll);
@@ -1218,7 +1217,7 @@ fn malformed_plane_response_is_a_wire_error() {
     let rig = Rig::new("malformed");
     let (id, name, _genesis) = rig.adopt(BASE);
     let plane = MalformedPlane;
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     let ctx = rig.ctx(&plane, &foll);
     let err = pull_data(
         &ctx,
@@ -1274,7 +1273,7 @@ fn auto_sweep_clean_merge_lands_draft_on_current() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
@@ -1313,7 +1312,7 @@ fn clean_merge_is_a_stable_fixpoint_with_no_lost_update() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Merged
@@ -1366,7 +1365,7 @@ fn a_targeted_accept_merges_a_diverged_draft_the_preview_called_clean() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // The prediction, over already-local bytes and writing none of them.
     let scanned = crate::scan::scan(&rig.placement()).unwrap();
@@ -1449,7 +1448,7 @@ fn keep_mine_keeps_my_side_of_the_collision_and_takes_the_rest() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // The merge stops FIRST — `--keep-mine` finishes a stopped merge, and there is nothing to
     // finish before one has stopped (see `keep_mine_refuses_wherever_no_merge_has_stopped`).
@@ -1648,7 +1647,7 @@ fn keep_mine_settles_every_structural_collision_the_way_git_does() {
         let mut plane = FixturePlane::default();
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         assert_eq!(
             only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
             PullAction::Conflicted,
@@ -1729,7 +1728,7 @@ fn a_hand_resolution_is_committed_exactly_as_written() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -1787,7 +1786,7 @@ fn a_hand_resolution_needs_neither_the_draft_nor_the_fork_point() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -1839,7 +1838,7 @@ fn keep_mine_finishes_a_stopped_merge_on_a_row_nobody_follows() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -1887,7 +1886,7 @@ fn after_keep_mine_the_draft_sits_on_theirs_and_merges_forward_from_it() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // The ordinary sweep conflicts.
     assert_eq!(
@@ -1991,7 +1990,7 @@ fn keep_mine_refuses_wherever_no_merge_has_stopped() {
         } else {
             plane.set_current(&id, served(WS, &id, genesis, 0));
         }
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         let unfollowed = InertFollow;
         let fsrc: &dyn FollowSource = if *followed { &foll } else { &unfollowed };
 
@@ -2051,7 +2050,7 @@ fn conflict_blocks_and_persists_until_escaped() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // Auto sweep → conflict (overlapping SKILL.md) → blocked.
     assert_eq!(
@@ -2123,7 +2122,7 @@ fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
     let copy = rig.conflict_copy(&id);
@@ -2176,7 +2175,7 @@ fn a_placement_holding_the_marker_tree_is_never_committed_as_the_persons_work() 
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -2266,7 +2265,7 @@ fn the_escape_discloses_the_divergent_copies_it_collapsed() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // Sweep → conflict: the placement keeps MINE, the workbench holds the marked-up tree.
     assert_eq!(
@@ -2361,7 +2360,7 @@ fn a_narrowed_reset_leaves_the_merge_stopped_and_the_escape_still_finishes_it() 
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // Sweep → a recorded stopped merge; then a SECOND managed copy holding the same un-merged
     // draft (one draft in two folders — never competitors), which is what the narrowed reset
@@ -2437,7 +2436,7 @@ fn a_narrowed_reset_leaves_per_folder_truth_on_both_surfaces() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // The stop, then two more managed copies of the same un-merged draft.
     assert_eq!(
@@ -2595,7 +2594,7 @@ fn reset_clears_the_recorded_conflict_block() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // Auto sweep → conflict (overlapping SKILL.md) → blocked.
     assert_eq!(
@@ -2656,7 +2655,7 @@ fn no_base_falls_back_to_two_way_never_silent() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
@@ -2757,7 +2756,7 @@ fn merge_unreachable_from_clean_follower_states() {
         let mut plane = FixturePlane::default();
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         let row =
             only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
         assert_eq!(row.action, PullAction::FastForwarded);
@@ -2777,7 +2776,7 @@ fn merge_unreachable_from_clean_follower_states() {
         let mut plane = FixturePlane::default();
         // `current` is the genesis the client already has applied → nothing pending.
         plane.set_current(&id, served(WS, &id, genesis, 0));
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         let row =
             only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
         assert!(
@@ -2809,7 +2808,7 @@ fn binary_conflict_keeps_both_sides_via_sidecar() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
@@ -2858,7 +2857,7 @@ fn resolve_crash_gate_converges_and_never_writes_markers_into_an_agent_folder() 
         let mut plane = FixturePlane::default();
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         let fs = FaultFs::new(0);
         pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
         (snapshot(&rig.conflict_copy(&id)), fs.ops_attempted())
@@ -2874,7 +2873,7 @@ fn resolve_crash_gate_converges_and_never_writes_markers_into_an_agent_folder() 
         let mut plane = FixturePlane::default();
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         let copy_root = rig.layout().home().join("conflicts").join("pr-describe");
 
         // Fault the Nth op (may error mid-resolve).
@@ -2961,7 +2960,7 @@ fn escape_crash_gate_keeps_one_coherent_bundle_and_never_eats_the_hand_merge() {
             let mut plane = FixturePlane::default();
             plane.add_version(&id, &v1);
             plane.set_current(&id, served(WS, &id, v1.id, 1));
-            let foll = follow(&id, FollowMode::Auto);
+            let foll = follow(&id);
             pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
             if by_hand {
                 write_tree(&rig.conflict_copy(&id), hand);
@@ -2984,7 +2983,7 @@ fn escape_crash_gate_keeps_one_coherent_bundle_and_never_eats_the_hand_merge() {
             let mut plane = FixturePlane::default();
             plane.add_version(&id, &v1);
             plane.set_current(&id, served(WS, &id, v1.id, 1));
-            let foll = follow(&id, FollowMode::Auto);
+            let foll = follow(&id);
             pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
             let copy = rig.conflict_copy(&id);
             if by_hand {
@@ -3059,7 +3058,7 @@ fn reset_crash_gate_converges_and_never_takes_the_workbench_before_the_record() 
     let n_ops = {
         let rig = Rig::new("rg-count");
         let (id, name, genesis) = reset_conflict_rig(&rig, mine);
-        let (mut plane, foll) = (FixturePlane::default(), follow(&id, FollowMode::Auto));
+        let (mut plane, foll) = (FixturePlane::default(), follow(&id));
         let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
@@ -3079,7 +3078,7 @@ fn reset_crash_gate_converges_and_never_takes_the_workbench_before_the_record() 
     for fail_at in 1..=n_ops {
         let rig = Rig::new(&format!("rg-{fail_at}"));
         let (id, name, genesis) = reset_conflict_rig(&rig, mine);
-        let (mut plane, foll) = (FixturePlane::default(), follow(&id, FollowMode::Auto));
+        let (mut plane, foll) = (FixturePlane::default(), follow(&id));
         let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
@@ -3153,7 +3152,7 @@ fn reset_conflict_rig(rig: &Rig, mine: FileSet) -> (String, String, [u8; 32]) {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -3186,7 +3185,7 @@ fn escape_of_unedited_conflict_commits_the_resolution_not_markers() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // Auto sweep → conflict (overlapping SKILL.md) → the markers are in the CONFLICT COPY, and the
     // placement still holds MINE.
@@ -3247,7 +3246,7 @@ fn escape_of_edited_conflict_commits_the_resolution() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
     // The author hand-resolves the marked-up copy (removes markers) and then escapes. The
@@ -3485,7 +3484,7 @@ fn an_unreadable_conflict_folder_refuses_instead_of_destroying_the_hand_resoluti
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
     // The hand merge, plus one thing the scanner refuses — a symlink to a note kept elsewhere.
@@ -3569,7 +3568,7 @@ fn a_hand_resolution_never_commits_topos_mine_scaffolding() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
     // The binary conflict kept both sides in the workbench. The author resolves the real file and
@@ -3623,7 +3622,7 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
     // Hand-resolve, escape — and then put the record back MARKED, which is exactly the on-disk
@@ -3777,7 +3776,7 @@ fn an_unmarked_record_matching_the_old_landed_pair_is_still_live() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -3833,7 +3832,7 @@ fn a_marked_reset_record_is_finished_by_the_next_sweep() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -3943,7 +3942,7 @@ fn a_reset_that_cannot_settle_every_copy_leaves_the_merge_live() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -4056,7 +4055,7 @@ fn every_conflict_record_this_build_writes_names_its_workbench() {
         let mut plane = FixturePlane::default();
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         assert_eq!(
             only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
             PullAction::Conflicted
@@ -4076,7 +4075,7 @@ fn every_conflict_record_this_build_writes_names_its_workbench() {
         let mut plane = FixturePlane::default();
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
-        let foll = follow(&id, FollowMode::Auto);
+        let foll = follow(&id);
         assert_eq!(
             only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
             PullAction::Conflicted
@@ -4100,7 +4099,7 @@ fn a_record_that_names_no_workbench_is_live_names_no_folder_and_still_escapes() 
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -4164,7 +4163,7 @@ fn keep_mine_commits_the_folder_as_it_stands_not_the_conflict_time_snapshot() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -4229,7 +4228,7 @@ fn an_accept_resolves_against_a_version_raised_in_the_same_pull() {
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
     ];
     write_tree(&rig.placement(), edited);
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
     let v2files: FileSet = &[
@@ -4288,7 +4287,7 @@ fn sidecar_avoids_case_fold_collision_with_a_real_path() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
@@ -4369,7 +4368,6 @@ fn follow_n(skill_id: &str, n: usize) -> FixtureFollow {
                     skill_id.to_owned(),
                     FollowContext {
                         workspace_id: WS.to_owned(),
-                        mode: FollowMode::Auto,
                         review_required: false,
                         following: true,
                     },
@@ -4435,7 +4433,7 @@ fn go_back_is_plane_independent_and_spends_no_network_call() {
         connect_level: true,
         ..Default::default()
     };
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // A go-back to the adopted genesis (recorded locally) must complete with the plane fully down —
     // and make ZERO network calls (including the proposals count, which is documented plane-independent).
@@ -4467,7 +4465,6 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
                 "topos_missing".to_owned(),
                 FollowContext {
                     workspace_id: WS.to_owned(),
-                    mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
                 },
@@ -4476,7 +4473,6 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
                 id.clone(),
                 FollowContext {
                     workspace_id: WS.to_owned(),
-                    mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
                 },
@@ -4516,7 +4512,7 @@ fn a_wedged_skills_sweep_failure_surfaces_in_its_topos_log() {
     // stay intact, so `log` still resolves the skill.
     std::fs::write(rig.layout().published(&sid(&id)).sync, b"{not json").unwrap();
     let plane = FixturePlane::default();
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let out = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     assert!(out.data.skills.is_empty(), "the wedged skill has no row");
@@ -4573,7 +4569,6 @@ fn sweep_refuses_a_traversal_follow_id_as_a_warning_never_a_join() {
             "../../evil".to_owned(),
             FollowContext {
                 workspace_id: WS.to_owned(),
-                mode: FollowMode::Auto,
                 review_required: false,
                 following: true,
             },
@@ -4819,7 +4814,7 @@ fn pull_fsyncs_exactly_the_fetched_version_plus_its_direct_parent() {
     plane.add_version(&id, &v1);
     plane.add_version(&id, &v2);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let store_dir = rig.layout().published(&sid(&id)).store;
     let genesis_era = store_loose_objects(&store_dir);
@@ -4953,7 +4948,7 @@ fn pull_fsyncs_a_present_but_unrecorded_parent() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v2);
     plane.set_current(&id, served(WS, &id, v2.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     let store_dir = rig.layout().published(&sid(&id)).store;
     let fs = RecordingFs::new();
@@ -5086,7 +5081,7 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
     let rig = Rig::new("rv-2phase");
     let (id, name, _genesis) = rig.adopt(&[("SKILL.md", FileMode::Regular, b"base\n")]);
     seed_instance(&rig);
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // good (tree A) and current (tree B, DIFFERENT) — both served by the plane.
     let good = mk_version(
@@ -5205,7 +5200,7 @@ fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
     let rig = Rig::new("rv-noop");
     let (id, name, _genesis) = rig.adopt(&[("SKILL.md", FileMode::Regular, b"base\n")]);
     seed_instance(&rig);
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
 
     // good and current share the SAME tree but DIFFERENT commit ids — current is a forward revert over
     // good's bytes, exactly the state one revert leaves behind (the repeated-revert bug's trigger).
@@ -5307,7 +5302,7 @@ fn fanout_rig(tag: &str) -> (Rig, String, FixturePlane, FixtureFollow, PathBuf) 
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    let foll = follow(&id);
     {
         let ctx = rig.ctx(&plane, &foll);
         assert_eq!(
