@@ -7,6 +7,14 @@
 //! usage line is added only when it says more than the heading — arguments or options exist), the
 //! per-command table is two columns (the flag with its value placeholder, then the plain-language
 //! help), and the preamble states the one behavior rule in ordinary words.
+//!
+//! The two consumers differ in ONE input, the registry rows the agent tables are spelled from:
+//! [`cli_ref_md`] takes this MACHINE's ([`registry::known_harnesses`] — the built-in skill teaches
+//! the folders this machine writes), [`cli_ref_md_bundled`] takes this BUILD's
+//! ([`registry::bundled_harnesses`] — a committed file and its drift gate must be a property of
+//! the commit, not of the laptop generating it). Everything else is one code path.
+
+use topos_harness::registry::{self, KnownHarness};
 
 /// The behavior verbs grouped by SCOPE — the KNOWN verb lists drive the grouping (not clap metadata),
 /// so the reference reads the way the tool is taught: self-scoped, then team-scoped, then maintenance.
@@ -204,32 +212,31 @@ fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usiz
     }
 }
 
-/// The agent → folder tables, BUILT FROM the baked registry (skills folders) and the MCP
-/// descriptor table (config files) at render time — so what the reference teaches about `-a` can
+/// The agent → folder tables, BUILT FROM the registry rows `table` states (skills folders) and
+/// their MCP columns (config files) at render time — so what the reference teaches about `-a` can
 /// never drift from what `-a` actually writes. The `--check` gate turns any registry change into a
 /// failing build until the committed copies are regenerated.
-fn render_agents(out: &mut String) {
-    use crate::manifest::dest::{mcp_dest_spelling, skills_dest_spelling};
+fn render_agents(out: &mut String, table: &[&'static KnownHarness]) {
+    use crate::manifest::dest::{mcp_dest_spelling_of, skills_dest_spelling_of};
     use crate::manifest::document::ManifestScope;
 
     // Per agent: its DEFAULT machine folders (the first is the one `-a` writes) + its project folder.
     // Sorted by slug — the reference is a lookup table, and row order carries no meaning here.
-    let mut rows: Vec<(&str, Vec<String>, Option<String>)> =
-        topos_harness::registry::known_harnesses()
-            .iter()
-            .map(|h| {
-                let machine: Vec<String> = h
-                    .user_dirs()
-                    .iter()
-                    .filter_map(|spec| spec.default_spelling())
-                    .collect();
-                (
-                    h.slug,
-                    machine,
-                    skills_dest_spelling(h.slug, ManifestScope::Project),
-                )
-            })
-            .collect();
+    let mut rows: Vec<(&str, Vec<String>, Option<String>)> = table
+        .iter()
+        .map(|h| {
+            let machine: Vec<String> = h
+                .user_dirs()
+                .iter()
+                .filter_map(|spec| spec.default_spelling())
+                .collect();
+            (
+                h.slug,
+                machine,
+                skills_dest_spelling_of(h, ManifestScope::Project),
+            )
+        })
+        .collect();
     rows.sort_unstable_by_key(|(slug, _, _)| *slug);
 
     out.push_str("## Agents (`-a`) and where files land\n\n");
@@ -310,23 +317,41 @@ fn render_agents(out: &mut String) {
          Claude Code's machine entry is a topos-owned plugin folder, not a single file.\n\n",
     );
     out.push_str("| Agent | Machine config file | Project config file |\n|---|---|---|\n");
-    for h in topos_harness::mcp::descriptor::mcp_harnesses() {
+    // The MCP view is the same filter `descriptor::mcp_harnesses` applies, over the stated table.
+    for h in table.iter().filter(|h| h.mcp().is_some()) {
         let cell_or_dash = |spelling: Option<String>| {
             spelling.map_or_else(|| "—".to_owned(), |s| format!("`{s}`"))
         };
         out.push_str(&format!(
             "| `{}` | {} | {} |\n",
             h.slug,
-            cell_or_dash(mcp_dest_spelling(h.slug, ManifestScope::Global)),
-            cell_or_dash(mcp_dest_spelling(h.slug, ManifestScope::Project)),
+            cell_or_dash(mcp_dest_spelling_of(h, ManifestScope::Global)),
+            cell_or_dash(mcp_dest_spelling_of(h, ManifestScope::Project)),
         ));
     }
     out.push('\n');
 }
 
-/// Render the full CLI reference markdown from the real clap command tree.
+/// Render the full CLI reference markdown from the real clap command tree, with the agent tables
+/// spelled from THIS MACHINE's registry — what the built-in skill places, so an agent reads the
+/// folders this machine actually writes (a local table that moved an agent's skills dir moves the
+/// teaching with it).
 #[must_use]
 pub fn cli_ref_md() -> String {
+    render_md(&registry::known_harnesses().iter().collect::<Vec<_>>())
+}
+
+/// The same document with the agent tables spelled from the BUNDLED registry — the reference this
+/// BUILD ships, which is what `cargo xtask gen-cli-ref` writes and its `--check` gate compares.
+/// A committed artifact must be a property of the commit: rendered from the resolved table, the
+/// gate would go red on any developer whose `~/.topos/harness-registry/` says something else.
+#[must_use]
+pub fn cli_ref_md_bundled() -> String {
+    render_md(&registry::bundled_harnesses().iter().collect::<Vec<_>>())
+}
+
+/// The one renderer both entry points run, over the registry rows it is handed.
+fn render_md(table: &[&'static KnownHarness]) -> String {
     let root = crate::cli::cli_command();
     let mut out = String::new();
     out.push_str("# `topos` command reference\n\n");
@@ -370,8 +395,8 @@ pub fn cli_ref_md() -> String {
          worked examples.\n\n",
     );
 
-    // The agent → folder tables, generated from the baked registry + the MCP descriptor table.
-    render_agents(&mut out);
+    // The agent → folder tables, generated from the registry rows this render was handed.
+    render_agents(&mut out, table);
 
     // The root command's own args, split by REACH so neither table claims the other's behavior:
     // the clap-global ones (`--json` + `--workspace`) attach to any verb, the rest stand alone.

@@ -678,6 +678,26 @@ pub fn bundled_version() -> &'static RegistryVersion {
     &bundled().version
 }
 
+/// The BUNDLED rows alone — the table this binary was BUILT with, whatever any machine-local file
+/// says. Leaked once, exactly as the resolved table is, so it hands out the same `&'static` rows.
+///
+/// Two callers, and both need "this build's table" rather than "this machine's":
+///
+/// - the REPO's own tooling — `cargo xtask`'s codegen and drift gates, and this crate's shape-pin
+///   tests. A gate that read the resolved table would pass or fail on whether the developer
+///   running it happens to keep a `~/.topos/harness-registry/override.toml`, which is a property
+///   of a laptop and not of the commit under test;
+/// - a TEARDOWN, which must reach a row a newer downloaded table has since dropped
+///   ([`super::teardown_harnesses`]).
+///
+/// Everything that acts on THIS machine — discovery, detection, placement, arming — reads
+/// [`super::known_harnesses`] instead.
+#[must_use]
+pub fn bundled_harnesses() -> &'static [KnownHarness] {
+    static TABLE: OnceLock<&'static [KnownHarness]> = OnceLock::new();
+    TABLE.get_or_init(|| leak(bundled().rows.clone()))
+}
+
 /// The slugs the BUNDLED table defines — the known-ids fence every fenced level is measured
 /// against. A downloaded row naming anything else never becomes a write target.
 fn bundled_slugs() -> &'static BTreeSet<String> {
@@ -779,12 +799,24 @@ pub(super) fn load_table() -> &'static [KnownHarness] {
     let downloaded = read_level(&cache_path(&home), &mut warnings);
     let (rows, resolution_warnings) = resolve(over, downloaded);
     warnings.extend(resolution_warnings);
-    for warning in warnings {
-        // stderr, once per process: the table is resolved behind a `OnceLock`, so there is exactly
-        // one resolution however many callers ask for it. stdout stays byte-clean for `--json`.
-        eprintln!("{warning}");
-    }
+    // stderr, once per process: the table is resolved behind a `OnceLock`, so there is exactly one
+    // resolution however many callers ask for it. stdout stays byte-clean for `--json`.
+    say(&mut std::io::stderr().lock(), &warnings);
     leak(rows)
+}
+
+/// Write the resolution's warnings, one per line, DROPPING any that cannot be delivered.
+///
+/// Not `eprintln!`: the macro PANICS when the write fails, and the ordinary way for a stderr write
+/// to fail is that the reader went away (`topos update --quiet 2> >(head -1)`). A gone stderr
+/// reader has stopped listening to diagnostics and nothing more — it never ends the run, and it
+/// certainly never ends it by panicking out of a table load that had already succeeded. This is
+/// the same posture the CLI's own two streams take; the table is loaded far below that machinery,
+/// so it takes the posture directly.
+fn say(out: &mut impl std::io::Write, warnings: &[String]) {
+    for warning in warnings {
+        let _ = writeln!(out, "{warning}");
+    }
 }
 
 /// Leak an owned table into the `&'static` slice the public signatures promise. ONE table per
@@ -1176,11 +1208,49 @@ mod tests {
         assert!(warnings[0].contains("brand-new-agent"), "{warnings:?}");
     }
 
+    // ---- the warnings' own stream -------------------------------------------------------------
+
+    /// A writer whose reader is gone — every write fails the way a closed pipe fails.
+    struct ClosedPipe;
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the reader is gone",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// **A gone stderr reader silences the warnings; it never ends the run.** The table had
+    /// already resolved by the time these lines are said, and `eprintln!` would have panicked the
+    /// whole process over a diagnostic nobody was listening to (`topos update --quiet 2> >(head
+    /// -1)` is enough to close that pipe).
+    #[test]
+    fn a_closed_stderr_drops_the_warnings_instead_of_panicking() {
+        say(
+            &mut ClosedPipe,
+            &[
+                "topos: the harness registry override at /tmp/x was refused".to_owned(),
+                "topos: and the downloaded copy too".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn every_warning_is_said_on_its_own_line() {
+        let mut out: Vec<u8> = Vec::new();
+        say(&mut out, &["first".to_owned(), "second".to_owned()]);
+        assert_eq!(String::from_utf8(out).expect("utf-8"), "first\nsecond\n");
+    }
+
     // ---- the round trip -----------------------------------------------------------------------
 
     #[test]
     fn rendering_the_parsed_table_re_parses_to_the_same_rows() {
-        let rendered = render_table(bundled_version(), super::super::known_harnesses());
+        let rendered = render_table(bundled_version(), bundled_harnesses());
         let again = parse_registry(&rendered, Origin::Bundled).expect("the render re-parses");
         assert_eq!(again.rows, bundled().rows, "field-for-field");
         // …and the rendering is stable: a second pass is byte-identical to the first.
@@ -1189,7 +1259,7 @@ mod tests {
 
     #[test]
     fn every_row_round_trips_through_its_own_rendering() {
-        for row in super::super::known_harnesses() {
+        for row in bundled_harnesses() {
             let text = format!(
                 "schema_version = 1\nversion = \"1\"\nmin_engine_version = 1\n\n{}",
                 render_row(row)

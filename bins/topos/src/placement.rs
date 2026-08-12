@@ -18,7 +18,14 @@
 //! A skill lands ONE copy in the shared cross-agent dir when at least one detected harness is
 //! covered by it ([`topos_harness::coverage`]), PLUS one native copy per detected harness the shared
 //! dir does NOT cover. With no harness detected at all (or no machine roots injected), the classic
-//! behavior holds: the active adapter's single placement.
+//! behavior holds: the active harness's single placement.
+//!
+//! **Every target dir comes from the harness's registry ROW**, resolved through the one resolver —
+//! the active harness's exactly like every other detected one ([`adapter_choice`]). Detection
+//! already follows a machine-local table that moved an agent's skills dir; a placement that asked
+//! the compiled adapter instead would keep writing where the agent no longer reads. The
+//! [`topos_harness::HarnessAdapter`] answers for the rest of its own behavior, and for the dir only
+//! where no row can resolve (no machine roots at all).
 //!
 //! ## Target-set reconciliation
 //!
@@ -246,10 +253,10 @@ pub(crate) fn plan_targets(
     for h in native {
         let dir = match prior_dir(ctx, prior, PlacementKind::Native, Some(h.slug), adopt) {
             Some(dir) => dir,
-            // The active adapter keeps its own richer `placement_for` for its native dir; every
-            // other detected harness resolves through the registry's canonical user skills root
-            // (v0's composition root constructs one adapter — the registry root is the same dir the
-            // sibling adapters' no-discovery default names) with the shared naming discipline.
+            // EVERY detected harness — the active one included — takes its user skills root from
+            // its registry row, through one resolver and the one naming discipline. The active
+            // slug keeps its own arm only for what the row cannot answer (see [`adapter_choice`]):
+            // a cwd-only harness still lands somewhere instead of silently placing nothing.
             None if h.slug == active_slug => {
                 adapter_choice(ctx, skill_id, naming, &taken, &owned, adopt)
             }
@@ -798,11 +805,24 @@ fn classic_plan(
     }
 }
 
-/// The active adapter's placement, hardened against paths ANOTHER tracked skill's record owns: the
-/// adapter's own ladder probes only the filesystem (it is content-blind and cannot see the sidecar),
-/// so when its answer lands on a recorded-elsewhere path — occupied or deleted — the ONE ladder
-/// re-runs directly over the same root with the CLI's full taken-probe (no duplicate naming logic;
-/// the adapter told us the root). The adopt override then applies as usual.
+/// The ACTIVE harness's placement dir — **the root from its registry ROW, the name from the ONE
+/// naming discipline.**
+///
+/// The row is the single source of the dir, exactly as it is for every other detected harness
+/// ([`plan_targets`]'s sibling branch resolves through the same [`registry::skills_root`]).
+/// Detection already follows a machine-local table that moved an agent's skills dir; a plan that
+/// asked the COMPILED adapter instead would keep landing bytes at the spelling this build was
+/// born with, in a folder the agent no longer reads. What stays the adapter's is what is genuinely
+/// its own — its id, its discovery, its config surface — none of which is a directory.
+///
+/// The adapter still answers where the row CANNOT: with no machine roots injected (production with
+/// no `$HOME`, and every test that does not exercise detection) there is nothing to resolve a row
+/// against. That path keeps its own hardening against paths ANOTHER tracked skill's record owns —
+/// the adapter probes only the filesystem, being content-blind about the sidecar, so when its
+/// answer lands on a recorded-elsewhere path the ONE ladder re-runs over the same root with the
+/// CLI's full taken-probe (no duplicate naming logic; the adapter told us the root).
+///
+/// The adopt override then applies as usual, whichever root answered.
 fn adapter_choice(
     ctx: &Ctx<'_>,
     skill_id: &str,
@@ -811,13 +831,33 @@ fn adapter_choice(
     owned: &dyn Fn(&Path) -> bool,
     adopt: Option<[u8; 32]>,
 ) -> PathBuf {
-    let mut dir = ctx.harness.placement_for(skill_id, naming, None).dir;
-    if recorded_by_another_skill(ctx, skill_id, &dir)
-        && let Some(root) = dir.parent().map(Path::to_path_buf)
-    {
-        dir = topos_harness::choose_skill_dir(&root, skill_id, naming, taken, owned);
-    }
+    let dir = match active_skills_root(ctx) {
+        Some(root) => topos_harness::choose_skill_dir(&root, skill_id, naming, taken, owned),
+        None => {
+            let mut dir = ctx.harness.placement_for(skill_id, naming, None).dir;
+            if recorded_by_another_skill(ctx, skill_id, &dir)
+                && let Some(root) = dir.parent().map(Path::to_path_buf)
+            {
+                dir = topos_harness::choose_skill_dir(&root, skill_id, naming, taken, owned);
+            }
+            dir
+        }
+    };
     adopt_override(ctx, dir, skill_id, naming, adopt)
+}
+
+/// The active harness's USER-scope skills root, from its registry row through the one resolver.
+/// `None` when no machine roots are injected (nothing to resolve against) or the row names no
+/// user-scope dir at all (a cwd-only harness) — the two cases in which the adapter's own compiled
+/// default is the honest answer.
+fn active_skills_root(ctx: &Ctx<'_>) -> Option<PathBuf> {
+    let roots = ctx.roots.as_ref()?;
+    registry::skills_root(
+        ctx.harness.id().slug(),
+        registry::SkillScope::User,
+        &roots.home,
+        roots.cwd.as_deref(),
+    )
 }
 
 /// Adopt-in-place override on a chosen placement dir: when the by-name candidate under the same
@@ -1834,6 +1874,112 @@ fn value_dest(value: &crate::manifest::document::EntryValue) -> Option<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+    use topos_types::HarnessId;
+
+    /// A self-cleaning temp dir (RAII) — a stand-in machine home.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("topos-plc-{tag}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir.canonicalize().unwrap())
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An adapter whose placement answer is a dir NO registry row names — the stand-in for a
+    /// compiled spelling that has fallen behind the table (a machine-local registry that moved
+    /// this harness's skills dir leaves exactly this gap: detection follows the row, and a
+    /// placement asking the adapter would not).
+    #[derive(Debug)]
+    struct AdapterElsewhere {
+        elsewhere: PathBuf,
+    }
+    impl HarnessAdapter for AdapterElsewhere {
+        fn id(&self) -> HarnessId {
+            HarnessId::ClaudeCode
+        }
+        fn discover(&self) -> Vec<DiscoveredPlacement> {
+            Vec::new()
+        }
+        fn placement_for(
+            &self,
+            skill_id: &str,
+            _naming: PlacementNaming<'_>,
+            _d: Option<&DiscoveredPlacement>,
+        ) -> PlacementTarget {
+            PlacementTarget {
+                dir: self.elsewhere.join(skill_id),
+            }
+        }
+    }
+
+    /// **The active harness's target dir is its registry ROW's, never the compiled adapter's.**
+    /// The row is what detection, attribution and every sibling harness's placement already read;
+    /// a machine carrying a table that moved this agent's skills dir must move the bytes with it,
+    /// and the only way that holds is for one source to name the dir.
+    ///
+    /// Rooted at a temp home with no agent detected, so the plan takes the classic single-target
+    /// path — the one branch that used to hand the question to the adapter outright.
+    #[test]
+    fn the_active_harnesss_target_dir_comes_from_its_registry_row() {
+        let home = Scratch::new("row-home");
+        let elsewhere = Scratch::new("row-adapter");
+        let harness = AdapterElsewhere {
+            elsewhere: elsewhere.0.clone(),
+        };
+        let fs = crate::fs_seam::RealFs;
+        let ids = crate::ids::test_sources::SeqIds::new("p");
+        let clock = crate::ids::test_sources::FixedClock(1);
+        let plane = crate::plane::InertPlane;
+        let follow = crate::plane::InertFollow;
+        let ctx = Ctx {
+            progress: crate::progress::silent(),
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: "d_test".to_owned(),
+            layout: crate::sidecar::Layout::new(&home.0),
+            harness: &harness,
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
+            plane: &plane,
+            follow: &follow,
+            roots: Some(crate::ctx::AgentRoots::new(home.0.clone(), None)),
+        };
+        let naming = PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some("acme"),
+        };
+
+        let plan = plan_targets(&ctx, "topos_aabbccdd", naming, None, None);
+        let dirs: Vec<PathBuf> = plan.dirs().map(|d| d.dir.clone()).collect();
+
+        // The row's own user skills root, resolved the one way (env overrides honored), plus the
+        // ONE naming discipline's choice of folder inside it.
+        let root = registry::skills_root(
+            HarnessId::ClaudeCode.slug(),
+            registry::SkillScope::User,
+            &home.0,
+            None,
+        )
+        .expect("claude-code has a user skills root");
+        assert_eq!(dirs, vec![root.join("deploy")]);
+        assert!(
+            !dirs.iter().any(|d| d.starts_with(&elsewhere.0)),
+            "the adapter's compiled dir is not a placement: {dirs:?}"
+        );
+    }
 
     /// A one-entry never-materialized map (a reservation) whose slot carries a recorded adoption.
     fn reservation_map(dir: &str, pre_existing: Option<&str>) -> PlacementMap {

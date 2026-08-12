@@ -10,9 +10,12 @@
 //! weekly scheduled workflow (`.github/workflows/registry-drift.yml`) runs it on its own lane and
 //! opens no PR: the report is the product, and the re-sync is still a person's decision.
 //!
-//! It reads the table through [`topos_harness::registry::known_harnesses`], so it sees exactly what
-//! the binary sees — the committed `crates/topos-harness/registry.toml`, which is where a re-sync
-//! is written.
+//! It reads the table through [`topos_harness::registry::bundled_harnesses`] — the BUNDLED rows,
+//! i.e. the committed `crates/topos-harness/registry.toml`, which is where a re-sync is written.
+//! Deliberately not the resolved table: `known_harnesses` would fold in whatever
+//! `~/.topos/harness-registry/` the developer running this happens to keep, and a repo check that
+//! answers differently per laptop is not a check. Every gate and generator under `xtask` reads the
+//! bundled accessor for that reason.
 //!
 //! ## What it parses, and its limits
 //! The upstream source is TypeScript, so this is a LIGHTWEIGHT line parse of the `agents` object literal
@@ -186,7 +189,8 @@ pub(crate) fn run() -> Result<()> {
     println!("fetching {UPSTREAM_URL} …");
     let src = fetch_upstream()?;
     let upstream = parse_upstream(&src)?;
-    let local = topos_harness::registry::known_harnesses();
+    // The COMMITTED table (never the resolved one — see the module doc).
+    let local = topos_harness::registry::bundled_harnesses();
 
     let upstream_slugs: BTreeMap<&str, ()> =
         upstream.iter().map(|a| (a.slug.as_str(), ())).collect();
@@ -364,7 +368,7 @@ export async function detectInstalledAgents() { return []; }
         let agents = parse_upstream(SAMPLE).expect("parses");
         let by: BTreeMap<&str, &UpstreamAgent> =
             agents.iter().map(|a| (a.slug.as_str(), a)).collect();
-        let local: BTreeMap<&str, &KnownHarness> = topos_harness::registry::known_harnesses()
+        let local: BTreeMap<&str, &KnownHarness> = topos_harness::registry::bundled_harnesses()
             .iter()
             .map(|h| (h.slug, h))
             .collect();

@@ -4,6 +4,9 @@ TWO client-side ports, one responsibility each, plus the `ConfigStore` + `Comman
 the harness impls:
 
 - **`HarnessAdapter`** answers **where** — `id` / `discover` / `placement_for`. It writes nothing.
+  (A target DIR is the registry ROW's: the CLI's placement engine resolves every detected
+  harness's skills root from the table, so `placement_for` decides a dir only where no row can
+  resolve — a client with no machine roots at all.)
 - **`triggers::TriggerAdapter`** answers **when the update check fires** — `slug` / `install` /
   `remove` / `present` / `artifacts`, plus the two honesty knobs (`offline_probe_refusal`,
   `scrub_needs_live_harness`). It edits its own harness config surface and nothing else.
@@ -114,6 +117,15 @@ never learns which machinery served which harness.
   a release), path validation on every downloaded dir, no absolute root outside the bundled
   table, and a 256 KB ceiling. The refresher is the client's (`topos::harness_registry`, on the
   forge lane's clock); there is no hot reload — the next process reads what landed.
+  **THREE accessors, three questions.** `known_harnesses()` is what THIS MACHINE reads today, and
+  everything acting on it joins there: discovery, detection, attribution, placement, arming.
+  `teardown_harnesses()` is that table UNIONED with the bundled one (dedup by slug, the loaded row
+  winning): a downloaded table may legitimately SHRINK, and arming honors the omission — but the
+  hook a dropped row was armed with is still in that agent's config, so the uninstall preview, the
+  scrub sweep and the footprint they share read the union or `uninstall --yes` would delete the
+  sidecar and leave an orphaned hook. `bundled_harnesses()` is THIS BUILD's table alone — what the
+  repo's own tooling (every `cargo xtask` generator and gate) and this crate's shape pins read, so
+  a check answers for the commit and not for the developer's `~/.topos/harness-registry/`.
   Which harnesses topos can PLACE into and ARM is NOT a column — it is decided per port
   (`HarnessAdapter` impls, `triggers::adapter_for_slug`). Attribution is ONE query,
   `folder_readers` (with its `folder_reader_slugs` spelling): every INSTALLED harness whose user

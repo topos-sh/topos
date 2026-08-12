@@ -13,6 +13,13 @@
 //! release — its trigger, its adapter and its id are compiled), and its dirs are re-validated. All
 //! of that lives in [`mod@format`].
 //!
+//! **Three accessors, three questions.** [`known_harnesses`] is what this MACHINE reads today, and
+//! everything acting on it — discovery, detection, placement, arming — joins there.
+//! [`teardown_harnesses`] adds the bundled floor back, because a table that shrank does not
+//! un-arm the hooks the shrunk-away rows were armed with. [`bundled_harnesses`] is this BUILD's
+//! table alone — the repo's own tooling and this crate's shape pins, which must not answer
+//! differently on a developer machine carrying an override.
+//!
 //! The queries over the real filesystem are read-only: [`discover_all`] (what skills are on this
 //! machine), [`folder_readers`] (which INSTALLED harnesses read a given skills dir — the one
 //! attribution answer both the untracked listing and `add`'s `@<slug>` resolution join on), and
@@ -43,7 +50,8 @@ pub mod format;
 
 pub use format::{
     MAX_REGISTRY_BYTES, Origin, ParsedRegistry, REGISTRY_ENGINE_VERSION, RegistryError,
-    RegistryVersion, SCHEMA_VERSION, bundled_version, cache_path, override_path, parse_registry,
+    RegistryVersion, SCHEMA_VERSION, bundled_harnesses, bundled_version, cache_path, override_path,
+    parse_registry,
 };
 
 /// The on-disk scope a skill was discovered in.
@@ -320,6 +328,39 @@ pub fn known_harness(slug: &str) -> Option<&'static KnownHarness> {
     known_harnesses().iter().find(|h| h.slug == slug)
 }
 
+/// Every row a TEARDOWN must reach: the loaded table UNIONED with the bundled one, deduped by slug
+/// (the loaded row wins wherever both define it), the loaded table's order first and the
+/// bundled-only rows appended in their own.
+///
+/// **The asymmetry is the point.** A downloaded table may legitimately SHRINK — "the file is the
+/// table", so a row it omits stops being known — and ARMING follows that decision: a dropped slug
+/// is one this machine no longer arms. But the hook armed under the BUNDLED table is still in that
+/// harness's config, and a teardown iterating the loaded table alone would walk straight past it:
+/// `uninstall --yes` would delete the sidecar and leave the agent invoking a topos that is no
+/// longer there. So every teardown-shaped path — the uninstall preview, the scrub sweep, and the
+/// footprint the two share — reads THIS instead. What may still be armed is the bundled floor's
+/// business; what may still be ARMED ANEW is the loaded table's.
+#[must_use]
+pub fn teardown_harnesses() -> Vec<&'static KnownHarness> {
+    merge_for_teardown(known_harnesses(), bundled_harnesses())
+}
+
+/// [`teardown_harnesses`]'s pure core — the union, taken over stated tables so the rule is
+/// testable against a table that dropped a row (which is not a shape a suite can resolve out of a
+/// real `~/.topos`).
+fn merge_for_teardown(
+    loaded: &'static [KnownHarness],
+    bundled: &'static [KnownHarness],
+) -> Vec<&'static KnownHarness> {
+    let mut out: Vec<&'static KnownHarness> = loaded.iter().collect();
+    out.extend(
+        bundled
+            .iter()
+            .filter(|b| !loaded.iter().any(|l| l.slug == b.slug)),
+    );
+    out
+}
+
 /// A harness row whose MCP surface is rooted at the passed home, with no skills dirs and no
 /// detection probes — a TEST fixture. Production code READS rows from [`known_harnesses`] and never
 /// builds one; this exists so a config-placement test can point every surface inside a temp home it
@@ -392,6 +433,15 @@ impl KnownHarness {
     #[must_use]
     pub fn shared_dir_claim(&self) -> SharedDirSupport {
         self.shared_dir
+    }
+
+    /// Whether this harness looks INSTALLED under `home` — one of its detect dirs exists. THE
+    /// presence gate [`discover_all`], [`folder_readers`] and [`detected_harnesses`] all run,
+    /// exposed for the one caller that asks it of a row it did not get from
+    /// [`detected_harnesses`]: a teardown sweeping the [`teardown_harnesses`] union.
+    #[must_use]
+    pub fn is_installed(&self, home: &Path, cwd: Option<&Path>) -> bool {
+        is_present(self, home, cwd)
     }
 }
 
@@ -802,9 +852,56 @@ mod tests {
         );
     }
 
+    /// **A teardown reaches a row the loaded table dropped.** A downloaded table may omit a row —
+    /// that is the stated cost of "the file is the table" — and the arming sweep honors the
+    /// omission. The hook that row was armed with does not un-arm itself, so the teardown set is
+    /// the union: the loaded rows as they stand, plus every bundled row they no longer name.
+    #[test]
+    fn a_teardown_reaches_a_row_the_loaded_table_dropped() {
+        // The stand-in for a downloaded table carrying ONE row: a stated table, since a suite
+        // cannot resolve one out of a real `~/.topos`.
+        let loaded: &'static [KnownHarness] =
+            Vec::leak(vec![kh("cursor", "Cursor (moved)", &[], ".moved", &[])]);
+        let union = merge_for_teardown(loaded, bundled_harnesses());
+
+        // The loaded row leads, and it is the LOADED one — a table that moved a dir is still the
+        // one that says where that harness reads.
+        assert_eq!(union[0].slug, "cursor");
+        assert_eq!(union[0].display_name, "Cursor (moved)");
+        assert_eq!(
+            union.iter().filter(|h| h.slug == "cursor").count(),
+            1,
+            "one row per slug — the loaded one"
+        );
+        // …and every bundled slug is still reachable, `codex` (an armed hook in its own two
+        // config surfaces) first among them.
+        assert!(
+            union.iter().any(|h| h.slug == "codex"),
+            "a dropped row is still swept: {:?}",
+            union.iter().map(|h| h.slug).collect::<Vec<_>>()
+        );
+        for row in bundled_harnesses() {
+            assert!(union.iter().any(|h| h.slug == row.slug), "{}", row.slug);
+        }
+        assert_eq!(
+            union.len(),
+            bundled_harnesses().len(),
+            "no slug is counted twice"
+        );
+
+        // The ordinary machine: nothing local, so the union IS the table — same rows, same order.
+        let plain = merge_for_teardown(known_harnesses(), bundled_harnesses());
+        assert_eq!(
+            plain.iter().map(|h| h.slug).collect::<Vec<_>>(),
+            known_harnesses().iter().map(|h| h.slug).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn table_shape_is_the_ported_registry() {
-        let all = known_harnesses();
+        // The BUNDLED table: a shape pin answers for the commit, never for whatever
+        // `~/.topos/harness-registry/` the developer running it happens to keep.
+        let all = bundled_harnesses();
         assert_eq!(all.len(), 76, "every vercel-labs/skills agent is ported");
 
         // Slugs are unique.

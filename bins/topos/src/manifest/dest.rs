@@ -43,7 +43,14 @@ pub(crate) fn safe_project_rel(raw: &str) -> bool {
 /// DIRECTORY, and every receipt names the `.mcp.json` inside it. Teaching one spelling while
 /// printing another meant pasting a receipt's own path into `dest` was refused.
 pub(crate) fn mcp_dest_spelling(slug: &str, scope: ManifestScope) -> Option<String> {
-    let mcp = descriptor::mcp_harness(slug)?.mcp()?;
+    mcp_dest_spelling_of(descriptor::mcp_harness(slug)?, scope)
+}
+
+/// [`mcp_dest_spelling`] over a ROW the caller already holds — the form the reference renderer
+/// uses, so it can spell a stated table (the bundled one, for the committed copy) without a second
+/// lookup rule.
+pub(crate) fn mcp_dest_spelling_of(harness: &KnownHarness, scope: ManifestScope) -> Option<String> {
+    let mcp = harness.mcp()?;
     match scope {
         ManifestScope::Global => {
             let user = mcp.user?;
@@ -78,7 +85,11 @@ fn surface_key(entry: &str, dialect: McpDialect) -> &str {
 /// string verbatim for a project file. `None` for an unknown slug, a scope the harness has no
 /// dir at, or a machine root with no `~/` spelling (a cwd- or env-only root).
 pub(crate) fn skills_dest_spelling(slug: &str, scope: ManifestScope) -> Option<String> {
-    let h = registry::known_harness(slug)?;
+    skills_dest_spelling_of(registry::known_harness(slug)?, scope)
+}
+
+/// [`skills_dest_spelling`] over a ROW the caller already holds (see [`mcp_dest_spelling_of`]).
+pub(crate) fn skills_dest_spelling_of(h: &KnownHarness, scope: ManifestScope) -> Option<String> {
     match scope {
         ManifestScope::Global => h.user_dirs().first()?.default_spelling(),
         ManifestScope::Project => {

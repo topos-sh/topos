@@ -446,7 +446,9 @@ mod tests {
     fn the_trigger_capable_harnesses_are_a_view_over_the_registry() {
         let cfg = MemConfig::default();
         let home = std::path::PathBuf::from("/no-such-home");
-        let capable: Vec<&str> = crate::registry::known_harnesses()
+        // The BUNDLED table: the enumeration this BUILD ships, so the pin cannot be moved by a
+        // machine-local override on the machine running it.
+        let capable: Vec<&str> = crate::registry::bundled_harnesses()
             .iter()
             .filter(|h| adapter_for_slug(h.slug, &home, &cfg, &NoCli).is_some())
             .map(|h| h.slug)

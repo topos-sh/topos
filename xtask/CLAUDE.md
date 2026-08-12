@@ -20,9 +20,12 @@ cargo xtask ci                         # ALL the non-DB gates, in CI's order, fa
   hand-edit.**
 - **`gen-fixtures`** — golden `--json` envelopes built FROM the typed shapes.
 - **`gen-cli-ref`** — TWO committed copies of the same bytes (`docs/cli.md` +
-  `skills/topos/reference.md`), both drift-gated. The RENDERER lives in the client lib
-  (`topos::cli_ref_md()`) because the built-in skill places the same bytes at placement time —
-  one implementation, no copy can drift; xtask keeps only the file-write/compare driver.
+  `skills/topos/reference.md`), both drift-gated. The RENDERER lives in the client lib because the
+  built-in skill places the same bytes at placement time — one implementation, no copy can drift;
+  xtask keeps only the file-write/compare driver. It calls `topos::cli_ref_md_bundled()`, the
+  render whose agent tables are spelled from the BUNDLED harness registry (the runtime
+  `cli_ref_md()` spells this machine's): a committed file and its gate answer for the commit, not
+  for the `~/.topos/harness-registry/` of whoever ran the command.
 - **`check-arch`** — the trust claims as one gate: the client carries no
   `plane-store`/`sqlx`/async-runtime/HTTP/contract-derive edge; the kernel carries no wire DTOs
   or IO stacks; the vault cannot name identity-era stacks (`oauth2`/`openidconnect`/`reqwest`/
@@ -36,8 +39,8 @@ cargo xtask ci                         # ALL the non-DB gates, in CI's order, fa
   serves the EXACT bytes the binary embeds (a client compares the served `version` against the one
   it was compiled with). A verbatim copy; `--check` is a byte compare.
 - **`check-registry-drift`** — fetches upstream `agents.ts` (vercel-labs/skills) and diffs it
-  against `crates/topos-harness/registry.toml`; re-syncing is a deliberate human decision, which is
-  why this never gates a push. It runs weekly on its own scheduled workflow
+  against `crates/topos-harness/registry.toml` (through `bundled_harnesses()`, like every gate
+  here); re-syncing is a deliberate human decision, which is why this never gates a push. It runs weekly on its own scheduled workflow
   (`.github/workflows/registry-drift.yml`) and by hand. It reads names/dirs only — detect-body
   changes are a known blind spot.
 - **`ci`** — fmt, clippy, doc, the four drift gates, check-arch. Not covered:
