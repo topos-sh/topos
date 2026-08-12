@@ -21,7 +21,8 @@ immutable `topos-…` key, so never hand-edit those entries or rename them (a re
 agent's OAuth sign-in). An entry a human edited reads `drifted` and is left byte-identical forever.
 
 The gate is the same client-side and server-side, and refuses BEFORE anything is written:
-`MCP_LOCAL_REFUSED` (a local `packages[]`), `MCP_NO_STREAMABLE_REMOTE`, `MCP_INSECURE_URL`,
+`MCP_PACKAGE_UNPINNED` (a package without one exact version), `MCP_NO_STREAMABLE_REMOTE`
+(neither a usable remote nor a package), `MCP_INSECURE_URL`,
 `MCP_URL_TEMPLATE` (a `{placeholder}` endpoint), `MCP_SECRET_REFUSED` (a credential in ANY form —
 `isSecret`, a value-less header, per-installation variables, or a literal that merely looks like a
 token), `MCP_INVALID`, `MCP_NAME_TAKEN` (publish only). Never work around one by editing the
