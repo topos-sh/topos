@@ -1877,6 +1877,63 @@ impl crate::release::ReleaseProbe for UreqVersionProbe {
 }
 
 // =================================================================================================
+// UreqHarnessRegistry — the harness TABLE's download: ONE GET of a small text document, on the
+// ordinary agent config (the table is served by the same plane the client already talks to, so the
+// timeouts that keep a session-start hook honest apply unchanged). Every failure is a sentence —
+// the lane records it and moves on; nothing here can fail a sweep.
+// =================================================================================================
+
+/// The blocking `ureq` harness-registry download.
+pub(crate) struct UreqHarnessRegistry {
+    agent: ureq::Agent,
+}
+
+impl std::fmt::Debug for UreqHarnessRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UreqHarnessRegistry")
+            .finish_non_exhaustive()
+    }
+}
+
+impl UreqHarnessRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            agent: ureq::Agent::new_with_config(agent_config()),
+        }
+    }
+}
+
+impl crate::harness_registry::RegistryFetch for UreqHarnessRegistry {
+    fn get(&self, url: &str) -> Result<String, String> {
+        let host = host_label(url);
+        let resp = self
+            .agent
+            .get(url)
+            .call()
+            .map_err(|e| transport_reason(&host, &e))?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return Err(format!("{url} answered HTTP {status}"));
+        }
+        // The same ceiling the reader enforces, applied at the wire: a body past it is refused
+        // rather than buffered.
+        let bytes = resp
+            .into_body()
+            .into_with_config()
+            .limit(topos_harness::registry::MAX_REGISTRY_BYTES as u64 + 1)
+            .read_to_vec()
+            .map_err(|e| format!("reading {url}: {e}"))?;
+        if bytes.len() > topos_harness::registry::MAX_REGISTRY_BYTES {
+            return Err(format!(
+                "{url} served more than {} bytes",
+                topos_harness::registry::MAX_REGISTRY_BYTES
+            ));
+        }
+        String::from_utf8(bytes).map_err(|_| format!("{url} did not serve text"))
+    }
+}
+
+// =================================================================================================
 // UreqGitSource — the real remote-source fetcher for `add <owner/repo>`. Downloads a repo as a `.tar.gz`
 // from GitHub's API tarball endpoint (which 302-redirects to codeload; the agent follows it) over the same
 // blocking agent as the other transports — whose config carries the [`USER_AGENT`] GitHub demands

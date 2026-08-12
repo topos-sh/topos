@@ -1,8 +1,17 @@
-//! The **baked harness registry** — ONE row per agent harness, carrying everything this crate knows
+//! The **harness registry** — ONE row per agent harness, carrying everything this crate knows
 //! about it: the on-disk skill-directory conventions ported from `vercel-labs/skills` (so `topos` can
 //! discover *untracked* skills across the whole ecosystem), the MCP-server config surfaces, and the
 //! shared-dir coverage claim. Every consumer joins on this table; supporting a new capability for a
 //! harness is filling a column, not adding a table.
+//!
+//! **The table is DATA, not code.** The rows live in `crates/topos-harness/registry.toml`, which
+//! this crate compiles in and [`mod@format`] parses — and which a machine may carry a newer copy of
+//! under `~/.topos/harness-registry/` without waiting for a release, because an agent moving its
+//! skills dir is news, not a new feature. [`known_harnesses`] resolves the levels once per process
+//! and hands out the same `&'static` rows every caller always had. What a downloaded copy may say
+//! is fenced hard: it can only refine slugs this binary already knows (a NEW harness still needs a
+//! release — its trigger, its adapter and its id are compiled), and its dirs are re-validated. All
+//! of that lives in [`mod@format`].
 //!
 //! The queries over the real filesystem are read-only: [`discover_all`] (what skills are on this
 //! machine), [`folder_readers`] (which INSTALLED harnesses read a given skills dir — the one
@@ -25,9 +34,17 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::coverage::SharedDirSupport;
 use crate::mcp::descriptor::McpDialect;
+
+pub mod format;
+
+pub use format::{
+    MAX_REGISTRY_BYTES, Origin, ParsedRegistry, REGISTRY_ENGINE_VERSION, RegistryError,
+    RegistryVersion, SCHEMA_VERSION, bundled_version, cache_path, override_path, parse_registry,
+};
 
 /// The on-disk scope a skill was discovered in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +55,7 @@ pub enum SkillScope {
     Project,
 }
 
-/// One known harness's directory conventions (a baked-table row).
+/// One known harness's directory conventions (one `registry.toml` row, parsed and leaked).
 #[derive(Debug)]
 pub struct KnownHarness {
     /// The stable machine slug, exactly as `vercel-labs/skills` names it (e.g. `claude-code`, `cursor`).
@@ -141,6 +158,32 @@ pub struct DirSpec {
 }
 
 impl Root {
+    /// Every root, in one place — what [`Root::from_tag`] searches and what a refusal lists. A new
+    /// root is a new arm here and in [`Root::tag`]; nothing else enumerates them.
+    const ALL: &'static [Root] = &[
+        Root::Home,
+        Root::Config,
+        Root::CodexHome,
+        Root::ClaudeHome,
+        Root::VibeHome,
+        Root::HermesHome,
+        Root::AutohandHome,
+        Root::GrokHome,
+        Root::Cwd,
+        Root::Abs,
+        Root::Appdata,
+        Root::FlatpakConfig,
+    ];
+
+    /// The inverse of [`Root::tag`] — the root a raw spec string names, or `None` for a tag this
+    /// build does not know. The absolute root has no tag (it is spelled by a leading `/`), so it is
+    /// never matched here.
+    fn from_tag(tag: &str) -> Option<Root> {
+        (!tag.is_empty())
+            .then(|| Root::ALL.iter().copied().find(|r| r.tag() == tag))
+            .flatten()
+    }
+
     /// The tag naming this root's upstream resolution variable (`home`, `configHome`, `codexHome`, …) —
     /// the encoding [`DirSpec::raw`] renders and an out-of-band checker compares. An absolute root is the
     /// empty tag (it renders `/`-rooted).
@@ -225,76 +268,11 @@ impl DirSpec {
     }
 }
 
-// Terse const-fn constructors so the baked table below stays a readable one-line-per-harness block.
+/// The ONE `home`-rooted dir constructor still built in Rust: the test fixture below. Every
+/// production row is DATA — parsed out of `registry.toml` by [`mod@format`].
 const fn home(suffix: &'static str) -> DirSpec {
     DirSpec {
         root: Root::Home,
-        suffix,
-    }
-}
-const fn cfg(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::Config,
-        suffix,
-    }
-}
-const fn codex_home(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::CodexHome,
-        suffix,
-    }
-}
-const fn claude_home(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::ClaudeHome,
-        suffix,
-    }
-}
-const fn vibe_home(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::VibeHome,
-        suffix,
-    }
-}
-const fn hermes_home(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::HermesHome,
-        suffix,
-    }
-}
-const fn autohand_home(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::AutohandHome,
-        suffix,
-    }
-}
-const fn grok_home(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::GrokHome,
-        suffix,
-    }
-}
-const fn cwd(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::Cwd,
-        suffix,
-    }
-}
-const fn abs(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::Abs,
-        suffix,
-    }
-}
-const fn appdata(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::Appdata,
-        suffix,
-    }
-}
-const fn flatpak(suffix: &'static str) -> DirSpec {
-    DirSpec {
-        root: Root::FlatpakConfig,
         suffix,
     }
 }
@@ -318,651 +296,28 @@ const fn kh(
 }
 
 impl KnownHarness {
-    /// Column setter: this harness's MCP config surfaces (see [`McpSurfaces`]). Chained onto [`kh`] in
-    /// the table below so a row without MCP support stays a one-liner.
+    /// Column setter: this harness's MCP config surfaces (see [`McpSurfaces`]). Chained onto [`kh`]
+    /// by the test fixture below.
     const fn with_mcp(mut self, mcp: McpSurfaces) -> Self {
         self.mcp = Some(mcp);
         self
     }
-
-    /// Column setter: this harness's shared-dir coverage claim, with the evidence that backs it. Each
-    /// call site carries the evidence in a comment — a fresh probe result is a one-line edit.
-    const fn with_shared_dir(mut self, support: SharedDirSupport) -> Self {
-        self.shared_dir = support;
-        self
-    }
 }
 
-/// The full baked registry — ported one-to-one from `vercel-labs/skills`'s `src/agents.ts`. Directory
-/// strings are preserved verbatim (only re-expressed as `Root` + suffix so env overrides resolve). Rows
-/// are kept in that file's order, which fixes the "first matching harness" tie-break for a shared dir.
-static HARNESSES: &[KnownHarness] = &[
-    kh(
-        "aider-desk",
-        "AiderDesk",
-        &[home(".aider-desk/skills")],
-        ".aider-desk/skills",
-        &[home(".aider-desk")],
-    ),
-    kh(
-        "amp",
-        "Amp",
-        &[cfg("agents/skills")],
-        ".agents/skills",
-        &[cfg("amp")],
-    )
-    // Vendor manual lists `~/.agents/skills` among its skills dirs (closed source — docs only).
-    .with_shared_dir(SharedDirSupport::Docs(true)),
-    kh(
-        "antigravity",
-        "Antigravity",
-        &[home(".gemini/antigravity/skills")],
-        ".agents/skills",
-        &[home(".gemini/antigravity")],
-    ),
-    kh(
-        "antigravity-cli",
-        "Antigravity CLI",
-        &[home(".gemini/antigravity-cli/skills")],
-        ".agents/skills",
-        &[home(".gemini/antigravity-cli")],
-    ),
-    kh(
-        "astrbot",
-        "AstrBot",
-        &[home(".astrbot/data/skills")],
-        "data/skills",
-        &[cwd("data/skills"), home(".astrbot")],
-    ),
-    kh(
-        "autohand-code",
-        "Autohand Code CLI",
-        &[autohand_home("skills")],
-        ".autohand/skills",
-        &[autohand_home("")],
-    ),
-    kh(
-        "augment",
-        "Augment",
-        &[home(".augment/skills")],
-        ".augment/skills",
-        &[home(".augment")],
-    ),
-    kh(
-        "bob",
-        "IBM Bob",
-        &[home(".bob/skills")],
-        ".bob/skills",
-        &[home(".bob")],
-    ),
-    kh(
-        "claude-code",
-        "Claude Code",
-        &[claude_home("skills")],
-        ".claude/skills",
-        &[claude_home("")],
-    )
-    .with_mcp(McpSurfaces {
-        // An OWNED plugin DIRECTORY: the `.mcp.json` under it is patched through the strict JSON
-        // driver; `plugin_dir` renders the constant `.claude-plugin/plugin.json` beside it.
-        user: Some(McpSurface {
-            dir: claude_home("skills/topos-mcp"),
-            dialect: McpDialect::ClaudePluginDir,
-        }),
-        project: Some((".mcp.json", McpDialect::ClaudeProjectJson)),
-        reload_note: "loads next session; /reload-plugins reloads live; sign in with /mcp",
-    }),
-    kh(
-        "openclaw",
-        "OpenClaw",
-        &[
-            home(".openclaw/skills"),
-            home(".clawdbot/skills"),
-            home(".moltbot/skills"),
-        ],
-        "skills",
-        &[home(".openclaw"), home(".clawdbot"), home(".moltbot")],
-    )
-    .with_mcp(McpSurfaces {
-        user: Some(McpSurface {
-            dir: home(".openclaw/openclaw.json"),
-            dialect: McpDialect::OpenclawJson,
-        }),
-        project: None,
-        reload_note: "picked up automatically; sign in with `openclaw mcp login <name>`",
-    })
-    // Verified against a live containerized install of openclaw@2026.7.1 on 2026-07-16:
-    // `~/.agents/skills` is a recognized skills root, higher precedence than `~/.openclaw/skills`.
-    .with_shared_dir(SharedDirSupport::Probed(true)),
-    kh(
-        "cline",
-        "Cline",
-        &[home(".agents/skills")],
-        ".agents/skills",
-        &[home(".cline")],
-    )
-    // Verified against cline 3.0.43 source on 2026-07-16: `~/.agents/skills` is in the global
-    // skills search paths (upgrades the registry-derived docs-level claim).
-    .with_shared_dir(SharedDirSupport::Probed(true)),
-    kh(
-        "codearts-agent",
-        "CodeArts Agent",
-        &[home(".codeartsdoer/skills")],
-        ".codeartsdoer/skills",
-        &[home(".codeartsdoer")],
-    ),
-    kh(
-        "codebuddy",
-        "CodeBuddy",
-        &[home(".codebuddy/skills")],
-        ".codebuddy/skills",
-        &[cwd(".codebuddy"), home(".codebuddy")],
-    ),
-    kh(
-        "codemaker",
-        "Codemaker",
-        &[home(".codemaker/skills")],
-        ".codemaker/skills",
-        &[home(".codemaker")],
-    ),
-    kh(
-        "codestudio",
-        "Code Studio",
-        &[home(".codestudio/skills")],
-        ".codestudio/skills",
-        &[home(".codestudio")],
-    ),
-    kh(
-        "codex",
-        "Codex",
-        &[codex_home("skills")],
-        ".agents/skills",
-        &[codex_home(""), abs("etc/codex")],
-    )
-    .with_mcp(McpSurfaces {
-        user: Some(McpSurface {
-            dir: codex_home("config.toml"),
-            dialect: McpDialect::CodexToml,
-        }),
-        // Codex honors a project config only once the user trusts the repo in Codex.
-        project: Some((".codex/config.toml", McpDialect::CodexToml)),
-        reload_note: "restart codex; sign in with `codex mcp login <name>`",
-    })
-    // Verified against a live codex-cli 0.144.4 binary on 2026-07-16: no `.agents/skills` path
-    // literal exists in the build; its only user skills root is `$CODEX_HOME/skills`.
-    .with_shared_dir(SharedDirSupport::Probed(false)),
-    kh(
-        "command-code",
-        "Command Code",
-        &[home(".commandcode/skills")],
-        ".commandcode/skills",
-        &[home(".commandcode")],
-    ),
-    kh(
-        "continue",
-        "Continue",
-        &[home(".continue/skills")],
-        ".continue/skills",
-        &[cwd(".continue"), home(".continue")],
-    ),
-    kh(
-        "cortex",
-        "Cortex Code",
-        &[home(".snowflake/cortex/skills")],
-        ".cortex/skills",
-        &[home(".snowflake/cortex")],
-    ),
-    kh(
-        "crush",
-        "Crush",
-        &[home(".config/crush/skills")],
-        ".crush/skills",
-        &[home(".config/crush")],
-    )
-    // Verified against crush v0.85.0 source on 2026-07-16: `~/.agents/skills` is in the global
-    // skills dirs ("Per the Agent Skills spec"); its own user dir alone would derive nothing.
-    .with_shared_dir(SharedDirSupport::Probed(true)),
-    kh(
-        "cursor",
-        "Cursor",
-        &[home(".cursor/skills")],
-        ".agents/skills",
-        &[home(".cursor")],
-    )
-    .with_mcp(McpSurfaces {
-        user: Some(McpSurface {
-            dir: home(".cursor/mcp.json"),
-            dialect: McpDialect::CursorJson,
-        }),
-        project: Some((".cursor/mcp.json", McpDialect::CursorJson)),
-        reload_note: "restart Cursor",
-    }),
-    kh(
-        "deepagents",
-        "Deep Agents",
-        &[home(".deepagents/agent/skills")],
-        ".agents/skills",
-        &[home(".deepagents")],
-    ),
-    kh(
-        "devin",
-        "Devin for Terminal",
-        &[cfg("devin/skills")],
-        ".devin/skills",
-        &[cfg("devin")],
-    ),
-    kh(
-        "dexto",
-        "Dexto",
-        &[home(".agents/skills")],
-        ".agents/skills",
-        &[home(".dexto")],
-    ),
-    kh(
-        "droid",
-        "Droid",
-        &[home(".factory/skills")],
-        ".factory/skills",
-        &[home(".factory")],
-    ),
-    kh("eve", "Eve", &[], "agent/skills", &[cwd("agent")]),
-    kh(
-        "firebender",
-        "Firebender",
-        &[home(".firebender/skills")],
-        ".agents/skills",
-        &[home(".firebender")],
-    ),
-    kh(
-        "forgecode",
-        "ForgeCode",
-        &[home(".forge/skills")],
-        ".forge/skills",
-        &[home(".forge")],
-    ),
-    kh(
-        "gemini-cli",
-        "Gemini CLI",
-        &[home(".gemini/skills")],
-        ".agents/skills",
-        &[home(".gemini")],
-    )
-    // Vendor docs list `~/.agents/skills`.
-    .with_shared_dir(SharedDirSupport::Docs(true)),
-    kh(
-        "github-copilot",
-        "GitHub Copilot",
-        &[home(".copilot/skills")],
-        ".agents/skills",
-        &[home(".copilot")],
-    )
-    // Vendor docs list `~/.agents/skills`.
-    .with_shared_dir(SharedDirSupport::Docs(true)),
-    kh(
-        "goose",
-        "Goose",
-        &[cfg("goose/skills")],
-        ".goose/skills",
-        &[cfg("goose")],
-    )
-    // Verified LIVE against goose 1.43.0 in a container on 2026-07-16: a skill placed at
-    // `~/.agents/skills/<name>` appears in `goose skills list` (and `~/.agents/skills` is the
-    // build's writable global skills dir).
-    .with_shared_dir(SharedDirSupport::Probed(true)),
-    kh(
-        "grok",
-        "Grok Build",
-        &[grok_home("skills")],
-        ".grok/skills",
-        &[grok_home("")],
-    ),
-    kh(
-        "hermes-agent",
-        "Hermes Agent",
-        &[hermes_home("skills")],
-        ".hermes/skills",
-        &[hermes_home("")],
-    )
-    .with_mcp(McpSurfaces {
-        user: Some(McpSurface {
-            dir: hermes_home("config.yaml"),
-            dialect: McpDialect::HermesYaml,
-        }),
-        project: None,
-        reload_note: "/reload-mcp in a session, or next session",
-    }),
-    kh(
-        "inference-sh",
-        "inference.sh",
-        &[home(".inferencesh/skills")],
-        ".inferencesh/skills",
-        &[home(".inferencesh")],
-    ),
-    kh(
-        "jazz",
-        "Jazz",
-        &[home(".jazz/skills")],
-        ".jazz/skills",
-        &[home(".jazz"), cwd(".jazz")],
-    ),
-    kh(
-        "junie",
-        "Junie",
-        &[home(".junie/skills")],
-        ".junie/skills",
-        &[home(".junie")],
-    ),
-    kh(
-        "iflow-cli",
-        "iFlow CLI",
-        &[home(".iflow/skills")],
-        ".iflow/skills",
-        &[home(".iflow")],
-    ),
-    kh(
-        "kilo",
-        "Kilo Code",
-        &[home(".kilocode/skills")],
-        ".kilocode/skills",
-        &[home(".kilocode")],
-    ),
-    kh(
-        "kimchi",
-        "Kimchi",
-        // A literal `~/.config` dir, NOT the XDG-overridable config home (`crush` is the precedent) —
-        // upstream joins it onto `home`, so `$XDG_CONFIG_HOME` does not move it.
-        &[home(".config/kimchi/harness/skills")],
-        ".kimchi/skills",
-        &[home(".config/kimchi")],
-    ),
-    kh(
-        "kimi-code-cli",
-        "Kimi Code CLI",
-        &[home(".agents/skills")],
-        ".agents/skills",
-        &[home(".kimi-code"), home(".kimi")],
-    ),
-    kh(
-        "kiro-cli",
-        "Kiro CLI",
-        &[home(".kiro/skills")],
-        ".kiro/skills",
-        &[home(".kiro")],
-    ),
-    kh(
-        "kode",
-        "Kode",
-        &[home(".kode/skills")],
-        ".kode/skills",
-        &[home(".kode")],
-    ),
-    kh(
-        "lingma",
-        "Lingma",
-        &[home(".lingma/skills")],
-        ".lingma/skills",
-        &[home(".lingma")],
-    ),
-    kh(
-        "loaf",
-        "Loaf",
-        &[home(".agents/skills")],
-        ".agents/skills",
-        &[home(".loaf")],
-    ),
-    kh(
-        "mcpjam",
-        "MCPJam",
-        &[home(".mcpjam/skills")],
-        ".mcpjam/skills",
-        &[home(".mcpjam")],
-    ),
-    kh(
-        "minimax-code",
-        "MiniMax Code",
-        &[home(".minimax/skills")],
-        ".minimax/skills",
-        // Present when either the home config dir OR the macOS app bundle exists — the `.app` path is
-        // joined onto the filesystem root, like `zcode`'s.
-        &[home(".minimax"), abs("Applications/MiniMax Code.app")],
-    ),
-    kh(
-        "mistral-vibe",
-        "Mistral Vibe",
-        &[vibe_home("skills")],
-        ".vibe/skills",
-        &[vibe_home("")],
-    ),
-    kh(
-        "moxby",
-        "Moxby",
-        &[home(".moxby/skills")],
-        ".moxby/skills",
-        &[home(".moxby")],
-    ),
-    kh(
-        "mux",
-        "Mux",
-        &[home(".mux/skills")],
-        ".mux/skills",
-        &[home(".mux")],
-    ),
-    kh(
-        "opencode",
-        "OpenCode",
-        &[cfg("opencode/skills")],
-        ".agents/skills",
-        &[cfg("opencode")],
-    )
-    .with_mcp(McpSurfaces {
-        user: Some(McpSurface {
-            dir: cfg("opencode/opencode.json"),
-            dialect: McpDialect::OpencodeJson,
-        }),
-        // The project config sits at the checkout root, not under a dot-dir.
-        project: Some(("opencode.json", McpDialect::OpencodeJson)),
-        // Automatic on 401 + dynamic client registration.
-        reload_note: "restart opencode",
-    })
-    // Verified against a live containerized opencode-ai 1.18.3 on 2026-07-16: the binary's own
-    // help text names `~/.agents/skills/<name>/SKILL.md` as an auto-loaded external skills dir.
-    .with_shared_dir(SharedDirSupport::Probed(true)),
-    kh(
-        "openhands",
-        "OpenHands",
-        &[home(".openhands/skills")],
-        ".openhands/skills",
-        &[home(".openhands")],
-    ),
-    kh(
-        "ona",
-        "Ona",
-        &[home(".ona/skills")],
-        ".ona/skills",
-        &[home(".ona")],
-    ),
-    kh(
-        "pi",
-        "Pi",
-        &[home(".pi/agent/skills")],
-        ".pi/skills",
-        &[home(".pi/agent")],
-    ),
-    kh(
-        "qoder",
-        "Qoder",
-        &[home(".qoder/skills")],
-        ".qoder/skills",
-        &[home(".qoder")],
-    ),
-    kh(
-        "qoder-cn",
-        "Qoder CN",
-        &[home(".qoder-cn/skills")],
-        ".qoder/skills",
-        &[home(".qoder-cn")],
-    ),
-    kh(
-        "qwen-code",
-        "Qwen Code",
-        &[home(".qwen/skills")],
-        ".qwen/skills",
-        &[home(".qwen")],
-    ),
-    kh(
-        "replit",
-        "Replit",
-        &[cfg("agents/skills")],
-        ".agents/skills",
-        &[cwd(".replit")],
-    ),
-    kh(
-        "reasonix",
-        "Reasonix",
-        &[home(".reasonix/skills")],
-        ".reasonix/skills",
-        &[home(".reasonix")],
-    ),
-    kh(
-        "rovodev",
-        "Rovo Dev",
-        &[home(".rovodev/skills")],
-        ".rovodev/skills",
-        &[home(".rovodev")],
-    ),
-    kh(
-        "roo",
-        "Roo Code",
-        &[home(".roo/skills")],
-        ".roo/skills",
-        &[home(".roo")],
-    ),
-    kh(
-        "tabnine-cli",
-        "Tabnine CLI",
-        &[home(".tabnine/agent/skills")],
-        ".tabnine/agent/skills",
-        &[home(".tabnine")],
-    ),
-    kh(
-        "terramind",
-        "Terramind",
-        &[home(".terramind/skills")],
-        ".terramind/skills",
-        &[home(".terramind")],
-    ),
-    kh(
-        "tinycloud",
-        "Tinycloud",
-        &[home(".tinycloud/skills")],
-        ".tinycloud/skills",
-        &[home(".tinycloud")],
-    ),
-    kh(
-        "trae",
-        "Trae",
-        &[home(".trae/skills")],
-        ".trae/skills",
-        &[home(".trae")],
-    ),
-    kh(
-        "trae-cn",
-        "Trae CN",
-        &[home(".trae-cn/skills")],
-        ".trae/skills",
-        &[home(".trae-cn")],
-    ),
-    kh(
-        "warp",
-        "Warp",
-        &[home(".agents/skills")],
-        ".agents/skills",
-        &[home(".warp")],
-    ),
-    kh(
-        "windsurf",
-        "Windsurf",
-        &[home(".codeium/windsurf/skills")],
-        ".windsurf/skills",
-        &[home(".codeium/windsurf")],
-    ),
-    kh(
-        "zed",
-        "Zed",
-        &[home(".agents/skills")],
-        ".agents/skills",
-        &[cfg("zed"), appdata("Zed"), flatpak("zed")],
-    ),
-    kh(
-        "zcode",
-        "ZCode",
-        &[home(".zcode/skills")],
-        ".zcode/skills",
-        // Present when either the home config dir OR the macOS app bundle exists (the reference probes
-        // both) — the `.app` path is joined onto the filesystem root, like `codex`'s `/etc/codex`.
-        &[home(".zcode"), abs("Applications/ZCode.app")],
-    ),
-    kh(
-        "zencoder",
-        "Zencoder",
-        &[home(".zencoder/skills")],
-        ".zencoder/skills",
-        &[home(".zencoder")],
-    ),
-    kh(
-        "zenflow",
-        "Zenflow",
-        &[home(".zencoder/skills")],
-        ".zencoder/skills",
-        &[home(".zencoder")],
-    ),
-    kh(
-        "neovate",
-        "Neovate",
-        &[home(".neovate/skills")],
-        ".neovate/skills",
-        &[home(".neovate")],
-    ),
-    kh(
-        "pochi",
-        "Pochi",
-        &[home(".pochi/skills")],
-        ".pochi/skills",
-        &[home(".pochi")],
-    ),
-    kh(
-        "promptscript",
-        "PromptScript",
-        &[],
-        ".agents/skills",
-        &[cwd(".promptscript"), cwd("promptscript.yaml")],
-    ),
-    kh(
-        "adal",
-        "AdaL",
-        &[home(".adal/skills")],
-        ".adal/skills",
-        &[home(".adal")],
-    ),
-    kh(
-        "universal",
-        "Universal",
-        &[cfg("agents/skills")],
-        ".agents/skills",
-        &[],
-    ),
-];
-
-/// The full baked registry.
+/// THE registry, resolved ONCE per process: the local override, else a downloaded copy newer than
+/// this build's, else the table compiled in from `registry.toml` — see [`mod@format`] for the fences
+/// and the warnings. Resolved lazily and leaked, so every consumer keeps the `&'static` rows it
+/// always had and there is exactly one table however many callers ask for it.
 #[must_use]
 pub fn known_harnesses() -> &'static [KnownHarness] {
-    HARNESSES
+    static TABLE: OnceLock<&'static [KnownHarness]> = OnceLock::new();
+    TABLE.get_or_init(format::load_table)
 }
 
 /// The row for a harness slug, or `None` when the slug is not a known harness.
 #[must_use]
 pub fn known_harness(slug: &str) -> Option<&'static KnownHarness> {
-    HARNESSES.iter().find(|h| h.slug == slug)
+    known_harnesses().iter().find(|h| h.slug == slug)
 }
 
 /// A harness row whose MCP surface is rooted at the passed home, with no skills dirs and no
@@ -1085,7 +440,7 @@ fn skills_roots_owned(
 ) -> Vec<(PathBuf, &'static KnownHarness, SkillScope)> {
     let mut out = Vec::new();
     let mut probed: HashSet<PathBuf> = HashSet::new();
-    for harness in HARNESSES {
+    for harness in known_harnesses() {
         if !is_present(harness, home, cwd) {
             continue;
         }
@@ -1135,14 +490,14 @@ fn probe(dir: &Path, scope: SkillScope, harness: &KnownHarness, out: &mut Vec<Di
 /// harness that is not installed here never claims a folder someone else's skills sit in; a shared
 /// dir (`~/.agents/skills`) honestly answers with EVERY installed claimant instead of picking one by
 /// table order. Rows are read in table order and returned SORTED BY SLUG, so the answer does not
-/// depend on where a harness happens to sit in the baked table.
+/// depend on where a harness happens to sit in the table.
 #[must_use]
 pub fn folder_readers(dir: &Path, home: &Path, cwd: Option<&Path>) -> Vec<&'static KnownHarness> {
     // Both sides through [`resolved_dir`]: the caller's folder comes from a listing (canonical) or
     // from a tracked placement (canonical), and a row's own dirs resolve from `$HOME` — comparing
     // one spelling against the other loses every reader under a symlinked home.
     let want = resolved_dir(dir.to_path_buf());
-    let mut out: Vec<&'static KnownHarness> = HARNESSES
+    let mut out: Vec<&'static KnownHarness> = known_harnesses()
         .iter()
         .filter(|h| is_present(h, home, cwd))
         .filter(|h| {
@@ -1171,7 +526,7 @@ pub fn folder_reader_slugs(dir: &Path, home: &Path, cwd: Option<&Path>) -> Vec<S
 /// Table order is preserved (the same first-match tie-break every other query uses).
 #[must_use]
 pub fn detected_harnesses(home: &Path, cwd: Option<&Path>) -> Vec<&'static KnownHarness> {
-    HARNESSES
+    known_harnesses()
         .iter()
         .filter(|h| is_present(h, home, cwd))
         .collect()

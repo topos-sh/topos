@@ -75,10 +75,16 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   dir-handle-anchored writes, private-file primitives) + crash-safe JSON docs with fail-closed
   schema migration. Every durable mutation goes through here; crash-safety contracts live in the
   module docs.
-- `sidecar`, `forge_check`, `visited_stores`, `sync_status` — the per-scope store layout +
-  recovery sweep, and the machine-local state documents (the forge auto-update clock + per-source
-  check log, visited project stores, the offline delivery cache that keeps `status`/`list`
-  honest).
+- `sidecar`, `forge_check`, `harness_registry`, `visited_stores`, `sync_status` — the per-scope
+  store layout + recovery sweep, and the machine-local state documents (the forge auto-update
+  clock + per-source check log, visited project stores, the offline delivery cache that keeps
+  `status`/`list` honest). `harness_registry` is the HARNESS TABLE's own lane, on the forge
+  clock's rhythm and its fail-open discipline: the bare sweep downloads
+  `TOPOS_HARNESS_REGISTRY_URL` (default `https://topos.sh/harness-registry.toml`), runs
+  `topos_harness::registry`'s fences, and writes `~/.topos/harness-registry/registry.toml`
+  atomically — a strictly-newer version only, an equal version with different bytes an error.
+  Nothing here can fail a sweep, and there is NO hot reload: the next process reads the table.
+  `TOPOS_NO_HARNESS_REGISTRY_UPDATE` switches the lane off.
 - `manifest/` (`keys`, `document`, `dest`, `normal`, `scopes`) — the reference grammar, the
   format-preserving `toml_edit` editor (property-tested exact inverse), the `dest` vocabulary
   (default destination spellings, the retired-`path`/`harness`/`[defaults]` rewrites, the

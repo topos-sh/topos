@@ -6,8 +6,11 @@
 //! `cargo xtask gen-fixtures --check`→ the fixture drift gate.
 //! `cargo xtask gen-cli-ref`         → (re)generate the CLI reference `docs/cli.md` from the real clap tree.
 //! `cargo xtask gen-cli-ref --check` → the CLI-reference drift gate.
+//! `cargo xtask gen-registry`        → vendor `crates/topos-harness/registry.toml` into the web app's
+//!                                     static assets (the plane serves the bytes the binary embeds).
+//! `cargo xtask gen-registry --check`→ the harness-registry drift gate (a byte compare).
 //! `cargo xtask check-arch`          → the architectural-layering + lint-opt-in + toolchain-pin gate.
-//! `cargo xtask check-registry-drift`→ OPT-IN + advisory: fetch upstream `agents.ts` and diff the baked
+//! `cargo xtask check-registry-drift`→ OPT-IN + advisory: fetch upstream `agents.ts` and diff the
 //!                                     harness registry against it (network; NEVER in `ci`/CI).
 //! `cargo xtask ci`                  → the full non-DB gate sequence, in CI's order (fmt, clippy, doc,
 //!                                     the drift gates, check-arch) — the contributor's pre-push loop.
@@ -2189,6 +2192,53 @@ fn gen_cli_ref(check: bool) -> Result<()> {
     Ok(())
 }
 
+// =================================================================================================
+// gen-registry — the harness registry, vendored into the web app's static assets so the plane
+// serves the EXACT bytes the binary embeds. One canonical file
+// (`crates/topos-harness/registry.toml`), copied verbatim; the `--check` gate is a byte compare, so
+// an edit that reaches the crate and not the app cannot ship.
+// =================================================================================================
+
+/// The canonical table, and the served copy.
+fn registry_paths() -> (PathBuf, PathBuf) {
+    (
+        workspace_root().join("crates/topos-harness/registry.toml"),
+        workspace_root().join("web/public/harness-registry.toml"),
+    )
+}
+
+/// Copy (or `--check`) `crates/topos-harness/registry.toml` → `web/public/harness-registry.toml`.
+/// Byte-for-byte: a client that downloads the served copy compares its version against the one it
+/// was compiled with, so "the same file" has to mean the same file.
+fn gen_registry(check: bool) -> Result<()> {
+    let (source, served) = registry_paths();
+    let content =
+        fs::read_to_string(&source).with_context(|| format!("reading {}", source.display()))?;
+    let shown = served
+        .strip_prefix(workspace_root())
+        .unwrap_or(&served)
+        .display()
+        .to_string();
+    if check {
+        match fs::read_to_string(&served) {
+            Ok(existing) if existing == content => println!("harness registry up to date: {shown}"),
+            Ok(_) => bail!(
+                "harness-registry drift: {shown} is stale — run `cargo xtask gen-registry` and commit"
+            ),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => bail!(
+                "harness-registry drift: {shown} is missing — run `cargo xtask gen-registry` and commit"
+            ),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", served.display())),
+        }
+    } else {
+        let dir = served.parent().expect("the served copy has a parent");
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        fs::write(&served, &content).with_context(|| format!("writing {}", served.display()))?;
+        println!("wrote {shown}");
+    }
+    Ok(())
+}
+
 /// The resolved set of crate names in a package's NORMAL (non-dev, non-build) dependency tree.
 fn normal_tree(pkg: &str) -> Result<BTreeSet<String>> {
     // `--all-features` so a future *feature-gated* edge (e.g. an optional `topos -> plane-store`)
@@ -2844,6 +2894,10 @@ fn ci() -> Result<()> {
             "contract drift gate (cli reference)",
             Box::new(|| gen_cli_ref(true)),
         ),
+        (
+            "contract drift gate (harness registry)",
+            Box::new(|| gen_registry(true)),
+        ),
         ("architectural layering", Box::new(check_arch)),
     ];
     let total = gates.len();
@@ -2866,6 +2920,7 @@ fn main() -> Result<()> {
         "gen-schema" => gen_schema(check)?,
         "gen-fixtures" => gen_fixtures(check)?,
         "gen-cli-ref" => gen_cli_ref(check)?,
+        "gen-registry" => gen_registry(check)?,
         "check-arch" => check_arch()?,
         "check-registry-drift" => registry_drift::run()?,
         "ci" => ci()?,
@@ -2873,7 +2928,7 @@ fn main() -> Result<()> {
         "dist" => dist::run(&args[1..])?,
         _ => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | gen-cli-ref [--check] | check-arch | check-registry-drift | ci | conformance | dist …>"
+                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | gen-cli-ref [--check] | gen-registry [--check] | check-arch | check-registry-drift | ci | conformance | dist …>"
             );
             std::process::exit(2);
         }

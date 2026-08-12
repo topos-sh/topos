@@ -8,8 +8,9 @@ workspace relative to its own crate (cwd-independent).
 cargo xtask gen-schema [--check]       # contracts/schemas/*.json + contracts/openapi/openapi.json
 cargo xtask gen-fixtures [--check]     # the golden --json fixtures under contracts/fixtures/
 cargo xtask gen-cli-ref [--check]      # docs/cli.md + skills/topos/reference.md from the real clap tree
+cargo xtask gen-registry [--check]     # crates/topos-harness/registry.toml → web/public/harness-registry.toml
 cargo xtask check-arch                 # layering + vocabulary + schema-boundary gates
-cargo xtask check-registry-drift       # OPT-IN advisory: baked harness registry vs upstream (network; NEVER in CI)
+cargo xtask check-registry-drift       # OPT-IN advisory: harness registry vs upstream (network; never a gate)
 cargo xtask ci                         # ALL the non-DB gates, in CI's order, failing fast
 ```
 
@@ -31,10 +32,14 @@ cargo xtask ci                         # ALL the non-DB gates, in CI's order, fa
   renaming code to allowlisting it), and the **schema-boundary gate** (no app-schema table in
   any `plane-store` SQL). All three scan gates are red-tested (`cargo test -p xtask`) and fail
   closed on a missing dir.
+- **`gen-registry`** — the harness table vendored into the web app's static assets, so the plane
+  serves the EXACT bytes the binary embeds (a client compares the served `version` against the one
+  it was compiled with). A verbatim copy; `--check` is a byte compare.
 - **`check-registry-drift`** — fetches upstream `agents.ts` (vercel-labs/skills) and diffs it
-  against the baked registry; re-syncing is a deliberate human decision, which is why this stays
-  out of the automated gates. It reads names/dirs only — detect-body changes are a known blind
-  spot.
-- **`ci`** — fmt, clippy, doc, the three drift gates, check-arch. Not covered:
+  against `crates/topos-harness/registry.toml`; re-syncing is a deliberate human decision, which is
+  why this never gates a push. It runs weekly on its own scheduled workflow
+  (`.github/workflows/registry-drift.yml`) and by hand. It reads names/dirs only — detect-body
+  changes are a known blind spot.
+- **`ci`** — fmt, clippy, doc, the four drift gates, check-arch. Not covered:
   `cargo test --workspace` (needs `DATABASE_URL`), `cargo deny check`, the sqlx offline-metadata
   job.

@@ -1,0 +1,1240 @@
+//! The harness registry FILE — its grammar, its parser, its fences, and the three-level resolution
+//! [`super::known_harnesses`] runs once per process.
+//!
+//! The table is DATA. One canonical file (`crates/topos-harness/registry.toml`) is compiled into
+//! the binary with `include_str!`, served byte-identically by the web app, and re-read from disk at
+//! startup so a machine can carry a NEWER table than the build it is running:
+//!
+//! 1. **the local override** — `~/.topos/harness-registry/override.toml`, always wins when it is
+//!    present and valid (the escape hatch for a person whose agent moved its dirs yesterday);
+//! 2. **the downloaded copy** — `~/.topos/harness-registry/registry.toml`, used only when its
+//!    [`RegistryVersion`] is strictly NEWER than the bundled one and this build's engine supports
+//!    it (a downgrade after a `self-update` is not an update);
+//! 3. **the bundled table** — the bytes this binary was built with, and the floor nothing can take
+//!    away.
+//!
+//! Every failure downgrades exactly ONE level and says why on stderr, once. There is no hot reload:
+//! a CLI process is one command long, so the next process picks up whatever the refresher wrote.
+//!
+//! ## What a downloaded file may and may not do
+//!
+//! The file is the WHOLE table (a row is the unit of change, never a field patch), but a downloaded
+//! or override file may only REFINE slugs this build already knows: a row whose slug is not in the
+//! BUNDLED set is warned about and skipped, so downstream data can never introduce a write target
+//! the binary has no compiled trigger, adapter, or id for. Its dirs are re-validated too —
+//! relative, `/`-separated, no `..`, no empty or `.` components, a conservative charset, and no
+//! absolute root at all (only the bundled table may name one, and today only codex's `/etc/codex`
+//! and the two macOS app bundles do). A file that names no known harness is refused rather than
+//! believed: an empty table is indistinguishable from a machine with no agents on it.
+//!
+//! The consequence worth stating plainly: a downloaded table can SHRINK (a row it omits stops being
+//! known). That is the deliberate cost of "the file is the table" — a delivery decision, not a
+//! privilege escalation, and the bundled floor returns the moment the copy is deleted.
+
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use toml_edit::{DocumentMut, Item, TableLike};
+
+use super::{DirSpec, KnownHarness, McpSurface, McpSurfaces, Root};
+use crate::coverage::SharedDirSupport;
+use crate::mcp::descriptor::McpDialect;
+
+/// The GRAMMAR version this build reads. A file naming any other number is refused whole — the
+/// shape of the rows is what changed, and guessing at a shape is how a table starts writing to the
+/// wrong directory.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// The ENGINE version this build provides: the ceiling on what a file may demand through its
+/// `min_engine_version`. A file that needs more is refused (and the level below it answers) — it is
+/// saying, honestly, that it carries semantics this binary does not implement.
+pub const REGISTRY_ENGINE_VERSION: u32 = 1;
+
+/// The widest registry file anything here will read, fetch, or accept from disk. The real table is
+/// a few tens of kilobytes; this is the "no surprises" ceiling on a lane that runs unattended.
+pub const MAX_REGISTRY_BYTES: usize = 256 * 1024;
+
+/// The bundled table — the ONE canonical file, compiled in. The web app serves these exact bytes.
+const BUNDLED: &str = include_str!("../../registry.toml");
+
+/// The directory both machine-local registry files live in, under a `~/.topos` home.
+fn registry_dir(topos_home: &Path) -> PathBuf {
+    topos_home.join("harness-registry")
+}
+
+/// The downloaded table under a `~/.topos` home — what the refresher writes and level 2 reads.
+/// Parameterized so the refresher and the loader can never disagree about where the file is.
+#[must_use]
+pub fn cache_path(topos_home: &Path) -> PathBuf {
+    registry_dir(topos_home).join("registry.toml")
+}
+
+/// The local OVERRIDE under a `~/.topos` home (level 1) — never written by topos, only read.
+#[must_use]
+pub fn override_path(topos_home: &Path) -> PathBuf {
+    registry_dir(topos_home).join("override.toml")
+}
+
+/// `$TOPOS_HOME`, else `$HOME/.topos` — the same resolution the client's composition root makes,
+/// restated here because the table is loaded before any of that machinery exists.
+fn sidecar_home() -> PathBuf {
+    super::env_override("TOPOS_HOME").unwrap_or_else(|| super::real_home().join(".topos"))
+}
+
+// =================================================================================================
+// The refusal
+// =================================================================================================
+
+/// Why a registry file was refused. The message always names WHAT was refused — the key, the row,
+/// the value — because the only reader is a person deciding whether their own file is wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryError(String);
+
+impl RegistryError {
+    /// The human-readable refusal.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+fn refuse<T>(what: impl fmt::Display) -> Result<T, RegistryError> {
+    Err(RegistryError(what.to_string()))
+}
+
+// =================================================================================================
+// The version
+// =================================================================================================
+
+/// A registry file's CONTENT version: dotted numeric (`2026.8.11.1`), bumped by hand on every edit
+/// and compared segment by segment. A segment either side runs out of counts as zero, so `1.2` and
+/// `1.2.0` are one version and lengthening the scheme is never silently a downgrade.
+#[derive(Debug, Clone, Eq)]
+pub struct RegistryVersion(String);
+
+impl RegistryVersion {
+    /// Parse a dotted-numeric version, naming what was refused.
+    ///
+    /// # Errors
+    /// An empty string, an empty segment, a non-digit segment, or a segment too large for `u64`.
+    pub fn parse(raw: &str) -> Result<Self, RegistryError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return refuse(
+                "version: empty (expected a dotted-numeric version like \"2026.8.11.1\")",
+            );
+        }
+        for segment in trimmed.split('.') {
+            if segment.is_empty() {
+                return refuse(format!("version {trimmed:?}: an empty segment"));
+            }
+            if !segment.chars().all(|c| c.is_ascii_digit()) {
+                return refuse(format!(
+                    "version {trimmed:?}: segment {segment:?} is not a number"
+                ));
+            }
+            if segment.parse::<u64>().is_err() {
+                return refuse(format!(
+                    "version {trimmed:?}: segment {segment:?} is too large"
+                ));
+            }
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// The version as written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RegistryVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Ord for RegistryVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let mut mine = self.0.split('.');
+        let mut theirs = other.0.split('.');
+        loop {
+            let (a, b) = (mine.next(), theirs.next());
+            if a.is_none() && b.is_none() {
+                return Ordering::Equal;
+            }
+            let a = a.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let b = b.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            match a.cmp(&b) {
+                Ordering::Equal => {}
+                verdict => return verdict,
+            }
+        }
+    }
+}
+
+impl PartialOrd for RegistryVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RegistryVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+// =================================================================================================
+// The parse product
+// =================================================================================================
+
+/// Where a registry file came from — which fences apply to it. The bundled table is the trusted
+/// one: it DEFINES the known slugs and is the only level allowed to name an absolute root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The bytes compiled into this binary.
+    Bundled,
+    /// The downloaded table at `~/.topos/harness-registry/registry.toml`.
+    Downloaded,
+    /// The person's own `~/.topos/harness-registry/override.toml`.
+    Override,
+}
+
+impl Origin {
+    /// Whether this level is fenced (everything but the bundled table).
+    const fn fenced(self) -> bool {
+        !matches!(self, Origin::Bundled)
+    }
+
+    /// How the level is named in a refusal or a warning.
+    const fn label(self) -> &'static str {
+        match self {
+            Origin::Bundled => "the harness registry built into this topos",
+            Origin::Downloaded => "the downloaded harness registry",
+            Origin::Override => "the harness registry override",
+        }
+    }
+}
+
+/// A whole registry file, parsed and fenced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedRegistry {
+    version: RegistryVersion,
+    rows: Vec<HarnessRow>,
+    warnings: Vec<String>,
+}
+
+impl ParsedRegistry {
+    /// The file's content version.
+    #[must_use]
+    pub fn version(&self) -> &RegistryVersion {
+        &self.version
+    }
+
+    /// How many harness rows survived the fences.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whatever the fences said about rows they skipped (never a reason to refuse the file).
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+/// One parsed row, OWNED — the shape the parser produces before the table is leaked into the
+/// `&'static` slice every accessor hands out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRow {
+    slug: String,
+    display_name: String,
+    user_dirs: Vec<OwnedDir>,
+    project_dir: String,
+    detect_dirs: Vec<OwnedDir>,
+    mcp: Option<OwnedMcp>,
+    shared_dir: SharedDirSupport,
+}
+
+/// A [`DirSpec`] before it is leaked: the resolution root + its `/`-separated suffix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedDir {
+    root: Root,
+    suffix: String,
+}
+
+impl OwnedDir {
+    /// The canonical raw spec string this dir renders as — [`DirSpec::raw`] before the leak. The
+    /// round-trip assertions are its one reader; production compares leaked rows.
+    #[cfg(test)]
+    fn raw(&self) -> String {
+        let tag = self.root.tag();
+        match (tag.is_empty(), self.suffix.is_empty()) {
+            (true, true) => "/".to_owned(),
+            (true, false) => format!("/{}", self.suffix),
+            (false, true) => tag.to_owned(),
+            (false, false) => format!("{tag}/{}", self.suffix),
+        }
+    }
+}
+
+/// One row's MCP surfaces before they are leaked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedMcp {
+    user: Option<(OwnedDir, McpDialect)>,
+    project: Option<(String, McpDialect)>,
+    reload_note: String,
+}
+
+// =================================================================================================
+// The parser — the inverse of `DirSpec::raw()`, plus the row grammar
+// =================================================================================================
+
+/// Parse a whole registry file, applying the fences [`Origin`] selects.
+///
+/// # Errors
+/// [`RegistryError`] naming exactly what was refused: invalid TOML, a wrong `schema_version`, a
+/// `min_engine_version` past this build, a malformed version, a missing or mistyped key, an unknown
+/// root tag or dialect, a path that fails validation, a duplicate slug, or a file that names no
+/// known harness at all.
+pub fn parse_registry(text: &str, origin: Origin) -> Result<ParsedRegistry, RegistryError> {
+    if text.len() > MAX_REGISTRY_BYTES {
+        return refuse(format!(
+            "{}: {} bytes is past the {MAX_REGISTRY_BYTES}-byte ceiling",
+            origin.label(),
+            text.len()
+        ));
+    }
+    let doc = match text.parse::<DocumentMut>() {
+        Ok(doc) => doc,
+        Err(e) => return refuse(format!("{}: not valid TOML — {e}", origin.label())),
+    };
+    let root: &dyn TableLike = doc.as_table();
+
+    let schema = int_at(root, "schema_version")?;
+    if schema != u64::from(SCHEMA_VERSION) {
+        return refuse(format!(
+            "schema_version {schema}: this topos reads harness registries at schema_version \
+             {SCHEMA_VERSION}"
+        ));
+    }
+    let version = RegistryVersion::parse(str_at(root, "version")?)?;
+    let min_engine = int_at(root, "min_engine_version")?;
+    if min_engine > u64::from(REGISTRY_ENGINE_VERSION) {
+        return refuse(format!(
+            "min_engine_version {min_engine}: this topos provides harness-registry engine \
+             {REGISTRY_ENGINE_VERSION} — a newer topos reads this file"
+        ));
+    }
+
+    let Some(tables) = doc.get("harness").and_then(Item::as_array_of_tables) else {
+        return refuse(format!(
+            "{}: no `[[harness]]` rows (the table IS the file)",
+            origin.label()
+        ));
+    };
+
+    let known = origin.fenced().then(bundled_slugs);
+    let mut rows: Vec<HarnessRow> = Vec::with_capacity(tables.len());
+    let mut warnings = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for (index, table) in tables.iter().enumerate() {
+        let row = parse_row(table, index, origin)?;
+        if let Some(known) = known
+            && !known.contains(&row.slug)
+        {
+            warnings.push(format!(
+                "topos: {} names the agent {:?}, which this topos does not know — that row was \
+                 skipped",
+                origin.label(),
+                row.slug
+            ));
+            continue;
+        }
+        if !seen.insert(row.slug.clone()) {
+            return refuse(format!(
+                "harness row {index}: the slug {:?} appears twice",
+                row.slug
+            ));
+        }
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return refuse(format!(
+            "{}: names no agent this topos knows",
+            origin.label()
+        ));
+    }
+    Ok(ParsedRegistry {
+        version,
+        rows,
+        warnings,
+    })
+}
+
+/// One `[[harness]]` row. Every refusal names the row — by slug once it has one, by index before.
+fn parse_row(
+    table: &dyn TableLike,
+    index: usize,
+    origin: Origin,
+) -> Result<HarnessRow, RegistryError> {
+    let slug = str_at(table, "slug")
+        .map_err(|e| RegistryError(format!("harness row {index}: {}", e.message())))?
+        .to_owned();
+    let at = |what: &str| RegistryError(format!("harness {slug:?}: {what}"));
+    let display_name = str_at(table, "display_name")
+        .map_err(|e| at(e.message()))?
+        .to_owned();
+    let project_dir = str_at(table, "project_dir")
+        .map_err(|e| at(e.message()))?
+        .to_owned();
+    if origin.fenced() && !project_dir.is_empty() {
+        validate_suffix(&project_dir).map_err(|e| at(&format!("project_dir {e}")))?;
+    }
+    let user_dirs = dirs_at(table, "user_dirs", origin).map_err(|e| at(e.message()))?;
+    let detect_dirs = dirs_at(table, "detect_dirs", origin).map_err(|e| at(e.message()))?;
+    let shared_dir = shared_dir_at(table).map_err(|e| at(e.message()))?;
+    let mcp = mcp_at(table, origin).map_err(|e| at(e.message()))?;
+    Ok(HarnessRow {
+        slug,
+        display_name,
+        user_dirs,
+        project_dir,
+        detect_dirs,
+        mcp,
+        shared_dir,
+    })
+}
+
+/// A row's `user_dirs` / `detect_dirs` array (absent ⇒ empty — the two cwd-only harnesses have no
+/// user dir, and the `universal` sentinel has no detection probe).
+fn dirs_at(
+    table: &dyn TableLike,
+    key: &str,
+    origin: Origin,
+) -> Result<Vec<OwnedDir>, RegistryError> {
+    let Some(found) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(array) = found.as_array() else {
+        return refuse(format!("{key}: expected an array of dir specs"));
+    };
+    let mut out = Vec::with_capacity(array.len());
+    for (i, value) in array.iter().enumerate() {
+        let Some(raw) = value.as_str() else {
+            return refuse(format!("{key}[{i}]: expected a dir-spec string"));
+        };
+        out.push(parse_dir(raw, origin).map_err(|e| RegistryError(format!("{key}[{i}]: {e}")))?);
+    }
+    Ok(out)
+}
+
+/// The inverse of [`DirSpec::raw`]: a root tag, then the `/`-separated suffix under it. A leading
+/// `/` is the absolute root (bundled rows only); an empty suffix is the root itself.
+fn parse_dir(raw: &str, origin: Origin) -> Result<OwnedDir, RegistryError> {
+    if raw.is_empty() {
+        return refuse(
+            "empty dir spec (expected a root tag like `home`, then an optional `/`-suffix)",
+        );
+    }
+    if let Some(rest) = raw.strip_prefix('/') {
+        if origin.fenced() {
+            return refuse(format!(
+                "{raw:?}: an absolute path is only allowed in the registry built into topos"
+            ));
+        }
+        return Ok(OwnedDir {
+            root: Root::Abs,
+            suffix: rest.to_owned(),
+        });
+    }
+    let (tag, suffix) = raw.split_once('/').unwrap_or((raw, ""));
+    let Some(root) = Root::from_tag(tag) else {
+        return refuse(format!(
+            "{raw:?}: {tag:?} is not a root this topos knows (expected one of {})",
+            known_tags()
+        ));
+    };
+    if origin.fenced() && !suffix.is_empty() {
+        validate_suffix(suffix).map_err(|e| RegistryError(format!("{raw:?}: {e}")))?;
+    }
+    Ok(OwnedDir {
+        root,
+        suffix: suffix.to_owned(),
+    })
+}
+
+/// The path fence every dir a DOWNLOADED or OVERRIDE row carries has to pass: relative,
+/// `/`-separated, no `..`, no empty or `.` components, and a conservative component charset. The
+/// bundled table skips it — that file is the artifact this build was compiled from, and this
+/// crate's own suite is its gate.
+fn validate_suffix(suffix: &str) -> Result<(), String> {
+    if suffix.contains('\\') {
+        return Err(format!("{suffix:?}: paths are `/`-separated"));
+    }
+    for component in suffix.split('/') {
+        match component {
+            "" => return Err(format!("{suffix:?}: an empty path component")),
+            "." => return Err(format!("{suffix:?}: a `.` path component")),
+            ".." => return Err(format!("{suffix:?}: a `..` path component")),
+            _ => {}
+        }
+        if let Some(bad) = component
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ' ' | '-')))
+        {
+            return Err(format!(
+                "{suffix:?}: {bad:?} is not allowed in a path component"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A row's `shared_dir = { level = "probed"|"docs", covered = <bool> }` (absent ⇒ no claim of its
+/// own, which is what makes [`crate::coverage`] derive one from the user dirs).
+fn shared_dir_at(table: &dyn TableLike) -> Result<SharedDirSupport, RegistryError> {
+    let Some(found) = table.get("shared_dir") else {
+        return Ok(SharedDirSupport::Unknown);
+    };
+    let Some(claim) = found.as_table_like() else {
+        return refuse("shared_dir: expected { level = \"probed\"|\"docs\", covered = <bool> }");
+    };
+    let level = claim
+        .get("level")
+        .and_then(Item::as_str)
+        .ok_or_else(|| RegistryError("shared_dir.level: expected \"probed\" or \"docs\"".into()))?;
+    let covered = claim
+        .get("covered")
+        .and_then(Item::as_bool)
+        .ok_or_else(|| RegistryError("shared_dir.covered: expected true or false".into()))?;
+    match level {
+        "probed" => Ok(SharedDirSupport::Probed(covered)),
+        "docs" => Ok(SharedDirSupport::Docs(covered)),
+        other => refuse(format!(
+            "shared_dir.level {other:?}: expected \"probed\" or \"docs\""
+        )),
+    }
+}
+
+/// A row's `[harness.mcp]` block (absent ⇒ the harness has no MCP surface, which is the majority).
+fn mcp_at(table: &dyn TableLike, origin: Origin) -> Result<Option<OwnedMcp>, RegistryError> {
+    let Some(found) = table.get("mcp") else {
+        return Ok(None);
+    };
+    let Some(mcp) = found.as_table_like() else {
+        return refuse("mcp: expected a [harness.mcp] table");
+    };
+    let reload_note = str_at(mcp, "reload_note")
+        .map_err(|e| RegistryError(format!("mcp.{}", e.message())))?
+        .to_owned();
+
+    let user = match mcp.get("user") {
+        None => None,
+        Some(entry) => {
+            let surface = entry.as_table_like().ok_or_else(|| {
+                RegistryError("mcp.user: expected { dir = …, dialect = … }".into())
+            })?;
+            let dir = str_at(surface, "dir")
+                .map_err(|e| RegistryError(format!("mcp.user.{}", e.message())))?;
+            let dialect = str_at(surface, "dialect")
+                .map_err(|e| RegistryError(format!("mcp.user.{}", e.message())))?;
+            Some((
+                parse_dir(dir, origin).map_err(|e| RegistryError(format!("mcp.user.dir: {e}")))?,
+                parse_dialect(dialect).map_err(|e| RegistryError(format!("mcp.user.{e}")))?,
+            ))
+        }
+    };
+    let project = match mcp.get("project") {
+        None => None,
+        Some(entry) => {
+            let surface = entry.as_table_like().ok_or_else(|| {
+                RegistryError("mcp.project: expected { path = …, dialect = … }".into())
+            })?;
+            let path = str_at(surface, "path")
+                .map_err(|e| RegistryError(format!("mcp.project.{}", e.message())))?;
+            let dialect = str_at(surface, "dialect")
+                .map_err(|e| RegistryError(format!("mcp.project.{}", e.message())))?;
+            if origin.fenced() {
+                validate_suffix(path)
+                    .map_err(|e| RegistryError(format!("mcp.project.path {e}")))?;
+            }
+            Some((
+                path.to_owned(),
+                parse_dialect(dialect).map_err(|e| RegistryError(format!("mcp.project.{e}")))?,
+            ))
+        }
+    };
+    Ok(Some(OwnedMcp {
+        user,
+        project,
+        reload_note,
+    }))
+}
+
+/// The kebab-case spelling of an [`McpDialect`] variant — the file's dialect vocabulary.
+const fn dialect_word(dialect: McpDialect) -> &'static str {
+    match dialect {
+        McpDialect::ClaudePluginDir => "claude-plugin-dir",
+        McpDialect::ClaudeProjectJson => "claude-project-json",
+        McpDialect::CursorJson => "cursor-json",
+        McpDialect::OpencodeJson => "opencode-json",
+        McpDialect::OpenclawJson => "openclaw-json",
+        McpDialect::CodexToml => "codex-toml",
+        McpDialect::HermesYaml => "hermes-yaml",
+    }
+}
+
+/// Every dialect this build speaks — the refusal's teaching half, and the renderer's source.
+const DIALECTS: &[McpDialect] = &[
+    McpDialect::ClaudePluginDir,
+    McpDialect::ClaudeProjectJson,
+    McpDialect::CursorJson,
+    McpDialect::OpencodeJson,
+    McpDialect::OpenclawJson,
+    McpDialect::CodexToml,
+    McpDialect::HermesYaml,
+];
+
+fn known_dialects() -> String {
+    DIALECTS
+        .iter()
+        .map(|d| dialect_word(*d))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn parse_dialect(word: &str) -> Result<McpDialect, String> {
+    DIALECTS
+        .iter()
+        .copied()
+        .find(|d| dialect_word(*d) == word)
+        .ok_or_else(|| format!("dialect {word:?}: expected one of {}", known_dialects()))
+}
+
+/// Every root tag a file may name (the absolute root has no tag — it is spelled by a leading `/`).
+fn known_tags() -> String {
+    Root::ALL
+        .iter()
+        .map(|r| r.tag())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A required string key.
+fn str_at<'a>(table: &'a dyn TableLike, key: &str) -> Result<&'a str, RegistryError> {
+    match table.get(key) {
+        None => refuse(format!("{key}: missing")),
+        Some(found) => found
+            .as_str()
+            .ok_or_else(|| RegistryError(format!("{key}: expected a string"))),
+    }
+}
+
+/// A required non-negative integer key.
+fn int_at(table: &dyn TableLike, key: &str) -> Result<u64, RegistryError> {
+    match table.get(key) {
+        None => refuse(format!("{key}: missing")),
+        Some(found) => match found.as_integer() {
+            Some(n) if n >= 0 => Ok(n.unsigned_abs()),
+            _ => refuse(format!("{key}: expected a non-negative integer")),
+        },
+    }
+}
+
+// =================================================================================================
+// The three-level resolution
+// =================================================================================================
+
+/// The bundled table, parsed once. A refusal here is a BUILD defect (the file ships inside the
+/// binary and this crate's suite parses it on every run), so it is the one place that panics.
+fn bundled() -> &'static ParsedRegistry {
+    static BUNDLED_TABLE: OnceLock<ParsedRegistry> = OnceLock::new();
+    BUNDLED_TABLE.get_or_init(|| {
+        parse_registry(BUNDLED, Origin::Bundled).expect(
+            "the bundled registry.toml parses (a compiled-in artifact gated by this crate's suite)",
+        )
+    })
+}
+
+/// The bundled table's content version — what a downloaded copy has to beat to be used.
+#[must_use]
+pub fn bundled_version() -> &'static RegistryVersion {
+    &bundled().version
+}
+
+/// The slugs the BUNDLED table defines — the known-ids fence every fenced level is measured
+/// against. A downloaded row naming anything else never becomes a write target.
+fn bundled_slugs() -> &'static BTreeSet<String> {
+    static SLUGS: OnceLock<BTreeSet<String>> = OnceLock::new();
+    SLUGS.get_or_init(|| bundled().rows.iter().map(|r| r.slug.clone()).collect())
+}
+
+/// One candidate level: the bytes, plus where they came from (a warning has to name the file a
+/// person can go and fix).
+#[derive(Debug, Clone)]
+pub(super) struct Candidate {
+    path: String,
+    text: String,
+}
+
+/// Resolve the table from the two machine-local levels over the bundled floor, collecting the
+/// warnings the caller says once. Pure — the loader does the reading, this does the deciding.
+pub(super) fn resolve(
+    over: Option<Candidate>,
+    downloaded: Option<Candidate>,
+) -> (Vec<HarnessRow>, Vec<String>) {
+    let bundled = bundled();
+    let mut warnings = Vec::new();
+
+    if let Some(candidate) = over {
+        match parse_registry(&candidate.text, Origin::Override) {
+            Ok(parsed) => {
+                warnings.extend(parsed.warnings);
+                return (parsed.rows, warnings);
+            }
+            // Name the level it falls TO, which is the next one that exists — if that one is
+            // refused as well it says so itself, on its own line.
+            Err(e) => warnings.push(format!(
+                "topos: the harness registry override at {} was refused ({e}) — using {} instead",
+                candidate.path,
+                if downloaded.is_some() {
+                    "the downloaded copy"
+                } else {
+                    "the one built into this topos"
+                }
+            )),
+        }
+    }
+    if let Some(candidate) = downloaded {
+        match parse_registry(&candidate.text, Origin::Downloaded) {
+            // Older or equal is the ordinary state after a `self-update`: the binary caught up with
+            // what it had downloaded, and there is nothing to say about it.
+            Ok(parsed) if parsed.version <= bundled.version => {}
+            Ok(parsed) => {
+                warnings.extend(parsed.warnings);
+                return (parsed.rows, warnings);
+            }
+            Err(e) => warnings.push(format!(
+                "topos: the downloaded harness registry at {} was refused ({e}) — using the one \
+                 built into this topos",
+                candidate.path
+            )),
+        }
+    }
+    (bundled.rows.clone(), warnings)
+}
+
+/// Read one level off disk, `None` when it is not there. A file that exists but cannot be read (or
+/// is past the ceiling) is reported and treated as absent — the level below it still answers.
+fn read_level(path: &Path, warnings: &mut Vec<String>) -> Option<Candidate> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_REGISTRY_BYTES as u64 => {
+            warnings.push(format!(
+                "topos: the harness registry at {} is larger than {MAX_REGISTRY_BYTES} bytes — it \
+                 was not read",
+                path.display()
+            ));
+            return None;
+        }
+        Ok(_) => {}
+        Err(_) => return None,
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(Candidate {
+            path: path.display().to_string(),
+            text,
+        }),
+        Err(e) => {
+            warnings.push(format!(
+                "topos: the harness registry at {} could not be read ({e}) — it was skipped",
+                path.display()
+            ));
+            None
+        }
+    }
+}
+
+/// THE table for this process: the three levels resolved, the warnings said once on stderr, the
+/// rows leaked so every accessor can keep handing out `&'static` rows.
+pub(super) fn load_table() -> &'static [KnownHarness] {
+    let home = sidecar_home();
+    let mut warnings = Vec::new();
+    let over = read_level(&override_path(&home), &mut warnings);
+    let downloaded = read_level(&cache_path(&home), &mut warnings);
+    let (rows, resolution_warnings) = resolve(over, downloaded);
+    warnings.extend(resolution_warnings);
+    for warning in warnings {
+        // stderr, once per process: the table is resolved behind a `OnceLock`, so there is exactly
+        // one resolution however many callers ask for it. stdout stays byte-clean for `--json`.
+        eprintln!("{warning}");
+    }
+    leak(rows)
+}
+
+/// Leak an owned table into the `&'static` slice the public signatures promise. ONE table per
+/// process, deliberately: it is resolved once and read until the process exits, so the memory is
+/// live for exactly as long as anything can reach it.
+fn leak(rows: Vec<HarnessRow>) -> &'static [KnownHarness] {
+    let table: Vec<KnownHarness> = rows
+        .into_iter()
+        .map(|row| KnownHarness {
+            slug: leak_str(row.slug),
+            display_name: leak_str(row.display_name),
+            user_dirs: leak_dirs(row.user_dirs),
+            project_dir: leak_str(row.project_dir),
+            detect_dirs: leak_dirs(row.detect_dirs),
+            mcp: row.mcp.map(|mcp| McpSurfaces {
+                user: mcp.user.map(|(dir, dialect)| McpSurface {
+                    dir: leak_dir(dir),
+                    dialect,
+                }),
+                project: mcp.project.map(|(path, dialect)| (leak_str(path), dialect)),
+                reload_note: leak_str(mcp.reload_note),
+            }),
+            shared_dir: row.shared_dir,
+        })
+        .collect();
+    Vec::leak(table)
+}
+
+fn leak_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn leak_dir(dir: OwnedDir) -> DirSpec {
+    DirSpec {
+        root: dir.root,
+        suffix: leak_str(dir.suffix),
+    }
+}
+
+fn leak_dirs(dirs: Vec<OwnedDir>) -> &'static [DirSpec] {
+    Vec::leak(dirs.into_iter().map(leak_dir).collect::<Vec<_>>())
+}
+
+// =================================================================================================
+// The renderer — the parser's inverse, in TESTS only. The committed file is edited by hand (its
+// evidence comments are the point), so nothing generates it; what a round trip proves is that
+// reading and writing agree about every field of every row.
+// =================================================================================================
+
+#[cfg(test)]
+pub(super) fn render_table(version: &RegistryVersion, rows: &[KnownHarness]) -> String {
+    let mut out = format!(
+        "schema_version = {SCHEMA_VERSION}\nversion = \"{version}\"\nmin_engine_version = \
+         {REGISTRY_ENGINE_VERSION}\n"
+    );
+    for row in rows {
+        out.push('\n');
+        out.push_str(&render_row(row));
+    }
+    out
+}
+
+#[cfg(test)]
+pub(super) fn render_row(row: &KnownHarness) -> String {
+    use std::fmt::Write as _;
+
+    let quote = |s: &str| format!("{s:?}");
+    let list = |dirs: &[DirSpec]| {
+        format!(
+            "[{}]",
+            dirs.iter()
+                .map(|d| quote(&d.raw()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut out = String::from("[[harness]]\n");
+    let _ = writeln!(out, "slug = {}", quote(row.slug));
+    let _ = writeln!(out, "display_name = {}", quote(row.display_name));
+    let _ = writeln!(out, "user_dirs = {}", list(row.user_dirs));
+    let _ = writeln!(out, "project_dir = {}", quote(row.project_dir));
+    let _ = writeln!(out, "detect_dirs = {}", list(row.detect_dirs));
+    match row.shared_dir {
+        SharedDirSupport::Unknown => {}
+        SharedDirSupport::Probed(covered) => {
+            let _ = writeln!(
+                out,
+                "shared_dir = {{ level = \"probed\", covered = {covered} }}"
+            );
+        }
+        SharedDirSupport::Docs(covered) => {
+            let _ = writeln!(
+                out,
+                "shared_dir = {{ level = \"docs\", covered = {covered} }}"
+            );
+        }
+    }
+    if let Some(mcp) = &row.mcp {
+        out.push_str("\n[harness.mcp]\n");
+        let _ = writeln!(out, "reload_note = {}", quote(mcp.reload_note));
+        if let Some(user) = mcp.user {
+            let _ = writeln!(
+                out,
+                "user = {{ dir = {}, dialect = {} }}",
+                quote(&user.dir.raw()),
+                quote(dialect_word(user.dialect))
+            );
+        }
+        if let Some((path, dialect)) = mcp.project {
+            let _ = writeln!(
+                out,
+                "project = {{ path = {}, dialect = {} }}",
+                quote(path),
+                quote(dialect_word(dialect))
+            );
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal valid file naming one row this build knows.
+    fn one_row(slug: &str, version: &str) -> String {
+        format!(
+            "schema_version = 1\nversion = \"{version}\"\nmin_engine_version = 1\n\n\
+             [[harness]]\nslug = \"{slug}\"\ndisplay_name = \"X\"\nuser_dirs = \
+             [\"home/.x/skills\"]\nproject_dir = \".x/skills\"\ndetect_dirs = [\"home/.x\"]\n"
+        )
+    }
+
+    fn candidate(text: &str) -> Candidate {
+        Candidate {
+            path: "/tmp/fixture.toml".to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    /// The bundled table's own version, plus a segment — the shape a real downloaded file has.
+    fn newer_than_bundled() -> String {
+        format!("{}.1", bundled_version())
+    }
+
+    // ---- the version -------------------------------------------------------------------------
+
+    #[test]
+    fn versions_compare_by_dotted_numeric_segment() {
+        let v = |s: &str| RegistryVersion::parse(s).expect(s);
+        assert!(v("2026.8.11.2") > v("2026.8.11.1"));
+        assert!(v("2026.9.1") > v("2026.8.99"));
+        assert_eq!(v("1.2"), v("1.2.0"));
+        assert!(v("1.2.1") > v("1.2"));
+    }
+
+    #[test]
+    fn a_version_that_is_not_dotted_numeric_names_what_it_refused() {
+        for bad in ["", "2026.8.alpha", "2026..8", "99999999999999999999999"] {
+            let e = RegistryVersion::parse(bad).expect_err(bad);
+            assert!(e.message().contains("version"), "{bad}: {e}");
+        }
+    }
+
+    // ---- the header fences -------------------------------------------------------------------
+
+    #[test]
+    fn a_foreign_schema_version_refuses_the_file() {
+        let text = one_row("cursor", "9.0.0").replace("schema_version = 1", "schema_version = 2");
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("schema_version 2"), "{e}");
+    }
+
+    #[test]
+    fn a_min_engine_version_past_this_build_refuses_the_file() {
+        let text =
+            one_row("cursor", "9.0.0").replace("min_engine_version = 1", "min_engine_version = 2");
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("min_engine_version 2"), "{e}");
+        // …and the engine this build DOES provide is named, so a person can tell which side is
+        // behind.
+        assert!(
+            e.message().contains(&REGISTRY_ENGINE_VERSION.to_string()),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_toml_or_names_no_rows_is_refused() {
+        let e = parse_registry("not = = toml", Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("not valid TOML"), "{e}");
+        let e = parse_registry(
+            "schema_version = 1\nversion = \"1\"\nmin_engine_version = 1\n",
+            Origin::Downloaded,
+        )
+        .expect_err("refused");
+        assert!(e.message().contains("[[harness]]"), "{e}");
+    }
+
+    #[test]
+    fn a_file_past_the_size_ceiling_is_refused_unread() {
+        let huge = format!(
+            "{}{}",
+            one_row("cursor", "9.0.0"),
+            "#".repeat(MAX_REGISTRY_BYTES)
+        );
+        let e = parse_registry(&huge, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("ceiling"), "{e}");
+    }
+
+    // ---- the row fences ----------------------------------------------------------------------
+
+    #[test]
+    fn an_unknown_slug_is_warned_about_and_skipped_never_refused() {
+        let text = format!(
+            "{}\n[[harness]]\nslug = \"brand-new-agent\"\ndisplay_name = \"New\"\nuser_dirs = \
+             [\"home/.new/skills\"]\nproject_dir = \".new/skills\"\ndetect_dirs = \
+             [\"home/.new\"]\n",
+            one_row("cursor", "9.0.0")
+        );
+        let parsed = parse_registry(&text, Origin::Downloaded).expect("the known row survives");
+        assert_eq!(parsed.row_count(), 1, "only the row this build knows");
+        assert_eq!(parsed.warnings().len(), 1, "{:?}", parsed.warnings());
+        assert!(
+            parsed.warnings()[0].contains("brand-new-agent"),
+            "{:?}",
+            parsed.warnings()
+        );
+        // The BUNDLED table DEFINES the set, so the same file is taken whole when it is the bundle.
+        assert_eq!(
+            parse_registry(&text, Origin::Bundled)
+                .expect("bundled takes it")
+                .row_count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_file_whose_every_row_is_unknown_is_refused_rather_than_believed_empty() {
+        let e = parse_registry(&one_row("brand-new-agent", "9.0.0"), Origin::Downloaded)
+            .expect_err("refused");
+        assert!(e.message().contains("names no agent"), "{e}");
+    }
+
+    #[test]
+    fn a_duplicate_slug_refuses_the_file() {
+        let row = one_row("cursor", "9.0.0");
+        let body = &row[row.find("[[harness]]").expect("a row")..];
+        let text = format!("{row}\n{body}");
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("twice"), "{e}");
+    }
+
+    #[test]
+    fn a_downloaded_row_may_not_escape_its_root_or_name_an_absolute_path() {
+        let cases = [
+            ("home/../../etc", ".."),
+            ("home/./skills", "`.`"),
+            ("home//skills", "empty path component"),
+            ("home/sk;ills", "not allowed"),
+            ("home/back\\slash", "`/`-separated"),
+            ("/etc/codex", "absolute"),
+            ("nosuchroot/skills", "not a root"),
+        ];
+        for (dir, needle) in cases {
+            let text =
+                one_row("cursor", "9.0.0").replace("[\"home/.x/skills\"]", &format!("[{dir:?}]"));
+            let e = parse_registry(&text, Origin::Downloaded).expect_err(dir);
+            assert!(e.message().contains(needle), "{dir}: {e}");
+            assert!(e.message().contains("cursor"), "{dir}: {e}");
+        }
+        // The BUNDLED table may name an absolute root (codex's `/etc/codex` does).
+        let text = one_row("cursor", "9.0.0").replace("[\"home/.x/skills\"]", "[\"/etc/codex\"]");
+        assert!(parse_registry(&text, Origin::Bundled).is_ok());
+    }
+
+    #[test]
+    fn a_downloaded_project_dir_or_mcp_path_is_fenced_too() {
+        let text = one_row("cursor", "9.0.0").replace(".x/skills", "../../etc");
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("project_dir"), "{e}");
+
+        let text = format!(
+            "{}\n[harness.mcp]\nreload_note = \"x\"\nproject = {{ path = \"../mcp.json\", dialect \
+             = \"cursor-json\" }}\n",
+            one_row("cursor", "9.0.0")
+        );
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("mcp.project.path"), "{e}");
+    }
+
+    #[test]
+    fn an_unknown_dialect_names_what_it_refused_and_what_it_knows() {
+        let text = format!(
+            "{}\n[harness.mcp]\nreload_note = \"x\"\nuser = {{ dir = \"home/.x/mcp.json\", dialect \
+             = \"telepathy\" }}\n",
+            one_row("cursor", "9.0.0")
+        );
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("telepathy"), "{e}");
+        assert!(e.message().contains("cursor-json"), "{e}");
+    }
+
+    #[test]
+    fn a_missing_or_mistyped_key_names_the_key_and_the_row() {
+        let text = one_row("cursor", "9.0.0").replace("display_name = \"X\"\n", "");
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("display_name"), "{e}");
+        assert!(e.message().contains("cursor"), "{e}");
+
+        let text =
+            one_row("cursor", "9.0.0").replace("project_dir = \".x/skills\"", "project_dir = 7");
+        let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("expected a string"), "{e}");
+    }
+
+    // ---- the three-level resolution -----------------------------------------------------------
+
+    #[test]
+    fn the_override_wins_whatever_its_version_says() {
+        // Deliberately OLDER than the bundled table: an override is the person's decision, not a
+        // race the newest copy wins.
+        let (rows, warnings) = resolve(Some(candidate(&one_row("cursor", "0.0.1"))), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slug, "cursor");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_refused_override_falls_to_the_downloaded_copy_with_one_warning() {
+        let (rows, warnings) = resolve(
+            Some(candidate("not = = toml")),
+            Some(candidate(&one_row("cursor", &newer_than_bundled()))),
+        );
+        assert_eq!(rows.len(), 1, "the downloaded copy answered");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("override"), "{warnings:?}");
+        assert!(warnings[0].contains("downloaded"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_refused_downloaded_copy_falls_to_the_bundled_table_with_one_warning() {
+        let (rows, warnings) = resolve(None, Some(candidate("not = = toml")));
+        assert_eq!(rows.len(), bundled().rows.len(), "the built-in table");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("built into this topos"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn both_levels_refused_downgrades_twice_and_still_answers() {
+        let (rows, warnings) = resolve(
+            Some(candidate("not = = toml")),
+            Some(candidate("also not = = toml")),
+        );
+        assert_eq!(rows.len(), bundled().rows.len());
+        assert_eq!(warnings.len(), 2, "one warning per level: {warnings:?}");
+    }
+
+    #[test]
+    fn a_downloaded_copy_no_newer_than_the_bundled_table_is_ignored_silently() {
+        // The ordinary state after a `self-update`: the binary caught up with what it downloaded.
+        for version in [bundled_version().to_string(), "0.0.1".to_owned()] {
+            let (rows, warnings) = resolve(None, Some(candidate(&one_row("cursor", &version))));
+            assert_eq!(rows.len(), bundled().rows.len(), "{version}");
+            assert!(warnings.is_empty(), "{version}: {warnings:?}");
+        }
+        // Strictly newer, and it is used.
+        let (rows, warnings) = resolve(
+            None,
+            Some(candidate(&one_row("cursor", &newer_than_bundled()))),
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_skipped_row_warning_rides_the_level_that_won() {
+        let text = format!(
+            "{}\n[[harness]]\nslug = \"brand-new-agent\"\ndisplay_name = \"New\"\nuser_dirs = \
+             []\nproject_dir = \".new/skills\"\ndetect_dirs = []\n",
+            one_row("cursor", &newer_than_bundled())
+        );
+        let (rows, warnings) = resolve(None, Some(candidate(&text)));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("brand-new-agent"), "{warnings:?}");
+    }
+
+    // ---- the round trip -----------------------------------------------------------------------
+
+    #[test]
+    fn rendering_the_parsed_table_re_parses_to_the_same_rows() {
+        let rendered = render_table(bundled_version(), super::super::known_harnesses());
+        let again = parse_registry(&rendered, Origin::Bundled).expect("the render re-parses");
+        assert_eq!(again.rows, bundled().rows, "field-for-field");
+        // …and the rendering is stable: a second pass is byte-identical to the first.
+        assert_eq!(render_table(bundled_version(), leak(again.rows)), rendered);
+    }
+
+    #[test]
+    fn every_row_round_trips_through_its_own_rendering() {
+        for row in super::super::known_harnesses() {
+            let text = format!(
+                "schema_version = 1\nversion = \"1\"\nmin_engine_version = 1\n\n{}",
+                render_row(row)
+            );
+            let parsed = parse_registry(&text, Origin::Bundled)
+                .unwrap_or_else(|e| panic!("{}: {e}", row.slug));
+            assert_eq!(parsed.rows.len(), 1, "{}", row.slug);
+            let back = &parsed.rows[0];
+            assert_eq!(back.slug, row.slug);
+            assert_eq!(back.display_name, row.display_name);
+            assert_eq!(back.project_dir, row.project_dir);
+            assert_eq!(
+                back.user_dirs.iter().map(OwnedDir::raw).collect::<Vec<_>>(),
+                row.user_dir_specs(),
+                "{}",
+                row.slug
+            );
+            assert_eq!(
+                back.detect_dirs
+                    .iter()
+                    .map(OwnedDir::raw)
+                    .collect::<Vec<_>>(),
+                row.detect_dir_specs(),
+                "{}",
+                row.slug
+            );
+            assert_eq!(back.shared_dir, row.shared_dir, "{}", row.slug);
+            assert_eq!(back.mcp.is_some(), row.mcp.is_some(), "{}", row.slug);
+            if let (Some(back), Some(mine)) = (&back.mcp, &row.mcp) {
+                assert_eq!(back.reload_note, mine.reload_note, "{}", row.slug);
+                assert_eq!(
+                    back.user.as_ref().map(|(d, dialect)| (d.raw(), *dialect)),
+                    mine.user.map(|s| (s.dir.raw(), s.dialect)),
+                    "{}",
+                    row.slug
+                );
+                assert_eq!(
+                    back.project
+                        .as_ref()
+                        .map(|(p, dialect)| (p.as_str(), *dialect)),
+                    mine.project,
+                    "{}",
+                    row.slug
+                );
+            }
+        }
+    }
+}
