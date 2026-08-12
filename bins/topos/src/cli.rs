@@ -51,11 +51,14 @@ pub(crate) struct Cli {
 
     /// Print the built-in topos skill — the document that teaches an agent to drive this CLI —
     /// and exit. Works anywhere, including where topos cannot place it for your agents.
-    #[arg(long)]
+    // Both documents are MARKDOWN, which is not the envelope `--json` promises: asked for
+    // together there is no answer that keeps both promises, so the run is a usage error rather
+    // than raw markdown on the lane a parser is reading.
+    #[arg(long, conflicts_with = "json")]
     pub(crate) skill: bool,
 
     /// Print the JSON Schema for every shape `--json` can answer with, as one document, and exit.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "json")]
     pub(crate) schema: bool,
 
     /// Optional so a bare `topos` can orient instead of erroring: on a TTY it renders the status

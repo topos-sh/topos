@@ -21,32 +21,41 @@
 //! **Ownership is the sentinel LINE**, which is also why the command here is the comment-less
 //! guarded sweep: a TOML config has real comments, so the marker goes where a person reads it
 //! rather than inside a quoted string. The block topos owns runs from that line to the end of the
-//! table it leads (the next table header, or EOF) — that is the region a re-arm rewrites and a
-//! scrub deletes, and nothing outside it is ever touched.
+//! table it leads (the next table header, or EOF) MINUS the blank and comment lines that trail it:
+//! a person's `# note` after the block, and the blank line separating it from their next table, are
+//! theirs — not table content. That trimmed region is what a re-arm compares against, rewrites, and
+//! a scrub deletes; nothing outside it is ever touched, and a re-arm over an untouched file writes
+//! nothing at all.
 //!
-//! **Evidence level: hook shape unverified** — the file, the sentinel-delimited append and the
-//! `[[hooks]]` entry schema are taken from herdr's shipped Kimi Code integration (Apache-2.0),
-//! which brackets its own block between two sentinel comments in exactly this file; no Kimi
-//! documentation was read here and no live build was probed. Herdr registers twelve events to feed
-//! an agent-state display; topos registers ONLY `SessionStart`, because what it needs is a refresh
-//! moment. Nothing in that integration describes a per-hook consent gate, so a registration reports
-//! `Active` carrying the evidence-level note.
+//! **Evidence level: hook shape unverified; needs kimi 0.14+** — the file, the sentinel-delimited
+//! append and the `[[hooks]]` entry schema are taken from herdr's shipped Kimi Code integration
+//! (Apache-2.0), which brackets its own block between two sentinel comments in exactly this file;
+//! no Kimi documentation was read here and no live build was probed. Herdr HARD-GATES this
+//! integration on kimi 0.14.0 or newer; topos deliberately probes no binary for its version, so the
+//! version the shape is known to work on rides the note instead of a gate. Herdr registers twelve
+//! events to feed an agent-state display; topos registers ONLY `SessionStart`, because what it
+//! needs is a refresh moment. Nothing in that integration describes a per-hook consent gate, so a
+//! registration reports `Active` carrying the evidence-level note.
 
 use std::path::{Path, PathBuf};
 
 use topos_types::{CurrencyKind, TriggerState};
 
+use crate::registry;
 use crate::{ConfigStore, trigger_report};
 
 use super::toml_lines::{
-    HeaderStated, basic_string_value, header_stated, is_key_line, root_defines_key,
-    shape_is_unprovable, split_lines, table_header,
+    HeaderStated, append_at_eof, basic_string_value, header_stated, is_key_line, root_defines_key,
+    shape_is_unprovable, split_lines, table_header, terminator,
 };
 use super::{EditPlan, GUARDED_SWEEP, SENTINEL, TriggerAdapter, TriggerArtifact, TriggerReport};
 
 const SLUG: &str = "kimi-code-cli";
 const MARKER_ID: &str = "topos:kimi-code-cli:currency:1";
-const NOTE: &str = "hook shape unverified";
+/// The evidence level, plus the build the shape is known against: herdr hard-gates this
+/// integration on kimi 0.14.0, and topos probes no binary for a version (a harness's own build is
+/// not something this port asks about), so the version rides the receipt where a person reads it.
+const NOTE: &str = "hook shape unverified; needs kimi 0.14+";
 /// The reason a config topos COULD read is still one it will not edit: `hooks` is already defined
 /// at the file's top level (`hooks = []`, `hooks.enabled = false`), where the `[[hooks]]` header
 /// this engine appends REDEFINES the name — which costs kimi its whole config rather than one
@@ -63,19 +72,42 @@ const HEADER_HOOKS_REASON: &str =
 const CONFIG_FILENAME: &str = "config.toml";
 /// The table header our block opens; also the only table a hand-rolled sweep is read out of.
 const HOOKS_HEADER: &str = "[[hooks]]";
+/// The ONE event topos registers — and the one a foreign sweep must ALSO name before it counts as
+/// somebody's own session-start trigger.
+const EVENT: &str = "SessionStart";
+/// Kimi's own config-dir override, the one herdr's integration reads.
+///
+/// This resolves through [`registry::env_override`] — the crate's ONE env read — rather than a
+/// [`registry::Root`] variant of its own: `Root` is the vocabulary of the DIRECTORY SPECS baked
+/// into registry rows, and no row names this dir. A variant nothing resolves would be vocabulary
+/// with no referent.
+const ENV_VAR: &str = "KIMI_CODE_HOME";
 
-/// The canonical block, sentinel line first. Composed from the shared sweep const so the one
-/// spelling can never drift per-surface (the byte-exact fixture is pinned in the tests); the sweep
-/// is the COMMENT-LESS guarded form, because the ownership marker is the comment line above it.
-fn block() -> String {
+/// The canonical block in a given line ending, sentinel line first. Composed from the shared sweep
+/// const so the one spelling can never drift per-surface (the byte-exact fixture is pinned in the
+/// tests); the sweep is the COMMENT-LESS guarded form, because the ownership marker is the comment
+/// line above it.
+fn block_in(term: &str) -> String {
     format!(
-        "{SENTINEL}\n{HOOKS_HEADER}\nevent = \"SessionStart\"\ncommand = \"{GUARDED_SWEEP}\"\ntimeout = 60\n"
+        "{SENTINEL}{term}{HOOKS_HEADER}{term}event = \"{EVENT}\"{term}command = \
+         \"{GUARDED_SWEEP}\"{term}timeout = 60{term}"
     )
 }
 
-/// Production root: `~/.kimi-code` under the passed home (no env override in the registry table).
+/// The block as a fresh file writes it.
+fn block() -> String {
+    block_in("\n")
+}
+
+/// Production root: `$KIMI_CODE_HOME` else `~/.kimi-code` under the passed home.
 pub(crate) fn resolve_root(home: &Path) -> PathBuf {
-    home.join(".kimi-code")
+    root_under(registry::env_override(ENV_VAR), home)
+}
+
+/// The root an override decides — split out so a test can state both answers without touching the
+/// process environment.
+fn root_under(override_dir: Option<PathBuf>, home: &Path) -> PathBuf {
+    override_dir.unwrap_or_else(|| home.join(".kimi-code"))
 }
 
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> KimiCodeCli<'a> {
@@ -206,7 +238,8 @@ fn text_of(current: Option<&[u8]>) -> Text<'_> {
 #[derive(Debug, PartialEq, Eq)]
 enum Located {
     /// Our block, as the half-open line range `[start, end)`: the sentinel line, the `[[hooks]]`
-    /// header it leads, and that table's lines up to the next header (or EOF).
+    /// header it leads, and that table's lines up to the next header (or EOF) — MINUS the blank
+    /// and comment lines trailing it, which are not table content.
     Managed(usize, usize),
     /// A topos sweep in somebody's own `[[hooks]]` table, sentinel-free — adopt-or-leave.
     Unmanaged,
@@ -238,31 +271,57 @@ fn locate(lines: &[&str]) -> Located {
         return Located::Unprovable; // our marker, somebody else's shape under it
     }
     // A TOML table runs to the next header; ours therefore ends there, or at EOF.
-    let end = lines[start + 2..]
+    let mut end = lines[start + 2..]
         .iter()
         .position(|l| table_header(l).is_some())
         .map_or(lines.len(), |offset| start + 2 + offset);
+    // …minus what trails it. A blank line before somebody's next header is a separator, and a
+    // comment after our block is a person's note about their own config: neither is content of the
+    // table we own, so neither is ours to rewrite on a re-arm or to take away on a scrub. The
+    // sentinel and the header it leads are never trimmed — they ARE the block.
+    while end > start + 2 && is_blank_or_comment(lines[end - 1]) {
+        end -= 1;
+    }
     Located::Managed(start, end)
 }
 
-/// Whether a person's OWN `[[hooks]]` entry already invokes a topos sweep. Only a `command`
-/// assignment inside a `[[hooks]]` table counts: the same string in another table is a different
-/// setting, and reading it as a hook would leave the machine with no trigger at all.
+/// Whether a line carries no table content — empty, or a comment.
+fn is_blank_or_comment(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty() || trimmed.starts_with('#')
+}
+
+/// Whether a person's OWN `[[hooks]]` entry already invokes a topos sweep AT SESSION START. Two
+/// things have to hold inside ONE `[[hooks]]` table: the `command` invokes a sweep, and the `event`
+/// is the one topos would register. Either alone is not a session-start trigger — a sweep somebody
+/// hung off `Stop` fires when a turn ends, so treating it as ours would leave the machine with no
+/// session-start trigger at all, silently. The same string outside a `[[hooks]]` table is a
+/// different setting entirely.
 fn holds_a_hand_rolled_sweep(lines: &[&str]) -> bool {
     let mut in_hooks = false;
+    let (mut sweep, mut at_session_start) = (false, false);
     for line in lines {
         if table_header(line).is_some() {
             // Their table in whichever spelling TOML reads as `[[hooks]]` — `[["hooks"]]` and
             // `[[ hooks ]]` hold the same entries, and missing one would install a duplicate
-            // sweep beside theirs.
+            // sweep beside theirs. A new table is a new entry: both answers reset.
             in_hooks =
                 header_stated(line, "hooks") == Some(HeaderStated::ArrayOfTables { whole: true });
+            (sweep, at_session_start) = (false, false);
             continue;
         }
-        if in_hooks
-            && is_key_line(line, "command")
+        if !in_hooks {
+            continue;
+        }
+        if is_key_line(line, "command")
             && basic_string_value(line).is_some_and(super::is_hand_rolled_sweep)
         {
+            sweep = true;
+        }
+        if is_key_line(line, "event") && basic_string_value(line) == Some(EVENT) {
+            at_session_start = true;
+        }
+        if sweep && at_session_start {
             return true;
         }
     }
@@ -308,8 +367,9 @@ fn plan_install(current: Option<&[u8]>) -> EditPlan {
         Located::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None),
         Located::Managed(start, end) => {
             // Ours already — but a block an EARLIER build wrote may carry a stale command or event.
-            // Rewrite the region in place; a true no-op when it already matches.
-            let canonical = block();
+            // Rewrite the region in place, in the line endings the block is already written in; a
+            // true no-op when it already matches.
+            let canonical = block_in(terminator(lines[start]));
             if lines[start..end].concat() == canonical {
                 return EditPlan::Leave(TriggerState::Active, Some(NOTE));
             }
@@ -318,16 +378,12 @@ fn plan_install(current: Option<&[u8]>) -> EditPlan {
             out.push_str(&lines[end..].concat());
             EditPlan::Write(out.into_bytes(), TriggerState::Active, Some(NOTE))
         }
-        Located::Absent => {
-            // A fresh table appended at EOF, blank-line separated: a top-level table header is
-            // absolute, so an EOF append can never land inside somebody else's table.
-            let mut out = text.trim_end_matches('\n').to_owned();
-            if !out.is_empty() {
-                out.push_str("\n\n");
-            }
-            out.push_str(&block());
-            EditPlan::Write(out.into_bytes(), TriggerState::Active, Some(NOTE))
-        }
+        // A fresh table appended at EOF, blank-line separated and in the file's own line endings.
+        Located::Absent => EditPlan::Write(
+            append_at_eof(&lines, &block()).into_bytes(),
+            TriggerState::Active,
+            Some(NOTE),
+        ),
     }
 }
 
@@ -410,7 +466,11 @@ timeout = 60
         assert_eq!(report.marker_id, "topos:kimi-code-cli:currency:1");
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
-        assert_eq!(report.note.as_deref(), Some("hook shape unverified"));
+        assert_eq!(
+            report.note.as_deref(),
+            Some("hook shape unverified; needs kimi 0.14+"),
+            "the evidence level names the build the shape is known against"
+        );
         assert_eq!(report.touched_path.as_deref(), Some(CONFIG));
         assert_eq!(cfg.text(CONFIG).as_deref(), Some(BLOCK_FIXTURE));
         assert_eq!(cfg.writes(), 1);
@@ -605,7 +665,7 @@ timeout = 60
     fn a_quoted_hooks_array_header_is_still_their_own_table() {
         for theirs in [
             "[[\"hooks\"]]\nevent = \"SessionStart\"\ncommand = \"topos update --quiet\"\n",
-            "[[ hooks ]]\ncommand = \"topos update\"\n",
+            "[[ hooks ]]\ncommand = \"topos update\"\nevent = \"SessionStart\"\n",
         ] {
             let cfg = MemConfig::with_file(CONFIG, theirs);
             let report = a(&cfg).install();
@@ -616,6 +676,112 @@ timeout = 60
             );
             assert_eq!(cfg.writes(), 0, "{theirs:?}");
         }
+    }
+
+    /// Review follow-up: a sweep somebody hung off ANOTHER event is not a session-start trigger.
+    /// Adopting it would leave the machine with nothing firing at session start — silently, since
+    /// adopt-or-leave writes nothing and reports success — so arming proceeds beside it.
+    #[test]
+    fn a_sweep_on_another_event_is_not_the_session_start_trigger() {
+        let theirs = "[[hooks]]\nevent = \"Stop\"\ncommand = \"topos update --quiet\"\n";
+        let cfg = MemConfig::with_file(CONFIG, theirs);
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Active);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some(&*format!("{theirs}\n{BLOCK_FIXTURE}")),
+            "their Stop hook is untouched and ours is appended beside it"
+        );
+
+        // An entry naming NO event at all is not one either — the sweep it runs could be anything.
+        let eventless = "[[hooks]]\ncommand = \"topos update --quiet\"\n";
+        let cfg = MemConfig::with_file(CONFIG, eventless);
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+
+        // …and the two halves must be the SAME entry: their session-start hook plus somebody
+        // else's sweep on another event is not one hand-rolled trigger.
+        let split_across_tables = "[[hooks]]\nevent = \"SessionStart\"\ncommand = \"echo hi\"\n\n[[hooks]]\nevent = \"Stop\"\ncommand = \"topos update\"\n";
+        let cfg = MemConfig::with_file(CONFIG, split_across_tables);
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+    }
+
+    /// A person's note after our block, and the blank line before their next table, are THEIRS: a
+    /// re-arm rewrites neither (it writes nothing at all) and a scrub leaves both standing.
+    #[test]
+    fn a_note_after_our_block_survives_a_re_arm_and_a_scrub() {
+        let before = format!(
+            "model = \"kimi-k2\"\n\n{BLOCK_FIXTURE}\n# my own note\n\n[tui]\nmouse = false\n"
+        );
+        let cfg = MemConfig::with_file(CONFIG, &before);
+
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+        assert_eq!(
+            cfg.writes(),
+            0,
+            "a re-arm over an untouched file writes nothing"
+        );
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(before.as_str()));
+
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
+        let after = cfg.text(CONFIG).unwrap();
+        assert!(
+            after.contains("# my own note"),
+            "their note survives: {after:?}"
+        );
+        assert!(after.contains("[tui]\nmouse = false\n"), "{after:?}");
+        assert!(
+            !after.contains(SENTINEL),
+            "and our block is gone: {after:?}"
+        );
+    }
+
+    /// A block at EOF with the file's trailing blank lines after it: the region still ends at our
+    /// own last line, so a re-arm is a no-op and a scrub takes only the block.
+    #[test]
+    fn trailing_blank_lines_are_not_part_of_the_block() {
+        let before = format!("model = \"kimi-k2\"\n\n{BLOCK_FIXTURE}\n\n");
+        let cfg = MemConfig::with_file(CONFIG, &before);
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+        assert_eq!(cfg.writes(), 0, "nothing to re-write");
+        a(&cfg).remove();
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some("model = \"kimi-k2\"\n"));
+    }
+
+    /// A user's table AFTER ours bounds the region even when its name holds a `]` — a header a
+    /// reader missed would run the region to EOF and take their table with it on a scrub.
+    #[test]
+    fn a_header_holding_a_bracket_in_its_key_still_bounds_the_region() {
+        let before = format!("{BLOCK_FIXTURE}[\"a]b\"]\nx = 1\n");
+        let cfg = MemConfig::with_file(CONFIG, &before);
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+        assert_eq!(cfg.writes(), 0, "the block is already canonical");
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[\"a]b\"]\nx = 1\n"),
+            "their table survives whole"
+        );
+    }
+
+    /// CRLF in, CRLF out: the appended block takes the file's own line endings, and the re-arm
+    /// that follows compares against them — one write, then nothing.
+    #[test]
+    fn the_appended_block_keeps_the_files_own_line_endings() {
+        let cfg = MemConfig::with_file(CONFIG, "model = \"kimi-k2\"\r\n");
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some(&*format!(
+                "model = \"kimi-k2\"\r\n\r\n{}",
+                BLOCK_FIXTURE.replace('\n', "\r\n")
+            ))
+        );
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+        assert_eq!(
+            cfg.writes(),
+            1,
+            "the re-arm sees its own block, endings and all"
+        );
     }
 
     /// The same string outside a `[[hooks]]` table is a different setting — reading it as a hook
@@ -699,17 +865,25 @@ timeout = 60
         assert!(adapter.artifacts().is_empty());
     }
 
+    /// The config lives under kimi's own root — and kimi's own override moves it, because a hook
+    /// written where the harness never reads is a trigger reported Active that fires for nobody.
     #[test]
-    fn the_config_lives_under_kimis_own_root() {
+    fn the_config_lives_under_kimis_own_root_or_its_override() {
         let cfg = MemConfig::default();
+        let home = Path::new("/home/me");
+        assert_eq!(root_under(None, home), PathBuf::from("/home/me/.kimi-code"));
         assert_eq!(
-            resolve_root(Path::new("/home/me")),
-            PathBuf::from("/home/me/.kimi-code")
+            root_under(Some(PathBuf::from("/elsewhere/kimi")), home),
+            PathBuf::from("/elsewhere/kimi"),
+            "the override wins outright"
         );
-        assert_eq!(
-            adapter(Path::new("/home/me"), &cfg).config_file(),
-            Some(PathBuf::from("/home/me/.kimi-code/config.toml"))
-        );
+        assert_eq!(ENV_VAR, "KIMI_CODE_HOME");
+        if registry::env_override(ENV_VAR).is_none() {
+            assert_eq!(
+                adapter(home, &cfg).config_file(),
+                Some(PathBuf::from("/home/me/.kimi-code/config.toml"))
+            );
+        }
     }
 
     #[test]

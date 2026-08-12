@@ -1327,6 +1327,32 @@ fn the_document_flags_print_their_bytes_and_touch_nothing() {
         !sidecar.exists(),
         "the document flags create no sidecar state"
     );
+
+    // A document asked for beside SOMETHING ELSE has no answer that keeps both promises, so the
+    // run is a usage error naming the conflict — never raw markdown on the `--json` lane a parser
+    // is reading, and never a document printed over a verb that silently never ran.
+    for (args, conflicts_with) in [
+        (vec!["--skill", "--json"], "--json"),
+        (vec!["--schema", "--json"], "--json"),
+        (vec!["--skill", "list"], "'list'"),
+        (vec!["--schema", "status"], "'status'"),
+        (vec!["--skill", "list", "--json"], "'list'"),
+    ] {
+        let out = run_doc(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} is a usage error, not an answer"
+        );
+        assert!(out.stdout.is_empty(), "{args:?} prints no document");
+        let err = String::from_utf8(out.stderr).expect("utf-8");
+        assert!(err.contains(args[0]), "{args:?}: {err}");
+        assert!(err.contains(conflicts_with), "{args:?}: {err}");
+    }
+    assert!(
+        !sidecar.exists(),
+        "a refused combination creates no sidecar state either"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 

@@ -61,7 +61,11 @@ fn dispatch() -> ExitCode {
         .collect();
     // The two DOCUMENT flags, intercepted before any dispatch: they read no state, touch no file,
     // dial nothing, and answer identically on a broken install. `--skill` first — an agent that
-    // asked for both wants the teaching document.
+    // asked for both wants the teaching document. A document asked for BESIDE a verb is a usage
+    // error, not a document printed over a verb that silently never ran.
+    if let Some(code) = document_flag_over_a_verb(&cli) {
+        return code;
+    }
     if let Some(doc) = document_flag(&cli) {
         outln!("{doc}");
         return ExitCode::SUCCESS;
@@ -102,6 +106,33 @@ fn version_check_applies(command: &Command) -> bool {
             // `status` promises "offline, nothing dialed" — the passive probe would break it.
             | Command::Status { .. }
     )
+}
+
+/// The refusal a DOCUMENT flag typed beside a verb earns: exit 2 with a clap usage error naming
+/// both halves of the conflict, or `None` when there is no conflict to answer.
+///
+/// `topos --skill list` asks two questions with one answer between them. Printing the document
+/// would swallow the verb — a person, or an agent, waits for a listing and reads a skill document
+/// instead, with a success code under it — and running the verb would swallow the flag. Both
+/// documents stand alone by construction (they read no state and touch no file), so there is
+/// nothing for a verb to add to them. The `--json` half of the same rule is clap's own, declared on
+/// the flags themselves.
+fn document_flag_over_a_verb(cli: &Cli) -> Option<ExitCode> {
+    let flag = if cli.skill {
+        "--skill"
+    } else if cli.schema {
+        "--schema"
+    } else {
+        return None;
+    };
+    let verb = cli.command.as_ref()?.name();
+    let mut cmd = crate::cli::cli_command();
+    let err = cmd.error(
+        clap::error::ErrorKind::ArgumentConflict,
+        format!("the argument '{flag}' cannot be used with the subcommand '{verb}'"),
+    );
+    let _ = err.print();
+    Some(ExitCode::from(2))
 }
 
 /// The stand-alone DOCUMENT flags (`--skill`, `--schema`) — the text to print, or `None` when

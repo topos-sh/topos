@@ -17,8 +17,13 @@
 //!   the interval exists to prevent.
 //! - **Fail open, and stay quiet.** Nothing here can fail a sweep: an unreadable stamp means check
 //!   now, an unreachable host means try in six hours, and a refused file means the machine keeps
-//!   the table it already had. The person hears about it only if the file they are ASKED to read
-//!   is broken, which is the loader's job, not this one's.
+//!   the table it already had. A copy already on disk that the fences now refuse is DELETED in the
+//!   round that finds it: the loader would otherwise warn about it on every command until a person
+//!   went looking, and the machine is on the built-in table either way.
+//! - **The one line this lane says.** A table that LANDS may name harnesses this build has no
+//!   trigger or adapter for — the ordinary shape of a table moving faster than releases. Those rows
+//!   are skipped by the fences, and the skip is said HERE, once, as the new version lands; the
+//!   loader stays silent about them on every later command (`topos_harness::registry::format`).
 //!
 //! **No hot reload.** A CLI process is one command long, so a table that lands during a sweep is
 //! read by the next command — there is no in-flight table to swap, and no window where half the
@@ -33,6 +38,7 @@ use topos_harness::registry;
 use topos_types::PERSISTED_SCHEMA_VERSION;
 
 use crate::fs_seam::FsOps;
+use crate::out::errln;
 use crate::sidecar::Layout;
 
 /// How long the lane waits between checks — the forge lane's interval, deliberately shared: both
@@ -139,7 +145,12 @@ pub(crate) fn refresh_if_due(
     let next = next_due(now_ms, jitter_ms);
     write_stamp(fs, layout, now_ms, next, stamp.cached_version.clone(), None);
 
-    let outcome = run(fs, layout, fetch);
+    let (outcome, skipped) = run(fs, layout, fetch);
+    // The rows the fences skipped in a table that LANDED — said once, here, and never again by the
+    // loader that reads the file on every later command.
+    for row in &skipped {
+        errln!("{row}");
+    }
     let cached_version = match &outcome {
         Refresh::Updated(v) => Some(v.clone()),
         _ => stamp.cached_version.clone(),
@@ -155,63 +166,80 @@ pub(crate) fn refresh_if_due(
     outcome
 }
 
-/// One round, past the clock: fetch, fence, compare, write.
-fn run(fs: &dyn FsOps, layout: &Layout, fetch: &dyn RegistryFetch) -> Refresh {
+/// One round, past the clock: fetch, fence, compare, write — plus the lines the round owes a
+/// person, which is exactly the skipped rows of a table that LANDED (empty on every other outcome).
+fn run(fs: &dyn FsOps, layout: &Layout, fetch: &dyn RegistryFetch) -> (Refresh, Vec<String>) {
+    let refused = |why: String| (Refresh::Refused(why), Vec::new());
     let url = registry_url();
     let text = match fetch.get(&url) {
         Ok(text) => text,
-        Err(e) => return Refresh::Refused(e),
+        Err(e) => return refused(e),
     };
     let parsed = match registry::parse_registry(&text, registry::Origin::Downloaded) {
         Ok(parsed) => parsed,
-        Err(e) => return Refresh::Refused(e.message().to_owned()),
+        Err(e) => return refused(e.message().to_owned()),
     };
     let version = parsed.version();
 
     let path = registry::cache_path(layout.home());
-    let on_disk = fs
-        .read_opt(&path)
-        .ok()
-        .flatten()
-        .and_then(|bytes| String::from_utf8(bytes).ok());
-    if let Some(current) = &on_disk
-        && let Ok(current_parsed) = registry::parse_registry(current, registry::Origin::Downloaded)
-    {
+    let raw = fs.read_opt(&path).ok().flatten();
+    let current = raw
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|text| {
+            registry::parse_registry(text, registry::Origin::Downloaded)
+                .ok()
+                .map(|parsed| (text, parsed))
+        });
+    // A copy already on disk that the fences REFUSE is deleted in the round that finds it: the
+    // loader warns about it on every command until somebody goes looking, and the machine is
+    // already back on the table built into this binary — the file costs warnings and buys nothing.
+    // Best-effort, and it happens whatever this round then decides about the served table.
+    if raw.is_some() && current.is_none() {
+        let _ = fs.remove_file(&path);
+    }
+
+    if let Some((on_disk, current_parsed)) = current {
         // The anti-rollback rule, non-cryptographic and deliberate: a version must go FORWARD, and
         // a version that stayed put must not have changed its bytes underneath us. Neither is an
         // attack defence — the delivery is plain TLS — but a publisher who edits without bumping
         // has made two machines disagree while claiming to agree, and that is worth refusing.
         match version.cmp(current_parsed.version()) {
             std::cmp::Ordering::Less => {
-                return Refresh::Refused(format!(
+                return refused(format!(
                     "{url} serves harness registry {version}, older than the {} already \
                      downloaded — kept the newer one",
                     current_parsed.version()
                 ));
             }
-            std::cmp::Ordering::Equal if current.as_str() != text.as_str() => {
-                return Refresh::Refused(format!(
+            std::cmp::Ordering::Equal if on_disk != text.as_str() => {
+                return refused(format!(
                     "{url} serves harness registry {version} with different bytes from the copy \
                      already downloaded — a changed table needs a new version"
                 ));
             }
-            std::cmp::Ordering::Equal => return Refresh::Unchanged,
+            std::cmp::Ordering::Equal => return (Refresh::Unchanged, Vec::new()),
             std::cmp::Ordering::Greater => {}
         }
     } else if version <= registry::bundled_version() {
-        // Nothing downloaded yet (or what is there is junk) and the table built into this topos is
-        // already at least as new — there is nothing to keep.
-        return Refresh::Unchanged;
+        // Nothing downloaded yet (or what was there has just been swept away) and the table built
+        // into this topos is already at least as new — there is nothing to keep.
+        return (Refresh::Unchanged, Vec::new());
     }
 
     if let Some(dir) = path.parent()
         && fs.create_dir_all(dir).is_err()
     {
-        return Refresh::Refused(format!("could not create {}", dir.display()));
+        return refused(format!("could not create {}", dir.display()));
     }
     match crate::atomic::atomic_write(fs, &path, text.as_bytes()) {
-        Ok(()) => Refresh::Updated(version.to_string()),
-        Err(e) => Refresh::Refused(format!(
+        // The table LANDED: the rows its fences skipped are said now, once — this build has no
+        // trigger, adapter or id for them, and the next release is what changes that.
+        Ok(()) => (
+            Refresh::Updated(version.to_string()),
+            parsed.warnings().to_vec(),
+        ),
+        Err(e) => refused(format!(
             "could not write {}: {}",
             path.display(),
             e.detail()
@@ -525,6 +553,57 @@ mod tests {
         );
         assert_eq!(out, Refresh::Unchanged);
         assert!(!home.cached().exists(), "nothing was written");
+    }
+
+    /// A cached copy the fences refuse is SWEPT, not left for a person to find: the loader would
+    /// warn about it on every command until somebody deleted it by hand, and the machine reads the
+    /// built-in table either way. It goes whatever the round then decides about the served table.
+    #[test]
+    fn a_cached_table_the_fences_refuse_is_deleted_by_the_round_that_finds_it() {
+        for served in [
+            table(registry::bundled_version().as_str(), ".cursor/skills"), // nothing to keep
+            table(&newer(), ".cursor/skills"),                             // a real update
+        ] {
+            let home = TempHome::new();
+            let (fs, layout) = (RealFs, home.layout());
+            std::fs::create_dir_all(home.cached().parent().unwrap()).unwrap();
+            std::fs::write(home.cached(), "<!doctype html>").unwrap();
+
+            let out = refresh_if_due(&fs, &layout, NOW, 0, &FakeHost::serving(&served));
+            match out {
+                Refresh::Unchanged => assert!(
+                    !home.cached().exists(),
+                    "the junk copy is gone, and nothing replaced it"
+                ),
+                Refresh::Updated(_) => {
+                    assert_eq!(std::fs::read_to_string(home.cached()).unwrap(), served);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// A table that LANDS naming an agent this build does not know says so ONCE, as it lands — the
+    /// loader that reads the file on every later command stays quiet about it, so a fleet running
+    /// yesterday's binary does not warn on every session until it self-updates.
+    #[test]
+    fn a_landing_table_names_the_agents_this_build_does_not_know_exactly_once() {
+        let home = TempHome::new();
+        let (fs, layout) = (RealFs, home.layout());
+        let with_a_new_agent = format!(
+            "{}\n[[harness]]\nslug = \"brand-new-agent\"\ndisplay_name = \"New\"\nuser_dirs = \
+             []\nproject_dir = \".new/skills\"\ndetect_dirs = []\n",
+            table(&newer(), ".cursor/skills")
+        );
+        let (outcome, said) = run(&fs, &layout, &FakeHost::serving(&with_a_new_agent));
+        assert_eq!(outcome, Refresh::Updated(newer()));
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("brand-new-agent"), "{said:?}");
+
+        // The same table already on disk: nothing lands, so nothing is said.
+        let (outcome, said) = run(&fs, &layout, &FakeHost::serving(&with_a_new_agent));
+        assert_eq!(outcome, Refresh::Unchanged);
+        assert!(said.is_empty(), "{said:?}");
     }
 
     #[test]

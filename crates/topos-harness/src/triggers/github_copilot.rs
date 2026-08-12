@@ -1,5 +1,6 @@
 //! `github-copilot` — the session-start auto-update hook in `<root>/settings.json` (production
-//! root: `~/.copilot`), in Copilot's OWN hook shape rather than the Claude-Code one: a FLAT entry
+//! root: `$COPILOT_HOME` else `~/.copilot`), in Copilot's OWN hook shape rather than the
+//! Claude-Code one: a FLAT entry
 //! array per event (no matcher groups) whose entries name the command under `bash` and the
 //! timeout under `timeoutSec` — `{"type": "command", "bash": …, "timeoutSec": 60}` — under the
 //! uppercase `"SessionStart"` event key.
@@ -25,8 +26,17 @@ use std::path::{Path, PathBuf};
 use topos_types::{CurrencyKind, TriggerState};
 
 use crate::ConfigStore;
+use crate::registry;
 
 use super::cc_hooks::{JsonHooks, JsonHooksSpec};
+
+/// Copilot CLI's own config-home override, the one herdr's integration reads.
+///
+/// It resolves through [`registry::env_override`] — the crate's ONE env read — rather than a
+/// [`registry::Root`] variant of its own: `Root` is the vocabulary of the DIRECTORY SPECS baked
+/// into registry rows, and no row names this config home. A variant nothing resolves would be
+/// vocabulary with no referent.
+const ENV_VAR: &str = "COPILOT_HOME";
 
 pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     slug: "github-copilot",
@@ -48,9 +58,15 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     note: Some("vendor docs, unverified"),
 };
 
-/// Production root: `~/.copilot` under the passed home (no env override in the registry table).
+/// Production root: `$COPILOT_HOME` else `~/.copilot` under the passed home.
 pub(crate) fn resolve_root(home: &Path) -> PathBuf {
-    home.join(".copilot")
+    root_under(registry::env_override(ENV_VAR), home)
+}
+
+/// The root an override decides — split out so a test can state both answers without touching the
+/// process environment.
+fn root_under(override_dir: Option<PathBuf>, home: &Path) -> PathBuf {
+    override_dir.unwrap_or_else(|| home.join(".copilot"))
 }
 
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a> {
@@ -206,5 +222,19 @@ mod tests {
         assert!(adapter.present());
         adapter.remove();
         assert!(!adapter.present());
+    }
+
+    /// The entry lands under Copilot's own config home, and its own override moves it — a hook
+    /// written where the harness never reads is a trigger reported Active that fires for nobody.
+    #[test]
+    fn the_config_lives_under_copilots_own_root_or_its_override() {
+        let home = Path::new("/home/me");
+        assert_eq!(root_under(None, home), PathBuf::from("/home/me/.copilot"));
+        assert_eq!(
+            root_under(Some(PathBuf::from("/elsewhere/copilot")), home),
+            PathBuf::from("/elsewhere/copilot"),
+            "the override wins outright"
+        );
+        assert_eq!(ENV_VAR, "COPILOT_HOME");
     }
 }

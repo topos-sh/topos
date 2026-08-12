@@ -243,6 +243,32 @@ fn rendered_bundle() -> Result<ScannedBundle, ClientError> {
 // ensure — create/refresh the sidecar entry and converge every planned placement.
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(test)]
+mod tests {
+    /// **Every committed source file is a file the bundle carries.** The render names its files one
+    /// by one, and a sibling added to `skills/topos/` without a line here is one the public repo
+    /// serves and no agent ever receives — the deferral that names it dead-ends in every placed
+    /// copy, silently. The web tier pins the same list against the same directory from its side.
+    #[test]
+    fn the_rendered_bundle_carries_every_committed_source_file() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/topos");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("skills/topos is readable")
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".md"))
+            .collect();
+        on_disk.sort();
+        let mut rendered: Vec<String> = super::rendered_bundle()
+            .expect("the bundle renders")
+            .files
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        rendered.sort();
+        assert_eq!(rendered, on_disk, "the bundle and the source directory");
+    }
+}
+
 /// What a sync did. The quiet hook ORs `changed` into its changed-bytes decision, which gates two
 /// things: whether a hook-output document is emitted at all when there is nothing else to say, and
 /// whether Claude Code is asked to reload its skills. Which dialect that document speaks is the

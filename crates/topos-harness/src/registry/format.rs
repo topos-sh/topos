@@ -16,6 +16,15 @@
 //! Every failure downgrades exactly ONE level and says why on stderr, once. There is no hot reload:
 //! a CLI process is one command long, so the next process picks up whatever the refresher wrote.
 //!
+//! Two things are deliberately NOT said here. A DOWNLOADED file's skipped rows are the refresher's
+//! line to say, because the served table naming a harness this build does not know yet is the
+//! system working — one warning as it lands, not one on every command until the next
+//! `self-update`. And the whole machine-local resolution is switched off by
+//! [`BUNDLED_ONLY_ENV`]`=bundled`, which the workspace's `.cargo/config.toml` sets for everything
+//! cargo runs: a gate, a shape pin, or a suite must answer for the COMMIT under test, never for
+//! whatever the developer running it happens to keep in `~/.topos/harness-registry/`. An installed
+//! binary sets no such variable and resolves all three levels as usual.
+//!
 //! ## What a downloaded file may and may not do
 //!
 //! The file is the WHOLE table (a row is the unit of change, never a field patch), but a downloaded
@@ -82,6 +91,25 @@ pub fn override_path(topos_home: &Path) -> PathBuf {
 /// restated here because the table is loaded before any of that machinery exists.
 fn sidecar_home() -> PathBuf {
     super::env_override("TOPOS_HOME").unwrap_or_else(|| super::real_home().join(".topos"))
+}
+
+/// The knob that pins resolution to the table BUNDLED in this binary: `TOPOS_HARNESS_REGISTRY`,
+/// whose one honored value is [`BUNDLED_ONLY`]. Anything else (including nothing) leaves the three
+/// levels resolving normally.
+///
+/// It exists for a checkout, not for a machine. The workspace's `.cargo/config.toml` sets it under
+/// `[env]` — the SQLX_OFFLINE precedent — so every binary cargo builds and runs here reads this
+/// commit's table: without it, the first data-only version bump makes a dogfooding developer's own
+/// `~/.topos/harness-registry/registry.toml` the table their `cargo test` reads, and shape pins
+/// start failing on a property of the laptop.
+pub const BUNDLED_ONLY_ENV: &str = "TOPOS_HARNESS_REGISTRY";
+
+/// The one value [`BUNDLED_ONLY_ENV`] is read for.
+pub const BUNDLED_ONLY: &str = "bundled";
+
+/// Whether this process was told to read the bundled table and nothing else.
+fn bundled_only() -> bool {
+    super::env_override(BUNDLED_ONLY_ENV).is_some_and(|v| v.to_str() == Some(BUNDLED_ONLY))
 }
 
 // =================================================================================================
@@ -469,8 +497,18 @@ fn parse_dir(raw: &str, origin: Origin) -> Result<OwnedDir, RegistryError> {
             known_tags()
         ));
     };
-    if origin.fenced() && !suffix.is_empty() {
-        validate_suffix(suffix).map_err(|e| RegistryError(format!("{raw:?}: {e}")))?;
+    if origin.fenced() {
+        // The bare home dir, with no suffix at all, is the one root that is never a DIR a row may
+        // name: as a skills dir it places bundles into `$HOME` itself, and as a detect dir it says
+        // the harness is installed on every machine there is. No bundled row uses it.
+        if root == Root::Home && suffix.is_empty() {
+            return refuse(format!(
+                "{raw:?}: the home directory itself is not a dir a registry row may name"
+            ));
+        }
+        if !suffix.is_empty() {
+            validate_suffix(suffix).map_err(|e| RegistryError(format!("{raw:?}: {e}")))?;
+        }
     }
     Ok(OwnedDir {
         root,
@@ -715,6 +753,13 @@ pub(super) struct Candidate {
 
 /// Resolve the table from the two machine-local levels over the bundled floor, collecting the
 /// warnings the caller says once. Pure — the loader does the reading, this does the deciding.
+///
+/// **A downloaded file's skipped rows are not warned about here.** A served table naming a harness
+/// this build does not know is the ordinary consequence of the table moving faster than releases:
+/// the row is skipped either way, and repeating that on every command until the next `self-update`
+/// would be guaranteed fleet-wide noise on the system's expected event. The client's refresher says
+/// it ONCE, as the new version lands. An OVERRIDE is the opposite case — a file a person wrote by
+/// hand, whose skipped row is a typo they are waiting to hear about — so its warnings ride through.
 pub(super) fn resolve(
     over: Option<Candidate>,
     downloaded: Option<Candidate>,
@@ -746,10 +791,8 @@ pub(super) fn resolve(
             // Older or equal is the ordinary state after a `self-update`: the binary caught up with
             // what it had downloaded, and there is nothing to say about it.
             Ok(parsed) if parsed.version <= bundled.version => {}
-            Ok(parsed) => {
-                warnings.extend(parsed.warnings);
-                return (parsed.rows, warnings);
-            }
+            // `parsed.warnings` are deliberately dropped — see this function's doc.
+            Ok(parsed) => return (parsed.rows, warnings),
             Err(e) => warnings.push(format!(
                 "topos: the downloaded harness registry at {} was refused ({e}) — using the one \
                  built into this topos",
@@ -793,6 +836,11 @@ fn read_level(path: &Path, warnings: &mut Vec<String>) -> Option<Candidate> {
 /// THE table for this process: the three levels resolved, the warnings said once on stderr, the
 /// rows leaked so every accessor can keep handing out `&'static` rows.
 pub(super) fn load_table() -> &'static [KnownHarness] {
+    if bundled_only() {
+        // Told to answer for this BUILD: the machine-local levels are not read at all, so nothing
+        // on the developer's disk can decide what a gate or a suite sees.
+        return bundled_harnesses();
+    }
     let home = sidecar_home();
     let mut warnings = Vec::new();
     let over = read_level(&override_path(&home), &mut warnings);
@@ -1093,6 +1141,42 @@ mod tests {
         assert!(parse_registry(&text, Origin::Bundled).is_ok());
     }
 
+    /// Review follow-up: the bare home dir is the one root a fenced row may never name — a skills
+    /// dir at `$HOME` places bundles into the home directory itself, and a detect dir at `$HOME`
+    /// says the harness is installed on every machine there is.
+    #[test]
+    fn a_fenced_row_may_not_name_the_home_directory_itself() {
+        let naming = |dir: &str| {
+            format!(
+                "schema_version = 1\nversion = \"9.0.0\"\nmin_engine_version = 1\n\n\
+                 [[harness]]\nslug = \"cursor\"\ndisplay_name = \"X\"\nproject_dir = \
+                 \".x/skills\"\nuser_dirs = [{dir:?}]\ndetect_dirs = [{dir:?}]\n"
+            )
+        };
+        let e = parse_registry(&naming("home"), Origin::Downloaded).expect_err("refused");
+        assert!(e.message().contains("home directory itself"), "{e}");
+        assert!(e.message().contains("cursor"), "{e}");
+
+        // A home root WITH a suffix, and another root's bare form, are both ordinary.
+        for ordinary in ["home/.x/skills", "codexHome"] {
+            assert!(
+                parse_registry(&naming(ordinary), Origin::Downloaded).is_ok(),
+                "{ordinary}"
+            );
+        }
+
+        // …and no row this build ships names it either, so nothing legitimate is being fenced out.
+        for row in bundled_harnesses() {
+            for spec in row.user_dirs().iter().chain(row.detect_dirs) {
+                assert!(
+                    !(spec.root() == Root::Home && spec.suffix().is_empty()),
+                    "{}: a bundled row names the bare home dir",
+                    row.slug
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_downloaded_project_dir_or_mcp_path_is_fenced_too() {
         let text = one_row("cursor", "9.0.0").replace(".x/skills", "../../etc");
@@ -1195,17 +1279,54 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
+    /// A row the fences SKIPPED is worth one line from the person's own file, and none at all from
+    /// the downloaded copy: the served table naming an agent this build does not know is the system
+    /// working, and a warning per command until the next `self-update` would be fleet-wide noise on
+    /// an expected event. The client's refresher says that one as the new version lands.
     #[test]
-    fn a_skipped_row_warning_rides_the_level_that_won() {
-        let text = format!(
-            "{}\n[[harness]]\nslug = \"brand-new-agent\"\ndisplay_name = \"New\"\nuser_dirs = \
-             []\nproject_dir = \".new/skills\"\ndetect_dirs = []\n",
-            one_row("cursor", &newer_than_bundled())
-        );
-        let (rows, warnings) = resolve(None, Some(candidate(&text)));
-        assert_eq!(rows.len(), 1);
+    fn a_skipped_row_is_the_overrides_warning_to_say_and_never_the_downloaded_copys() {
+        let with_a_new_agent = |version: &str| {
+            format!(
+                "{}\n[[harness]]\nslug = \"brand-new-agent\"\ndisplay_name = \"New\"\nuser_dirs = \
+                 []\nproject_dir = \".new/skills\"\ndetect_dirs = []\n",
+                one_row("cursor", version)
+            )
+        };
+
+        let (rows, warnings) = resolve(Some(candidate(&with_a_new_agent("0.0.1"))), None);
+        assert_eq!(rows.len(), 1, "the known row survives");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("brand-new-agent"), "{warnings:?}");
+
+        let (rows, warnings) = resolve(
+            None,
+            Some(candidate(&with_a_new_agent(&newer_than_bundled()))),
+        );
+        assert_eq!(rows.len(), 1, "the same row is still skipped");
+        assert!(warnings.is_empty(), "silently: {warnings:?}");
+    }
+
+    // ---- the bundled-only knob ------------------------------------------------------------------
+
+    /// **The suite reads the table this COMMIT ships.** `.cargo/config.toml` sets
+    /// `TOPOS_HARNESS_REGISTRY=bundled` under `[env]`, so every binary cargo builds and runs here —
+    /// this suite, the xtask gates, the spawned CLI in the composed e2e — resolves the bundled
+    /// table alone. Without it the first data-only version bump would hand a dogfooding developer's
+    /// own `~/.topos/harness-registry/registry.toml` to their `cargo test`, and shape pins would
+    /// start failing on a property of the laptop rather than of the commit.
+    #[test]
+    fn everything_cargo_runs_reads_the_bundled_table() {
+        assert_eq!(BUNDLED_ONLY_ENV, "TOPOS_HARNESS_REGISTRY");
+        assert!(
+            bundled_only(),
+            "run through cargo, so `[env]` in .cargo/config.toml applies"
+        );
+        let slugs =
+            |table: &'static [KnownHarness]| table.iter().map(|h| h.slug).collect::<Vec<_>>();
+        assert_eq!(
+            slugs(super::super::known_harnesses()),
+            slugs(bundled_harnesses())
+        );
     }
 
     // ---- the warnings' own stream -------------------------------------------------------------

@@ -21,8 +21,12 @@ import { serverEnv } from "@/env.server";
  * install guide, the generated verb reference, and the four detail documents SKILL.md defers to
  * by name ("read `manifest.md` next to this file"). Every one must be served: a skill installer
  * that downloads the entry document and not its siblings leaves each deferral dead-ended.
+ *
+ * Exported for its own unit test, which holds this list against the source directory's actual
+ * `.md` listing — the CLI's bundle render is pinned the same way from the Rust side, so a sibling
+ * added to `skills/topos/` cannot end up placed but not served (or served but not placed).
  */
-const SKILL_FILES = [
+export const SKILL_FILES = [
   "SKILL.md",
   "INSTALL.md",
   "reference.md",

@@ -1,5 +1,5 @@
-//! `kilo` — one topos-owned plugin at `<config-home>/kilo/plugin/topos.js` (production config-home:
-//! `$XDG_CONFIG_HOME` else `~/.config`). Kilo auto-loads every plugin in that directory; the plugin
+//! `kilo` — one topos-owned plugin at `~/.config/kilo/plugin/topos.js`. Kilo auto-loads every
+//! plugin in that directory; the plugin
 //! runs the plain sweep (`topos update --quiet`) once when kilo loads it and again on each
 //! `session.created` event, swallowing failures itself — updating is best-effort, never
 //! session-breaking.
@@ -10,9 +10,13 @@
 //! is available, and an error nobody reads is what makes a machine with no `topos` on PATH a silent
 //! no-op instead of a session-start failure.
 //!
-//! **Note the directory.** Kilo keeps its SKILLS under `~/.kilocode` (the registry row's dirs are
-//! untouched by this) while its plugin loader reads `<config-home>/kilo/plugin` — two different
-//! roots for two different things, which is why arming does not follow the skills dir here.
+//! **Note the directory, and note the `~/.config`.** Kilo keeps its SKILLS under `~/.kilocode`
+//! (the registry row's dirs are untouched by this) while its plugin loader reads
+//! `~/.config/kilo/plugin` — two different roots for two different things, which is why arming does
+//! not follow the skills dir here. That `~/.config` is LITERAL, not the XDG-overridable config
+//! home: herdr's kilo integration joins the dir onto `home` and its env resolution never consults
+//! `$XDG_CONFIG_HOME`, so honoring the variable here would write the plugin where kilo does not
+//! look. The registry documents the same literal idiom for `crush` and `kimchi`.
 //!
 //! **Evidence level: plugin API unverified** — the plugin directory and the factory shape are taken
 //! from herdr's shipped Kilo integration (Apache-2.0); no Kilo documentation was read here and no
@@ -24,7 +28,6 @@ use std::path::Path;
 use topos_types::CurrencyKind;
 
 use crate::ConfigStore;
-use crate::registry::{self, Root};
 
 use super::PLAIN_SWEEP;
 use super::file_drop::{FileDrop, FileDropSpec};
@@ -69,7 +72,7 @@ export const ToposCurrency = async () => {{
     )
 }
 
-/// The adapter over an explicit config-home (tests inject; production resolves).
+/// The adapter over an explicit config-home (tests inject; production joins the literal one).
 pub(crate) fn in_config_home<'a>(config_home: &Path, cfg: &'a dyn ConfigStore) -> FileDrop<'a> {
     FileDrop::new(
         &SPEC,
@@ -79,8 +82,10 @@ pub(crate) fn in_config_home<'a>(config_home: &Path, cfg: &'a dyn ConfigStore) -
     )
 }
 
+/// Production path: the LITERAL `~/.config/kilo/plugin` — `$XDG_CONFIG_HOME` deliberately does not
+/// move it (see the module doc).
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> FileDrop<'a> {
-    in_config_home(&registry::config_root(Root::Config, home), cfg)
+    in_config_home(&home.join(".config"), cfg)
 }
 
 #[cfg(test)]
@@ -152,20 +157,16 @@ export const ToposCurrency = async () => {
         assert_eq!(cfg.writes(), 1);
     }
 
-    /// The plugin follows `$XDG_CONFIG_HOME` the way every other config-home instance does — and
-    /// never the `~/.kilocode` skills root, which arming has no business writing into.
+    /// The plugin lands under the LITERAL `~/.config` kilo's own loader reads — never moved by
+    /// `$XDG_CONFIG_HOME` (kilo does not consult it, so honoring it would write where kilo never
+    /// looks), and never in the `~/.kilocode` skills root, which arming has no business writing
+    /// into.
     #[test]
-    fn the_plugin_lands_under_the_config_home_not_the_skills_root() {
+    fn the_plugin_lands_under_the_literal_config_dir_not_the_skills_root() {
         let cfg = MemConfig::default();
         let home = Path::new("/home/me");
         let path = adapter(home, &cfg).config_file().expect("a path");
-        assert_eq!(
-            path,
-            registry::config_root(Root::Config, home)
-                .join("kilo")
-                .join("plugin")
-                .join("topos.js")
-        );
+        assert_eq!(path, Path::new("/home/me/.config/kilo/plugin/topos.js"));
         assert!(
             !path.to_string_lossy().contains(".kilocode"),
             "the skills root is left alone"
