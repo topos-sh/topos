@@ -15284,10 +15284,25 @@ fn publish_at(
     seams: &PublishSeams,
     scope: ops::StoreScope,
 ) -> Result<ops::PublishOutcome, ClientError> {
+    publish_arm(ctx, seams, scope, false)
+}
+
+/// [`publish_at`] with the arm chosen: the direct publish, or `--propose`. The contribute lane
+/// matches it — a landed pointer move, or a proposal opened for review.
+fn publish_arm(
+    ctx: &Ctx<'_>,
+    seams: &PublishSeams,
+    scope: ops::StoreScope,
+    propose: bool,
+) -> Result<ops::PublishOutcome, ClientError> {
     let session_connect = |_s: &Session| ops::SessionTransports {
         plane: Box::new(seams.plane.clone()),
         directory: Box::new(seams.dir.clone()),
-        contribute: Box::new(OkPublish),
+        contribute: if propose {
+            Box::new(OkPropose) as Box<dyn crate::plane::ContributeSource>
+        } else {
+            Box::new(OkPublish)
+        },
         governance: Box::new(NoGovernance),
     };
     let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
@@ -15300,7 +15315,7 @@ fn publish_at(
         Some(&session_connect),
         None,
         "deploy",
-        false,
+        propose,
         None,
         None,
         None,
@@ -15631,4 +15646,117 @@ fn a_g_publish_misses_a_project_only_name() {
         publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap(),
         ops::PublishOutcome::Published(_)
     ));
+}
+
+/// A byte copy of a record directory under a second id — the shape a store carrying two records
+/// under ONE name has, which is the shape that makes it unable to answer for that name.
+fn duplicate_record(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if entry.file_type().unwrap().is_dir() {
+            duplicate_record(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// A project store that cannot answer for the name — two records under it — must not fail a `-g`
+/// publish. The machine store is the authoritative answer under that flag, so the cwd chain is
+/// consulted only for the disclosure, and a store with no answer simply gives none.
+#[test]
+fn a_poisoned_project_store_never_fails_a_g_publish() {
+    let rig = Rig::new("pubscope-poison");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let seams = publish_seams(&v);
+    let (proj, machine_dir, _project_dir) =
+        both_scopes("pubscope-poison-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let edited = b"# deploy\nmachine edit\n";
+    std::fs::write(machine_dir.join("SKILL.md"), edited).unwrap();
+
+    // The checkout's store now answers "deploy" twice.
+    let playout =
+        crate::sidecar::existing_project_store(&rig.fs, &proj.0).expect("the checkout's store");
+    let skills = playout.skills_dir();
+    duplicate_record(&skills.join("s_deploy"), &skills.join("s_deploytwin"));
+    // Standing in the checkout, that ambiguity IS the answer — the store the command stands in
+    // cannot say which copy it means.
+    assert!(
+        matches!(
+            publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap_err(),
+            ClientError::AmbiguousName { .. }
+        ),
+        "the poison is real"
+    );
+
+    // `-g` ships the machine copy regardless: the broken store neither fails the resolution nor
+    // changes what it ships. Both halves of the verb agree.
+    let preview = describe_at(&ctx, &seams, ops::StoreScope::Machine).unwrap();
+    let ops::PublishPreview::Describe(d) = preview else {
+        panic!("the machine copy is drafted, so the ship previews");
+    };
+    assert_eq!(d.from_placement, None, "{d:?}");
+    assert!(d.other_scope_draft.is_none(), "{d:?}");
+    let data = landed(publish_at(&ctx, &seams, ops::StoreScope::Machine).unwrap());
+    assert_eq!(
+        data.bundle_digest,
+        topos_core::digest::to_hex(&one_file(edited).digest),
+        "the MACHINE draft is what shipped"
+    );
+    // No answer means no disclosure — never a guess about a copy that could not be read.
+    assert_eq!(data.from_placement, None, "{data:?}");
+    assert!(!data.from_machine, "{data:?}");
+    assert!(data.other_scope_draft.is_none(), "{data:?}");
+}
+
+/// A `--propose` carries the SAME scope disclosure a landed publish does: a proposal ships bytes
+/// too, so which folder they came from and what the other scope's copy keeps are the same two
+/// facts — stated in the same words on the receipt the reader meets.
+#[test]
+fn a_cross_scope_proposal_carries_the_disclosure_a_landed_publish_does() {
+    let rig = Rig::new("pubscope-propose");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let seams = publish_seams(&v);
+    let (proj, machine_dir, project_dir) =
+        both_scopes("pubscope-propose-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    std::fs::write(machine_dir.join("SKILL.md"), b"# deploy\nmachine edit\n").unwrap();
+    std::fs::write(project_dir.join("SKILL.md"), b"# deploy\nproject edit\n").unwrap();
+
+    let data = match publish_arm(&ctx, &seams, ops::StoreScope::Machine, true).unwrap() {
+        ops::PublishOutcome::Proposed(d) => d,
+        other => panic!("the proposal OPENED: {other:?}"),
+    };
+    assert!(data.from_machine, "{data:?}");
+    assert_eq!(
+        data.from_placement.as_deref(),
+        Some(machine_dir.display().to_string().as_str()),
+        "the folder named is the MACHINE copy's"
+    );
+    let other = data
+        .other_scope_draft
+        .clone()
+        .expect("the checkout's draft is disclosed");
+    assert!(!other.machine, "{other:?}");
+
+    let receipt = crate::render::propose_tty(&data);
+    assert!(
+        receipt.contains(&format!("(from {}) for review.", machine_dir.display())),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!(
+            "\nyour project copy in {} keeps its edits — it becomes a draft ahead of this version \
+             (topos publish deploy shares it).",
+            other.folder
+        )),
+        "{receipt}"
+    );
 }

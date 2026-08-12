@@ -1756,6 +1756,25 @@ pub struct ProposeData {
     /// no prior state to restore — the author's escape is `review <handle> --withdraw`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_line: Option<String>,
+    /// The folder these bytes were read from, present when it was a CHOICE — one of several edited
+    /// copies (`--dest`), or a copy in a scope other than the one the command stood in. The same
+    /// field the direct publish carries: a proposal ships bytes too, so it owes the same answer.
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_placement: Option<String>,
+    /// Whether the proposed bytes came from the MACHINE copy while the command stood in a project
+    /// checkout — the cross-scope ship, which `from_placement` names the folder of. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_machine: bool,
+    /// The OTHER scope's copy, when it carries edits this proposal did not ship. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_scope_draft: Option<ScopeDraft>,
+    /// The edited copies in this scope the proposal left alone (populated beside
+    /// `from_placement`). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_edited: Vec<String>,
 }
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
