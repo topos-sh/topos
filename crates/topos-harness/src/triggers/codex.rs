@@ -13,7 +13,9 @@
 //!   `[features]` header, or appended as a new `[features]` table at EOF. The edit is a
 //!   line-anchored merge in the Hermes YAML discipline (no TOML dependency here): every other
 //!   line re-emits byte-for-byte, and anything it cannot prove — non-UTF-8 bytes, a leading
-//!   byte-order mark hiding the first line's true content — fails closed with ZERO writes.
+//!   byte-order mark hiding the first line's true content, a multiline string whose content lines
+//!   would read as structure, or a `features` key already defined at the file's ROOT (where the
+//!   appended header would redefine it) — fails closed with ZERO writes.
 //!
 //! Codex's hooks used to live in a `[[hooks.SessionStart]]` block topos appended to `config.toml`
 //! itself. That mechanism is gone. There is no migration and no cleanup: a block an earlier build
@@ -45,7 +47,10 @@ use crate::ConfigStore;
 use crate::registry::{self, Root};
 
 use super::cc_hooks::{JsonHooks, JsonHooksSpec};
-use super::toml_lines::{is_key_line, split_lines, table_header, terminator};
+use super::toml_lines::{
+    HeaderStated, header_stated, is_key_line, root_defines_key, shape_is_unprovable, split_lines,
+    table_header, terminator,
+};
 use super::{TriggerAdapter, TriggerArtifact, TriggerReport};
 
 /// Codex's user config file, under the resolved root — the `[features]` switch lives here.
@@ -119,7 +124,7 @@ impl<'a> Codex<'a> {
         let current = self.cfg.read(&path).map_err(|e| crate::io_reason(&e))?;
         match plan_feature(current.as_deref()) {
             FeaturePlan::Leave => Ok(false),
-            FeaturePlan::Unprovable => Err(crate::UNPROVABLE_REASON),
+            FeaturePlan::Refuse(reason) => Err(reason),
             FeaturePlan::Write(bytes) => match self.cfg.replace(&path, &bytes) {
                 Ok(()) => Ok(true),
                 Err(e) => Err(crate::io_reason(&e)),
@@ -199,16 +204,31 @@ impl TriggerAdapter for Codex<'_> {
 // ---------------------------------------------------------------------------------------------
 
 /// What the feature-switch edit does: write the post-image bytes, leave the file untouched (it
-/// already says `hooks = true`), or refuse to reason about it at all.
+/// already says `hooks = true`), or refuse the file entirely, carrying the reason a degraded
+/// receipt states.
 enum FeaturePlan {
     Write(Vec<u8>),
     Leave,
-    Unprovable,
+    Refuse(&'static str),
 }
 
 /// The switch as topos writes it, and the whole of a from-scratch `config.toml`.
 const FEATURE_TABLE: &str = "[features]\nhooks = true\n";
 const FEATURE_KEY_LINE: &str = "hooks = true";
+
+/// The reason a config topos COULD read is still one it will not edit: `features` is already
+/// defined at the file's top level (`features.hooks = …`, or `features = { … }`), where the
+/// `[features]` header this edit would append REDEFINES the key — which costs codex its whole
+/// config rather than one setting. The switch is codex's own, so the receipt names the line a
+/// person can write themselves.
+const ROOT_FEATURES_REASON: &str =
+    "config.toml sets `features` at its top level, where topos cannot add `hooks = true`";
+
+/// The array shape of the same refusal: `[[features]]` defines the key as an ARRAY of tables, and
+/// both the header this edit would append and the key line it would insert presuppose a plain
+/// table — there is nowhere legal to put the switch.
+const ARRAY_FEATURES_REASON: &str =
+    "config.toml defines `features` as an array of tables, where topos cannot add `hooks = true`";
 
 /// Whether an assignment line already states `true` — the value read up to a trailing comment (a
 /// boolean can hold neither a quote nor a `#`). A switch already on is left ALONE rather than
@@ -221,32 +241,55 @@ fn states_true(line: &str) -> bool {
 /// Plan the `[features] hooks = true` edit over the existing `config.toml` bytes.
 ///
 /// Absent or blank → the table IS the file. Otherwise: an existing `hooks` key under the
-/// top-level `[features]` table is set to `true` in place; else the line is inserted directly
+/// top-level `[features]` table is set to `true` in place (in whichever spelling — `hooks`,
+/// `"hooks"`, `'hooks'` — TOML reads as that same key); else the line is inserted directly
 /// after the first `[features]` header (a key must land inside its own table, and the top is the
 /// one position that is always inside it); else the table is appended at EOF, where a fresh
 /// top-level table can never fall into somebody else's.
+///
+/// Three shapes refuse the file outright, because the header this edit would append is only legal
+/// where `features` is not already defined without one: a config whose ROOT context defines
+/// `features` (`features.hooks = false`, `features = { … }` — including a dotted spelling that
+/// already says `true`, which is still a shape these anchors cannot prove); a `[[features]]`
+/// array of tables, which no plain `[features]` header may sit beside; and a config the
+/// anchors cannot read at all (non-UTF-8 bytes, a byte-order mark, a multiline string, an escaped
+/// quoted key or header). A `[features.sub]` header WITHOUT a `[features]` of its own is
+/// deliberately not one of them: TOML lets the super-table be defined afterward, so the EOF
+/// append stays legal — and that holds for `[[features.sub]]` the same way.
 fn plan_feature(current: Option<&[u8]>) -> FeaturePlan {
     let text = match current {
         None => return FeaturePlan::Write(FEATURE_TABLE.into()),
         Some(bytes) => match std::str::from_utf8(bytes) {
             Ok(t) if t.trim().is_empty() => return FeaturePlan::Write(FEATURE_TABLE.into()),
             Ok(t) => t,
-            Err(_) => return FeaturePlan::Unprovable,
+            Err(_) => return FeaturePlan::Refuse(crate::UNPROVABLE_REASON),
         },
     };
     // A byte-order mark hides the first line's true content from the line anchors — never
-    // reasoned about.
-    if text.starts_with('\u{feff}') {
-        return FeaturePlan::Unprovable;
+    // reasoned about. Neither is a file whose lines are not all structure to begin with.
+    if text.starts_with('\u{feff}') || shape_is_unprovable(text) {
+        return FeaturePlan::Refuse(crate::UNPROVABLE_REASON);
     }
 
     let lines = split_lines(text);
+    if root_defines_key(&lines, "features") {
+        return FeaturePlan::Refuse(ROOT_FEATURES_REASON);
+    }
+    if lines.iter().any(|line| {
+        header_stated(line, "features") == Some(HeaderStated::ArrayOfTables { whole: true })
+    }) {
+        return FeaturePlan::Refuse(ARRAY_FEATURES_REASON);
+    }
     let mut header_at = None;
     let mut key_at = None;
     let mut in_features = false;
     for (i, line) in lines.iter().enumerate() {
-        if let Some(header) = table_header(line) {
-            in_features = header == "[features]";
+        if table_header(line).is_some() {
+            // The features table in whichever spelling TOML reads as that name — `[features]`,
+            // `["features"]`, `[ features ]` — so the switch lands inside the table a person
+            // already has instead of beside it in a duplicate header TOML refuses to read.
+            in_features =
+                header_stated(line, "features") == Some(HeaderStated::Table { whole: true });
             if in_features && header_at.is_none() {
                 header_at = Some(i);
             }
@@ -431,6 +474,127 @@ mod tests {
         assert_eq!(
             cfg.text(CONFIG).as_deref(),
             Some("[sandbox]\nhooks = false\n\n[features]\nhooks = true\n")
+        );
+    }
+
+    /// A `hooks` key spelled with quotes is the SAME key: it is set in place, never joined by a
+    /// second bare `hooks` that would leave codex unable to parse its own config.
+    #[test]
+    fn a_quoted_hooks_key_is_the_same_switch() {
+        let cfg = MemConfig::with_file(CONFIG, "[features]\n\"hooks\" = false\n");
+        a(&cfg).install();
+        let after = cfg.text(CONFIG).unwrap();
+        assert_eq!(after, "[features]\nhooks = true\n");
+        assert_eq!(after.matches("hooks").count(), 1, "set, not duplicated");
+
+        // A quoted spelling already on is left exactly as the person wrote it.
+        let already_on = "[features]\n'hooks' = true\n";
+        let cfg = MemConfig::with_file(CONFIG, already_on);
+        a(&cfg).install();
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(already_on));
+        assert_eq!(cfg.writes(), 1, "the entry only");
+    }
+
+    /// A `[features]` line inside somebody's multiline string is their prose, not a table header —
+    /// so the whole file is refused rather than written into the middle of their sentence.
+    #[test]
+    fn a_multiline_string_degrades_instead_of_being_edited_into() {
+        let prose = "instructions = \"\"\"\n[features]\nhooks = false\n\"\"\"\n";
+        let cfg = MemConfig::with_file(CONFIG, prose);
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Degraded);
+        assert!(report.note.is_some(), "a degrade says why");
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(prose), "byte-untouched");
+        assert_eq!(cfg.writes(), 1, "the entry only — config.toml is untouched");
+    }
+
+    /// Review follow-up: a header spelled `["features"]` or `[ features ]` IS the features table,
+    /// so the switch lands inside it — not beside it in a duplicate `[features]` TOML refuses to
+    /// read.
+    #[test]
+    fn a_quoted_features_header_is_the_same_table() {
+        for (before, after) in [
+            (
+                "[\"features\"]\nweb_search = true\n",
+                "[\"features\"]\nhooks = true\nweb_search = true\n",
+            ),
+            (
+                "[ features ]  # mine\nweb_search = true\n",
+                "[ features ]  # mine\nhooks = true\nweb_search = true\n",
+            ),
+        ] {
+            let cfg = MemConfig::with_file(CONFIG, before);
+            a(&cfg).install();
+            assert_eq!(cfg.text(CONFIG).as_deref(), Some(after), "{before:?}");
+        }
+    }
+
+    /// Review follow-up: `[[features]]` defines the key as an ARRAY of tables — a shape neither
+    /// the appended header nor the inserted key line may legally sit beside — so the file degrades
+    /// untouched. The dotted `[[features.sub]]` creates the name only implicitly, where TOML still
+    /// allows the explicit super-table, so the append stays.
+    #[test]
+    fn an_array_features_header_degrades_instead_of_redefining_the_key() {
+        let array = "[[features]]\nname = \"one\"\n";
+        let cfg = MemConfig::with_file(CONFIG, array);
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Degraded);
+        assert!(
+            report.note.as_deref().unwrap().contains("array of tables"),
+            "the degrade says which shape refused"
+        );
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(array), "byte-untouched");
+
+        let dotted = "[[features.sub]]\nx = 1\n";
+        let cfg = MemConfig::with_file(CONFIG, dotted);
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[[features.sub]]\nx = 1\n\n[features]\nhooks = true\n"),
+            "the implicit-only name still takes the appended super-table"
+        );
+    }
+
+    /// `features` defined at the file's root has no header to insert into, and appending one would
+    /// REDEFINE the key — so the switch is refused with a note naming the file to fix. A dotted
+    /// key under somebody else's table is a different key and does not count; a `[features.sub]`
+    /// header leaves an explicit `[features]` legal, so the append still happens there.
+    #[test]
+    fn a_root_level_features_key_degrades_instead_of_redefining_the_table() {
+        for root_defined in [
+            "features.hooks = false\n",
+            "features = { hooks = false }\n",
+            "model = \"gpt-5-codex\"\nfeatures.hooks = true\n\n[tui]\nmouse = false\n",
+        ] {
+            let cfg = MemConfig::with_file(CONFIG, root_defined);
+            let report = a(&cfg).install();
+            assert_eq!(report.state, TriggerState::Degraded, "{root_defined:?}");
+            assert!(
+                report.note.as_deref().unwrap().contains("features"),
+                "the note names the key a person has to set themselves"
+            );
+            assert_eq!(
+                cfg.text(CONFIG).as_deref(),
+                Some(root_defined),
+                "byte-untouched"
+            );
+            assert_eq!(cfg.writes(), 1, "the entry only");
+        }
+
+        // Under a table it is `tui.features` — somebody else's key entirely.
+        let cfg = MemConfig::with_file(CONFIG, "[tui]\nfeatures.hooks = false\n");
+        assert_eq!(a(&cfg).install().state, TriggerState::Inactive);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[tui]\nfeatures.hooks = false\n\n[features]\nhooks = true\n")
+        );
+
+        // A sub-table alone: TOML lets the super-table be defined afterward, so the append is fine.
+        let cfg = MemConfig::with_file(CONFIG, "[features.sub]\nx = 1\n");
+        assert_eq!(a(&cfg).install().state, TriggerState::Inactive);
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[features.sub]\nx = 1\n\n[features]\nhooks = true\n")
         );
     }
 
