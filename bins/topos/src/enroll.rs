@@ -122,8 +122,14 @@ pub(crate) fn delete_wal(fs: &dyn FsOps, layout: &Layout) -> Result<(), ClientEr
 /// The recovery sweep for the enrollment WAL: remove a WAL whose flow has expired
 /// (`now_millis > expires_at_millis`) — a clean abandon (the server's flow row expired with it). An
 /// unexpired WAL is preserved (a resume can still poll it; a granted flow re-answers the same grant).
-/// Best-effort: an unreadable/corrupt WAL is left in place for the owning op to diagnose, never
-/// hard-failing recovery.
+///
+/// A WAL this binary cannot PARSE is reaped too: a pending login is transient state, and a flow
+/// this binary cannot deserialize is one it can never resume — leaving the file would wedge every
+/// future `topos login` on the corrupt read instead of letting one start fresh. (The same arm
+/// covers a WAL with leaked permissions: the document holds a device code, and shredding a
+/// mis-permissioned secret beats preserving it.) Two failures are still left in place: a schema
+/// NEWER than this binary (a downgraded binary must not destroy a newer one's state) and an IO
+/// error (nothing was read; there is nothing to decide). Never hard-fails recovery.
 ///
 /// The read → decide → delete runs UNDER the `"identity"` lock (the same lock every identity write
 /// holds), and the expiry is decided from the read taken under that lock — never from an earlier
@@ -142,8 +148,16 @@ pub(crate) fn sweep_expired_wal(
     // The authoritative read, under the lock, immediately before any delete decision.
     let wal = match read_wal(fs, layout) {
         Ok(Some(wal)) => wal,
-        // Absent → nothing to sweep. Unreadable/permissive/corrupt → leave it for the op to surface.
-        Ok(None) | Err(_) => return Ok(()),
+        // Absent → nothing to sweep.
+        Ok(None) => return Ok(()),
+        // Unresumable by THIS binary (shape parse failed, or the secret's perms leaked): reap it
+        // so the next login starts fresh instead of wedging on the corrupt read forever.
+        Err(ClientError::Corrupt(_)) => {
+            delete_wal(fs, layout)?;
+            return Ok(());
+        }
+        // A newer schema or an IO failure: leave the file alone.
+        Err(_) => return Ok(()),
     };
     if now_millis > wal.expires_at_millis {
         delete_wal(fs, layout)?;
@@ -186,5 +200,56 @@ mod tests {
         let wal = read_wal(&fs, &layout).unwrap().unwrap();
         assert_eq!(wal, written);
         assert!(!format!("{wal:?}").contains("dc_secret"), "{wal:?}");
+    }
+
+    /// A WAL this binary cannot parse (an intent kind it does not know) is REAPED by the sweep —
+    /// a pending login is transient, and leaving the file would wedge every future login on the
+    /// corrupt read instead of letting one start fresh.
+    #[test]
+    fn an_unparseable_wal_is_reaped_by_the_sweep() {
+        let fs = RealFs;
+        let dir = std::env::temp_dir().join(format!("topos-wal-reap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.enrollment_path().parent().unwrap()).unwrap();
+        let bytes = format!(
+            "{{\"schema_version\":{PERSISTED_SCHEMA_VERSION},\"intent\":{{\"kind\":\"unknowable\"}}}}"
+        );
+        std::fs::write(layout.enrollment_path(), bytes).unwrap();
+        std::fs::set_permissions(
+            layout.enrollment_path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+
+        sweep_expired_wal(&fs, &layout, 0).unwrap();
+        assert!(
+            !layout.enrollment_path().exists(),
+            "the unparseable WAL must be reaped"
+        );
+    }
+
+    /// A WAL at a schema NEWER than this binary is LEFT ALONE — a downgraded binary must never
+    /// destroy a newer one's state.
+    #[test]
+    fn a_newer_schema_wal_survives_the_sweep() {
+        let fs = RealFs;
+        let dir = std::env::temp_dir().join(format!("topos-wal-newer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.enrollment_path().parent().unwrap()).unwrap();
+        let bytes = format!("{{\"schema_version\":{}}}", PERSISTED_SCHEMA_VERSION + 1);
+        std::fs::write(layout.enrollment_path(), bytes).unwrap();
+        std::fs::set_permissions(
+            layout.enrollment_path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+
+        sweep_expired_wal(&fs, &layout, i64::MAX).unwrap();
+        assert!(
+            layout.enrollment_path().exists(),
+            "a newer-schema WAL must survive"
+        );
     }
 }
