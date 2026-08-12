@@ -286,6 +286,13 @@ pub(crate) fn list_with(
                 detail.conflict_copy = Some(dir);
                 detail.conflict_reason = Some(reason);
             }
+            // THE CHECKOUT this answer is about: whether it carries a draft, and whether the other
+            // reachable scope holds a checkout of its own. Both are store facts, read from the
+            // store the answering section resolved against — the rows above say what is DEMANDED,
+            // and neither question is answerable from a row.
+            if let Some(id) = record.as_ref() {
+                fill_checkout(ctx, section, id, &mut detail);
+            }
         }
         // A one-skill answer names THIS skill's external source and NO other. Every line above it
         // is about the skill on screen, so an unrelated repository's last check reads as one more
@@ -649,6 +656,51 @@ fn scope_layout(ctx: &Ctx<'_>, section: &ScopeResolution) -> Option<sidecar::Lay
     sidecar::existing_project_store(ctx.fs, root)
 }
 
+/// THE CHECKOUT the deep dive leads with: does the answering scope's copy carry a draft, and does
+/// the OTHER reachable scope hold a checkout of the same bundle?
+///
+/// Both are read from the STORES, because a manifest row cannot answer either: it says what is
+/// demanded, not what the bytes on disk are, and a second scope's row is not this answer's row at
+/// all. The draft rule is the one every surface shares (bytes against the lock —
+/// [`super::store_draft_dir`]), so a settled draft the last sweep re-recorded still reads as
+/// unshared work here, exactly as `publish` treats it.
+///
+/// The twin is matched on the RECORD IDENTITY, never the name: two scopes can each track a
+/// different bundle under one name, and "you also have this on your machine" about somebody else's
+/// bundle is worse than silence. Best-effort throughout — a store that cannot be read holds no
+/// answer, and the dive says nothing rather than guessing one.
+fn fill_checkout(
+    ctx: &Ctx<'_>,
+    section: &ScopeResolution,
+    record: &crate::id::SkillId,
+    detail: &mut ListDetail,
+) {
+    let Some(layout) = scope_layout(ctx, section) else {
+        return;
+    };
+    let sctx = super::pull::ctx_with_layout(ctx, &layout);
+    if let Some(lock) = super::store_lock(&sctx, record) {
+        detail.drafted = super::store_has_draft(&sctx, record, &lock);
+    }
+    // The other KIND of scope: a project answer looks at the machine, a machine answer at the cwd
+    // chain's checkouts (nearest first — the one a bare `topos list` here would answer from).
+    let others: Vec<sidecar::Layout> = if section.scope == "project" {
+        vec![ctx.layout.clone()]
+    } else {
+        super::project_stores(ctx)
+    };
+    for other in others {
+        let octx = super::pull::ctx_with_layout(ctx, &other);
+        if let Some(lock) = super::store_lock(&octx, record) {
+            detail.twin = Some(topos_types::results::ScopeTwin {
+                machine: !other.is_project_scope(),
+                drafted: super::store_has_draft(&octx, record, &lock),
+            });
+            return;
+        }
+    }
+}
+
 /// The LIVE stopped merge one store holds under ONE record identity, when it holds one — a direct
 /// read of that record's document, never a walk (see [`conflict_workbench`]). Retired records
 /// answer for nothing here either, the same probe every store walker gates on.
@@ -854,6 +906,10 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
         diverged: Vec::new(),
         conflict_copy: None,
         conflict_reason: None,
+        // For the same reason there is no draft to report: the binary is the version, and the
+        // built-in lives in exactly one store, so there is no second checkout to point at either.
+        drafted: false,
+        twin: None,
     })
 }
 
@@ -907,6 +963,8 @@ fn unmanaged_detail(ctx: &Ctx<'_>, token: &str, roots: Option<&DiscoveryRoots>) 
         diverged: Vec::new(),
         conflict_copy: None,
         conflict_reason: None,
+        drafted: false,
+        twin: None,
     }
 }
 
@@ -1383,6 +1441,280 @@ mod tests {
         // so the dir scans FOREIGN and the row reads settled, not drafted.
         lay_adopted(&layout, "repo-helper", &tool);
         repo
+    }
+
+    /// A store record under ONE identity: the two documents that make a store TRACK a bundle, plus
+    /// the placements it holds. A dir that EXISTS scans against a `materialized_sha` topos never
+    /// wrote, so it reads as a draft; an absent one reads clean.
+    fn lay_record(layout: &crate::sidecar::Layout, id: &str, name: &str, placements: &[&Path]) {
+        use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability, SyncState};
+        let fs = crate::fs_seam::RealFs;
+        let sid = crate::id::SkillId::parse(id).unwrap();
+        std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+        let sp = layout.published(&sid);
+        crate::doc::write_doc(
+            &fs,
+            &sp.sync,
+            &SyncState {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                observed: 1,
+                observed_version_id: "d".repeat(64),
+                applied: 1,
+                base_commit: "d".repeat(64),
+                work_hash: "e".repeat(64),
+                held: false,
+                draft_observed: None,
+            },
+        )
+        .unwrap();
+        crate::doc::write_doc(
+            &fs,
+            &sp.lock,
+            &Lock {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                skill_id: id.to_owned(),
+                name: name.to_owned(),
+                base_commit: "d".repeat(64),
+                bundle_digest: "e".repeat(64),
+                files: Vec::new(),
+            },
+        )
+        .unwrap();
+        crate::doc::write_map(
+            &fs,
+            &sp.map,
+            &PlacementMap {
+                schema_version: 2,
+                placements: placements
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                applied_commit: "d".repeat(64),
+                materialized_sha: "e".repeat(64),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                harness: None,
+                harness_layer: None,
+                harness_slug: None,
+                placement_state: placements
+                    .iter()
+                    .map(|_| PlacementState {
+                        kind: PlacementKind::Native,
+                        agent: None,
+                        materialized_sha: Some("e".repeat(64)),
+                        pre_existing_sha: None,
+                        swap_capability: SwapCapability::Unsupported,
+                        adopted_source: false,
+                        claim: None,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A folder holding bytes — a placement that EXISTS, so it scans against the recorded sha.
+    fn lay_folder(dir: &Path, body: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), body.as_bytes()).unwrap();
+        dir.to_path_buf()
+    }
+
+    /// The CHECKOUT facts come from the STORES, never the rows: whether the copy that answered
+    /// carries a draft, and whether the other reachable scope holds a copy of the SAME record.
+    /// Both directions, and the identity is deliberately not the name.
+    #[test]
+    fn the_deep_dive_reads_its_draft_and_the_other_scopes_copy_from_the_stores() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let id = skill_id_of("deploy");
+        assert_ne!(id, "deploy", "the identity is never the name");
+        // The MACHINE's copy, edited: its folder holds bytes no recorded sha explains.
+        let edited = lay_folder(&home.0.join(".claude/skills/deploy"), "# edited\n");
+        home.store_applied(&id, "deploy", &"d".repeat(64), &[edited.to_str().unwrap()]);
+        // The PROJECT's copy of the SAME record, clean: it holds no folder at all.
+        lay_record(
+            &crate::sidecar::project_store_layout(&repo),
+            &id,
+            "deploy",
+            &[],
+        );
+
+        let deep = |view| {
+            run(
+                &home,
+                &repo,
+                &ListRequest {
+                    name: Some("deploy".to_owned()),
+                    view,
+                    ..request()
+                },
+            )
+            .unwrap()
+            .data
+            .detail
+            .expect("a detail")
+        };
+        // Standing in the checkout: the project's clean copy answers, and the machine's edited
+        // one is the twin.
+        let detail = deep(ScopeView::Here);
+        assert_eq!(detail.scope.as_deref(), Some("project"));
+        assert!(!detail.drafted, "{detail:?}");
+        let twin = detail.twin.expect("the machine's copy");
+        assert!(twin.machine && twin.drafted, "{twin:?}");
+        // `-g`: the same two copies, the other way round.
+        let detail = deep(ScopeView::Machine);
+        assert_eq!(detail.scope.as_deref(), Some("machine"));
+        assert!(detail.drafted, "{detail:?}");
+        let twin = detail.twin.expect("the project's copy");
+        assert!(!twin.machine && !twin.drafted, "{twin:?}");
+    }
+
+    /// A bundle only ONE scope tracks names no twin — and a DIFFERENT bundle sharing the name in
+    /// the other scope is not one either: the match is the record identity, because "you also
+    /// have this on your machine" about somebody else's bundle is worse than silence.
+    #[test]
+    fn a_twin_is_the_same_record_or_no_twin_at_all() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.store_applied(&skill_id_of("deploy"), "deploy", &"d".repeat(64), &[]);
+        // A project record of the same NAME under another identity — a different bundle.
+        lay_record(
+            &crate::sidecar::project_store_layout(&repo),
+            "topos_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "deploy",
+            &[],
+        );
+        let detail = run(
+            &home,
+            &repo,
+            &ListRequest {
+                name: Some("deploy".to_owned()),
+                view: ScopeView::Machine,
+                ..request()
+            },
+        )
+        .unwrap()
+        .data
+        .detail
+        .expect("a detail");
+        assert_eq!(detail.scope.as_deref(), Some("machine"));
+        assert!(detail.twin.is_none(), "{detail:?}");
+    }
+
+    /// The SECOND CHECKOUT a machine-wide add creates is disclosed only where a checkout in reach
+    /// already tracks the SAME record — and it names the machine folder the copy landed in. A
+    /// different bundle of the same name in the project is not that, and neither is a machine copy
+    /// standing alone.
+    #[test]
+    fn a_machine_add_discloses_the_copy_it_lands_beside_a_project_that_has_one() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        let id = skill_id_of("deploy");
+        let placed = lay_folder(&home.0.join(".claude/skills/deploy"), "# d\n");
+        home.store_applied(&id, "deploy", &"d".repeat(64), &[placed.to_str().unwrap()]);
+        let data = |skill_id: &str| topos_types::results::AddData {
+            skill_id: Some(skill_id.to_owned()),
+            name: "deploy".to_owned(),
+            ..blank_add()
+        };
+        let project_store = crate::sidecar::project_store_layout(&repo);
+        // Nothing in the project tracks it yet: a machine add creates the only copy there is.
+        assert_eq!(
+            with_ctx(&home, Some(&repo), |ctx| {
+                super::super::reference::machine_copy_beside_project(ctx, &data(&id))
+            }),
+            None
+        );
+        // The project holds a DIFFERENT bundle of the same name — still one copy of this one.
+        lay_record(
+            &project_store,
+            "topos_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "deploy",
+            &[],
+        );
+        assert_eq!(
+            with_ctx(&home, Some(&repo), |ctx| {
+                super::super::reference::machine_copy_beside_project(ctx, &data(&id))
+            }),
+            None
+        );
+        // The project tracks THIS record: the add just created a second checkout, and the folder
+        // it landed in is the one the receipt names.
+        lay_record(&project_store, &id, "deploy", &[]);
+        assert_eq!(
+            with_ctx(&home, Some(&repo), |ctx| {
+                super::super::reference::machine_copy_beside_project(ctx, &data(&id))
+            }),
+            Some(placed.to_string_lossy().into_owned())
+        );
+        // Outside any checkout there is no project to speak of.
+        assert_eq!(
+            with_ctx(&home, Some(&home.0), |ctx| {
+                super::super::reference::machine_copy_beside_project(ctx, &data(&id))
+            }),
+            None
+        );
+    }
+
+    /// An `AddData` with nothing filled in — the fields a receipt-shape test does not speak about.
+    fn blank_add() -> topos_types::results::AddData {
+        topos_types::results::AddData {
+            skill_id: None,
+            name: String::new(),
+            version_id: None,
+            bundle_digest: None,
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            source: None,
+            manifest: None,
+            scope: None,
+            reference: None,
+            undo: Vec::new(),
+            governed_copy: None,
+            published_match: None,
+            note: None,
+            mcp: None,
+            dest: Vec::new(),
+            display: None,
+            dest_resolved: Vec::new(),
+            dest_change: None,
+            claim: None,
+            unchanged: false,
+            machine_copy: None,
+        }
     }
 
     /// Record ONE adopted-in-place placement — the shape `add <path>` writes: the source dir, with
@@ -3729,6 +4061,8 @@ mod tests {
                     diverged: Vec::new(),
                     conflict_copy: None,
                     conflict_reason: None,
+                    drafted: false,
+                    twin: None,
                 }),
                 footprint: footprint.clone(),
                 ..ListData::default()

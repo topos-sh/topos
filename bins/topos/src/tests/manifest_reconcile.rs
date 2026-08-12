@@ -9858,11 +9858,16 @@ fn a_name_this_scope_already_records_answers_already_added_not_ambiguous() {
     )
     .unwrap_err();
     assert_eq!(err.code(), "ALREADY_TRACKED");
+    // The standing record answers first, so the stray never enters a count — and it is still
+    // LISTED underneath, because "what do I do about that folder?" is the question a person
+    // standing in front of it actually has.
     assert_eq!(
         err.to_string(),
         format!(
             "alpha is already added machine-wide (~/.topos/topos.toml)\nsource: \
-             {HOST}/{WS_NAME}/alpha"
+             {HOST}/{WS_NAME}/alpha\n'alpha' is in 1 folder here:\n  \
+             ~/.aider-desk/skills/alpha — edited (adopting it makes these your draft)\nname the \
+             one to adopt: topos add -g <folder> --as {HOST}/{WS_NAME}/alpha"
         )
     );
 }

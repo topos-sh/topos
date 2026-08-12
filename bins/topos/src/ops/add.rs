@@ -23,7 +23,7 @@ use topos_types::results::{
 
 use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
-use crate::error::{ClientError, TargetCandidate, TrackedBy};
+use crate::error::{ClientError, CopyRelation, TargetCandidate, TrackedBy};
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
 use crate::id::SkillId;
 use crate::scan::{self, ScannedBundle};
@@ -400,6 +400,7 @@ fn unclaimed_record(
         dest_change: None,
         claim: None,
         unchanged: false,
+        machine_copy: None,
         display: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
@@ -671,6 +672,7 @@ pub(crate) fn add_with_name(
         dest_change: None,
         claim: None,
         unchanged: false,
+        machine_copy: None,
         display: None,
     })
 }
@@ -2161,6 +2163,7 @@ pub(crate) fn extend_folder_dest(
         dest_change: None,
         claim: None,
         unchanged: false,
+        machine_copy: None,
         display: None,
         note: None,
     };
@@ -2385,16 +2388,19 @@ fn standing_records(
     Ok(out)
 }
 
-/// The UNMANAGED folders on this machine whose bytes are PROVABLY a version of the bundle that
-/// already stands here — each offered as a runnable claim (`add [-g] <folder> --as <reference>`).
+/// The UNMANAGED folders on this machine holding the NAME that already stands here — the listing
+/// the answer prints, each folder carrying what its bytes are.
 ///
-/// BYTE PROOF ONLY. A same-named folder is not evidence of anything: agents' skills dirs are full
-/// of same-named, unrelated bundles, and an offer built on the name alone would invite the person
-/// to merge two histories that never met. So each candidate is scanned and matched against this
-/// record's own current version or any version in its history; anything else is simply not listed.
-/// (An explicit `--as` needs no such proof — the person is the one making the claim.)
+/// Byte proof decides the RELATION, not the listing. A same-named folder used to be dropped
+/// outright unless its bytes were provably a version of this bundle, because the line offered was
+/// a runnable claim and a claim over an unrelated folder invites merging two histories that never
+/// met. The listing states the relation instead, so a person sees every folder the name is in AND
+/// what adopting each would mean — and the folder whose bytes nothing here explains simply reads
+/// `edited`, with the draft it would become spelled out beside it. A copy the record's own history
+/// DOES explain (an older version — the next update brings it current) is neither current nor a
+/// draft, so it carries no clause at all rather than a wrong one.
 ///
-/// SCOPE, as everywhere: a project-invoked answer offers only folders inside the checkout, and `-g`
+/// SCOPE, as everywhere: a project-invoked answer lists only folders inside the checkout, and `-g`
 /// only the machine's own. Best-effort throughout — discovery or a store read that fails offers
 /// nothing rather than half a list.
 fn claimable_copies(
@@ -2419,7 +2425,7 @@ fn claimable_copies(
     let sctx = super::pull::ctx_with_layout(ctx, &record.layout);
     let sp = sctx.layout.published(&record.id);
     let store = Store::open(&sp.store).ok();
-    let mut out: Vec<TargetCandidate> = Vec::new();
+    let mut found: Vec<(TargetCandidate, Option<String>)> = Vec::new();
     for entry in untracked.iter().filter(|u| u.name == name) {
         if entry.scope != want_scope {
             continue;
@@ -2429,22 +2435,47 @@ fn claimable_copies(
             continue;
         };
         let digest = to_hex(&scanned.bundle_digest);
-        let known = digest == record.lock.bundle_digest
-            || store
-                .as_ref()
-                .is_some_and(|s| super::claim::digest_in_history(s, &digest).unwrap_or(false));
-        if !known {
-            continue;
-        }
-        out.push(TargetCandidate::claim(
+        let candidate = TargetCandidate::claim(
             dir.to_string_lossy().into_owned(),
             spell_home(ctx, &dir),
             as_argv.clone(),
             as_display.clone(),
+        );
+        // The digest rides along until the whole set is known: `edited differently` is a fact
+        // about a folder AND the ones listed before it, so it cannot be decided one at a time.
+        let differing = (digest != record.lock.bundle_digest
+            && !store
+                .as_ref()
+                .is_some_and(|s| super::claim::digest_in_history(s, &digest).unwrap_or(false)))
+        .then_some(digest.clone());
+        found.push((
+            if digest == record.lock.bundle_digest {
+                candidate.with_relation(Some(CopyRelation::Current))
+            } else {
+                candidate
+            },
+            differing,
         ));
     }
-    out.sort();
-    out.dedup();
+    found.sort();
+    found.dedup();
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<TargetCandidate> = Vec::new();
+    for (candidate, differing) in found {
+        let relation = differing.map(|digest| {
+            let differently = !seen.is_empty() && !seen.contains(&digest);
+            seen.push(digest);
+            if differently {
+                CopyRelation::EditedDifferently
+            } else {
+                CopyRelation::Edited
+            }
+        });
+        out.push(match relation {
+            Some(r) => candidate.with_relation(Some(r)),
+            None => candidate,
+        });
+    }
     out
 }
 

@@ -13,7 +13,7 @@ use topos_types::{
 };
 
 use crate::bundle_kind::BundleKind;
-use crate::error::ClientError;
+use crate::error::{ClientError, TargetCandidate};
 use crate::ops::ListOutcome;
 
 /// A success envelope wrapping a verb's typed `data`.
@@ -101,13 +101,25 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
         // The already-added answer's OPTIONS are not a rebuild of the refused invocation — the
         // question they answer is a different one ("this copy too?"), so each is spelled whole:
         // the verb, the scope the answer is about, and the candidate's own tokens.
+        //
+        // Only the copies whose bytes a version of the bundle EXPLAINS are offered as commands
+        // (see `TargetCandidate::offerable`). The answer LISTS every folder the name is in — that
+        // is what a person reads to choose — but an argv handed to an agent is run, and running a
+        // claim over a folder holding something else merges two histories that never met.
         ClientError::AlreadyAdded {
             scope, candidates, ..
-        } => candidate_actions(
-            "add",
-            *scope == topos_types::results::ReceiptScope::Machine,
-            candidates,
-        ),
+        } => {
+            let offerable: Vec<TargetCandidate> = candidates
+                .iter()
+                .filter(|c| c.offerable())
+                .cloned()
+                .collect();
+            candidate_actions(
+                "add",
+                *scope == topos_types::results::ReceiptScope::Machine,
+                &offerable,
+            )
+        }
         // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
         // count-only ambiguity plus the not-found cases from `add <skill>` name resolution.
         ClientError::AmbiguousName { .. }
@@ -774,6 +786,25 @@ fn source_line(data: &AddData) -> String {
     }
 }
 
+/// The line a machine-wide add prints when it has just created a SECOND checkout: the project you
+/// are standing in already delivers this bundle, and this add gives you a copy of your own beside
+/// it. Two copies, two drafts, two version histories — stated at the moment the second one is
+/// born, because no other line on the receipt says a first one existed.
+///
+/// Empty (no line at all) wherever the producer found no such folder — see
+/// [`crate::ops::reference`]'s own gate: nothing here decides WHETHER there is a second copy, only
+/// how it reads.
+fn machine_copy_line(data: &AddData) -> String {
+    match &data.machine_copy {
+        Some(folder) => format!(
+            "this project already delivers '{}' — this adds your machine copy ({})\n",
+            data.name,
+            tty_path(folder)
+        ),
+        None => String::new(),
+    }
+}
+
 /// A path as the TERMINAL spells it: `~/`-abbreviated under this machine's home, verbatim
 /// otherwise (and a reference, which holds no leading path, passes straight through).
 ///
@@ -873,6 +904,7 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     }
     let mut out = format!("{}\n", added_lead(data));
     out.push_str(&source_line(data));
+    out.push_str(&machine_copy_line(data));
     // The disclosure a plain row write did not carry: a file born by this act, a row NOT written
     // (the feed already delivers it), an `off` switch deleted instead, a standing web decline.
     if let Some(note) = &data.note {
@@ -1042,6 +1074,7 @@ fn add_dest_receipt(data: &AddData) -> String {
     // The same second line every other add answer carries — the destination receipt says where
     // the copy went, and this says what it is a copy OF.
     s.push_str(&source_line(data));
+    s.push_str(&machine_copy_line(data));
     s.truncate(s.trim_end().len());
     if !data.undo.is_empty() {
         s.push_str(&format!("\n(undo: {})", argv_line(&data.undo)));
@@ -2445,7 +2478,15 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     } else {
         ""
     };
-    let mut s = detail.name.clone();
+    // THE CHECKOUT, on the name line: each place you work holds its own copy of a bundle, and
+    // which one this whole answer is about is the first thing a reader needs — every folder,
+    // version, and command below belongs to that one copy. The scope that ANSWERED says it, so a
+    // bare run inside a checkout and the same run with `-g` never read alike.
+    let mut s = match detail.scope.as_deref() {
+        Some("project") => format!("{} — in this project", detail.name),
+        Some("machine") => format!("{} — on this machine", detail.name),
+        _ => detail.name.clone(),
+    };
     match (&detail.source_file, &detail.source_key, &detail.feed) {
         (Some(file), Some(key), _) => s.push_str(&format!("\n  from {file}, line key {key}")),
         (Some(file), None, _) => s.push_str(&format!("\n  from {file}")),
@@ -2462,6 +2503,15 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         (Some(v), None) => s.push_str(&format!("\n  version {}", short(v))),
         (None, Some(p)) => s.push_str(&format!("\n  pinned {} (not applied here)", short(p))),
         (None, None) => {}
+    }
+    // The DRAFT beside the version it is ahead of — the other half of a checkout, and the one
+    // fact a version line alone cannot carry. `not shared yet` is what a draft IS here; the read
+    // that shows it is spelled for this answer's own scope, like every other command on the page.
+    if detail.drafted {
+        s.push_str(&format!(
+            "\n  your draft: edited, not shared yet (topos diff{flag} {})",
+            detail.name
+        ));
     }
     // ONE folder per line. A comma-joined run of absolute paths wraps into a wall the eye cannot
     // find a path's start in, and the count of copies — the thing this line exists to report — is
@@ -2540,6 +2590,21 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         }
     };
     s.push_str(&format!("\n  {state}"));
+    // The OTHER scope's checkout, LAST — everything above is about the copy that answered, and
+    // this is the one line that says there is a second one. A separate copy, with its own draft
+    // state and its own history; the command that opens it is the same `list` in the other scope.
+    if let Some(twin) = &detail.twin {
+        let (where_, twin_flag) = if twin.machine {
+            ("also on this machine", " -g")
+        } else {
+            ("also in this project", "")
+        };
+        let edits = if twin.drafted { "edited" } else { "no edits" };
+        s.push_str(&format!(
+            "\n  {where_}: a separate copy, {edits} (topos list{twin_flag} {})",
+            detail.name
+        ));
+    }
     s
 }
 
@@ -4532,7 +4597,14 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
     // they are the answer's own list, not a suggestion appended to a refusal. Each is spelled for
     // a READER: a folder under this home reads as `~/…`, which a shell expands back to exactly the
     // argv the agent surface got. One list, two spellings, never two lists.
+    //
+    // A FOLDER LISTING answers with its own document (`err_tty` prints it whole, ending in the one
+    // command that adopts a folder), so nothing goes under it: re-listing the same folders as
+    // commands would be the second listing that shape exists to replace.
     if let ClientError::AmbiguousSource { candidates, .. } = err {
+        if crate::error::listed_as_folders(err) {
+            return None;
+        }
         let lines: Vec<String> = candidates
             .iter()
             .map(|c| {
@@ -4544,27 +4616,11 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
             .collect();
         return (!lines.is_empty()).then(|| lines.join("\n"));
     }
-    // The already-added answer's OPTIONS read the same way the chooser's do — the answer's own
-    // list under the sentence that counted them, not a suggestion appended to a refusal. Each
-    // folder is spelled for a READER (`~/…`), which a shell expands back to the agent's argv.
-    if let ClientError::AlreadyAdded {
-        scope, candidates, ..
-    } = err
-    {
-        let global = *scope == topos_types::results::ReceiptScope::Machine;
-        let lines: Vec<String> = candidates
-            .iter()
-            .map(|c| {
-                let mut argv = vec!["topos".to_owned(), "add".to_owned()];
-                if global {
-                    argv.push("-g".to_owned());
-                }
-                argv.extend(c.printed_tokens());
-                format!("  {}", hint_line(&argv))
-            })
-            .collect();
-        // Nothing provable to offer: better no line than a vague line.
-        return (!lines.is_empty()).then(|| lines.join("\n"));
+    // The already-added answer carries the same FOLDER LISTING, ending in the same one command —
+    // so nothing goes under it either. The per-folder claims stay on the agent surface, where a
+    // list of argv is what a consumer wants and nothing has to be read.
+    if let ClientError::AlreadyAdded { .. } = err {
+        return None;
     }
     if matches!(
         err,
@@ -5058,6 +5114,7 @@ mod tests {
             dest_change: None,
             claim: None,
             unchanged: false,
+            machine_copy: None,
             // The local source's tell: no workspace qualifies it.
             display: None,
         };
@@ -5157,6 +5214,34 @@ mod tests {
             "{}",
             add_tty(&frozen)
         );
+
+        // THE SECOND CHECKOUT: a machine-wide add of a bundle the project already delivers says
+        // so, and names the folder its own copy landed in — the same line on the plain receipt
+        // and on the one that named destinations, because it is a fact about neither.
+        let mut beside = local(Vec::new());
+        beside.name = "coolify-deploy".to_owned();
+        beside.machine_copy = Some("/home/u/.claude/skills/coolify-deploy".to_owned());
+        assert!(
+            add_tty(&beside).ends_with(
+                "this project already delivers 'coolify-deploy' — this adds your machine copy \
+                 (/home/u/.claude/skills/coolify-deploy)"
+            ),
+            "{}",
+            add_tty(&beside)
+        );
+        let mut beside_dest = local(vec!["~/.codex/skills".to_owned()]);
+        beside_dest.name = "coolify-deploy".to_owned();
+        beside_dest.machine_copy = Some("/home/u/.claude/skills/coolify-deploy".to_owned());
+        assert!(
+            add_tty(&beside_dest).contains(
+                "\nthis project already delivers 'coolify-deploy' — this adds your machine copy \
+                 (/home/u/.claude/skills/coolify-deploy)\n"
+            ),
+            "{}",
+            add_tty(&beside_dest)
+        );
+        // No second copy, no line — the add that creates one is the only one that says anything.
+        assert!(!add_tty(&local(Vec::new())).contains("already delivers"));
     }
 
     /// EVERY add answer opens the same way: what was added and which of the two files asks for it
@@ -5190,6 +5275,7 @@ mod tests {
             dest_change: None,
             claim: None,
             unchanged: false,
+            machine_copy: None,
             display: None,
         };
         // A local folder adopted into this project: the row's own `./…` spelling never surfaces —
@@ -7149,6 +7235,8 @@ mod tests {
                     ],
                     conflict_copy: None,
                     conflict_reason: None,
+                    drafted: false,
+                    twin: None,
                 }),
                 signed_in: false,
                 ..ListData::default()
@@ -7206,6 +7294,8 @@ mod tests {
                     }],
                     conflict_copy: None,
                     conflict_reason: None,
+                    drafted: false,
+                    twin: None,
                 }),
                 signed_in: false,
                 ..ListData::default()
@@ -7258,6 +7348,8 @@ mod tests {
             diverged: Vec::new(),
             conflict_copy: None,
             conflict_reason: None,
+            drafted: false,
+            twin: None,
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -7292,6 +7384,91 @@ mod tests {
         );
     }
 
+    /// THE CHECKOUT MODEL, byte-exact on the deep dive: the scope on the name line, the draft
+    /// after the version, and the other scope's copy last. The four states (draft × twin) in both
+    /// directions, because a bare run and a `-g` run are answers about different copies and every
+    /// command they spell has to say which.
+    #[test]
+    fn the_deep_dive_leads_with_the_checkout_and_names_the_other_scopes_copy() {
+        use topos_types::results::{ListDetail, ScopeTwin, StatusItemState as S};
+        let detail = |scope: &str, drafted, twin| ListDetail {
+            name: "coolify-deploy".to_owned(),
+            scope: Some(scope.to_owned()),
+            source_file: None,
+            source_key: None,
+            feed: Some("topos.sh/acme".to_owned()),
+            attribution: None,
+            version: Some("a".repeat(64)),
+            pin: None,
+            placements: Vec::new(),
+            state: S::Applied,
+            kind: None,
+            harnesses: Vec::new(),
+            mcp_unreachable: None,
+            managed: true,
+            folders: Vec::new(),
+            diverged: Vec::new(),
+            conflict_copy: None,
+            conflict_reason: None,
+            drafted,
+            twin,
+        };
+        let render = |d| {
+            list_tty(&ListOutcome {
+                data: ListData {
+                    detail: Some(d),
+                    signed_in: false,
+                    ..ListData::default()
+                },
+                warnings: Vec::new(),
+                untracked_view: false,
+            })
+        };
+        // A project answer with neither: the headline alone says which copy this is about.
+        assert_eq!(
+            render(detail("project", false, None)),
+            "coolify-deploy — in this project\n  from the topos.sh/acme feed\n  version \
+             aaaaaaaaaaaa\n  applied"
+        );
+        // The same copy, drafted, with a clean machine twin.
+        assert_eq!(
+            render(detail(
+                "project",
+                true,
+                Some(ScopeTwin {
+                    machine: true,
+                    drafted: false
+                })
+            )),
+            "coolify-deploy — in this project\n  from the topos.sh/acme feed\n  version \
+             aaaaaaaaaaaa\n  your draft: edited, not shared yet (topos diff coolify-deploy)\n  \
+             applied\n  also on this machine: a separate copy, no edits (topos list -g \
+             coolify-deploy)"
+        );
+        // The mirror: a `-g` answer, clean here, with an EDITED project copy — every command
+        // spelled for the scope it drives.
+        assert_eq!(
+            render(detail(
+                "machine",
+                false,
+                Some(ScopeTwin {
+                    machine: false,
+                    drafted: true
+                })
+            )),
+            "coolify-deploy — on this machine\n  from the topos.sh/acme feed\n  version \
+             aaaaaaaaaaaa\n  applied\n  also in this project: a separate copy, edited (topos list \
+             coolify-deploy)"
+        );
+        // A machine draft with no twin: the read that shows it carries `-g`.
+        assert!(
+            render(detail("machine", true, None))
+                .contains("your draft: edited, not shared yet (topos diff -g coolify-deploy)"),
+            "{}",
+            render(detail("machine", true, None))
+        );
+    }
+
     /// The NOT-MANAGED deep dive is the headline, the unmanaged folders one per line, and — when
     /// copies exist — the one command that brings them under management. Nothing else: no source
     /// line, no state sentence, no store mention.
@@ -7317,6 +7494,8 @@ mod tests {
             diverged: Vec::new(),
             conflict_copy: None,
             conflict_reason: None,
+            drafted: false,
+            twin: None,
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -7370,6 +7549,8 @@ mod tests {
                     diverged: Vec::new(),
                     conflict_copy: None,
                     conflict_reason: None,
+                    drafted: false,
+                    twin: None,
                 }),
                 signed_in: false,
                 ..ListData::default()
@@ -8007,6 +8188,8 @@ mod tests {
                     diverged: Vec::new(),
                     conflict_copy: None,
                     conflict_reason: None,
+                    drafted: false,
+                    twin: None,
                 }),
                 signed_in: true,
                 ..ListData::default()
@@ -8015,7 +8198,9 @@ mod tests {
             untracked_view: false,
         };
         let text = list_tty(&out);
-        assert!(text.starts_with("deploy\n"), "{text}");
+        // The headline names the CHECKOUT this whole answer is about — the scope that answered,
+        // beside the name, because every line under it belongs to that one copy.
+        assert!(text.starts_with("deploy — on this machine\n"), "{text}");
         assert!(
             text.contains("from ~/.topos/topos.toml, line key topos.sh/acme/deploy"),
             "{text}"

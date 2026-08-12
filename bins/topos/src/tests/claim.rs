@@ -1235,7 +1235,7 @@ fn no_sessions(_s: &crate::sessions::Session) -> ops::SessionTransports {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn the_already_added_answer_offers_only_the_copies_whose_bytes_it_can_prove() {
+fn the_already_added_answer_lists_every_folder_and_offers_only_provable_bytes() {
     let rig = Rig::new("options");
     // The standing record, adopted from one agent's folder (creating the dir installs the agent,
     // as far as detection is concerned — its detect dir is the same tree).
@@ -1243,8 +1243,10 @@ fn the_already_added_answer_offers_only_the_copies_whose_bytes_it_can_prove() {
     rig.adopt(&source);
     // A byte-identical stray in another agent's folder — provably this bundle.
     let same = rig.folder(".cursor/skills/pr-describe", "# pr\n");
-    // A same-NAME stray holding something else entirely — never offered, because the name is not
-    // evidence and merging two histories that never met is not a suggestion to make.
+    // A same-NAME stray holding something else entirely — LISTED, because a person choosing a
+    // folder has to see every folder the name is in, and read as `edited` with what adopting it
+    // would mean spelled beside it. Never OFFERED as an argv: merging two histories that never
+    // met is not something an agent should be able to run unattended.
     rig.folder(".codeium/windsurf/skills/pr-describe", "# something else\n");
 
     let ctx = rig.ctx();
@@ -1270,20 +1272,51 @@ fn the_already_added_answer_offers_only_the_copies_whose_bytes_it_can_prove() {
     };
     let spellings: Vec<String> = candidates.iter().map(|c| c.spelling()).collect();
     assert_eq!(
-        spellings,
-        vec![format!("{} --as {}", same.display(), source.display())],
-        "byte proof only, and every printed line spells the whole reference"
+        spellings.len(),
+        2,
+        "both folders are listed, whatever their bytes: {spellings:?}"
     );
-    // The count line rides the answer itself; the runnable lines ride the hint surface, `-g` and
-    // all, and the printed folder is the `~/…` a shell expands back to the agent's own argv.
     assert!(
-        err.to_string()
-            .ends_with("1 unmanaged copy looks like it — manage it as the same skill:"),
-        "{err}"
+        spellings.contains(&format!("{} --as {}", same.display(), source.display())),
+        "{spellings:?}"
     );
-    let hint = crate::render::err_hint_tty("add", &["add".to_owned()], &err).unwrap();
-    assert!(hint.starts_with("  topos add -g "), "{hint}");
-    assert!(hint.contains(" --as "), "{hint}");
+    // The listing states what each one IS: the byte-identical copy matches, and the stray reads
+    // as the draft adopting it would create.
+    let listing = err.to_string();
+    assert!(
+        listing.contains("'pr-describe' is in 2 folders here:"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains(".cursor/skills/pr-describe — matches the published current"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("skills/pr-describe — edited (adopting it makes these your draft)"),
+        "{listing}"
+    );
+    assert!(
+        listing.ends_with(
+            "name the one to adopt: topos add -g <folder> --as ~/.claude/skills/pr-describe"
+        ),
+        "{listing}"
+    );
+    // The listing ends in its own command, so nothing goes under it — and only the copy whose
+    // bytes are proven rides the agent surface as a runnable claim.
+    assert!(crate::render::err_hint_tty("add", &["add".to_owned()], &err).is_none());
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
+    assert_eq!(
+        envelope
+            .next_actions
+            .iter()
+            .map(|a| a.argv.join(" "))
+            .collect::<Vec<_>>(),
+        vec![format!(
+            "topos add -g {} --as {} --json",
+            same.display(),
+            source.display()
+        )],
+    );
 }
 
 #[test]

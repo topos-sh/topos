@@ -646,6 +646,7 @@ fn receipt(
         dest_change: None,
         display: None,
         unchanged: false,
+        machine_copy: None,
         claim: Some(ClaimReceipt {
             folder: crate::ops::inventory::pretty(ctx, dir),
             state,

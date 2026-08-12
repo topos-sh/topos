@@ -95,6 +95,13 @@
         "null"
       ]
     },
+    "machine_copy": {
+      "description": "The MACHINE folder this add's own copy landed in, disclosed when a checkout at or above\nthis folder ALREADY delivers the same bundle — a machine-wide add then gives you a second\ncheckout beside the project's, which is a surprise worth stating at the moment it is\ncreated. Absolute (the wire's form; the receipt abbreviates it under the home). Absent for\nevery add that creates no second copy. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "manifest": {
       "description": "The MANIFEST this add edited — the trust rail's first half: a `topos.toml` path. Absent when\nno manifest line was written (an internal adopt). **Additive.**",
       "type": [

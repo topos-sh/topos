@@ -1202,10 +1202,77 @@ fn a_folder_candidate_is_absolute_in_argv_and_abbreviated_only_when_printed() {
         serde_json::json!(["/home/ada/.claude/skills/x"]),
         "the machine-readable half is the argv form too"
     );
-    // The PRINTED line reads shorter, and a shell expands it back to exactly that argv.
+    // The PRINTED line reads shorter, and a shell expands it back to exactly that argv. ONE
+    // folder is not a choice: it keeps the plain chooser line rather than becoming a listing.
     assert_eq!(
         chooser_tty(&err, &["add", "x"]),
         "x is ambiguous, pick one:\n  topos add ~/.claude/skills/x"
+    );
+}
+
+#[test]
+fn a_bare_add_whose_name_is_in_several_folders_lists_them() {
+    // THE FOLDER LISTING for a name NOTHING here answers to: every folder, one per line, bare —
+    // no bundle resolves under the name, so there is no relation to prove and no `--as` to spell.
+    let folder = |dir: &str| {
+        crate::error::TargetCandidate::folder(format!("/home/ada/{dir}"), format!("~/{dir}"))
+    };
+    let err = crate::error::ClientError::AmbiguousSource {
+        name: "coolify-deploy".to_owned(),
+        token: "coolify-deploy".to_owned(),
+        verb: "add".to_owned(),
+        candidates: vec![
+            folder(".agents/skills/coolify-deploy"),
+            folder(".claude/skills/coolify-deploy"),
+        ],
+        global: false,
+    };
+    assert_eq!(
+        chooser_tty(&err, &["add", "coolify-deploy"]),
+        "'coolify-deploy' is in 2 folders here:\n  ~/.agents/skills/coolify-deploy\n  \
+         ~/.claude/skills/coolify-deploy\nname the one to adopt: topos add <folder>"
+    );
+    // The agent surface is unchanged: every folder still rides one runnable command, because
+    // nothing here is a guess about bytes — the person named the folder either way.
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
+    assert_eq!(
+        envelope.next_actions.len(),
+        2,
+        "{:?}",
+        envelope.next_actions
+    );
+    // A WORKSPACE spelling among the candidates is a different question — two bundles, not two
+    // copies of one — so that answer keeps the plain chooser.
+    let mixed = crate::error::ClientError::AmbiguousSource {
+        name: "coolify-deploy".to_owned(),
+        token: "coolify-deploy".to_owned(),
+        verb: "add".to_owned(),
+        candidates: vec![
+            crate::error::TargetCandidate::plain("topos.sh/acme/coolify-deploy"),
+            folder(".claude/skills/coolify-deploy"),
+        ],
+        global: false,
+    };
+    assert!(
+        crate::render::err_tty(&mixed).starts_with("coolify-deploy is ambiguous, pick one:"),
+        "{}",
+        crate::render::err_tty(&mixed)
+    );
+    // And so does another verb's chooser: `publish` is not asking anyone to adopt anything.
+    let publishing = crate::error::ClientError::AmbiguousSource {
+        name: "coolify-deploy".to_owned(),
+        token: "coolify-deploy".to_owned(),
+        verb: "publish".to_owned(),
+        candidates: vec![
+            folder(".agents/skills/coolify-deploy"),
+            folder(".claude/skills/coolify-deploy"),
+        ],
+        global: false,
+    };
+    assert!(
+        crate::render::err_tty(&publishing).starts_with("coolify-deploy is ambiguous, pick one:"),
+        "{}",
+        crate::render::err_tty(&publishing)
     );
 }
 
@@ -1240,55 +1307,75 @@ fn the_already_added_answer_reads_like_the_receipt_it_mirrors() {
 }
 
 #[test]
-fn the_already_added_answer_offers_every_copy_its_bytes_explain() {
-    // The OPTIONS half: unmanaged folders whose bytes are provably a version of this very bundle,
-    // each a runnable claim. `-g` rides every line, and the folders read `~/…` while the argv the
-    // agent surface gets stays absolute.
-    let copy = |dir: &str| {
+fn the_already_added_answer_lists_every_folder_the_name_is_in() {
+    // THE FOLDER LISTING, byte-exact: every folder on one line with what its bytes are, then the
+    // ONE command that adopts whichever the reader picks. `-g` rides that command, and the folders
+    // read `~/…` while the argv the agent surface gets stays absolute.
+    use crate::error::CopyRelation;
+    let copy = |dir: &str, relation| {
         crate::error::TargetCandidate::claim(
             format!("/home/ada/{dir}"),
             format!("~/{dir}"),
             "topos.sh/ideamotive/coolify-deploy",
             "topos.sh/ideamotive/coolify-deploy",
         )
+        .with_relation(relation)
     };
     let err = crate::error::ClientError::AlreadyAdded {
         name: "coolify-deploy".to_owned(),
         scope: topos_types::results::ReceiptScope::Machine,
         from: Some("topos.sh/ideamotive/coolify-deploy".to_owned()),
         candidates: vec![
-            copy(".agents/skills/coolify-deploy"),
-            copy(".codex/skills/coolify-deploy"),
+            copy(".agents/skills/coolify-deploy", Some(CopyRelation::Edited)),
+            copy(
+                ".claude/skills/coolify-deploy",
+                Some(CopyRelation::EditedDifferently),
+            ),
+            copy(".codex/skills/coolify-deploy", Some(CopyRelation::Current)),
         ],
     };
     assert_eq!(
         crate::render::err_tty(&err),
         "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: \
-         topos.sh/ideamotive/coolify-deploy\n2 unmanaged copies look like it — manage any as the \
-         same skill:"
+         topos.sh/ideamotive/coolify-deploy\n'coolify-deploy' is in 3 folders here:\n  \
+         ~/.agents/skills/coolify-deploy — edited (adopting it makes these your draft)\n  \
+         ~/.claude/skills/coolify-deploy — edited differently\n  ~/.codex/skills/coolify-deploy — \
+         matches the published current\nname the one to adopt: topos add -g <folder> --as \
+         topos.sh/ideamotive/coolify-deploy"
     );
+    // The listing IS the answer and it ends in its own command — nothing goes under it. A second
+    // list of the same folders spelled as commands is exactly the shape this one replaced.
+    assert!(crate::render::err_hint_tty("add", &["add".to_owned()], &err).is_none());
+    // The RUNNABLE half is narrower than the listing: a folder whose bytes no version explains is
+    // listed (with what adopting it would mean) and never handed to an agent as an argv.
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
     assert_eq!(
-        crate::render::err_hint_tty("add", &["add".to_owned()], &err),
-        Some(
-            "  topos add -g ~/.agents/skills/coolify-deploy --as \
-             topos.sh/ideamotive/coolify-deploy\n  topos add -g ~/.codex/skills/coolify-deploy \
-             --as topos.sh/ideamotive/coolify-deploy"
+        envelope
+            .next_actions
+            .iter()
+            .map(|a| a.argv.join(" "))
+            .collect::<Vec<_>>(),
+        vec![
+            "topos add -g /home/ada/.codex/skills/coolify-deploy --as \
+             topos.sh/ideamotive/coolify-deploy --json"
                 .to_owned()
-        )
+        ],
     );
-    // The committed example IS what the agent surface emits: the candidates as argv, one runnable
-    // claim each, and the counted sentence in the message.
+    // The committed example IS what the agent surface emits: every folder in `data.candidates`,
+    // the offerable ones as runnable claims, and the listing in the message.
     assert_golden_err("add.already-added", "add", &err);
-    // ONE copy says so in the singular, and speaks about that copy rather than "any".
+    // ONE folder says so in the singular, and a relation nothing proved prints no clause at all.
     let one = crate::error::ClientError::AlreadyAdded {
         name: "coolify-deploy".to_owned(),
         scope: topos_types::results::ReceiptScope::Machine,
         from: None,
-        candidates: vec![copy(".codex/skills/coolify-deploy")],
+        candidates: vec![copy(".codex/skills/coolify-deploy", None)],
     };
-    assert!(
-        crate::render::err_tty(&one)
-            .ends_with("1 unmanaged copy looks like it — manage it as the same skill:")
+    assert_eq!(
+        crate::render::err_tty(&one),
+        "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\n'coolify-deploy' is \
+         in 1 folder here:\n  ~/.codex/skills/coolify-deploy\nname the one to adopt: topos add -g \
+         <folder> --as topos.sh/ideamotive/coolify-deploy"
     );
 }
 

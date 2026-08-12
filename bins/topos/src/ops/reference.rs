@@ -553,7 +553,33 @@ fn finish_workspace(
     {
         super::add_mcp::fold_workspace_mcp(ctx, target, global, &mut data);
     }
+    // THE SECOND CHECKOUT, disclosed at the moment it is created (see [`machine_copy_beside_project`]).
+    if global {
+        data.machine_copy = machine_copy_beside_project(ctx, &data);
+    }
     AddRefOutcome::Applied(Box::new(data))
+}
+
+/// The MACHINE folder a `-g` add just landed its own copy in, when a checkout at or above this
+/// folder ALREADY delivers the same bundle — and `None` in every other case.
+///
+/// One bundle, two checkouts, is the state this line exists for: the project's copy keeps its own
+/// version and its own draft, and so does the machine's, and nothing about the receipt's other
+/// lines says a second copy was just created. Matched on the RECORD IDENTITY, never the name —
+/// two scopes can track different bundles under one name, and a sentence about somebody else's
+/// bundle is worse than silence.
+///
+/// The folder is the FIRST placement the delivery recorded: several are the same bundle in several
+/// of this machine's agent dirs, and the first is the one the plan lands natively. A copy that did
+/// not land names no folder, so there is no line — the row still stands and the next update places
+/// it, which is what that receipt already says.
+pub(super) fn machine_copy_beside_project(ctx: &Ctx<'_>, data: &AddData) -> Option<String> {
+    let id = crate::id::SkillId::parse(data.skill_id.as_deref()?).ok()?;
+    super::project_stores(ctx).into_iter().find(|layout| {
+        super::store_lock(&super::pull::ctx_with_layout(ctx, layout), &id).is_some()
+    })?;
+    let map = crate::doc::read_map(ctx.fs, &ctx.layout.published(&id).map).ok()??;
+    map.placements.first().cloned()
 }
 
 /// Resolve a workspace-shaped reference through the ONE session that serves it: the catalog
@@ -672,6 +698,7 @@ fn set_data(name: &str) -> AddData {
         dest_change: None,
         claim: None,
         unchanged: false,
+        machine_copy: None,
         display: None,
     }
 }

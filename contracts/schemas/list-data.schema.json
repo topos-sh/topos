@@ -316,6 +316,10 @@
             "$ref": "#/$defs/DivergedCopy"
           }
         },
+        "drafted": {
+          "description": "THIS checkout carries a draft — bytes ahead of the version it stands at, in any of its\nfolders. The one draft rule every surface reads (bytes against the lock), so a settled\ndraft nobody has touched since the last sweep still counts as unshared work.\n**INFERRED** (additive).",
+          "type": "boolean"
+        },
         "feed": {
           "description": "The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed\ndelivers it).",
           "type": [
@@ -397,6 +401,17 @@
         "state": {
           "description": "The line's state (the resolution's own vocabulary).",
           "$ref": "#/$defs/StatusItemState"
+        },
+        "twin": {
+          "description": "The OTHER reachable scope's checkout of the SAME bundle, when it holds one — a separate\ncopy with its own draft state, which the answer names so a reader never mistakes one\ncheckout for both. Absent whenever only this scope tracks it. **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeTwin"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "version": {
           "description": "The applied version (64-hex), when applied locally.",
@@ -657,6 +672,24 @@
         "workspace_id",
         "channels",
         "skills"
+      ]
+    },
+    "ScopeTwin": {
+      "description": "The OTHER scope's checkout of one bundle: which scope holds it, and whether it carries edits.\nNo folder — the answer sends a reader to that scope's own `list`, which names its folders.",
+      "type": "object",
+      "properties": {
+        "drafted": {
+          "description": "Whether that copy carries edits of its own.",
+          "type": "boolean"
+        },
+        "machine": {
+          "description": "`true` = the MACHINE's copy (`-g`), `false` = this project's.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "machine",
+        "drafted"
       ]
     },
     "SkillEntry": {
