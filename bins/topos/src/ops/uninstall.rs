@@ -237,9 +237,12 @@ fn trigger_failure(scrubbed: &crate::ops::Scrubbed) -> Option<Message> {
     ))
 }
 
-/// A harness's display name from the ONE registry table, falling back to its slug.
+/// A harness's display name from the registry, falling back to its slug. Read off the TEARDOWN
+/// table (the loaded rows plus the bundled floor), because the row this names may be one a newer
+/// downloaded table dropped — the scrub still reached that harness, so the failure line still owes
+/// a person its name.
 fn display_name(slug: &str) -> String {
-    topos_harness::registry::known_harnesses()
+    topos_harness::registry::teardown_harnesses()
         .iter()
         .find(|h| h.slug == slug)
         .map_or_else(|| slug.to_owned(), |h| h.display_name.to_owned())

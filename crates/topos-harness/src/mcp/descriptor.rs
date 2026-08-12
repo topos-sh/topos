@@ -53,9 +53,24 @@ mod tests {
     use crate::registry::Root;
     use std::path::{Path, PathBuf};
 
+    /// The MCP view over the BUNDLED table — [`mcp_harnesses`]'s own filter, over the rows this
+    /// BUILD ships. A shape pin answers for the commit under test, so it must not be movable by
+    /// the `~/.topos/harness-registry/` of whoever is running the suite.
+    fn bundled_mcp_rows() -> Vec<&'static KnownHarness> {
+        registry::bundled_harnesses()
+            .iter()
+            .filter(|h| h.mcp().is_some())
+            .collect()
+    }
+
+    /// [`mcp_harness`] over the bundled rows.
+    fn bundled_mcp_row(slug: &str) -> Option<&'static KnownHarness> {
+        bundled_mcp_rows().into_iter().find(|h| h.slug == slug)
+    }
+
     #[test]
     fn the_mcp_capable_rows_are_the_six_verified_harnesses() {
-        let slugs: Vec<&str> = mcp_harnesses().iter().map(|h| h.slug).collect();
+        let slugs: Vec<&str> = bundled_mcp_rows().iter().map(|h| h.slug).collect();
         assert_eq!(
             slugs,
             [
@@ -68,20 +83,22 @@ mod tests {
             ],
             "registry-table order"
         );
-        for h in mcp_harnesses() {
+        for h in bundled_mcp_rows() {
             assert!(
                 !h.mcp().expect("mcp row").reload_note.is_empty(),
                 "{}",
                 h.slug
             );
         }
-        assert!(mcp_harness("cline").is_none(), "no MCP surface, no row");
-        assert!(mcp_harness("not-a-harness").is_none());
+        assert!(bundled_mcp_row("cline").is_none(), "no MCP surface, no row");
+        assert!(bundled_mcp_row("not-a-harness").is_none());
+        // …and the runtime view is the same filter over whatever table THIS machine resolved.
+        assert!(mcp_harness("cline").is_none());
     }
 
     #[test]
     fn surfaces_are_as_specified() {
-        let get = |slug: &str| mcp_harness(slug).unwrap().mcp().unwrap();
+        let get = |slug: &str| bundled_mcp_row(slug).unwrap().mcp().unwrap();
 
         let cc = get("claude-code");
         let s = cc.user.unwrap();
@@ -151,7 +168,7 @@ mod tests {
     #[test]
     fn user_surface_paths_resolve_under_home() {
         let home = Path::new("/test-home");
-        let path = |slug: &str| mcp_harness(slug).unwrap().mcp_user_path(home);
+        let path = |slug: &str| bundled_mcp_row(slug).unwrap().mcp_user_path(home);
         // Home-rooted rows resolve deterministically (no env override to perturb the test).
         assert_eq!(
             path("cursor"),

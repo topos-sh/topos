@@ -122,16 +122,22 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
   machine root the whole-machine set resolves under, so `artifacts` (the uninstall describe, and its
   path rows `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE SAME set — plus the
-  detection-scoped `arm_detected`/`probe_detected` sweeps. All of it iterates the ONE harness table
+  detection-scoped `arm_detected`/`probe_detected` sweeps. All of it iterates harness-table rows
   and asks `topos-harness::triggers` for each row's adapter, so no caller knows which machinery
-  serves which agent), `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the
-  `DivergedWitness` token).
+  serves which agent — ARMING over the table this machine resolved, TEARDOWN over
+  `registry::teardown_harnesses()` (that table plus the bundled floor), because a row a newer
+  downloaded table dropped is one topos stops arming and never one it stops scrubbing),
+  `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the `DivergedWitness` token).
 - `materialize` — crash-safe dir-swap placement writes. The destructive-path rail is
   PARK-THEN-VERIFY (park aside, re-read, drop only what is accounted for; unaccounted bytes are
   preserved as `.topos-kept-*` siblings) plus the park journal + recovery; the contracts live in
   the module docs. The rule everywhere: **no byte differing from its recorded baseline is
   destroyed unless a snapshot taken after the last revalidation holds it.**
-- `placement` — where a bundle's bytes land per scope, in the TWO target shapes one plan carries:
+- `placement` — where a bundle's bytes land per scope. **Every target dir comes from the harness's
+  registry ROW through the one resolver — the ACTIVE harness's exactly like every other detected
+  one**, so a machine-local table that moved an agent's skills dir moves the bytes with it; the
+  `HarnessAdapter` answers for the dir only where no row can (no machine roots at all). Two target
+  shapes ride one plan:
   a DIRECTORY the bundle owns (shared-dir-first over the home; project-rooted with containment
   proven at the write boundary), or ENTRIES it owns inside a config file shared with the whole
   machine (`entries_plan` — the harness table's MCP surfaces joined onto detection, narrowed by

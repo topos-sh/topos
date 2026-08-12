@@ -77,4 +77,4 @@ mod tests;
 
 pub use app::run;
 pub use cli::cli_command;
-pub use cli_ref::cli_ref_md;
+pub use cli_ref::{cli_ref_md, cli_ref_md_bundled};

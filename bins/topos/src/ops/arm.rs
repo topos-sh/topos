@@ -3,11 +3,18 @@
 //!
 //! The placement engine delivers a followed skill's bytes to every detected agent (the shared
 //! `~/.agents/skills` copy plus native dirs); this module keeps those copies CURRENT by
-//! (un)installing each agent's trigger. It iterates ONE list — the registry rows — and asks
+//! (un)installing each agent's trigger. It iterates registry rows and asks
 //! [`topos_harness::triggers::adapter_for_slug`] for each row's trigger, so which machinery serves a
 //! harness (a config merge, a dropped file, its own scheduler) is never this module's business. The
 //! honesty rules are the adapters' own: evidence-gated `Active`, consent never forged, fail-closed
 //! config edits.
+//!
+//! **Which rows, though, depends on the direction.** ARMING follows the table this machine
+//! resolved ([`registry::detected_harnesses`], over `known_harnesses`): a row a newer downloaded
+//! table dropped is one topos no longer arms. TEARDOWN follows
+//! [`registry::teardown_harnesses`] — those rows PLUS the bundled floor — because the hook a
+//! dropped row was armed with is still in that agent's config, and a scrub that walked past it
+//! would leave an agent invoking a topos this teardown just deleted.
 //!
 //! [`Triggers`] is what a verb holds ([`Ctx::triggers`](crate::ctx::Ctx)) — the ACTIVE harness's
 //! trigger plus, in production, the machine roots the whole-machine set resolves under. It is the
@@ -103,10 +110,13 @@ impl<'a> Triggers<'a> {
     }
 
     /// Visit every OTHER supported harness's trigger this machine's scrub reaches. The production
-    /// set sweeps every KNOWN registry row rather than the detected ones — an artifact must be
-    /// scrubbed even when the harness's detect dir has since vanished — minus the active slug (the
-    /// verb handles that one) and minus a trigger whose scrub must dial the harness's OWN program
-    /// on a machine where it does not look installed.
+    /// set sweeps the TEARDOWN table ([`registry::teardown_harnesses`] — the loaded rows plus the
+    /// bundled floor) rather than the detected ones — an artifact must be scrubbed even when the
+    /// harness's detect dir has since vanished, and even when a newer downloaded table has since
+    /// dropped its row, or `uninstall --yes` would delete the sidecar and leave that agent's hook
+    /// invoking a topos that is gone. Minus the active slug (the verb handles that one) and minus
+    /// a trigger whose scrub must dial the harness's OWN program on a machine where it does not
+    /// look installed.
     ///
     /// A visitor rather than a returned list because the two breadth sources own their adapters
     /// differently (one builds them, one borrows them); every caller here only ever reads each
@@ -116,7 +126,7 @@ impl<'a> Triggers<'a> {
             None => {}
             Some(Breadth::Machine { home, cfg, run }) => {
                 let mut detected: Option<Vec<&'static str>> = None;
-                for harness in registry::known_harnesses() {
+                for harness in registry::teardown_harnesses() {
                     if harness.slug == self.active.slug() {
                         continue;
                     }
@@ -125,9 +135,13 @@ impl<'a> Triggers<'a> {
                         continue;
                     };
                     if adapter.scrub_needs_live_harness() {
+                        // Presence over the SAME teardown rows: a harness whose row a downloaded
+                        // table dropped is still installed on this machine, and its scheduled job
+                        // is still registered in its own program.
                         let live = detected.get_or_insert_with(|| {
-                            registry::detected_harnesses(home, None)
+                            registry::teardown_harnesses()
                                 .iter()
+                                .filter(|h| h.is_installed(home, None))
                                 .map(|h| h.slug)
                                 .collect()
                         });
@@ -598,6 +612,41 @@ mod tests {
                 .find(|s| s.report.agent == "cursor")
                 .is_some_and(|s| s.config_file.is_some()),
             "a file-backed trigger names its config"
+        );
+    }
+
+    /// **The teardown sweep reads the TEARDOWN table, not the one this machine resolved.** A
+    /// downloaded registry may legitimately drop a row, and the arming sweep honors that — but the
+    /// hook that row was armed with is still in the agent's config, so every harness THIS BUILD
+    /// can arm has to stay reachable by the preview and the scrub. (Where no local table is
+    /// installed the two sets coincide; what this pins is which one the sweep asks for, and the
+    /// bundled floor is the half that cannot be taken away.)
+    #[test]
+    fn the_teardown_sweep_covers_every_harness_this_build_can_arm() {
+        let home = TempHome::new();
+        let cfg = MemConfig::default();
+        let active = claude_trigger(&home.0, &cfg);
+        let ports = Triggers::machine(active.as_ref(), home.0.clone(), &cfg, &NoBinary);
+        let mut swept: Vec<&str> = Vec::new();
+        ports.for_each_other(|adapter| swept.push(adapter.slug()));
+
+        for row in registry::bundled_harnesses() {
+            let Some(adapter) = triggers::adapter_for_slug(row.slug, &home.0, &cfg, &NoBinary)
+            else {
+                continue; // placement-only: no trigger, nothing to scrub
+            };
+            if row.slug == active.slug() || adapter.scrub_needs_live_harness() {
+                continue; // the verb's own scrub / the one that needs the harness running
+            }
+            assert!(
+                swept.contains(&row.slug),
+                "{} is armable by this build and must stay reachable by its teardown: {swept:?}",
+                row.slug
+            );
+        }
+        assert!(
+            !swept.contains(&active.slug()),
+            "the active harness is the verb's own scrub, never swept twice"
         );
     }
 

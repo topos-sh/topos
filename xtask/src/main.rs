@@ -2140,7 +2140,9 @@ fn json_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
 
 // =================================================================================================
 // gen-cli-ref — the CLI reference, rendered from the REAL `clap` tree by the client lib's own
-// renderer (`topos::cli_ref_md()`). TWO committed copies of the same bytes: `docs/cli.md` (the
+// renderer (`topos::cli_ref_md_bundled()` — the same document `cli_ref_md()` places at runtime,
+// with its agent tables spelled from the BUNDLED registry so this gate is hermetic). TWO committed
+// copies of the same bytes: `docs/cli.md` (the
 // repo's reference doc) and `skills/topos/reference.md` (the downloadable public skill's copy —
 // the built-in bundle renders the same fn at placement, and skill installers fetch the committed
 // file straight from the repo, so it must never go stale). Same byte-compare `--check` drift
@@ -2162,7 +2164,9 @@ fn cli_ref_paths() -> [PathBuf; 2] {
 /// mirroring the schema/fixture drift discipline (a stale or missing file fails). Rendered from
 /// the real clap tree, so both references track the binary exactly.
 fn gen_cli_ref(check: bool) -> Result<()> {
-    let content = topos::cli_ref_md();
+    // The BUNDLED table's rendering: a committed file (and the gate over it) answers for the
+    // commit, never for the `~/.topos/harness-registry/` of whoever ran the command.
+    let content = topos::cli_ref_md_bundled();
     for path in cli_ref_paths() {
         let shown = path
             .strip_prefix(workspace_root())

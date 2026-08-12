@@ -125,6 +125,30 @@ fn no_trigger() -> TriggerReport {
     }
 }
 
+/// The active harness's USER skills root under a fixture `home`, resolved the one way the
+/// placement engine resolves it (the registry row through the registry's resolver).
+///
+/// It asserts the answer stays inside the fixture, which is a real fence and not a formality: the
+/// row's root honors `$CLAUDE_CONFIG_DIR`, and this suite writes actual bytes into the dir it
+/// computes. With that variable set, a silent pass would mean a test had just written into the
+/// developer's own skills folder — so the whole file requires it unset, and says so here rather
+/// than finding out afterwards.
+fn native_skills_root(home: &std::path::Path) -> PathBuf {
+    let root = topos_harness::registry::skills_root(
+        HarnessId::ClaudeCode.slug(),
+        topos_harness::registry::SkillScope::User,
+        home,
+        None,
+    )
+    .expect("claude-code has a user skills root");
+    assert!(
+        root.starts_with(home),
+        "this suite needs $CLAUDE_CONFIG_DIR unset — the active harness's skills root resolved to \
+         {root:?}, outside the fixture home {home:?}"
+    );
+    root
+}
+
 /// The rig: a fake $HOME (with `.claude/` so claude-code detects), a sidecar under `<home>/.topos`,
 /// and a work dir. The cwd each test chooses (a project checkout, or the bare work dir).
 struct Rig {
@@ -142,8 +166,12 @@ impl Rig {
         // engages: person scope → `<home>/.agents/skills`, project scope → `<proj>/.agents/skills`.
         std::fs::create_dir_all(home.0.join(".claude")).unwrap();
         let work = Scratch::new(&format!("{tag}-work"));
+        // The fake adapter answers with the ROW's root — the same answer the placement engine
+        // resolves, which is the one source of a target dir. (An adapter naming some other
+        // directory would not move a byte; it would only make this rig disagree with the engine
+        // about where to look.)
         let harness = TmpHarness {
-            skills_root: work.0.join("skills"),
+            skills_root: native_skills_root(&home.0),
         };
         Self {
             home,
@@ -152,6 +180,20 @@ impl Rig {
             ids: SeqIds::new("s"),
             clock: FixedClock(1_700_000_000_000),
             harness,
+        }
+    }
+
+    /// Where this rig's ACTIVE-harness (native, machine-scope) copies land.
+    fn skills(&self) -> PathBuf {
+        native_skills_root(&self.home.0)
+    }
+
+    /// A path as the RECEIPTS spell it: a machine path under the home abbreviates to `~/…` (see
+    /// `ops::inventory::pretty`), which is what every destination and kept row carries.
+    fn pretty(&self, path: &std::path::Path) -> String {
+        match path.strip_prefix(&self.home.0) {
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
         }
     }
     fn layout(&self) -> Layout {
@@ -718,7 +760,7 @@ fn the_feed_row_adopts_the_workspaces_feed() {
         Some(&format!("@{WS_NAME}/deploy")[..])
     );
     assert_eq!(row.destinations.len(), 1, "{:?}", row.destinations);
-    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    assert!(rig.skills().join("deploy/SKILL.md").exists());
     // The applied report went out; the offline cache carries the identity, the attribution, and
     // the caller's declines.
     assert!(log.lock().unwrap().iter().any(|l| l == "report s_deploy"));
@@ -761,7 +803,7 @@ fn no_global_file_delivers_nothing_and_cleans_what_was_delivered() {
     // Delivered while the feed row stood…
     rig.seed_feed();
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.exists());
 
     // …then the whole file is deleted. The next sweep delivers nothing and RETIRES the
@@ -795,7 +837,7 @@ fn no_global_file_delivers_nothing_and_cleans_what_was_delivered() {
     let ctx = fresh.ctx_at(Some(&fresh.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        !fresh.work.0.join("skills/deploy").exists(),
+        !fresh.skills().join("deploy").exists(),
         "{:?}",
         out.data.skills
     );
@@ -834,12 +876,12 @@ fn a_global_file_withholds_the_feed_and_says_so_loudly() {
     let out = sweep(&ctx, &plane, &dir);
 
     assert!(
-        rig.work.0.join("skills/other/SKILL.md").exists(),
+        rig.skills().join("other/SKILL.md").exists(),
         "the file's own row delivers: {:?}",
         out.warnings
     );
     assert!(
-        !rig.work.0.join("skills/deploy").exists(),
+        !rig.skills().join("deploy").exists(),
         "no feed row, no feed"
     );
     let loud = crate::message::legacy_lines(&out.advisories)
@@ -947,7 +989,7 @@ fn a_served_feed_never_earns_the_empty_exchange_line() {
     let out = sweep(&ctx, &plane, &dir);
 
     assert!(
-        !rig.work.0.join("skills/noisy").exists(),
+        !rig.skills().join("noisy").exists(),
         "the switch withholds it"
     );
     assert!(
@@ -986,12 +1028,12 @@ fn an_off_row_withholds_exactly_its_bundle_from_a_flowing_feed() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        rig.work.0.join("skills/deploy/SKILL.md").exists(),
+        rig.skills().join("deploy/SKILL.md").exists(),
         "the feed flows: {:?}",
         out.warnings
     );
     assert!(
-        !rig.work.0.join("skills/noisy").exists(),
+        !rig.skills().join("noisy").exists(),
         "the one switch is the one exception"
     );
     // A flowing feed is not a withheld one — no loud line here.
@@ -1024,7 +1066,7 @@ fn an_explicit_pinned_row_beats_the_feeds_version() {
     let out = sweep(&ctx, &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert_eq!(
-        std::fs::read_to_string(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        std::fs::read_to_string(rig.skills().join("deploy/SKILL.md")).unwrap(),
         "# v1\n",
         "the row's pin lands, not the feed's current"
     );
@@ -1055,7 +1097,7 @@ fn a_declined_bundle_a_row_still_delivers_is_disclosed() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
-    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    assert!(rig.skills().join("deploy/SKILL.md").exists());
     let line = crate::message::legacy_lines(&out.advisories)
         .into_iter()
         .find(|w| w.starts_with("DECLINED_OVERRIDE"))
@@ -1094,7 +1136,7 @@ fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
     // The bytes live INSIDE the checkout, not the home-scope dirs.
     let placed = proj.0.join(".claude/skills/deploy");
     assert!(placed.join("SKILL.md").exists());
-    assert!(!rig.work.0.join("skills/deploy").exists());
+    assert!(!rig.skills().join("deploy").exists());
     // The placed dir SELF-IGNORES (the node_modules model), and NOTHING under `.git/` was written.
     assert_eq!(
         std::fs::read(placed.join(".gitignore")).unwrap(),
@@ -1196,7 +1238,7 @@ fn the_same_bundle_at_both_scopes_lands_twice() {
     let out = sweep_both(&ctx, &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
 
-    let person_copy = rig.work.0.join("skills/deploy");
+    let person_copy = rig.skills().join("deploy");
     let project_copy = proj.0.join(".claude/skills/deploy");
     assert!(person_copy.join("SKILL.md").exists(), "the feed's copy");
     assert!(project_copy.join("SKILL.md").exists(), "the project's copy");
@@ -1358,7 +1400,7 @@ fn a_driven_manifest_that_fails_to_load_refuses_the_run_whole() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.exists());
 
     // A typo the grammar refuses: the driven scope's recipe is unreadable, so the run refuses —
@@ -1436,7 +1478,7 @@ fn a_broken_manifest_in_an_undriven_scope_warns_and_freezes_it() {
     );
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.exists());
 
     // Break the GLOBAL file, then drive the PROJECT scope only: the machine scope is not this
@@ -1516,7 +1558,7 @@ fn a_bare_update_inside_a_project_converges_only_that_project() {
     );
     // The machine scope was never DRIVEN: no bytes in the home agent dirs, no home store entry.
     assert!(
-        !rig.work.0.join("skills").exists(),
+        !rig.skills().exists(),
         "the feed's copy stayed away from the machine's agent dirs"
     );
     let deploy_id = crate::id::SkillId::parse("s_deploy").unwrap();
@@ -1532,7 +1574,7 @@ fn a_bare_update_inside_a_project_converges_only_that_project() {
     // The machine's demand is PENDING, not dropped — the machine-scoped run still delivers it.
     let out = sweep_scoped(&ctx, &t.plane, &t.dir, ops::UpdateScope::Machine);
     assert!(
-        rig.work.0.join("skills/deploy/SKILL.md").exists(),
+        rig.skills().join("deploy/SKILL.md").exists(),
         "{:?}",
         out.warnings
     );
@@ -1550,7 +1592,7 @@ fn a_bare_update_outside_a_project_converges_the_machine() {
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
 
     assert_eq!(out.data.scope.as_deref(), Some("machine"));
-    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    assert!(rig.skills().join("deploy/SKILL.md").exists());
     // A project the invocation never stood in is not reconciled from outside it.
     assert!(!t.proj.0.join(".claude/skills/api").exists());
     assert!(crate::sidecar::existing_project_store(&rig.fs, &t.proj.0).is_none());
@@ -1567,7 +1609,7 @@ fn update_g_inside_a_project_converges_only_the_machine() {
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
 
     assert_eq!(out.data.scope.as_deref(), Some("machine"));
-    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    assert!(rig.skills().join("deploy/SKILL.md").exists());
     // The checkout the invocation was standing in is untouched: no bytes, and no store minted.
     assert!(
         !t.proj.0.join(".claude/skills/api").exists(),
@@ -1601,7 +1643,7 @@ fn the_hook_sweep_converges_both_scopes_from_inside_a_project() {
         "the project scope converged"
     );
     assert!(
-        rig.work.0.join("skills/deploy/SKILL.md").exists(),
+        rig.skills().join("deploy/SKILL.md").exists(),
         "the machine scope converged in the same run"
     );
 }
@@ -1646,7 +1688,7 @@ fn a_frozen_project_manifest_refuses_and_never_falls_back_to_the_machine() {
         Some("nothing changed")
     );
     assert!(
-        !rig.work.0.join("skills").exists(),
+        !rig.skills().exists(),
         "a broken project file never hands the run to the machine"
     );
 }
@@ -1814,10 +1856,7 @@ fn a_target_from_the_other_scope_refuses_naming_the_scope_it_searched() {
         "{msg}"
     );
     assert!(msg.contains("`topos update -g deploy`"), "{msg}");
-    assert!(
-        !rig.work.0.join("skills").exists(),
-        "the refusal moved no bytes: {msg}"
-    );
+    assert!(!rig.skills().exists(), "the refusal moved no bytes: {msg}");
 
     // The mirror image, standing outside the project: `api` is the project file's demand.
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -2882,7 +2921,7 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/alpha");
+    let placed = rig.skills().join("alpha");
     assert!(placed.join("SKILL.md").exists(), "alpha's bytes are placed");
 
     // Sign out (the session ends; a deliberate state) and drop the feed line: nothing claims the
@@ -2928,7 +2967,7 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
             format!(
                 "{WS_NAME} stopped sharing this — topos will not update it any more\nthe files \
                  stay where they are, and are yours to keep or delete: {}",
-                placed.display()
+                rig.pretty(&placed)
             )
             .as_str()
         )
@@ -2975,22 +3014,26 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
             .any(|r| r.skill == "alpha"),
         "no row claims it, so no line originates from it"
     );
-    // The retired record no longer answers for the name at all (this rig's placement dir sits
-    // outside the registry discovery roots, so the honest answer is the ordinary no-such-name —
-    // never the record's "already tracked").
-    assert!(
-        matches!(
-            ops::plan_bare_add(
-                &ctx,
-                &connect(&plane, &dir),
-                &roots,
-                "alpha",
-                bare_opts(true)
-            ),
-            Err(ClientError::NoUntrackedSkill { .. })
-        ),
-        "a retired record must not resolve the bare name"
+    // The retired record no longer answers for the name at all. The folder it left behind is the
+    // person's now, sitting in an agent's own skills dir — so the honest answer is the ordinary
+    // untracked-folder adopt, never the record's "already tracked" or its workspace reference.
+    let plan = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        bare_opts(true),
     );
+    match plan {
+        Ok(ops::BareAddPlan::Adopt { path, name, .. }) => {
+            assert_eq!(
+                path, placed,
+                "the released folder, adopted as anyone's would be"
+            );
+            assert_eq!(name, "alpha");
+        }
+        other => panic!("a retired record must not resolve the bare name: {other:?}"),
+    }
 }
 
 #[test]
@@ -3969,7 +4012,7 @@ fn a_dropped_feed_row_uninstalls_clean_copies_and_keeps_edited_ones() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.join("SKILL.md").exists());
 
     // A CLEAN copy: dropping the feed row uninstalls it now, and the receipt row speaks in
@@ -3986,7 +4029,7 @@ fn a_dropped_feed_row_uninstalls_clean_copies_and_keeps_edited_ones() {
         row.display.as_deref(),
         Some(&format!("@{WS_NAME}/deploy")[..])
     );
-    assert_eq!(row.destinations, vec![placed.display().to_string()]);
+    assert_eq!(row.destinations, vec![rig.pretty(&placed)]);
     assert!(row.kept.is_empty(), "{:?}", row.kept);
     assert!(!placed.exists(), "the clean person-scope copy is retired");
     let sid = crate::id::SkillId::parse("s_deploy").unwrap();
@@ -4011,7 +4054,7 @@ fn a_dropped_feed_row_uninstalls_clean_copies_and_keeps_edited_ones() {
         .find(|s| s.skill == "deploy" && s.action == PullAction::Removed)
         .unwrap_or_else(|| panic!("{:?}", out.data.skills));
     assert!(row.destinations.is_empty(), "{:?}", row.destinations);
-    assert_eq!(row.kept, vec![placed.display().to_string()]);
+    assert_eq!(row.kept, vec![rig.pretty(&placed)]);
     assert!(placed.join("SKILL.md").exists(), "the edited copy stays");
     assert_eq!(
         std::fs::read(placed.join("SKILL.md")).unwrap(),
@@ -4050,7 +4093,7 @@ fn a_new_off_row_cleans_its_bundles_placements_and_keeps_the_bytes() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_noisy", "noisy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/noisy");
+    let placed = rig.skills().join("noisy");
     assert!(placed.exists());
 
     rig.write_global(&format!(
@@ -4171,7 +4214,7 @@ fn rebuild_absorbs_the_edit_before_it_re_projects() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.join("SKILL.md").exists());
     let before = store_versions(&rig.layout(), "s_deploy");
 
@@ -4278,7 +4321,7 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.join("SKILL.md").exists());
 
     // My own edit to the same file the team is about to change → a conflict on the next sweep.
@@ -4698,9 +4741,9 @@ fn a_targeted_update_narrows_the_sweep_and_names_a_miss() {
     )
     .unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    assert!(rig.skills().join("deploy/SKILL.md").exists());
     assert!(
-        !rig.work.0.join("skills/other").exists(),
+        !rig.skills().join("other").exists(),
         "a targeted update touches only what was named"
     );
 
@@ -5015,7 +5058,7 @@ fn a_project_mention_never_shields_a_person_scope_clean() {
     std::fs::write(proj.0.join("deploy/SKILL.md"), b"# local deploy\n").unwrap();
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep_both(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.exists(), "the person feed installed its copy");
 
     // The feed withdraws the bundle. The person-scope copy must retire — the PROJECT's mention
@@ -5152,7 +5195,7 @@ fn the_report_covers_a_declined_but_locally_added_bundle() {
         "{:?}",
         out.warnings
     );
-    assert!(rig.work.0.join("skills/noisy/SKILL.md").exists());
+    assert!(rig.skills().join("noisy/SKILL.md").exists());
     // The report includes the declined-but-applied bundle — which is exactly what makes the
     // web's declined-but-applied disclosure real.
     assert!(
@@ -5673,7 +5716,7 @@ fn the_governance_transfer_carries_the_rows_destinations_onto_the_workspace_row(
 fn install_feed_deploy(rig: &Rig, plane: &FakePlane, dir: &FakeDirectory) -> PathBuf {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, plane, dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.join("SKILL.md").exists());
     placed
 }
@@ -5736,7 +5779,7 @@ fn an_off_switch_over_a_draft_applies_with_the_kept_disclosure() {
             // `topos list <name>`, which answers "not managed on this machine" once the row is
             // gone — the one command it named could never show the copy it was about.
             assert!(
-                note.contains(&format!("they stay in {}", placed.display())),
+                note.contains(&format!("they stay in {}", rig.pretty(&placed))),
                 "{note}"
             );
             assert!(!note.contains("topos list"), "{note}");
@@ -5792,7 +5835,7 @@ fn a_feed_drop_applies_immediately_and_uninstalls_in_the_same_invocation() {
         .find(|u| u.name == format!("@{WS_NAME}/deploy"))
         .unwrap_or_else(|| panic!("{:?}", data.uninstalled));
     assert!(u.destinations.is_empty(), "{:?}", u.destinations);
-    assert_eq!(u.kept, vec![placed.display().to_string()]);
+    assert_eq!(u.kept, vec![rig.pretty(&placed)]);
     assert!(
         placed.join("SKILL.md").exists(),
         "the edited copy stays in place"
@@ -5826,7 +5869,7 @@ fn a_feed_drop_applies_immediately_and_uninstalls_in_the_same_invocation() {
         .iter()
         .find(|u| u.name == format!("@{WS_NAME}/deploy"))
         .unwrap_or_else(|| panic!("{:?}", data.uninstalled));
-    assert_eq!(u.destinations, vec![placed.display().to_string()]);
+    assert_eq!(u.destinations, vec![rig.pretty(&placed)]);
     assert!(u.kept.is_empty(), "{:?}", u.kept);
     assert!(!placed.exists(), "the copies left in this invocation");
 }
@@ -7493,7 +7536,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_says_nothing_about_
     let out = sweep_both(&ctx, &plane, &dir);
 
     assert_eq!(
-        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        std::fs::read(rig.skills().join("deploy/SKILL.md")).unwrap(),
         b"# deploy v2\n",
         "the person scope takes the served current"
     );
@@ -7555,7 +7598,7 @@ fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() 
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep_both(&ctx, &plane, &dir);
     assert_eq!(
-        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        std::fs::read(rig.skills().join("deploy/SKILL.md")).unwrap(),
         b"# deploy v1\n"
     );
 
@@ -7573,7 +7616,7 @@ fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() 
         "the scope you stand in is the one that moves"
     );
     assert_eq!(
-        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        std::fs::read(rig.skills().join("deploy/SKILL.md")).unwrap(),
         b"# deploy v1\n",
         "the machine-wide copy was never driven"
     );
@@ -7639,7 +7682,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep_both(&ctx, &plane, &dir);
     assert_eq!(
-        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        std::fs::read(rig.skills().join("deploy/SKILL.md")).unwrap(),
         b"# deploy v1\n"
     );
 
@@ -7659,7 +7702,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
         "the scope you stand in is the one that moves"
     );
     assert_eq!(
-        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        std::fs::read(rig.skills().join("deploy/SKILL.md")).unwrap(),
         b"# deploy v1\n",
         "the pinned machine copy is materially behind v2 — deliberately"
     );
@@ -7782,7 +7825,7 @@ fn an_off_row_is_never_reported_behind() {
     let dir = FakeDirectory::new(vec![listed], Vec::new());
     let out = sweep(&ctx, &plane, &dir);
     assert_eq!(
-        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        std::fs::read(rig.skills().join("deploy/SKILL.md")).unwrap(),
         b"# deploy v1\n",
         "the switched-off copy is left exactly where it was"
     );
@@ -11280,7 +11323,7 @@ fn reads_from_inside_a_project_answer_the_project_copy() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
     let proj = both_scopes_hold_deploy("scope-reads-repo", &rig, &plane, &dir);
     let ctx = rig.ctx_at(Some(&proj.0));
-    let machine_copy = rig.work.0.join("skills/deploy");
+    let machine_copy = rig.skills().join("deploy");
     let project_copy = proj.0.join(".claude/skills/deploy");
 
     // The team moves to v2 and only the MACHINE converges (`-g`), so the two stores' histories
@@ -11463,7 +11506,7 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let proj = both_scopes_hold_deploy("scope-greset-repo", &rig, &plane, &dir);
     let ctx = rig.ctx_at(Some(&proj.0));
-    let machine_copy = rig.work.0.join("skills/deploy");
+    let machine_copy = rig.skills().join("deploy");
     let project_copy = proj.0.join(".claude/skills/deploy");
     // ONLY the checkout's copy is edited. The machine's is clean — so `-g` has nothing to discard,
     // and anything it DOES discard came from the scope the flag excluded.
@@ -12145,7 +12188,7 @@ fn a_dest_row_freezes_placement_and_grows_and_shrinks_on_the_next_update() {
     let a = rig.home.0.join("dest-a/deploy");
     assert!(a.join("SKILL.md").exists(), "{:?}", out.data.skills);
     assert!(
-        !rig.work.0.join("skills/deploy").exists(),
+        !rig.skills().join("deploy").exists(),
         "the default adapter dir gets nothing — the row froze its destinations"
     );
     let row = out
@@ -13062,7 +13105,7 @@ fn removing_a_row_the_feed_still_delivers_says_the_copies_stay() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    let placed = rig.work.0.join("skills/deploy/SKILL.md");
+    let placed = rig.skills().join("deploy/SKILL.md");
     assert!(placed.exists());
 
     let data = match ops::remove_global(
@@ -13716,7 +13759,7 @@ fn removing_a_row_a_channel_line_still_delivers_names_no_feed() {
     );
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    let placed = rig.work.0.join("skills/deploy/SKILL.md");
+    let placed = rig.skills().join("deploy/SKILL.md");
     assert!(placed.exists());
 
     let data = match ops::remove_global(
@@ -13780,7 +13823,7 @@ fn removing_a_row_names_the_feed_that_actually_delivers_it() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    let placed = rig.work.0.join("skills/deploy/SKILL.md");
+    let placed = rig.skills().join("deploy/SKILL.md");
     assert!(placed.exists());
 
     // The OTHER workspace's feed carries a bundle of the same name, and this machine adopts it.
@@ -13862,7 +13905,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
     // First sweep installs; the second is genuinely untouched and pins the exact summary — down to
     // the header's verb, which says what the run DID: it checked, it did not update.
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.join("SKILL.md").exists());
     let clean = sweep(&ctx, &plane, &dir);
     assert_eq!(
@@ -13941,7 +13984,7 @@ fn re_adding_the_feed_line_reinstalls_with_a_receipt_line() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
-    let placed = rig.work.0.join("skills/deploy");
+    let placed = rig.skills().join("deploy");
     assert!(placed.join("SKILL.md").exists());
 
     // The feed line is removed: the next update retires the copies.
