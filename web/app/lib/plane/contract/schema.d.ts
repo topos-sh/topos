@@ -399,7 +399,6 @@ export interface components {
         /**
          * ActionCode
          * @description A machine-actionable next-action code. The values in `examples` are the known set; an unrecognized future code is still valid and MUST be executed via the action's `argv` (never rejected).
-         * @example PROPOSE_PUBLISH
          * @example REBASE_AND_RETRY
          * @example RESOLVE_DIVERGED_DRAFT
          * @example APPLY_WAITING_UPDATE
@@ -861,8 +860,8 @@ export interface components {
         };
         /**
          * @description `publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is
-         *     DOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with
-         *     `topos follow <workspace-address>` first). **INFERRED.**
+         *     DOWNGRADED to a proposal (see [`ProposeData`]); a publish with no session is refused typed (sign in
+         *     with `topos login <workspace-address>` first). **INFERRED.**
          */
         PublishData: {
             added?: null | components["schemas"]["AddedNote"];

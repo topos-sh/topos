@@ -11816,9 +11816,9 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
     // no placement folders at all — so the line names the config entries and invents no folder:
     // the `from …` clause appears only where there really are dirs to empty.
     assert!(
-        data.items[0].agent_dirs.is_empty(),
+        data.items[0].dest_dirs.is_empty(),
         "an mcp record places no skill folders: {:?}",
-        data.items[0].agent_dirs
+        data.items[0].dest_dirs
     );
     let described_tty = crate::render::remove_describe_tty(&data, &["topos".to_owned()]);
     assert!(
@@ -13201,7 +13201,7 @@ fn a_local_adopt_with_dest_places_a_copy_at_the_selected_folder() {
 
 /// The bare whole-row remove with the plane UNREACHABLE at remove time: the eager reconcile's
 /// cache walk freezes (no fresh snapshot), so the verb's own rail must retire the copies — both
-/// folders leave NOW, the receipt lists them, and the item's `agent_dirs` says what moved.
+/// folders leave NOW, the receipt lists them, and the item's `dest_dirs` says what moved.
 #[test]
 fn an_offline_whole_row_remove_still_deletes_every_copy() {
     let (rig, plane, dir, _v) = add_rig("whole-offline");
@@ -13238,7 +13238,7 @@ fn an_offline_whole_row_remove_still_deletes_every_copy() {
         "the codex copy leaves in-invocation; uninstalled={:?}",
         data.uninstalled
     );
-    // The receipt speaks in what actually moved, and the item's agent_dirs carries it.
+    // The receipt speaks in what actually moved, and the item's dest_dirs carries it.
     let u = &data.uninstalled[0];
     assert_eq!(u.name, format!("@{WS_NAME}/deploy"));
     let mut dests = u.destinations.clone();
@@ -13251,7 +13251,7 @@ fn an_offline_whole_row_remove_still_deletes_every_copy() {
         ]
     );
     assert!(u.kept.is_empty(), "{:?}", u.kept);
-    let mut dirs = data.items[0].agent_dirs.clone();
+    let mut dirs = data.items[0].dest_dirs.clone();
     dirs.sort();
     assert_eq!(dirs, dests);
 }
@@ -13379,7 +13379,7 @@ fn a_local_path_whole_row_remove_deletes_managed_copies_and_spares_the_source() 
     let u = &data.uninstalled[0];
     assert_eq!(u.name, "my-skill");
     assert_eq!(u.destinations, vec!["~/.codex/skills/my-skill".to_owned()]);
-    assert_eq!(data.items[0].agent_dirs, u.destinations);
+    assert_eq!(data.items[0].dest_dirs, u.destinations);
 }
 
 /// A whole-row `remove -g` of an MCP row takes its server entries OUT of the config files in the
@@ -13493,9 +13493,9 @@ fn a_whole_row_remove_spares_another_workspaces_same_named_record() {
     // And the receipt claims nothing: no uninstall block, no cleaned dirs, no copies-leave line.
     assert!(data.uninstalled.is_empty(), "{:?}", data.uninstalled);
     assert!(
-        data.items[0].agent_dirs.is_empty(),
+        data.items[0].dest_dirs.is_empty(),
         "{:?}",
-        data.items[0].agent_dirs
+        data.items[0].dest_dirs
     );
     let tty = crate::render::remove_applied_tty(&data);
     assert!(!tty.contains("leave this machine now"), "{tty}");
@@ -14941,7 +14941,7 @@ fn a_record_no_row_demands_takes_the_classic_delete_and_spares_the_adopted_folde
         panic!("--yes applies");
     };
     assert!(
-        data.items[0].bytes_kept && data.items[0].agent_dirs.is_empty(),
+        data.items[0].bytes_kept && data.items[0].dest_dirs.is_empty(),
         "nothing is claimed deleted: {data:?}"
     );
     assert_eq!(

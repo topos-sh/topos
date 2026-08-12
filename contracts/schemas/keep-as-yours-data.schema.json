@@ -37,16 +37,6 @@
           "description": "Upstream withdrew the skill (archived, or its last delivering channel dropped it) — the agent dirs\nwere cleaned; the sidecar kept the bytes + any draft.",
           "type": "string",
           "const": "withdrawn-upstream"
-        },
-        {
-          "description": "The person unfollowed the skill (a detach) — its bytes are frozen in place here.",
-          "type": "string",
-          "const": "detached"
-        },
-        {
-          "description": "`topos remove` excluded the skill on this device — the agent dirs were cleaned, the sidecar kept.",
-          "type": "string",
-          "const": "removed-here"
         }
       ]
     }

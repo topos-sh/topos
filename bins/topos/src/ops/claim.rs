@@ -621,8 +621,6 @@ fn receipt(
         version_id: Some(target.lock.base_commit.clone()),
         bundle_digest: Some(target.lock.bundle_digest.clone()),
         tracked: true,
-        harness: None,
-        harness_slug: None,
         // Nothing was adopted and no trigger moved: the record already stood.
         currency: None,
         triggers: Vec::new(),

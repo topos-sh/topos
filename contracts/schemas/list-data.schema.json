@@ -859,11 +859,6 @@
           "const": "blocked"
         },
         {
-          "description": "An exclude line withholds this name here (the row's `source` recorded it).",
-          "type": "string",
-          "const": "excluded"
-        },
-        {
           "description": "A machine-local `\"off\"` row in the global manifest withholds this bundle from the feed\nhere (the everywhere-path is the web decline).",
           "type": "string",
           "const": "off"

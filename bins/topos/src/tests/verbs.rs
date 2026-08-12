@@ -2406,11 +2406,6 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
         add.name, "pr-describe",
         "name is the directory basename, not frontmatter"
     );
-    assert_eq!(
-        add.harness,
-        Some(HarnessId::ClaudeCode),
-        "tagged as Claude Code"
-    );
     let report = add.currency.expect("currency armed for a recognized skill");
     assert_eq!(report.state, TriggerState::Active);
     assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
@@ -2449,10 +2444,6 @@ fn add_of_a_plain_dir_tags_no_harness_and_installs_no_hook() {
     let ctx = h.ctx_with(&cc, trigger.as_ref());
 
     let add = ops::add(&ctx, &src.0.join("pr-describe")).unwrap();
-    assert!(
-        add.harness.is_none(),
-        "a plain dir is not a recognized harness skill"
-    );
     assert!(add.currency.is_none(), "no currency armed for a plain dir");
     assert!(
         !claude.join("settings.json").exists(),

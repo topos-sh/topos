@@ -77,24 +77,6 @@
         }
       ]
     },
-    "harness": {
-      "description": "The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain\ndirectory tracked in place. Disclosed so the agent can see whether auto-update was armed.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/HarnessId"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "harness_slug": {
-      "description": "The registry slug (e.g. `cursor`) of the agent that owns the added dir, when ONE does: the\nrecognized harness, or the sole installed reader of its folder (then `harness` may be `None`).\nUnset for a folder several agents read, or none. Provenance/disclosure only.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "machine_copy": {
       "description": "The MACHINE folder this add's own copy landed in, disclosed when a checkout at or above\nthis folder ALREADY delivers the same bundle — a machine-wide add then gives you a second\ncheckout beside the project's, which is a surprise worth stating at the moment it is\ncreated. Absolute (the wire's form; the receipt abbreviates it under the home). Absent for\nevery add that creates no second copy. **INFERRED** (additive-only).",
       "type": [
@@ -360,14 +342,6 @@
         "name",
         "reference",
         "same_path"
-      ]
-    },
-    "HarnessId": {
-      "type": "string",
-      "enum": [
-        "claude-code",
-        "openclaw",
-        "hermes"
       ]
     },
     "McpServerSummary": {

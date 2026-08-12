@@ -35,10 +35,6 @@ pub const PERSISTED_SCHEMA_VERSION: u32 = 1;
 /// dispatching on [`PERSISTED_SCHEMA_VERSION`].
 pub const PLACEMENT_MAP_SCHEMA_VERSION: u32 = 2;
 
-/// Bumped on any breaking change to the [`Receipt`] shape (the durable idempotency record evolves
-/// with the op vocabulary, not with the envelope or the sidecar docs).
-pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
-
 /// The `data` payload defaults to an empty object (`{}`), not `null`, when absent — matching the
 /// emitted envelope (a pure-signal command still carries `"data": {}`).
 fn empty_object() -> serde_json::Value {
@@ -192,8 +188,7 @@ pub struct NextAction {
 /// The closed initial action-code vocabulary (each maps to its producing outcome). Advertised in
 /// the [`ActionCode`] schema's `examples` so a cross-language consumer learns the set without
 /// reading Rust; additive-only — new codes append here.
-pub const KNOWN_ACTION_CODES: [&str; 11] = [
-    "PROPOSE_PUBLISH",
+pub const KNOWN_ACTION_CODES: [&str; 10] = [
     "REBASE_AND_RETRY",
     "RESOLVE_DIVERGED_DRAFT",
     "APPLY_WAITING_UPDATE",
@@ -210,7 +205,6 @@ pub const KNOWN_ACTION_CODES: [&str; 11] = [
 /// unrecognized code round-trips through [`ActionCode::Unknown`]. Serialized as a plain string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionCode {
-    ProposePublish,       // APPROVAL_REQUIRED
     RebaseAndRetry,       // CONFLICT
     ResolveDivergedDraft, // DIVERGED
     ApplyWaitingUpdate,   // `pull <skill>` — a previously observed-but-unapplied version
@@ -229,7 +223,7 @@ pub enum ActionCode {
 
 /// An action code outside this build's known set — its inner string is private so it can only be
 /// produced by [`ActionCode::from`], which canonicalizes known codes first. This prevents an
-/// `Unknown("PROPOSE_PUBLISH")` that would serialize as a known code yet compare unequal to it.
+/// `Unknown("REBASE_AND_RETRY")` that would serialize as a known code yet compare unequal to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownActionCode(String);
 
@@ -243,7 +237,6 @@ impl UnknownActionCode {
 impl ActionCode {
     pub fn as_str(&self) -> &str {
         match self {
-            ActionCode::ProposePublish => "PROPOSE_PUBLISH",
             ActionCode::RebaseAndRetry => "REBASE_AND_RETRY",
             ActionCode::ResolveDivergedDraft => "RESOLVE_DIVERGED_DRAFT",
             ActionCode::ApplyWaitingUpdate => "APPLY_WAITING_UPDATE",
@@ -262,7 +255,6 @@ impl ActionCode {
 impl From<String> for ActionCode {
     fn from(s: String) -> Self {
         match s.as_str() {
-            "PROPOSE_PUBLISH" => ActionCode::ProposePublish,
             "REBASE_AND_RETRY" => ActionCode::RebaseAndRetry,
             "RESOLVE_DIVERGED_DRAFT" => ActionCode::ResolveDivergedDraft,
             "APPLY_WAITING_UPDATE" => ActionCode::ApplyWaitingUpdate,
@@ -497,15 +489,14 @@ pub enum HarnessId {
     ClaudeCode,
     #[serde(rename = "openclaw")]
     OpenClaw,
-    #[serde(rename = "hermes")]
+    #[serde(rename = "hermes-agent")]
     Hermes,
 }
 
 impl HarnessId {
     /// The stable registry slug for this harness — matches `topos-harness`'s baked registry (which mirrors
     /// the `vercel-labs/skills` ecosystem slugs), so an adapter-backed skill's `harness_slug` agrees with a
-    /// discovered one. Note Hermes's ecosystem slug is `hermes-agent` (the [`HarnessId`] serde rename stays
-    /// the shorter `hermes` for wire back-compat — the two are deliberately distinct).
+    /// discovered one. Each variant's serde rename IS its slug — one spelling per harness, everywhere.
     #[must_use]
     pub fn slug(&self) -> &'static str {
         match self {
@@ -570,9 +561,9 @@ mod tests {
 
     #[test]
     fn action_code_round_trips_known_and_unknown() {
-        let known = ActionCode::ProposePublish;
+        let known = ActionCode::RebaseAndRetry;
         let j = serde_json::to_string(&known).unwrap();
-        assert_eq!(j, "\"PROPOSE_PUBLISH\"");
+        assert_eq!(j, "\"REBASE_AND_RETRY\"");
         assert_eq!(serde_json::from_str::<ActionCode>(&j).unwrap(), known);
 
         // A forward-compatible code this build doesn't know is preserved, not rejected.

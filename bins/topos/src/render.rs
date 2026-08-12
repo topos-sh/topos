@@ -1203,8 +1203,6 @@ pub(crate) fn keep_as_yours_describe_tty(
         KeepReason::WithdrawnUpstream => {
             "the team withdrew it (archived, or its last channel dropped it)"
         }
-        KeepReason::Detached => "you unfollowed it",
-        KeepReason::RemovedHere => "you removed it from this device",
     };
     let mut s = format!("'{}' — {}. Its bytes are kept locally.\n", data.name, why);
     s.push_str(
@@ -2597,7 +2595,6 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         // bundle, one answer, whichever command asked — plus the folder the merge stopped in,
         // which only this surface can still name once the update's receipt has scrolled away.
         StatusItemState::Blocked => blocked_detail_block(detail, flag),
-        StatusItemState::Excluded => "excluded here".to_owned(),
         StatusItemState::Off => "off — withheld here by your global manifest".to_owned(),
         StatusItemState::NotAvailable => "not available with your current access".to_owned(),
         StatusItemState::PendingSession => "awaiting session approval".to_owned(),
@@ -2854,7 +2851,7 @@ fn remove_kind_line(item: &RemoveItem, applied: bool) -> String {
             // item's own cleaned dirs). An applied row whose uninstall moved nothing states the
             // row removal ALONE — the feed-still-delivers shape carries its own note, which wins
             // above, and everything else must not claim a departure that never happened.
-            if applied && item.agent_dirs.is_empty() {
+            if applied && item.dest_dirs.is_empty() {
                 format!("{manifest}: removed '{}'.", item.name)
             } else {
                 format!(
@@ -2932,12 +2929,12 @@ fn remove_kind_line(item: &RemoveItem, applied: bool) -> String {
             // A record can hold BOTH shapes — a copy topos materialized somewhere and the source
             // folder it adopted. The permanent half keeps the word; the kept half comes last,
             // because "what survives" is the clause a person scans a removal receipt for.
-            let deleted = if item.agent_dirs.is_empty() {
+            let deleted = if item.dest_dirs.is_empty() {
                 String::new()
             } else {
                 format!(
                     "; the copies in {} are deleted PERMANENTLY",
-                    item.agent_dirs.join(", ")
+                    item.dest_dirs.join(", ")
                 )
             };
             format!(
@@ -2963,10 +2960,10 @@ fn remove_kind_line(item: &RemoveItem, applied: bool) -> String {
 /// so a describe names the very places its apply will empty, in the same words. A permanent delete
 /// that named no path made the `--yes` gate ask about bytes it would not show.
 fn from_dirs(item: &RemoveItem) -> String {
-    if item.agent_dirs.is_empty() {
+    if item.dest_dirs.is_empty() {
         String::new()
     } else {
-        format!(" from {}", item.agent_dirs.join(", "))
+        format!(" from {}", item.dest_dirs.join(", "))
     }
 }
 
@@ -5095,7 +5092,7 @@ mod tests {
             kind,
             manifest: None,
             workspace_id: None,
-            agent_dirs: vec!["~/work/demo".to_owned()],
+            dest_dirs: vec!["~/work/demo".to_owned()],
             kept_dirs: Vec::new(),
             bytes_kept: false,
             note: None,
@@ -5118,7 +5115,7 @@ mod tests {
         }
         // A removal that names no folder says nothing about one — no dangling `from`.
         let mut bare = item(RemoveKind::TrackedLocalPermanent);
-        bare.agent_dirs = Vec::new();
+        bare.dest_dirs = Vec::new();
         assert!(
             super::remove_item_line(&bare, false).starts_with("Would delete 'demo' PERMANENTLY"),
             "{}",
@@ -5131,12 +5128,12 @@ mod tests {
     /// item with verifiably cleaned dirs keep the full sentence.
     #[test]
     fn an_applied_row_removal_with_no_uninstall_drops_the_copies_leave_claim() {
-        let item = |agent_dirs: Vec<String>| RemoveItem {
+        let item = |dest_dirs: Vec<String>| RemoveItem {
             name: "deploy".to_owned(),
             kind: RemoveKind::ManifestRemoved,
             manifest: Some("~/.topos/topos.toml".to_owned()),
             workspace_id: None,
-            agent_dirs,
+            dest_dirs,
             kept_dirs: Vec::new(),
             bytes_kept: true,
             note: None,
@@ -5193,8 +5190,6 @@ mod tests {
             version_id: Some("a".repeat(64)),
             bundle_digest: Some("b".repeat(64)),
             tracked: true,
-            harness: None,
-            harness_slug: None,
             currency: None,
             triggers: Vec::new(),
             origin: None,
@@ -5359,8 +5354,6 @@ mod tests {
             version_id: Some("a".repeat(64)),
             bundle_digest: Some("b".repeat(64)),
             tracked: true,
-            harness: None,
-            harness_slug: None,
             currency: None,
             triggers: Vec::new(),
             origin: None,
@@ -6334,7 +6327,7 @@ mod tests {
                 kind: RemoveKind::FeedRemoved,
                 manifest: Some("~/.topos/topos.toml".to_owned()),
                 workspace_id: None,
-                agent_dirs: Vec::new(),
+                dest_dirs: Vec::new(),
                 kept_dirs: Vec::new(),
                 bytes_kept: true,
                 note: None,

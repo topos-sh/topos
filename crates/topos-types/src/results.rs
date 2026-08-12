@@ -1067,15 +1067,6 @@ pub struct AddData {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: Option<String>,
     pub tracked: bool,
-    /// The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain
-    /// directory tracked in place. Disclosed so the agent can see whether auto-update was armed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<crate::HarnessId>,
-    /// The registry slug (e.g. `cursor`) of the agent that owns the added dir, when ONE does: the
-    /// recognized harness, or the sole installed reader of its folder (then `harness` may be `None`).
-    /// Unset for a folder several agents read, or none. Provenance/disclosure only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_slug: Option<String>,
     /// The auto-update-trigger outcome, present when adopting into a recognized harness attempted a
     /// session-start trigger install — the honest disclosure of the (only) write `add` makes outside
     /// `~/.topos/`. `None` for a plain directory.
@@ -1403,10 +1394,6 @@ pub enum KeepReason {
     /// Upstream withdrew the skill (archived, or its last delivering channel dropped it) — the agent dirs
     /// were cleaned; the sidecar kept the bytes + any draft.
     WithdrawnUpstream,
-    /// The person unfollowed the skill (a detach) — its bytes are frozen in place here.
-    Detached,
-    /// `topos remove` excluded the skill on this device — the agent dirs were cleaned, the sidecar kept.
-    RemovedHere,
 }
 
 /// A pending device-authorization a `follow` surfaced — the human opens `verification_uri` and
@@ -1565,8 +1552,8 @@ pub enum ExchangeFault {
 }
 
 /// `publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is
-/// DOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with
-/// `topos follow <workspace-address>` first). **INFERRED.**
+/// DOWNGRADED to a proposal (see [`ProposeData`]); a publish with no session is refused typed (sign in
+/// with `topos login <workspace-address>` first). **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -1897,9 +1884,10 @@ pub struct RemoveData {
     /// `true` on an apply (immediate for a followed clean skill, or `--yes`), `false` on the
     /// describe (nothing changed yet).
     pub applied: bool,
-    /// APPLY receipts: the literal inverse command (paste-ready argv) — `topos follow <skill>`
-    /// re-attaches the followed skills this removal excluded. Empty when nothing is undoable (a
-    /// permanent delete) or on a describe. **INFERRED** (additive).
+    /// APPLY receipts: the literal inverse command (paste-ready argv) — the `topos add <reference>`
+    /// that re-adds the manifest row this removal edited away. Empty when nothing is undoable (a
+    /// permanent delete, or a row no single command re-spells) or on a describe. **INFERRED**
+    /// (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undo: Vec<String>,
     /// APPLY receipts of a feed-line drop: the bundles whose placed copies left this machine IN
@@ -1949,11 +1937,11 @@ pub struct RemoveItem {
     /// The workspace the exclusion is recorded in (a followed skill); absent for a local copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    /// The agent directories cleaned (or, on the describe, that would be cleaned).
+    /// The destination directories cleaned (or, on the describe, that would be cleaned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agent_dirs: Vec<String>,
+    pub dest_dirs: Vec<String>,
     /// The directories the removal LEAVES STANDING — a folder the person adopted in place, which
-    /// topos never created and therefore never deletes. Disjoint from [`Self::agent_dirs`], which
+    /// topos never created and therefore never deletes. Disjoint from [`Self::dest_dirs`], which
     /// names only what is emptied. **Additive.**
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept_dirs: Vec<String>,
@@ -2456,8 +2444,6 @@ pub enum StatusItemState {
     /// (`update <name> --keep-mine` / `--reset`) are the only ways forward. The row's
     /// version/digest name what the folders hold, never the team's.
     Blocked,
-    /// An exclude line withholds this name here (the row's `source` recorded it).
-    Excluded,
     /// A machine-local `"off"` row in the global manifest withholds this bundle from the feed
     /// here (the everywhere-path is the web decline).
     Off,

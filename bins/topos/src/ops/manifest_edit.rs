@@ -3227,7 +3227,7 @@ fn apply_arms(
                 _ => Some(target.path.display().to_string()),
             },
             workspace_id: None,
-            agent_dirs: Vec::new(),
+            dest_dirs: Vec::new(),
             // A row edit names no folders in either direction — what left rides
             // `RemoveData::uninstalled`, and what stayed is an edited copy the uninstall reports
             // as kept. The adopted-source disclosure belongs to the classic arm, which is the one
@@ -3752,7 +3752,7 @@ fn eager_cleanup(
                                     RemoveKind::ManifestRemoved | RemoveKind::ManifestExcluded
                                 )
                         }) {
-                            item.agent_dirs = clean.removed.clone();
+                            item.dest_dirs = clean.removed.clone();
                         }
                         out.push(UninstalledBundle {
                             name: b.display.clone(),

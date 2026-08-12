@@ -6,10 +6,10 @@
     "applied": false,
     "items": [
       {
-        "agent_dirs": [
+        "bytes_kept": false,
+        "dest_dirs": [
           "~/.claude/skills/deploy"
         ],
-        "bytes_kept": false,
         "kind": "tracked-local-permanent",
         "name": "deploy",
         "note": "'deploy' was never published — no other copy exists, so removing deletes it permanently (the topos entry is dropped too). Share it first with `topos publish deploy`, or apply with --yes"

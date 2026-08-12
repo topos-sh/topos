@@ -156,11 +156,6 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
             Safety::new(Some(true), Some(true), None)
         }
         "RESOLVE_DIVERGED_DRAFT" => resolve_diverged_draft(argv),
-        "PROPOSE_PUBLISH" => Safety::new(
-            Some(true),
-            Some(true),
-            Some("opens a proposal visible to the whole workspace"),
-        ),
         // Not self-service: no argv executes — asking a human changes nothing here.
         "REQUEST_ACCESS" | "CONTACT_ADMIN" => Safety::new(Some(false), Some(false), None),
         // RETRY re-runs the CALLER's own previous command (the argv is empty by design), so whether

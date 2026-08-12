@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PublishData",
-  "description": "`publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is\nDOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with\n`topos follow <workspace-address>` first). **INFERRED.**",
+  "description": "`publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is\nDOWNGRADED to a proposal (see [`ProposeData`]); a publish with no session is refused typed (sign in\nwith `topos login <workspace-address>` first). **INFERRED.**",
   "type": "object",
   "properties": {
     "added": {

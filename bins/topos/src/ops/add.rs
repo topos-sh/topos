@@ -341,7 +341,7 @@ fn unclaimed_record(
     // Re-stamp the never-deletable source marker on the dir's slot. A record written before the
     // marker existed lacks it, and this is the one moment the dir is PROVEN to be the user's own
     // adopted source — they just named it to `add`. Under the skill lock, read-modify-write.
-    let map = {
+    {
         let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, &skill_id)?;
         let mut map = doc::read_map(ctx.fs, &sp.map)?;
         if let Some(m) = map.as_mut() {
@@ -356,8 +356,7 @@ fn unclaimed_record(
                 doc::write_map(ctx.fs, &sp.map, m)?;
             }
         }
-        map
-    };
+    }
 
     logfile::append_event(
         ctx.fs,
@@ -377,8 +376,6 @@ fn unclaimed_record(
         version_id: Some(lock.base_commit),
         bundle_digest: Some(lock.bundle_digest),
         tracked: true,
-        harness: map.as_ref().and_then(|m| m.harness),
-        harness_slug: map.as_ref().and_then(|m| m.harness_slug.clone()),
         // Re-armed exactly as an adopt arms it: the folder is demanded again, and the harness
         // config may have been rewritten while it was not. Idempotent, and the signal the
         // composition root's breadth sweep + built-in placement ride.
@@ -585,7 +582,7 @@ pub(crate) fn add_with_name(
                 claim: None,
             }],
             harness,
-            harness_slug: harness_slug.clone(),
+            harness_slug,
         },
     )?;
     doc::write_doc(
@@ -640,8 +637,6 @@ pub(crate) fn add_with_name(
         version_id: Some(version_hex),
         bundle_digest: Some(digest_hex),
         tracked: true,
-        harness,
-        harness_slug,
         currency,
         triggers: Vec::new(),
         // Set by the remote-import wrapper ([`add_remote`]); a local adopt has no upstream.
@@ -2140,8 +2135,6 @@ pub(crate) fn extend_folder_dest(
         version_id: Some(lock.base_commit),
         bundle_digest: Some(lock.bundle_digest),
         tracked: true,
-        harness: None,
-        harness_slug: None,
         // Nothing was adopted, so no trigger was armed and no arming sweep rides this receipt.
         currency: None,
         triggers: Vec::new(),

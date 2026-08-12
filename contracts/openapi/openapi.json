@@ -2244,7 +2244,6 @@
         "title": "ActionCode",
         "description": "A machine-actionable next-action code. The values in `examples` are the known set; an unrecognized future code is still valid and MUST be executed via the action's `argv` (never rejected).",
         "examples": [
-          "PROPOSE_PUBLISH",
           "REBASE_AND_RETRY",
           "RESOLVE_DIVERGED_DRAFT",
           "APPLY_WAITING_UPDATE",
@@ -3003,7 +3002,7 @@
       },
       "PublishData": {
         "type": "object",
-        "description": "`publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is\nDOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with\n`topos follow <workspace-address>` first). **INFERRED.**",
+        "description": "`publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is\nDOWNGRADED to a proposal (see [`ProposeData`]); a publish with no session is refused typed (sign in\nwith `topos login <workspace-address>` first). **INFERRED.**",
         "required": [
           "skill_id",
           "name",

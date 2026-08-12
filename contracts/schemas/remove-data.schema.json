@@ -15,7 +15,7 @@
       }
     },
     "undo": {
-      "description": "APPLY receipts: the literal inverse command (paste-ready argv) — `topos follow <skill>`\nre-attaches the followed skills this removal excluded. Empty when nothing is undoable (a\npermanent delete) or on a describe. **INFERRED** (additive).",
+      "description": "APPLY receipts: the literal inverse command (paste-ready argv) — the `topos add <reference>`\nthat re-adds the manifest row this removal edited away. Empty when nothing is undoable (a\npermanent delete, or a row no single command re-spells) or on a describe. **INFERRED**\n(additive).",
       "type": "array",
       "items": {
         "type": "string"
@@ -38,19 +38,19 @@
       "description": "One skill in a [`RemoveData`]. **INFERRED.**",
       "type": "object",
       "properties": {
-        "agent_dirs": {
-          "description": "The agent directories cleaned (or, on the describe, that would be cleaned).",
+        "bytes_kept": {
+          "description": "Whether the sidecar bytes are kept (a manifest edit keeps the tracked bytes as a frozen\ncopy; an untracked-local delete removes the only copy there is).",
+          "type": "boolean"
+        },
+        "dest_dirs": {
+          "description": "The destination directories cleaned (or, on the describe, that would be cleaned).",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "bytes_kept": {
-          "description": "Whether the sidecar bytes are kept (a manifest edit keeps the tracked bytes as a frozen\ncopy; an untracked-local delete removes the only copy there is).",
-          "type": "boolean"
-        },
         "kept_dirs": {
-          "description": "The directories the removal LEAVES STANDING — a folder the person adopted in place, which\ntopos never created and therefore never deletes. Disjoint from [`Self::agent_dirs`], which\nnames only what is emptied. **Additive.**",
+          "description": "The directories the removal LEAVES STANDING — a folder the person adopted in place, which\ntopos never created and therefore never deletes. Disjoint from [`Self::dest_dirs`], which\nnames only what is emptied. **Additive.**",
           "type": "array",
           "items": {
             "type": "string"

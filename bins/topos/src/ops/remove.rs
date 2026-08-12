@@ -690,7 +690,7 @@ fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
             },
             manifest: None,
             workspace_id: None,
-            agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
+            dest_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
             kept_dirs: kept_dirs.iter().map(|d| d.display().to_string()).collect(),
             bytes_kept: !kept_dirs.is_empty(),
             note: note.as_ref().map(|n| {
@@ -706,7 +706,7 @@ fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
             kind: RemoveKind::UntrackedLocal,
             manifest: None,
             workspace_id: None,
-            agent_dirs: vec![dir.display().to_string()],
+            dest_dirs: vec![dir.display().to_string()],
             kept_dirs: Vec::new(),
             bytes_kept: false,
             note: None,
@@ -716,7 +716,7 @@ fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
             kind: RemoveKind::BuiltinOptOut,
             manifest: None,
             workspace_id: None,
-            agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
+            dest_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
             kept_dirs: Vec::new(),
             bytes_kept: false,
             // The kind now carries this shape's whole sentence (`RemoveKind::BuiltinOptOut`), so

@@ -65,7 +65,7 @@
       "enum": [
         "claude-code",
         "openclaw",
-        "hermes"
+        "hermes-agent"
       ]
     },
     "PlacementClaim": {

@@ -1769,8 +1769,6 @@ mod tests {
             version_id: None,
             bundle_digest: None,
             tracked: true,
-            harness: None,
-            harness_slug: None,
             currency: None,
             triggers: Vec::new(),
             origin: None,

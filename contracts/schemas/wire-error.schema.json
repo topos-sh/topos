@@ -57,7 +57,6 @@
       "description": "A machine-actionable next-action code. The values in `examples` are the known set; an unrecognized future code is still valid and MUST be executed via the action's `argv` (never rejected).",
       "type": "string",
       "examples": [
-        "PROPOSE_PUBLISH",
         "REBASE_AND_RETRY",
         "RESOLVE_DIVERGED_DRAFT",
         "APPLY_WAITING_UPDATE",
