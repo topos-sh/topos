@@ -13,8 +13,10 @@
 //! surgical APPEND, not a file drop: the block is written at EOF, and every other line of a
 //! person's config re-emits byte-for-byte. The edit is line-anchored in the Hermes/codex discipline
 //! (no TOML dependency — see [`super::toml_lines`]): only shapes an anchor can prove are touched,
-//! and anything else — non-UTF-8 bytes, a leading byte-order mark, a second sentinel line, a
-//! sentinel line that does not lead a `[[hooks]]` table — fails closed with ZERO writes.
+//! and anything else — non-UTF-8 bytes, a leading byte-order mark, a multiline string whose content
+//! lines would read as structure, a `hooks` key already defined at the file's ROOT (where the
+//! appended header would redefine it), a second sentinel line, a sentinel line that does not lead a
+//! `[[hooks]]` table — fails closed with ZERO writes.
 //!
 //! **Ownership is the sentinel LINE**, which is also why the command here is the comment-less
 //! guarded sweep: a TOML config has real comments, so the marker goes where a person reads it
@@ -36,12 +38,27 @@ use topos_types::{CurrencyKind, TriggerState};
 
 use crate::{ConfigStore, trigger_report};
 
-use super::toml_lines::{basic_string_value, is_key_line, split_lines, table_header};
+use super::toml_lines::{
+    HeaderStated, basic_string_value, header_stated, is_key_line, root_defines_key,
+    shape_is_unprovable, split_lines, table_header,
+};
 use super::{EditPlan, GUARDED_SWEEP, SENTINEL, TriggerAdapter, TriggerArtifact, TriggerReport};
 
 const SLUG: &str = "kimi-code-cli";
 const MARKER_ID: &str = "topos:kimi-code-cli:currency:1";
 const NOTE: &str = "hook shape unverified";
+/// The reason a config topos COULD read is still one it will not edit: `hooks` is already defined
+/// at the file's top level (`hooks = []`, `hooks.enabled = false`), where the `[[hooks]]` header
+/// this engine appends REDEFINES the name — which costs kimi its whole config rather than one
+/// entry. The receipt names the file so a person can decide which shape they meant.
+const ROOT_HOOKS_REASON: &str =
+    "config.toml sets `hooks` at its top level, where topos cannot append `[[hooks]]`";
+/// The header shape of the same refusal: a `[hooks]` table — or a dotted `[hooks.sub]` /
+/// `[[hooks.sub]]`, which define the name implicitly as a plain table — already states what
+/// `hooks` IS, and the `[[hooks]]` this engine appends would redefine it as an array. Only the
+/// whole-array spelling leaves the append legal: one more `[[hooks]]` entry extends an array.
+const HEADER_HOOKS_REASON: &str =
+    "config.toml defines `hooks` in a shape topos cannot append a `[[hooks]]` entry to";
 /// Kimi's user config — the hooks live in it beside the rest of its settings.
 const CONFIG_FILENAME: &str = "config.toml";
 /// The table header our block opens; also the only table a hand-rolled sweep is read out of.
@@ -167,7 +184,9 @@ enum Text<'a> {
     /// Absent or whitespace-only — the block IS the file.
     Fresh,
     Provable(&'a str),
-    /// Non-UTF-8, or a byte-order mark hiding the first line's true content.
+    /// Non-UTF-8, a byte-order mark hiding the first line's true content, or a shape whose lines
+    /// are not all structure: a multiline string (whose `[[hooks]]` content line would read as a
+    /// real table) or a key only TOML's escape rules could spell out.
     Unprovable,
 }
 
@@ -176,7 +195,7 @@ fn text_of(current: Option<&[u8]>) -> Text<'_> {
         None => Text::Fresh,
         Some(bytes) => match std::str::from_utf8(bytes) {
             Ok(t) if t.trim().is_empty() => Text::Fresh,
-            Ok(t) if t.starts_with('\u{feff}') => Text::Unprovable,
+            Ok(t) if t.starts_with('\u{feff}') || shape_is_unprovable(t) => Text::Unprovable,
             Ok(t) => Text::Provable(t),
             Err(_) => Text::Unprovable,
         },
@@ -232,8 +251,12 @@ fn locate(lines: &[&str]) -> Located {
 fn holds_a_hand_rolled_sweep(lines: &[&str]) -> bool {
     let mut in_hooks = false;
     for line in lines {
-        if let Some(header) = table_header(line) {
-            in_hooks = header == HOOKS_HEADER;
+        if table_header(line).is_some() {
+            // Their table in whichever spelling TOML reads as `[[hooks]]` — `[["hooks"]]` and
+            // `[[ hooks ]]` hold the same entries, and missing one would install a duplicate
+            // sweep beside theirs.
+            in_hooks =
+                header_stated(line, "hooks") == Some(HeaderStated::ArrayOfTables { whole: true });
             continue;
         }
         if in_hooks
@@ -246,6 +269,16 @@ fn holds_a_hand_rolled_sweep(lines: &[&str]) -> bool {
     false
 }
 
+/// Plan the block's arming over the existing `config.toml` bytes.
+///
+/// Two shapes no arming can express, both because the appended `[[hooks]]` would REDEFINE the
+/// name and leave kimi unable to read any of its own config: a `hooks` key defined at the file's
+/// ROOT (`hooks = []`, `hooks.enabled = false` — the name is then a value), and a header stating
+/// `hooks` as a plain table (`[hooks]`, or implicitly via `[hooks.sub]` / `[[hooks.sub]]`). Only
+/// the whole-array spelling `[[hooks]]` coexists with ours — one more entry extends an array.
+/// Both refusals are INSTALL's alone — [`plan_remove`] appends nothing, and taking our own
+/// sentinel-led block back out of such a file can only leave a person closer to the config they
+/// meant, so a scrub keeps its full reach.
 fn plan_install(current: Option<&[u8]>) -> EditPlan {
     let text = match text_of(current) {
         Text::Fresh => {
@@ -257,6 +290,17 @@ fn plan_install(current: Option<&[u8]>) -> EditPlan {
         }
     };
     let lines = split_lines(text);
+    if root_defines_key(&lines, "hooks") {
+        return EditPlan::Leave(TriggerState::Degraded, Some(ROOT_HOOKS_REASON));
+    }
+    if lines.iter().any(|line| {
+        matches!(
+            header_stated(line, "hooks"),
+            Some(HeaderStated::Table { .. } | HeaderStated::ArrayOfTables { whole: false })
+        )
+    }) {
+        return EditPlan::Leave(TriggerState::Degraded, Some(HEADER_HOOKS_REASON));
+    }
     match locate(&lines) {
         Located::Unprovable => {
             EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON))
@@ -467,6 +511,110 @@ timeout = 60
             assert_eq!(cfg.writes(), 0, "{hand_rolled}");
             assert_eq!(cfg.text(CONFIG).as_deref(), Some(theirs.as_str()));
             assert!(!a(&cfg).present(), "{hand_rolled}");
+        }
+    }
+
+    /// A `command` key spelled with quotes states the same key — so somebody's own sweep is still
+    /// adopted-or-left instead of being joined by a managed second copy.
+    #[test]
+    fn a_quoted_command_key_is_still_their_own_sweep() {
+        let theirs =
+            "[[hooks]]\nevent = \"SessionStart\"\n\"command\" = \"topos update --quiet\"\n";
+        let cfg = MemConfig::with_file(CONFIG, theirs);
+        assert_eq!(
+            a(&cfg).install().state,
+            TriggerState::AlreadyPresentUnmanaged
+        );
+        assert_eq!(cfg.writes(), 0);
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(theirs));
+    }
+
+    /// A `[[hooks]]` line inside somebody's multiline string is their prose, not a table — the
+    /// whole file is refused rather than read as structure it is not.
+    #[test]
+    fn a_multiline_string_degrades_instead_of_being_read_as_structure() {
+        let prose = "prompt = \"\"\"\n[[hooks]]\ncommand = \"topos update --quiet\"\n\"\"\"\n";
+        let cfg = MemConfig::with_file(CONFIG, prose);
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Degraded);
+        assert!(report.note.is_some(), "a degrade says why");
+        assert_eq!(a(&cfg).remove().state, TriggerState::Degraded);
+        assert_eq!(cfg.writes(), 0);
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(prose), "byte-untouched");
+        assert!(!a(&cfg).present());
+    }
+
+    /// A root-level `hooks` key is the name our `[[hooks]]` header would REDEFINE — arming refuses
+    /// with zero writes. A scrub still reaches its own block there, because removal appends
+    /// nothing.
+    #[test]
+    fn a_root_level_hooks_key_degrades_instead_of_redefining_the_name() {
+        for root_defined in ["hooks = []\n", "hooks.enabled = false\n"] {
+            let cfg = MemConfig::with_file(CONFIG, root_defined);
+            let report = a(&cfg).install();
+            assert_eq!(report.state, TriggerState::Degraded, "{root_defined:?}");
+            assert!(
+                report.note.as_deref().unwrap().contains("hooks"),
+                "the note names the key that collides"
+            );
+            assert_eq!(cfg.writes(), 0, "{root_defined:?}");
+            assert_eq!(cfg.text(CONFIG).as_deref(), Some(root_defined));
+            assert!(!a(&cfg).present());
+        }
+
+        // The same key under a table is `tui.hooks` — somebody else's setting entirely.
+        let cfg = MemConfig::with_file(CONFIG, "[tui]\nhooks = []\n");
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+
+        // Removal keeps its reach: our own block comes back out, their key stays.
+        let with_ours = format!("hooks = []\n\n{BLOCK_FIXTURE}");
+        let cfg = MemConfig::with_file(CONFIG, &with_ours);
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some("hooks = []\n"));
+    }
+
+    /// Review follow-up: a header stating `hooks` as a plain table — directly or implicitly via
+    /// a dotted path — is a shape the appended `[[hooks]]` would redefine, so the file degrades
+    /// untouched. A whole `[[hooks]]` array coexists (one more entry extends it), so a sweep-free
+    /// one still takes the append.
+    #[test]
+    fn a_hooks_table_header_degrades_instead_of_redefining_the_name() {
+        for conflicting in [
+            "[hooks]\nx = 1\n",
+            "[hooks.sub]\nx = 1\n",
+            "[[hooks.sub]]\n",
+        ] {
+            let cfg = MemConfig::with_file(CONFIG, conflicting);
+            let report = a(&cfg).install();
+            assert_eq!(report.state, TriggerState::Degraded, "{conflicting:?}");
+            assert!(
+                report.note.as_deref().unwrap().contains("hooks"),
+                "the note names the colliding shape"
+            );
+            assert_eq!(cfg.writes(), 0, "{conflicting:?}");
+            assert_eq!(cfg.text(CONFIG).as_deref(), Some(conflicting));
+        }
+        let coexists = "[[hooks]]\nevent = \"Stop\"\ncommand = \"echo hi\"\n";
+        let cfg = MemConfig::with_file(CONFIG, coexists);
+        assert_eq!(a(&cfg).install().state, TriggerState::Active);
+    }
+
+    /// Review follow-up: their table in a quoted or spaced spelling is still `[[hooks]]`, so a
+    /// hand-rolled sweep inside one stays adopt-or-leave instead of gaining a duplicate beside it.
+    #[test]
+    fn a_quoted_hooks_array_header_is_still_their_own_table() {
+        for theirs in [
+            "[[\"hooks\"]]\nevent = \"SessionStart\"\ncommand = \"topos update --quiet\"\n",
+            "[[ hooks ]]\ncommand = \"topos update\"\n",
+        ] {
+            let cfg = MemConfig::with_file(CONFIG, theirs);
+            let report = a(&cfg).install();
+            assert_eq!(
+                report.state,
+                TriggerState::AlreadyPresentUnmanaged,
+                "{theirs:?}"
+            );
+            assert_eq!(cfg.writes(), 0, "{theirs:?}");
         }
     }
 
