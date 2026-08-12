@@ -73,10 +73,11 @@ pub struct McpEntry {
     pub auth: AuthHint,
 }
 
-/// What the caller knows about the server's auth story. Only the Hermes dialect renders it
-/// (`auth: oauth`, emitted for [`AuthHint::Oauth`] alone — Hermes needs the explicit opt-in but
-/// must not be sent into OAuth for a no-auth server); everywhere else OAuth is the harness's own
-/// on-401 behavior.
+/// What the caller knows about the server's auth story. Two dialects render it — Hermes and
+/// OpenClaw, both of which gate their whole OAuth path on an explicit `auth: oauth` key and do
+/// nothing on a 401 without it. It is emitted for [`AuthHint::Oauth`] ALONE: a no-auth server
+/// must never be sent into a sign-in flow. Everywhere else OAuth is the harness's own on-401
+/// behavior and the key does not exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthHint {
     None,
@@ -314,9 +315,16 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Value {
             m.insert("type".to_owned(), Value::String("remote".to_owned()));
             m.insert("url".to_owned(), Value::String(entry.url.clone()));
         }
-        // `transport` EXPLICIT (OpenClaw's silent default is sse) and NEVER any other key
-        // (OpenClaw strictly rejects unknown keys and a bad config bricks its gateway startup).
+        // `transport` EXPLICIT (OpenClaw's silent default is sse), and `auth: oauth` on the
+        // explicit hint alone — OpenClaw's per-server options are open-world, `auth` is one of
+        // its own declared keys, and its whole OAuth path (including `openclaw mcp login`) is
+        // gated on that key: without it an oauth-hinted server can never be signed in to.
+        // Nothing else is emitted — a key OpenClaw retired is refused, and a refused config
+        // bricks its gateway startup.
         McpDialect::OpenclawJson => {
+            if entry.auth == AuthHint::Oauth {
+                m.insert("auth".to_owned(), Value::String("oauth".to_owned()));
+            }
             insert_headers(&mut m, entry);
             m.insert(
                 "transport".to_owned(),
@@ -613,7 +621,7 @@ mod tests {
         assert_eq!(
             keys(McpDialect::OpenclawJson, &plain),
             ["transport", "url"],
-            "openclaw: transport explicit, nothing else"
+            "openclaw: transport explicit; `auth` rides the explicit hint alone"
         );
         assert_eq!(keys(McpDialect::CodexToml, &plain), ["url"]);
         assert_eq!(
@@ -653,8 +661,11 @@ mod tests {
         assert_eq!(codex["http_headers"]["A"], "1");
     }
 
+    /// The two dialects whose OAuth path is gated on the key emit it on the explicit hint and
+    /// nowhere else; every other dialect never carries it (OAuth there is the harness's own
+    /// on-401 behavior).
     #[test]
-    fn hermes_auth_is_emitted_only_on_the_explicit_oauth_hint() {
+    fn auth_is_emitted_only_on_the_explicit_oauth_hint_and_only_where_it_is_read() {
         for (hint, expect_auth) in [
             (AuthHint::Oauth, true),
             (AuthHint::None, false),
@@ -664,12 +675,37 @@ mod tests {
                 auth: hint,
                 ..entry("topos-x", "https://u")
             };
-            let v = entry_value(McpDialect::HermesYaml, &e);
-            assert_eq!(v.get("auth").is_some(), expect_auth, "{hint:?}");
-            if expect_auth {
-                assert_eq!(v["auth"], "oauth");
+            for dialect in [McpDialect::HermesYaml, McpDialect::OpenclawJson] {
+                let v = entry_value(dialect, &e);
+                assert_eq!(v.get("auth").is_some(), expect_auth, "{dialect:?} {hint:?}");
+                if expect_auth {
+                    assert_eq!(v["auth"], "oauth", "{dialect:?}");
+                }
+            }
+            for dialect in [
+                McpDialect::ClaudePluginDir,
+                McpDialect::ClaudeProjectJson,
+                McpDialect::CursorJson,
+                McpDialect::OpencodeJson,
+                McpDialect::CodexToml,
+            ] {
+                assert!(
+                    entry_value(dialect, &e).get("auth").is_none(),
+                    "{dialect:?}: no auth key in this dialect"
+                );
             }
         }
+        // OpenClaw's oauth entry carries EXACTLY its four legal keys — `transport` stays
+        // explicit and nothing OpenClaw retired rides along.
+        let oauth = McpEntry {
+            auth: AuthHint::Oauth,
+            ..entry_with_headers("topos-x", "https://u", &[("A", "1")])
+        };
+        let v = entry_value(McpDialect::OpenclawJson, &oauth);
+        assert_eq!(
+            v.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["auth", "headers", "transport", "url"]
+        );
     }
 
     #[test]
