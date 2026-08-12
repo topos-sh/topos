@@ -10,8 +10,10 @@
 //!
 //! Parameterized by [`JsonHooksSpec`]: the config file under the harness root, the JSON path to
 //! the events map, the event key spelling, the entry SHAPE (Claude-Code-style matcher groups
-//! wrapping handler arrays, or flat per-event entry arrays), the handler fields, and the
-//! per-instance placed-state/note policy — a harness that gates hooks behind its own consent
+//! wrapping handler arrays, or flat per-event entry arrays), the handler fields — including which
+//! KEY carries the command and which spells the timeout, since Copilot's settings shape says
+//! `bash`/`timeoutSec` where the Claude-Code-shaped ones say `command`/`timeout` — and the
+//! per-instance placed-state/note policy: a harness that gates hooks behind its own consent
 //! reports `Inactive` (the explicit-pull floor) even after a successful write, per the honesty
 //! contract in the module root.
 //!
@@ -26,7 +28,8 @@ use topos_types::{CurrencyKind, TriggerState};
 use crate::{ConfigStore, trigger_report};
 
 use super::{
-    PLAIN_SWEEP, SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerArtifact, TriggerReport,
+    EditPlan, PLAIN_SWEEP, SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerArtifact,
+    TriggerReport,
 };
 
 /// One instance's parameterization of the shared JSON-hooks machinery.
@@ -44,10 +47,22 @@ pub(crate) struct JsonHooksSpec {
     /// Whether matcher-groups wrap handler arrays (the Claude Code shape) or the event array
     /// holds flat handler entries.
     pub(crate) grouped: bool,
+    /// The matcher OUR group states, in the grouped shape. `None` — the Claude Code reading —
+    /// omits the key entirely, which fires on every event source; a harness whose own docs write
+    /// the wildcard explicitly (qoder's `"*"`) states it here, and a re-arm then pins it. Ignored
+    /// by the flat shape, which has no group to carry one.
+    pub(crate) matcher: Option<&'static str>,
     /// Whether the canonical handler carries `"type": "command"`.
     pub(crate) handler_type: bool,
-    /// The canonical handler's `timeout` value, where the harness supports one.
-    pub(crate) timeout: Option<u64>,
+    /// The handler key holding the shell command — `"command"` in the Claude-Code-shaped
+    /// schemas, `"bash"` in Copilot's own settings shape. It is also the key ownership reads: a
+    /// handler is ours iff THIS key's string carries the sentinel.
+    pub(crate) command_key: &'static str,
+    /// The canonical handler's timeout, as the KEY the harness spells it with plus the value —
+    /// `("timeout", 60)` in the Claude-Code-shaped schemas, `("timeoutSec", 60)` in Copilot's.
+    /// `None` where the harness's schema has no timeout field at all (cursor), so no instance
+    /// ever carries a key that means nothing.
+    pub(crate) timeout: Option<(&'static str, u64)>,
     /// Whether the canonical handler carries `"async": true` — the harness runs the hook off the
     /// session's critical path, so even a slow sweep never blocks a session event.
     pub(crate) handler_async: bool,
@@ -180,14 +195,6 @@ impl TriggerAdapter for JsonHooks<'_> {
 // cannot be safely interpreted.
 // ---------------------------------------------------------------------------------------------
 
-/// What a planned edit does: write the post-image bytes, or leave the file untouched (a true
-/// no-op, so an unchanged rerun never re-serializes the user's file). Both carry the state (and
-/// the receipt note) to report.
-enum EditPlan {
-    Write(Vec<u8>, TriggerState, Option<&'static str>),
-    Leave(TriggerState, Option<&'static str>),
-}
-
 /// How the existing event entries relate to topos's managed one.
 #[derive(Debug, PartialEq, Eq)]
 enum Classification {
@@ -200,7 +207,7 @@ enum Classification {
 }
 
 /// The parse outcome for the existing config bytes.
-enum Parsed {
+pub(super) enum Parsed {
     /// Absent or whitespace-only — start from a fresh object.
     Fresh,
     /// Parsed JSON.
@@ -209,7 +216,7 @@ enum Parsed {
     Malformed,
 }
 
-fn parse(current: Option<&[u8]>) -> Parsed {
+pub(super) fn parse(current: Option<&[u8]>) -> Parsed {
     match current {
         None => Parsed::Fresh,
         Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Parsed::Fresh,
@@ -286,9 +293,9 @@ fn plan_remove(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPlan
         Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None),
         Classification::Managed => {
             if spec.grouped {
-                scrub_grouped(entries);
+                scrub_grouped(spec, entries);
             } else {
-                entries.retain(|e| !command_of(e).is_some_and(is_managed_command));
+                entries.retain(|e| !command_of(spec, e).is_some_and(is_managed_command));
             }
             prune_empty(&mut root, spec);
             match serialize(&root) {
@@ -344,9 +351,9 @@ fn commands<'v>(spec: &JsonHooksSpec, entries: &'v [Value]) -> Vec<&'v str> {
     for entry in entries {
         if spec.grouped {
             if let Some(handlers) = entry.get("hooks").and_then(Value::as_array) {
-                out.extend(handlers.iter().filter_map(command_of));
+                out.extend(handlers.iter().filter_map(|h| command_of(spec, h)));
             }
-        } else if let Some(cmd) = command_of(entry) {
+        } else if let Some(cmd) = command_of(spec, entry) {
             out.push(cmd);
         }
     }
@@ -371,14 +378,16 @@ fn classify(spec: &JsonHooksSpec, entries: &[Value]) -> Classification {
     }
 }
 
-fn command_of(handler: &Value) -> Option<&str> {
-    handler.get("command").and_then(Value::as_str)
+/// The handler's command string under THIS instance's command key — the one place the family
+/// reads a command, so a harness spelling it `bash` is a spec knob rather than a second engine.
+fn command_of<'v>(spec: &JsonHooksSpec, handler: &'v Value) -> Option<&'v str> {
+    handler.get(spec.command_key).and_then(Value::as_str)
 }
 
 /// Ours iff the command carries our sentinel — the version-agnostic ownership marker. Keying on
 /// the sentinel ALONE (never the command text) lets a re-arm recognize an entry an earlier build
 /// wrote under a different spelling and rewrite it in place instead of duplicating beside it.
-fn is_managed_command(cmd: &str) -> bool {
+pub(super) fn is_managed_command(cmd: &str) -> bool {
     cmd.contains(SENTINEL)
 }
 
@@ -401,9 +410,12 @@ fn canonical_handler(spec: &JsonHooksSpec) -> Value {
     if spec.handler_type {
         m.insert("type".to_owned(), Value::String("command".to_owned()));
     }
-    m.insert("command".to_owned(), Value::String(sweep_command(spec)));
-    if let Some(timeout) = spec.timeout {
-        m.insert("timeout".to_owned(), Value::from(timeout));
+    m.insert(
+        spec.command_key.to_owned(),
+        Value::String(sweep_command(spec)),
+    );
+    if let Some((key, timeout)) = spec.timeout {
+        m.insert(key.to_owned(), Value::from(timeout));
     }
     if spec.handler_async {
         m.insert("async".to_owned(), Value::Bool(true));
@@ -411,22 +423,32 @@ fn canonical_handler(spec: &JsonHooksSpec) -> Value {
     Value::Object(m)
 }
 
-/// The canonical entry pushed into the event array: a matcher-free group wrapping the handler
-/// (grouped shape — an omitted matcher fires on every event source), or the bare handler (flat).
+/// The canonical entry pushed into the event array: a group wrapping the handler under this
+/// instance's matcher (grouped shape — an omitted matcher fires on every event source), or the
+/// bare handler (flat).
 fn canonical_entry(spec: &JsonHooksSpec) -> Value {
     if spec.grouped {
-        serde_json::json!({ "hooks": [canonical_handler(spec)] })
+        let mut group = Map::new();
+        group.insert(
+            "hooks".to_owned(),
+            Value::Array(vec![canonical_handler(spec)]),
+        );
+        if let Some(matcher) = spec.matcher {
+            group.insert("matcher".to_owned(), Value::String(matcher.to_owned()));
+        }
+        Value::Object(group)
     } else {
         canonical_handler(spec)
     }
 }
 
 /// Rewrite every managed handler to the canonical object; on a group whose handlers are ALL ours,
-/// shed the group's stale source matcher. A group also holding a user's own handler has OUR
-/// handler EXTRACTED into its own canonical matcher-free group (their matcher governs THEIR
-/// handlers; leaving ours inside would pin it to their source filter while re-arms no-op
-/// forever) — the user's group, handlers, and matcher stay byte-identical. Returns whether
-/// anything changed; idempotent, so re-running install after a migration writes nothing.
+/// state the group's matcher the way this instance registers it (shedding a stale one where the
+/// instance is matcher-free). A group also holding a user's own handler has OUR handler EXTRACTED
+/// into its own canonical group (their matcher governs THEIR handlers; leaving ours inside would
+/// pin it to their source filter while re-arms no-op forever) — the user's group, handlers, and
+/// matcher stay byte-identical. Returns whether anything changed; idempotent, so re-running
+/// install after a migration writes nothing.
 fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
     let mut changed = false;
     // Pass 1: pull our handler OUT of any group also holding a user's handler. Extraction only
@@ -437,10 +459,10 @@ fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
         };
         let ours = handlers
             .iter()
-            .filter(|h| command_of(h).is_some_and(is_managed_command))
+            .filter(|h| command_of(spec, h).is_some_and(is_managed_command))
             .count();
         if ours > 0 && ours < handlers.len() {
-            handlers.retain(|h| !command_of(h).is_some_and(is_managed_command));
+            handlers.retain(|h| !command_of(spec, h).is_some_and(is_managed_command));
             changed = true;
         }
     }
@@ -453,7 +475,7 @@ fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
         };
         let mut ours = false;
         for handler in handlers.iter_mut() {
-            if !command_of(handler).is_some_and(is_managed_command) {
+            if !command_of(spec, handler).is_some_and(is_managed_command) {
                 continue;
             }
             ours = true;
@@ -464,10 +486,22 @@ fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
         }
         if ours {
             any_managed = true;
-            if let Some(obj) = group.as_object_mut()
-                && obj.remove("matcher").is_some()
-            {
-                changed = true;
+            if let Some(obj) = group.as_object_mut() {
+                // The group is all-ours now, so its matcher is this instance's to state: pinned
+                // to the declared spelling, or shed where the instance registers matcher-free.
+                match spec.matcher {
+                    Some(matcher) => {
+                        if obj.get("matcher").and_then(Value::as_str) != Some(matcher) {
+                            obj.insert("matcher".to_owned(), Value::String(matcher.to_owned()));
+                            changed = true;
+                        }
+                    }
+                    None => {
+                        if obj.remove("matcher").is_some() {
+                            changed = true;
+                        }
+                    }
+                }
             }
         }
     }
@@ -485,7 +519,9 @@ fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
 fn migrate_flat(spec: &JsonHooksSpec, entries: &mut [Value]) -> bool {
     let mut changed = false;
     for entry in entries.iter_mut() {
-        if command_of(entry).is_some_and(is_managed_command) && *entry != canonical_handler(spec) {
+        if command_of(spec, entry).is_some_and(is_managed_command)
+            && *entry != canonical_handler(spec)
+        {
             *entry = canonical_handler(spec);
             changed = true;
         }
@@ -496,18 +532,18 @@ fn migrate_flat(spec: &JsonHooksSpec, entries: &mut [Value]) -> bool {
 /// Drop every topos-marked handler from the grouped shape, pruning a matcher group ONLY when our
 /// removal is what emptied it. A group we never managed — including a pre-existing empty one — is
 /// the user's and is left intact.
-fn scrub_grouped(groups: &mut Vec<Value>) {
+fn scrub_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) {
     groups.retain_mut(|group| {
         let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             return true; // not a well-formed group → leave it untouched
         };
         if !handlers
             .iter()
-            .any(|h| command_of(h).is_some_and(is_managed_command))
+            .any(|h| command_of(spec, h).is_some_and(is_managed_command))
         {
             return true; // we never managed this group → keep it
         }
-        handlers.retain(|h| !command_of(h).is_some_and(is_managed_command));
+        handlers.retain(|h| !command_of(spec, h).is_some_and(is_managed_command));
         !handlers.is_empty() // drop only if removing OUR handler is what emptied the group
     });
 }
@@ -549,7 +585,7 @@ fn prune_empty(root: &mut Value, spec: &JsonHooksSpec) {
 /// Serialize the merged config the family's way: 2-space pretty + a trailing newline, keys in
 /// `serde_json`'s default (alphabetical) order. A write happens only on a real change, so any
 /// normalization is one-time and action-triggered.
-fn serialize(root: &Value) -> Option<Vec<u8>> {
+pub(super) fn serialize(root: &Value) -> Option<Vec<u8>> {
     let mut text = serde_json::to_string_pretty(root).ok()?;
     text.push('\n');
     Some(text.into_bytes())

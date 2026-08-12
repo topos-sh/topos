@@ -7,16 +7,26 @@
 //!
 //! [`adapter_for_slug`] is the ONE place a harness's trigger machinery is named, so the set of
 //! trigger-capable harnesses is a VIEW over the [`registry`](crate::registry) table — a caller arms
-//! or scrubs by iterating rows, never by carrying its own list. Three shared bases carry the
-//! machinery, plus the two harnesses whose trigger lives in a program of their own:
+//! or scrubs by iterating rows, never by carrying its own list. Two shared bases carry most of the
+//! machinery, plus three harnesses whose config surface is theirs alone and two whose trigger lives
+//! in a program of their own:
 //!
-//! - `cc_hooks` — the JSON-config-merge family (Claude-Code-shaped hooks registered in a shared
-//!   strict-JSON config file): `claude-code` (whose spec lives with its placement adapter, and is the
-//!   only one declaring a hook dialect), `gemini-cli`, `cursor`, `droid`.
-//! - `file_drop` — one topos-owned file at a harness-defined path: `github-copilot`, `opencode`,
-//!   `goose`, `amp`, `cline`.
-//! - `codex` is special: its config is TOML, handled as a line-anchored merge mirroring the
-//!   Hermes YAML discipline — provable shapes only, fail-closed on everything else.
+//! - `cc_hooks` — the JSON-config-merge family (hooks registered in a shared strict-JSON config
+//!   file): `claude-code` (whose spec lives with its placement adapter, and is the only one
+//!   declaring a hook dialect), `gemini-cli`, `cursor`, `devin`, `droid`, `qoder`, and
+//!   `github-copilot` (whose entries spell the command `bash` and the timeout `timeoutSec` — a
+//!   spec knob, not a second engine).
+//! - `file_drop` — one topos-owned file at a harness-defined path: `opencode`, `goose`, `amp`,
+//!   `cline`, `grok` (a merged hooks dir), `pi` (an auto-loaded extension), `kilo` (an auto-loaded
+//!   plugin).
+//! - `codex` is special: it is a `cc_hooks` instance over its `hooks.json` PLUS a line-anchored
+//!   TOML edit setting `[features] hooks = true` in `config.toml` — codex's own switch for the
+//!   mechanism, without which the entry is never read. That edit mirrors the Hermes YAML
+//!   discipline: provable shapes only, fail-closed on everything else.
+//! - `antigravity_cli` and `kimi_code_cli` each edit a SHARED config nobody else's shape fits:
+//!   Antigravity's hooks file keys blocks by NAME (topos owns the key `topos` wholesale, every
+//!   other key byte-preserved), and Kimi keeps its hooks in its own `config.toml` (a sentinel-led
+//!   `[[hooks]]` block appended line-surgically, over the shared `toml_lines` anchors codex uses).
 //! - `openclaw` (its own scheduler) and `hermes-agent` (its own config edit) implement this port
 //!   DIRECTLY on the same types that carry their placement half, so a caller never sees the
 //!   difference.
@@ -38,35 +48,47 @@ use topos_types::TriggerReport;
 use crate::{CommandRunner, ConfigStore};
 
 mod amp;
+mod antigravity_cli;
 pub(crate) mod cc_hooks;
 mod cline;
 mod codex;
 mod cursor;
+mod devin;
 mod droid;
 mod file_drop;
 mod gemini_cli;
 mod github_copilot;
 mod goose;
+mod grok;
+mod kilo;
+mod kimi_code_cli;
 mod opencode;
+mod pi;
+mod qoder;
 #[cfg(test)]
 pub(crate) mod testutil;
+mod toml_lines;
 
 /// The version-agnostic ownership sentinel — the exact spelling the Claude Code reference
 /// adapter writes as a trailing shell comment, reused verbatim by every shell-string surface
-/// here (and by the line-anchored TOML merge as its block anchor line), so ownership detection
-/// stays ONE substring across every build and every surface.
+/// here, so ownership detection stays ONE substring across every build and every surface.
 pub(crate) const SENTINEL: &str = "# topos:currency";
 
-/// The guarded sweep WITHOUT the sentinel suffix. The `command -v` guard skips the update when
-/// the `topos` binary is gone (post-uninstall safety) and the `|| true` tail makes the whole
-/// line exit 0 regardless, so a best-effort update sweep never surfaces as a hook error.
-/// Quoted-string surfaces (the TOML block) register this form; their sentinel rides a separate
-/// comment line instead of an in-command suffix.
+/// The guarded sweep WITHOUT the ownership comment — the spelling for a surface that carries its
+/// marker somewhere a person can actually read it (kimi's TOML block leads with a `# topos:currency`
+/// comment LINE, so repeating the sentinel inside the quoted command would say the same thing twice
+/// and add a second thing to keep in step).
+///
+/// The `command -v` guard skips the update when the `topos` binary is gone (post-uninstall safety)
+/// and the `|| true` tail makes the whole line exit 0 regardless, so a best-effort update sweep
+/// never surfaces as a hook error. Every shell surface composes from here: [`SHELL_SWEEP_LINE`] is
+/// this line plus the sentinel.
 pub(crate) const GUARDED_SWEEP: &str =
     "command -v topos >/dev/null 2>&1 && topos update --quiet || true";
 
 /// The ONE shell-string sweep line every shell surface here registers: the guarded sweep + the
-/// trailing ownership sentinel (inert under `sh -c`).
+/// trailing ownership [`SENTINEL`] (inert under `sh -c`, and inert as a `bash` hook command —
+/// which is why every surface can carry ownership inside the command itself).
 ///
 /// It carries NO `--hook <harness>` marker, and that is the point: unmarked is the
 /// schema-conservative default. A changed sweep then answers with `hookEventName` +
@@ -145,6 +167,19 @@ fn opens_a_command(prefix: &str) -> bool {
     }
     let head = head.strip_suffix(['"', '\'']).unwrap_or(head).trim_end();
     head.is_empty() || head.ends_with([';', '&', '|', '(', '{'])
+}
+
+/// What a planned config edit does: write the post-image bytes, or leave the file untouched (a
+/// true no-op, so an unchanged rerun never re-serializes the user's file). Both carry the state —
+/// and the receipt note — to report.
+///
+/// The shared shape of every merge here: an engine computes it as a PURE function of the current
+/// bytes, and applying it is the one place a [`ConfigStore`] write can happen. A degrade is
+/// therefore always reachable without a write, which is what makes "fail closed with ZERO writes"
+/// a property of the type rather than a rule each engine remembers.
+pub(crate) enum EditPlan {
+    Write(Vec<u8>, topos_types::TriggerState, Option<&'static str>),
+    Leave(topos_types::TriggerState, Option<&'static str>),
 }
 
 /// ONE artifact an auto-update trigger's scrub reaches — the unit a preview names, so a disclosure
@@ -270,6 +305,7 @@ pub fn adapter_for_slug<'a>(
 ) -> Option<Box<dyn TriggerAdapter + 'a>> {
     Some(match slug {
         "amp" => Box::new(amp::adapter(home, cfg)),
+        "antigravity-cli" => Box::new(antigravity_cli::adapter(home, cfg)),
         // The reference harness is an ordinary instance of the shared JSON-hooks base — its own
         // adapter runs this very spec, so arming it here and arming it there are one code path.
         "claude-code" => claude_code_at(
@@ -279,11 +315,17 @@ pub fn adapter_for_slug<'a>(
         "cline" => Box::new(cline::adapter(home, cfg)),
         "codex" => Box::new(codex::adapter(home, cfg)),
         "cursor" => Box::new(cursor::adapter(home, cfg)),
+        "devin" => Box::new(devin::adapter(home, cfg)),
         "droid" => Box::new(droid::adapter(home, cfg)),
         "gemini-cli" => Box::new(gemini_cli::adapter(home, cfg)),
         "github-copilot" => Box::new(github_copilot::adapter(home, cfg)),
         "goose" => Box::new(goose::adapter(home, cfg)),
+        "grok" => Box::new(grok::adapter(home, cfg)),
+        "kilo" => Box::new(kilo::adapter(home, cfg)),
+        "kimi-code-cli" => Box::new(kimi_code_cli::adapter(home, cfg)),
         "opencode" => Box::new(opencode::adapter(home, cfg)),
+        "pi" => Box::new(pi::adapter(home, cfg)),
+        "qoder" => Box::new(qoder::adapter(home, cfg)),
         // The two harnesses whose trigger lives in a program of their own (OpenClaw's scheduler;
         // Hermes's own config surface) implement this port on the same type that carries their
         // placement half — no wrapper, and the offline/live-harness knobs are theirs to declare.
@@ -330,7 +372,7 @@ mod tests {
             "topos update",
             "topos update --quiet",
             "topos pull",
-            GUARDED_SWEEP,
+            "command -v topos >/dev/null 2>&1 && topos update --quiet || true",
             PLAIN_SWEEP,
             "command -v topos >/dev/null 2>&1 && topos pull --quiet || true",
             "echo starting; topos update --quiet",
@@ -368,17 +410,19 @@ mod tests {
     #[test]
     fn the_sweep_consts_compose() {
         assert_eq!(
+            GUARDED_SWEEP,
+            format!("command -v topos >/dev/null 2>&1 && {PLAIN_SWEEP} || true"),
+            "the guarded line is the guard, the one sweep, and the exit-0 tail"
+        );
+        assert_eq!(
             SHELL_SWEEP_LINE,
             format!("{GUARDED_SWEEP}  {SENTINEL}"),
-            "the shell line is the guarded sweep + two spaces + the sentinel"
+            "the shell line is the guarded sweep plus the ownership sentinel"
         );
-        assert!(GUARDED_SWEEP.contains(PLAIN_SWEEP));
-        assert!(GUARDED_SWEEP.starts_with("command -v topos"));
-        assert!(GUARDED_SWEEP.ends_with("|| true"));
         // The breadth surfaces stay UNMARKED — the conservative hook-output dialect is what a
         // harness gets unless it declares itself, and none of these has been proven to accept
         // more (codex actively rejects unknown hook-output fields).
-        for line in [GUARDED_SWEEP, SHELL_SWEEP_LINE, PLAIN_SWEEP] {
+        for line in [SHELL_SWEEP_LINE, GUARDED_SWEEP, PLAIN_SWEEP] {
             assert!(
                 !line.contains("--hook"),
                 "{line}: no dialect marker on a breadth sweep"
@@ -411,17 +455,24 @@ mod tests {
             capable,
             [
                 "amp",
+                "antigravity-cli",
                 "claude-code",
                 "openclaw",
                 "cline",
                 "codex",
                 "cursor",
+                "devin",
                 "droid",
                 "gemini-cli",
                 "github-copilot",
                 "goose",
+                "grok",
                 "hermes-agent",
+                "kilo",
+                "kimi-code-cli",
                 "opencode",
+                "pi",
+                "qoder",
             ],
             "registry-table order"
         );

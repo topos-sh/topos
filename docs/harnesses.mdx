@@ -154,8 +154,9 @@ two receive the same server through your machine-wide scope.
 - **Placement** reaches every detected agent in the table below — that tier is broad.
 - **Full adapters** (placement + trigger management + discovery) exist for Claude Code,
   OpenClaw, and Hermes Agent; the active adapter constructed today is **Claude Code**.
-- **Triggers** are additionally installed for Amp, Cline, Codex, Cursor, Droid, Gemini CLI,
-  GitHub Copilot, Goose, and OpenCode.
+- **Triggers** are additionally installed for Amp, Antigravity CLI, Cline, Codex, Cursor,
+  Devin for Terminal, Droid, Gemini CLI, GitHub Copilot, Goose, Grok Build, Kilo Code,
+  Kimi Code CLI, OpenCode, Pi, and Qoder.
 - Some trigger shapes are confirmed against a live build; others follow vendor documentation.
   `topos status` tells you the truth for your machine — per agent: `armed`, `not armed`, or
   `unknown`.
@@ -172,18 +173,24 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | OpenClaw | `openclaw` | `~/.openclaw/skills` ‡ | `skills` | auto-update |
 | Hermes Agent | `hermes-agent` | `~/.hermes/skills` † | `.hermes/skills` | auto-update |
 | Amp | `amp` | `~/.config/agents/skills` † | `.agents/skills` | auto-update |
+| Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | auto-update |
 | Cline | `cline` | `~/.agents/skills` | `.agents/skills` | auto-update |
 | Codex | `codex` | `~/.codex/skills` † | `.agents/skills` | auto-update * |
 | Cursor | `cursor` | `~/.cursor/skills` | `.agents/skills` | auto-update |
+| Devin for Terminal | `devin` | `~/.config/devin/skills` † | `.devin/skills` | auto-update |
 | Droid | `droid` | `~/.factory/skills` | `.factory/skills` | auto-update |
 | Gemini CLI | `gemini-cli` | `~/.gemini/skills` | `.agents/skills` | auto-update * |
 | GitHub Copilot | `github-copilot` | `~/.copilot/skills` | `.agents/skills` | auto-update |
 | Goose | `goose` | `~/.config/goose/skills` † | `.goose/skills` | auto-update * |
+| Grok Build | `grok` | `~/.grok/skills` † | `.grok/skills` | auto-update |
+| Kilo Code | `kilo` | `~/.kilocode/skills` | `.kilocode/skills` | auto-update |
+| Kimi Code CLI | `kimi-code-cli` | `~/.agents/skills` | `.agents/skills` | auto-update |
 | OpenCode | `opencode` | `~/.config/opencode/skills` † | `.agents/skills` | auto-update |
+| Pi | `pi` | `~/.pi/agent/skills` | `.pi/skills` | auto-update |
+| Qoder | `qoder` | `~/.qoder/skills` | `.qoder/skills` | auto-update |
 | AdaL | `adal` | `~/.adal/skills` | `.adal/skills` | delivery |
 | AiderDesk | `aider-desk` | `~/.aider-desk/skills` | `.aider-desk/skills` | delivery |
 | Antigravity | `antigravity` | `~/.gemini/antigravity/skills` | `.agents/skills` | delivery |
-| Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | delivery |
 | AstrBot | `astrbot` | `~/.astrbot/data/skills` | `data/skills` | delivery |
 | Augment | `augment` | `~/.augment/skills` | `.augment/skills` | delivery |
 | Autohand Code CLI | `autohand-code` | `~/.autohand/skills` † | `.autohand/skills` | delivery |
@@ -196,19 +203,15 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Cortex Code | `cortex` | `~/.snowflake/cortex/skills` | `.cortex/skills` | delivery |
 | Crush | `crush` | `~/.config/crush/skills` | `.crush/skills` | delivery |
 | Deep Agents | `deepagents` | `~/.deepagents/agent/skills` | `.agents/skills` | delivery |
-| Devin for Terminal | `devin` | `~/.config/devin/skills` † | `.devin/skills` | delivery |
 | Dexto | `dexto` | `~/.agents/skills` | `.agents/skills` | delivery |
 | Firebender | `firebender` | `~/.firebender/skills` | `.agents/skills` | delivery |
 | ForgeCode | `forgecode` | `~/.forge/skills` | `.forge/skills` | delivery |
-| Grok Build | `grok` | `~/.grok/skills` † | `.grok/skills` | delivery |
 | IBM Bob | `bob` | `~/.bob/skills` | `.bob/skills` | delivery |
 | iFlow CLI | `iflow-cli` | `~/.iflow/skills` | `.iflow/skills` | delivery |
 | inference.sh | `inference-sh` | `~/.inferencesh/skills` | `.inferencesh/skills` | delivery |
 | Jazz | `jazz` | `~/.jazz/skills` | `.jazz/skills` | delivery |
 | Junie | `junie` | `~/.junie/skills` | `.junie/skills` | delivery |
-| Kilo Code | `kilo` | `~/.kilocode/skills` | `.kilocode/skills` | delivery |
 | Kimchi | `kimchi` | `~/.config/kimchi/harness/skills` | `.kimchi/skills` | delivery |
-| Kimi Code CLI | `kimi-code-cli` | `~/.agents/skills` | `.agents/skills` | delivery |
 | Kiro CLI | `kiro-cli` | `~/.kiro/skills` | `.kiro/skills` | delivery |
 | Kode | `kode` | `~/.kode/skills` | `.kode/skills` | delivery |
 | Lingma | `lingma` | `~/.lingma/skills` | `.lingma/skills` | delivery |
@@ -221,9 +224,7 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Neovate | `neovate` | `~/.neovate/skills` | `.neovate/skills` | delivery |
 | Ona | `ona` | `~/.ona/skills` | `.ona/skills` | delivery |
 | OpenHands | `openhands` | `~/.openhands/skills` | `.openhands/skills` | delivery |
-| Pi | `pi` | `~/.pi/agent/skills` | `.pi/skills` | delivery |
 | Pochi | `pochi` | `~/.pochi/skills` | `.pochi/skills` | delivery |
-| Qoder | `qoder` | `~/.qoder/skills` | `.qoder/skills` | delivery |
 | Qoder CN | `qoder-cn` | `~/.qoder-cn/skills` | `.qoder/skills` | delivery |
 | Qwen Code | `qwen-code` | `~/.qwen/skills` | `.qwen/skills` | delivery |
 | Reasonix | `reasonix` | `~/.reasonix/skills` | `.reasonix/skills` | delivery |

@@ -59,14 +59,25 @@ never learns which machinery served which harness.
   a silent 1-minute OpenClaw cron registered argv-only through `CommandRunner` (declaration-key
   idempotent); Active only on a successful gateway round-trip, and the only trigger that refuses the
   offline presence probe (`offline_probe_refusal`) and needs a live harness to scrub.
-- **`triggers`** — the ONE trigger port over twelve harnesses: `cc_hooks` (the strict-JSON
-  session-start merge — claude-code, gemini-cli, cursor, droid — parameterized by a `JsonHooksSpec`
-  whose `handler_async` and `hook_dialect` knobs are the only per-harness deviations; plus codex as
-  a line-anchored TOML merge, never Active) and `file_drop` (one topos-owned marker-led file:
-  github-copilot, opencode, goose, amp, cline), plus openclaw + hermes-agent implementing the port
-  themselves. `adapter_for_slug` is the seam the CLI's arming sweep consumes AND the only place
-  machinery is named, so the trigger-capable set is a view over the registry, not a second list;
-  the one sweep spelling is composed from shared consts.
+- **`triggers`** — the ONE trigger port over nineteen harnesses: `cc_hooks` (the strict-JSON
+  session-start merge — claude-code, gemini-cli, cursor, devin, droid, qoder, github-copilot —
+  parameterized by a `JsonHooksSpec` whose per-harness deviations are knobs, never forks: the entry
+  shape (grouped/flat + the group `matcher`), the handler key spellings (`command`/`timeout`, or
+  Copilot's `bash`/`timeoutSec`), `handler_async`, `hook_dialect`; plus codex, the one instance
+  needing a SECOND surface — its `hooks.json` entry through the same engine, and `[features] hooks
+  = true` line-anchored into `config.toml`, the switch without which codex reads no hooks at all —
+  and never Active) and `file_drop` (one topos-owned marker-led file: opencode, goose, amp, cline,
+  grok's merged `hooks/*.json` dir, pi's auto-loaded extension, kilo's auto-loaded plugin), plus the
+  two shared configs neither base fits — antigravity-cli (a hooks file keyed by NAME: topos owns the
+  key `topos` wholesale, writes its handler list FLAT because a matcher group would invalidate the
+  whole file, and byte-preserves every other key) and kimi-code-cli (a sentinel-led `[[hooks]]`
+  block appended to its own `config.toml`) — and openclaw + hermes-agent implementing the port
+  themselves. The line-anchored TOML reading codex and kimi share lives in `toml_lines`; every
+  engine plans a pure `EditPlan` (bytes in, write-or-leave out), which is what makes fail-closed
+  zero-writes a property of the type. `adapter_for_slug` is the seam the CLI's arming sweep consumes
+  AND the only place machinery is named, so the trigger-capable set is a view over the registry, not
+  a second list; the one sweep spelling is composed from shared consts (`GUARDED_SWEEP` +
+  `SENTINEL` = `SHELL_SWEEP_LINE`).
 - **`coverage`** — whether a harness reads the shared `~/.agents/skills` dir, with PROVENANCE
   (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed): the claim is a registry-row
   column, over an automatic derivation for a row carrying none.
