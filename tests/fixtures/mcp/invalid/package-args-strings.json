@@ -1,0 +1,19 @@
+{
+  "name": "io.github.acme/notes",
+  "description": "Arguments spelled as bare strings instead of objects.",
+  "version": "0.4.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "acme-mcp-notes",
+      "version": "0.4.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        "--root",
+        "/srv/notes"
+      ]
+    }
+  ]
+}

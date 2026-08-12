@@ -1,14 +1,14 @@
 ---
 title: MCP servers
-description: Share a remote MCP server the way you share a skill — one server.json, delivered into every agent's own MCP config.
+description: Share an MCP server the way you share a skill — one server.json, delivered into every agent's own MCP config.
 sidebar_label: MCP servers
 ---
 
 A workspace shares two kinds of bundle. A **skill** is a folder of instructions your agent reads;
-an **MCP server** is one file naming a remote endpoint your agents can call as tools. Both are
-published once, given to people the same way, and updated the same way — what differs is where the
-bytes land. A skill lands in a skills directory; an MCP server lands as one entry in each agent's
-own MCP config.
+an **MCP server** is one file naming a server your agents can call as tools. Both are published
+once, given to people the same way, and updated the same way — what differs is where the bytes
+land. A skill lands in a skills directory; an MCP server lands as one entry in each agent's own MCP
+config.
 
 ## What an MCP bundle is
 
@@ -18,11 +18,16 @@ registry hands out, unchanged. (A `README.md` may sit beside it; nothing else ma
 refuses at publish, and both files' bytes run the same credential scan.) Two constraints decide
 everything else on this page:
 
-- **Remote.** The document offers a `streamable-http` endpoint over `https`. Nothing is installed
-  and nothing runs locally, so the same bytes work from every machine on the team.
-- **Secretless.** The document carries no credential and no slot for one. Where a server needs a
-  sign-in, that sign-in is your agent's own OAuth dance on your own machine — Topos never sees it,
-  never stores it, and never moves it between machines.
+- **Something to run.** The document offers a `streamable-http` endpoint over `https`, or one or
+  more packages, or both. A document offering neither has nothing to hand an agent and refuses.
+- **Pinned.** Every package names exactly one immutable thing: an exact version for npm and PyPI, a
+  tag or a `sha256` digest for a container image, a file hash for an `.mcpb` download. A version
+  range or `latest` refuses — "the same bytes everywhere" is the promise a range breaks.
+- **Secretless.** The document carries no credential and no slot for one *in what travels*. Where a
+  server needs a sign-in, that sign-in is your agent's own OAuth dance on your own machine — Topos
+  never sees it, never stores it, and never moves it between machines. A package may *name* the
+  environment variable it wants (`GITHUB_TOKEN`, and `isSecret` on it is fine): the machine that
+  runs the server fills that in. What refuses is such a slot arriving with the value already in it.
 
 ```json title="server.json — the whole bundle"
 {
@@ -40,11 +45,16 @@ everything else on this page:
 }
 ```
 
-Headers are allowed when their values are **literal** — every machine sends the same bytes, so
-nothing is filled in per person. `_meta."sh.topos/auth"` is optional and says what someone is
-signing up for: `oauth` (an agent will be asked to authorize on first use) or `none` (the publisher
-states no credential is needed). Saying nothing is not a claim that none is needed, and Topos never
-reads silence as one.
+Headers on a remote are allowed when their values are **literal** — every machine sends the same
+bytes, so nothing is filled in per person. `_meta."sh.topos/auth"` is optional and says what someone
+is signing up for: `oauth` (an agent will be asked to authorize on first use) or `none` (the
+publisher states no credential is needed). Saying nothing is not a claim that none is needed, and
+Topos never reads silence as one.
+
+Which registries a package may come from is the format's question, not Topos's: `npm`, `pypi`,
+`oci`, `nuget`, `mcpb` and whatever the registry adds next all publish here. Whether a given machine
+can set a particular one up is answered **on that machine**, in plain words, when the entry is
+written — not by refusing the document for everyone.
 
 ## Three ways in
 
@@ -233,18 +243,20 @@ Every refusal is typed, and each one refuses a specific temptation rather than f
 
 | Code | Refused | Why |
 |---|---|---|
-| `MCP_LOCAL_REFUSED` | a non-empty `packages[]` | the server installs and runs locally; a shared bundle is an address every machine can reach |
-| `MCP_NO_STREAMABLE_REMOTE` | no `streamable-http` remote (`sse`-only, or none) | there is no endpoint to hand an agent |
+| `MCP_PACKAGE_UNPINNED` | a version range or `latest`; an image with no tag or digest; an `.mcpb` with no `fileSha256` | the package names a moving target, so two machines installing the same bundle would not get the same bytes |
+| `MCP_NO_STREAMABLE_REMOTE` | no `streamable-http` remote (`sse`-only, or none) **and** no packages | there is nothing here for an agent to run |
 | `MCP_INSECURE_URL` | a plain `http://` endpoint | every call and every reply would go over the wire in the clear |
 | `MCP_URL_TEMPLATE` | a `{placeholder}` in the URL | a template is not an address — someone has to fill it in per machine |
 | `MCP_SECRET_REFUSED` | a credential in any form | see below |
 | `MCP_INVALID` | not JSON; a missing or malformed `name`, `description`, or `version`; an endpoint that isn't a URL | there is nothing here to publish or point an agent at |
 | `MCP_NAME_TAKEN` | a `name` another bundle here already publishes | the registry lane resolves by that name; two claims would make a lookup a coin flip |
 
-`MCP_SECRET_REFUSED` is the widest of them, deliberately. It covers a header whose *name* carries a
-credential by definition (`Authorization`, `Cookie`, `X-Api-Key` and their kin), a header marked
-`isSecret`, a header with no literal value, a header or endpoint assembled from per-installation
-`variables`, and a literal value anywhere in the document that simply *has the shape* of a token —
+`MCP_SECRET_REFUSED` is the widest of them, deliberately. It covers a remote header whose *name*
+carries a credential by definition (`Authorization`, `Cookie`, `X-Api-Key` and their kin), a remote
+header marked `isSecret`, a remote header with no literal value, a header or endpoint assembled from
+per-installation `variables`, a package environment variable or flag named for a credential that
+arrives with its value filled in, and a literal value anywhere in the document that simply *has the
+shape* of a token —
 an API key, a `Bearer` string, a long random-looking run. The scan reads the raw document **before**
 any field is read out of it, so a document carrying somebody's token is refused whole, and the
 message names the shape it matched, never the value:

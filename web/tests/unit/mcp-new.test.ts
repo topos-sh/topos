@@ -722,6 +722,7 @@ describe("the preview card's auth chip", () => {
         url: WEATHER.remotes[0]?.url ?? "",
         transport: "streamable-http",
         headers: [],
+        packages: [],
         authHint,
       },
     };
@@ -765,6 +766,60 @@ describe("the preview card's auth chip", () => {
     expect(html).not.toContain(">oauth<");
     // Still a preview: the transport is the chip that never depended on the declaration.
     expect(html).toContain("streamable-http");
+  });
+
+  /**
+   * A PACKAGE-ONLY DOCUMENT has no address, and the card must not leave the address line standing
+   * empty where one would be: it names what each machine installs instead.
+   */
+  it("shows what a package-only bundle installs, and no empty address line", async () => {
+    const { PreviewCard } = await import("@/routes/mcp-new");
+    type Preview = Parameters<typeof PreviewCard>[0]["preview"];
+    const preview: Preview = {
+      form: "preview",
+      origin: "pasted",
+      suggestedName: "files",
+      document: "{}",
+      summary: {
+        name: "io.github.acme/files",
+        description: "Files the agent is pointed at, over stdio.",
+        version: "2.1.0",
+        url: null,
+        transport: null,
+        headers: [],
+        packages: [
+          {
+            registryType: "npm",
+            identifier: "@acme/mcp-files",
+            version: "2.1.0",
+            transport: "stdio",
+          },
+        ],
+        authHint: null,
+      },
+    };
+    const routes: RouteObject[] = [
+      {
+        path: "/",
+        loader: () => ({
+          channels: [{ name: "everyone", isDefault: true, mode: "open" }],
+          role: "owner",
+        }),
+        Component: () => createElement(PreviewCard, { preview }),
+      },
+    ];
+    const handler = createStaticHandler(routes);
+    const context = await handler.query(new Request("http://localhost/"));
+    if (context instanceof Response) {
+      throw new Error("expected a rendered context, got a Response");
+    }
+    const router = createStaticRouter(handler.dataRoutes, context);
+    const html = renderToStaticMarkup(createElement(StaticRouterProvider, { router, context }));
+    expect(html).toContain("npm @acme/mcp-files 2.1.0");
+    expect(html).toContain("stdio");
+    // No address, so no address element at all — and no transport chip claiming one.
+    expect(html).not.toContain("mcp-preview-url");
+    expect(html).not.toContain("streamable-http");
   });
 
   /**

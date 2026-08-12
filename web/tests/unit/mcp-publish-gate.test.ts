@@ -172,9 +172,14 @@ describe("what an MCP candidate must carry", () => {
 
   it.each([
     [
-      "a local-install server",
-      { ...WEATHER, packages: [{ identifier: "x", version: "1" }] },
-      "MCP_LOCAL_REFUSED",
+      "a package pinned to nothing",
+      {
+        ...WEATHER,
+        packages: [
+          { registryType: "npm", identifier: "@a/x", version: "^1", transport: { type: "stdio" } },
+        ],
+      },
+      "MCP_PACKAGE_UNPINNED",
     ],
     [
       "an event-stream-only server",

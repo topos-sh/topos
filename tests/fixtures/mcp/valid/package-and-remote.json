@@ -1,0 +1,22 @@
+{
+  "name": "io.github.acme/mail",
+  "description": "One server offered two ways: an address and a package.",
+  "version": "5.0.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mail.acme.example/mcp"
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-mail",
+      "version": "5.0.1",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

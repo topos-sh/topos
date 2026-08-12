@@ -189,6 +189,40 @@ describe("check-boundary agent-skills digest carve-out (one exact expression)", 
   it.each(titled(CARVE_OUT_VIOLATIONS))("fires on %s", (_name, fc) => expectFires(BOUNDARY, fc));
 });
 
+describe("check-boundary MCP digest-spelling carve-out (reading, never computing)", () => {
+  // The gate READS the two published digest spellings out of somebody else's server document so
+  // it can tell an integrity digest from a credential. It hashes nothing.
+  const MODULE = join("lib", "mcp", "validate.server.ts");
+
+  it("passes the recognized spellings in the named module", () => {
+    const app = fixtureApp({
+      [MODULE]:
+        "const OCI_DIGEST = /@sha256:[a-f0-9]{64}$/;\n" +
+        'const isDigest = (before: string) => before.slice(-7).toLowerCase() === "sha256:";\n' +
+        'const isKey = (key: string) => key.slice(-6).toLowerCase() === "sha256";\n',
+    });
+    expect(runGate(BOUNDARY, app).code).toBe(0);
+  });
+
+  const MCP_CARVE_OUT_VIOLATIONS: FiringCase[] = [
+    {
+      name: "a computation in that module",
+      files: {
+        [MODULE]: 'import { createHash } from "node:crypto";\nconst h = createHash("sha256");\n',
+      },
+      needles: ["createHash"],
+    },
+    {
+      name: "the spellings in any OTHER module — the carve-out is one file's",
+      files: { "lib/rogue.server.ts": 'const prefix = "sha256:";\n' },
+      needles: ["sha256"],
+    },
+  ];
+
+  it.each(titled(MCP_CARVE_OUT_VIOLATIONS))("fires on %s", (_name, fc) =>
+    expectFires(BOUNDARY, fc));
+});
+
 const EMAIL_VIOLATIONS: FiringCase[] = [
   {
     name: "an email equality branch, with file:line",

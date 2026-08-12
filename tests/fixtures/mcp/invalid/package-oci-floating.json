@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/graph",
+  "description": "A container image named by a moving tag.",
+  "version": "3.0.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/acme/mcp-graph:latest",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -20,19 +20,84 @@
     "note": "Two remotes offered; the first streamable-http one is picked and the event-stream sibling is ignored."
   },
   {
-    "file": "invalid/packages-local.json",
-    "verdict": "MCP_LOCAL_REFUSED",
-    "note": "A non-empty packages[] means the server installs and runs locally — out of scope for a shared bundle."
+    "file": "valid/package-npm.json",
+    "verdict": "ok",
+    "note": "A package-only bundle: no address at all, one npm package at one exact version. An environment slot DECLARED secret is metadata — the machine that runs the server fills it, and no credential travels."
+  },
+  {
+    "file": "valid/package-pypi.json",
+    "verdict": "ok",
+    "note": "The same shape from the other common registry, with the official STRUCTURED arguments — a named flag carrying a literal value and a positional naming its hint."
+  },
+  {
+    "file": "valid/package-oci-digest.json",
+    "verdict": "ok",
+    "note": "An OCI package pins itself inside the identifier, by digest. The 64 hex characters are an integrity digest, not a credential — the belt reads what precedes them."
+  },
+  {
+    "file": "valid/package-mcpb-hash.json",
+    "verdict": "ok",
+    "note": "An MCPB download is identified by the sha-256 of its file; the hash under a fileSha256 key is likewise integrity, not a secret."
+  },
+  {
+    "file": "valid/package-and-remote.json",
+    "verdict": "ok",
+    "note": "Both ways offered at once. The summary still reports the placed remote; the packages ride along for the machines that prefer one."
+  },
+  {
+    "file": "invalid/package-version-range.json",
+    "verdict": "MCP_PACKAGE_UNPINNED",
+    "note": "A range resolves to whatever the day supplies — two machines installing the same bundle would not get the same bytes."
+  },
+  {
+    "file": "invalid/package-version-latest.json",
+    "verdict": "MCP_PACKAGE_UNPINNED",
+    "note": "`latest` is the moving pointer the registry reserves, and reads as a version only until it moves."
+  },
+  {
+    "file": "invalid/package-oci-floating.json",
+    "verdict": "MCP_PACKAGE_UNPINNED",
+    "note": "An OCI reference carries its version in the identifier, so a `latest` tag there is the same unpinned promise."
+  },
+  {
+    "file": "invalid/package-mcpb-no-hash.json",
+    "verdict": "MCP_PACKAGE_UNPINNED",
+    "note": "An MCPB download with no fileSha256 is a URL whose contents can change under it — nothing to check the arriving bytes against."
+  },
+  {
+    "file": "invalid/package-env-secret-value.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A slot NAMED for a credential is fine; the same slot with the value already in it is somebody's credential travelling to every machine."
+  },
+  {
+    "file": "invalid/package-env-random-value.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "The name says nothing, the value reads as a generated key: the credential scan reads package environment values exactly as it reads header ones."
+  },
+  {
+    "file": "invalid/package-args-strings.json",
+    "verdict": "MCP_INVALID",
+    "note": "The registry format spells arguments as objects that state their own type; a bare string array is a different format's shape."
+  },
+  {
+    "file": "invalid/package-no-transport.json",
+    "verdict": "MCP_INVALID",
+    "note": "transport is one of the three fields the schema requires — without it nothing knows how the installed server is spoken to."
+  },
+  {
+    "file": "invalid/version-latest.json",
+    "verdict": "MCP_INVALID",
+    "note": "The server's own version is held to the same rule as a package's: one version, never a moving pointer."
   },
   {
     "file": "invalid/sse-only.json",
     "verdict": "MCP_NO_STREAMABLE_REMOTE",
-    "note": "Only the event-stream transport is offered; there is nothing this can place."
+    "note": "Only the event-stream transport is offered, and no packages: there is nothing this can place."
   },
   {
     "file": "invalid/no-remotes.json",
     "verdict": "MCP_NO_STREAMABLE_REMOTE",
-    "note": "No remotes at all reads exactly like sse-only: no endpoint to hand an agent."
+    "note": "No remotes and no packages reads exactly like sse-only: nothing to hand an agent."
   },
   {
     "file": "invalid/insecure-url.json",

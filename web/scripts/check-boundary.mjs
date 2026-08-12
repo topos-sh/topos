@@ -21,7 +21,10 @@
  *     index ADVERTISES for the public skill bytes this same process serves; no secret is
  *     hashed and nothing signs (the digest exists for the READER to verify). Anything past
  *     the pinned form — a second call site, another algorithm, a userland sha256, hmac/sign/
- *     subtle — fails there too.
+ *     subtle — fails there too. A FOURTH, narrower one: app/lib/mcp/validate.server.ts may spell
+ *     the published digest SPELLINGS it recognizes in somebody else's server document
+ *     (`"sha256:"`, `"sha256"`, `@sha256:`) — reading a digest, never computing one; every
+ *     crypto identifier still fails there.
  *  2. The (node:)crypto module specifier and `randomBytes` are allowed ONLY in
  *     app/lib/db/identity.server.ts and app/lib/auth/recovery.server.ts — the two mints of
  *     random SECRETS/ids (randomness is this tier's; hashing stays in Postgres/better-auth) —
@@ -140,6 +143,16 @@ const PUBLIC_DIGEST_ALLOWED = new Set([join("app", "lib", "agent-skills.server.t
 const SANCTIONED_DIGEST_EXPR =
   /`sha256:\$\{createHash\("sha256"\)\.update\([A-Za-z_$][\w$]*\)\.digest\("hex"\)\}`/;
 const SANCTIONED_DIGEST_IMPORT = 'import { createHash } from "node:crypto";';
+/**
+ * A FOURTH carve-out, and the narrowest: the MCP server-document gate READS two published digest
+ * SPELLINGS out of somebody else's document — the OCI reference's `@sha256:<hex>` and the
+ * `fileSha256` key — so it can tell an integrity digest from a credential and stop refusing every
+ * pinned container image as a high-entropy secret. It computes nothing and hashes nothing: only
+ * the quoted spellings below are stripped, so `createHash`, a `digest(` call, hmac, sign, subtle
+ * and every other identifier still fail in this module exactly as they do everywhere else.
+ */
+const MCP_DIGEST_ALLOWED = new Set([join("app", "lib", "mcp", "validate.server.ts")]);
+const MCP_DIGEST_SPELLINGS = ['"sha256:"', '"sha256"', "@sha256:", "`sha256:`", "`sha256`"];
 for (const { rel, text } of files) {
   // The carve-outs, stripped before scanning:
   //  - bundle_digest/bundleDigest DISPLAY the vault's recorded consent value;
@@ -160,6 +173,11 @@ for (const { rel, text } of files) {
     // a second spelling of either is a violation and stays in the scanned text, so the full
     // rule set below still fires on it.
     carved = carved.replace(SANCTIONED_DIGEST_EXPR, "").replace(SANCTIONED_DIGEST_IMPORT, "");
+  }
+  if (MCP_DIGEST_ALLOWED.has(rel)) {
+    for (const spelling of MCP_DIGEST_SPELLINGS) {
+      carved = carved.replaceAll(spelling, "");
+    }
   }
   for (const [regex, name] of HARD_ZERO) {
     if (regex.test(carved)) {
