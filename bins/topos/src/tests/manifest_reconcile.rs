@@ -15308,7 +15308,16 @@ fn both_scopes(
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| panic!("no placement (person={person}): {:?}", out.data.skills))
     };
-    let (machine, project_dir) = (placed(true), placed(false));
+    // The person row PRINTS the machine-truth `~/…` spelling, which is a display and not a
+    // joinable path — the filesystem dir is the rig's own row-resolved skills root (the same
+    // resolution the planner ran). The project row still prints a real path inside the checkout.
+    let spelled = placed(true);
+    assert!(
+        spelled.to_string_lossy().starts_with("~/"),
+        "the person destination prints the machine spelling: {spelled:?}"
+    );
+    let machine = rig.skills().join("deploy");
+    let project_dir = placed(false);
     (proj, machine, project_dir)
 }
 
@@ -15527,9 +15536,8 @@ fn a_machine_draft_ships_from_inside_a_clean_checkout_and_says_so() {
     assert!(d.other_scope_draft.is_none(), "{d:?}");
     let from = d.from_placement.clone().expect("the folder is named");
     assert_eq!(
-        from,
-        machine_dir.display().to_string(),
-        "the folder named is the MACHINE copy's, spelled at its own scope"
+        from, "~/.claude/skills/deploy",
+        "the folder named is the MACHINE copy's, in the machine spelling receipts print"
     );
     let text = crate::render::publish_describe_tty(&d, &["topos".into(), "publish".into()]);
     assert!(
@@ -15787,8 +15795,8 @@ fn a_cross_scope_proposal_carries_the_disclosure_a_landed_publish_does() {
     assert!(data.from_machine, "{data:?}");
     assert_eq!(
         data.from_placement.as_deref(),
-        Some(machine_dir.display().to_string().as_str()),
-        "the folder named is the MACHINE copy's"
+        Some("~/.claude/skills/deploy"),
+        "the folder named is the MACHINE copy's, in the machine spelling receipts print"
     );
     let other = data
         .other_scope_draft
@@ -15798,7 +15806,7 @@ fn a_cross_scope_proposal_carries_the_disclosure_a_landed_publish_does() {
 
     let receipt = crate::render::propose_tty(&data);
     assert!(
-        receipt.contains(&format!("(from {}) for review.", machine_dir.display())),
+        receipt.contains("(from ~/.claude/skills/deploy) for review."),
         "{receipt}"
     );
     // The PROPOSAL's own way out: no pointer moved, so that copy is still an ordinary draft on the
