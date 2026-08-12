@@ -35,8 +35,9 @@ fn install(tag: &str) -> SessionInstall {
 /// The one placement dir under `work/` holding a `SKILL.md` (person-scope placements are keyed by
 /// the local skill id, opaque to the suite).
 fn person_scope_dir(client: &SessionInstall) -> Option<std::path::PathBuf> {
-    let work = client.root().join("work");
-    let entries = std::fs::read_dir(&work).ok()?;
+    // The registry ROW under the install's home names the person-scope root now — the same
+    // resolution the planner runs — so the scan reads where placements actually land.
+    let entries = std::fs::read_dir(client.skills_root()).ok()?;
     entries
         .flatten()
         .map(|e| e.path())

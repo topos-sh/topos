@@ -116,14 +116,12 @@ fn a_pinned_reference_delivers_its_version_and_publish_to_never_mints_a_channel(
     // …while the machine-wide copy really did take v2, so the two scopes DO disagree here: the
     // silence above is a judgement about the difference, not an absence of one.
     // The copy is NAMED, never picked off a directory walk: `read_dir` promises no order, so
-    // "the first SKILL.md under work/" is whichever entry the filesystem happens to yield — an
-    // assertion that passes today because only one folder is there, and starts reading some other
-    // skill's bytes the moment a second one is.
-    let skill_id = added
-        .skill_id
-        .as_deref()
-        .expect("the add recorded a bundle");
-    let person_copy = dev.work_dir(skill_id).join("SKILL.md");
+    // "the first SKILL.md under the skills root" is whichever entry the filesystem happens to
+    // yield — an assertion that passes today because only one folder is there, and starts reading
+    // some other skill's bytes the moment a second one is. The dir is the registry ROW's, under
+    // the install's own home — the same resolution the planner runs.
+    assert!(added.skill_id.is_some(), "the add recorded a bundle");
+    let person_copy = dev.skills_dir("pinme").join("SKILL.md");
     assert_eq!(
         std::fs::read_to_string(&person_copy).expect("the feed landed the person-scope copy"),
         "# pinme v2\n",
