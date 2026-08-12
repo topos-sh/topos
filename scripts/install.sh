@@ -5,10 +5,10 @@
 #   1. Detects your OS and CPU architecture (uname) and picks the matching release target.
 #   2. Downloads topos-<target>.tar.gz AND SHA256SUMS from
 #      https://github.com/topos-sh/topos/releases (with retries; GitHub 302s to a CDN).
-#   3. When this installer embeds a release-signing public key (MINISIGN_PUBKEY below is
-#      non-empty), also downloads the asset's .minisig (REQUIRED then) and verifies the
-#      minisign signature — fail-closed — whenever the `minisign` tool is installed;
-#      without the tool the signature step is skipped with a loud note.
+#   3. Also downloads the asset's .minisig — REQUIRED, against the release-signing public key
+#      this installer embeds (MINISIGN_PUBKEY below) — and verifies the minisign signature,
+#      fail-closed, whenever the `minisign` tool is installed; without the tool the
+#      verification step is skipped with a loud note.
 #   4. Prints the EXPECTED sha256 (this asset's entry in SHA256SUMS) and the ACTUAL sha256
 #      (computed locally over the downloaded bytes), and REFUSES to install unless they
 #      match. Verification is never skippable — there is no flag that disables it.
@@ -56,11 +56,10 @@ VERSION="${TOPOS_VERSION:-}"
 INSTALL_DIR="${TOPOS_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="${TOPOS_INSTALL_BASE_URL:-https://github.com/topos-sh/topos/releases}"
 
-# The release-signing public key (minisign, the base64 line of minisign.pub). Empty in the
-# pre-key-ceremony state — the checksum below is then the only verification. When non-empty
-# (scripts/mint-release-key.sh prints the exact value to paste here, in the same change that
-# flips the binary's compiled-in RELEASE_PUBKEY), the asset's .minisig becomes REQUIRED and is
-# verified BEFORE the checksum whenever the `minisign` tool is available. Not a knob: this is
+# The release-signing public key (minisign, the base64 line of minisign.pub) — armed.
+# scripts/mint-release-key.sh printed this value, in the same change that flipped the binary's
+# compiled-in RELEASE_PUBKEY. With it set, the asset's .minisig is REQUIRED and is verified
+# BEFORE the checksum whenever the `minisign` tool is available. Not a knob: this is
 # release-time configuration, deliberately not overridable by flag or environment.
 MINISIGN_PUBKEY="RWRsqhNImLJGum9BdXy1X/p7Dhr+xc0JQTyNPxaGW5emP/K/+828Euav"
 
@@ -247,58 +246,56 @@ if ! fetch "$URL_DIR/SHA256SUMS" "$TMP_DIR/SHA256SUMS"; then
   exit 1
 fi
 
-# ---------- signature (when a release public key is embedded; mirrors the binary's own
-# ---------- self-update order: signature first, then checksum) -------------------------
+# ---------- signature (mirrors the binary's own self-update order: signature first,
+# ---------- then checksum) -------------------------------------------------------------
 
-if [ -n "$MINISIGN_PUBKEY" ]; then
-  say "downloading: $URL_DIR/$ASSET.minisig"
-  if ! fetch "$URL_DIR/$ASSET.minisig" "$TMP_DIR/$ASSET.minisig"; then
-    err "ERROR: could not download $ASSET.minisig from $URL_DIR"
-    err "This installer embeds a release-signing public key, so a signature is REQUIRED"
-    err "for every asset. Refusing to install an unsigned binary."
+say "downloading: $URL_DIR/$ASSET.minisig"
+if ! fetch "$URL_DIR/$ASSET.minisig" "$TMP_DIR/$ASSET.minisig"; then
+  err "ERROR: could not download $ASSET.minisig from $URL_DIR"
+  err "This installer embeds a release-signing public key, so a signature is REQUIRED"
+  err "for every asset. Refusing to install an unsigned binary."
+  exit 1
+fi
+if command -v minisign >/dev/null 2>&1; then
+  if ! minisign -Vm "$TMP_DIR/$ASSET" -x "$TMP_DIR/$ASSET.minisig" -P "$MINISIGN_PUBKEY" >/dev/null 2>&1; then
+    err ""
+    err "ERROR: minisign signature verification FAILED for $ASSET."
+    err "The downloaded bytes are NOT the bytes the release signed."
+    err "Refusing to install. Nothing was installed, and the download was deleted."
+    err "Possible causes:"
+    err "  - a corrupted download"
+    err "  - a tampering proxy or mirror between you and the release host"
+    err "  - a compromised release"
+    err "Please retry once; if it happens again, report it:"
+    err "  https://github.com/topos-sh/topos/issues"
     exit 1
   fi
-  if command -v minisign >/dev/null 2>&1; then
-    if ! minisign -Vm "$TMP_DIR/$ASSET" -x "$TMP_DIR/$ASSET.minisig" -P "$MINISIGN_PUBKEY" >/dev/null 2>&1; then
+  say "OK: minisign signature verified."
+  # A pinned --version additionally binds the SIGNED trusted comment to that tag: the release
+  # pipeline signs "topos-sh/topos <tag> <asset>" and minisign's global signature covers the
+  # comment, so a valid signature minted for a DIFFERENT release cannot be re-served under this
+  # tag. (A "latest" install has no expected tag to bind against; the installed binary's own
+  # self-update binds every update it performs.)
+  if [ -n "$VERSION" ]; then
+    TC_LINE="$(sed -n 's/^trusted comment://p' "$TMP_DIR/$ASSET.minisig")"
+    if ! printf '%s\n' "$TC_LINE" | awk -v tag="$VERSION" '{ for (i = 1; i <= NF; i++) if ($i == tag) ok = 1 } END { exit ok ? 0 : 1 }'; then
       err ""
-      err "ERROR: minisign signature verification FAILED for $ASSET."
-      err "The downloaded bytes are NOT the bytes the release signed."
+      err "ERROR: the signature is valid but was minted for a DIFFERENT release."
+      err "  requested release: $VERSION"
+      err "  signed comment:   $TC_LINE"
       err "Refusing to install. Nothing was installed, and the download was deleted."
-      err "Possible causes:"
-      err "  - a corrupted download"
-      err "  - a tampering proxy or mirror between you and the release host"
-      err "  - a compromised release"
-      err "Please retry once; if it happens again, report it:"
-      err "  https://github.com/topos-sh/topos/issues"
       exit 1
     fi
-    say "OK: minisign signature verified."
-    # A pinned --version additionally binds the SIGNED trusted comment to that tag: the release
-    # pipeline signs "topos-sh/topos <tag> <asset>" and minisign's global signature covers the
-    # comment, so a valid signature minted for a DIFFERENT release cannot be re-served under this
-    # tag. (A "latest" install has no expected tag to bind against; the installed binary's own
-    # self-update binds every update it performs.)
-    if [ -n "$VERSION" ]; then
-      TC_LINE="$(sed -n 's/^trusted comment://p' "$TMP_DIR/$ASSET.minisig")"
-      if ! printf '%s\n' "$TC_LINE" | awk -v tag="$VERSION" '{ for (i = 1; i <= NF; i++) if ($i == tag) ok = 1 } END { exit ok ? 0 : 1 }'; then
-        err ""
-        err "ERROR: the signature is valid but was minted for a DIFFERENT release."
-        err "  requested release: $VERSION"
-        err "  signed comment:   $TC_LINE"
-        err "Refusing to install. Nothing was installed, and the download was deleted."
-        exit 1
-      fi
-      say "OK: signature is bound to release $VERSION."
-    fi
-  else
-    # The tool is absent: skip LOUDLY, never silently. The sha256 gate below still runs — it is
-    # never skippable — but be honest about what it proves without a signature.
-    say "NOTE: minisign is not installed — the downloaded signature was NOT verified."
-    say "      The sha256 checksum below is still enforced, but it rides the SAME origin as the"
-    say "      asset (transit integrity, not origin integrity). For the stronger check, install"
-    say "      minisign and re-run this installer — and note the installed binary's own"
-    say "      'topos self-update' always enforces its compiled-in release key."
+    say "OK: signature is bound to release $VERSION."
   fi
+else
+  # The tool is absent: skip LOUDLY, never silently. The sha256 gate below still runs — it is
+  # never skippable — but be honest about what it proves without a signature.
+  say "NOTE: minisign is not installed — the downloaded signature was NOT verified."
+  say "      The sha256 checksum below is still enforced, but it rides the SAME origin as the"
+  say "      asset (transit integrity, not origin integrity). For the stronger check, install"
+  say "      minisign and re-run this installer — and note the installed binary's own"
+  say "      'topos self-update' always enforces its compiled-in release key."
 fi
 
 # ---------- verify (never skippable) ---------------------------------------------------

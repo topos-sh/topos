@@ -14,14 +14,18 @@ curl -fsSL https://topos.sh/install | sh
 ```
 
 Installs the `topos` binary to `~/.local/bin` (no sudo) on macOS (Apple Silicon and Intel) and
-Linux (x86_64 and arm64); on Windows, run it inside WSL2. The installer downloads the release's
-SHA-256 manifest over TLS, prints the expected and actual checksums, and refuses to install on a
-mismatch.
+Linux (x86_64 and arm64); on Windows, run it inside WSL2. Over TLS it always downloads both the
+release's SHA-256 manifest and the asset's minisign signature — a signature it cannot fetch aborts
+the install. It verifies that signature against the release public key it embeds **when the
+`minisign` tool is present**, and says so loudly when it is not; then it checks the SHA-256, prints
+the expected and actual checksums, and refuses to install on a mismatch.
 
-Manual alternative: download `topos-<target>.tar.gz` and `SHA256SUMS` from
-<https://github.com/topos-sh/topos/releases>, check the archive's SHA-256 against its manifest
+Manual alternative: download `topos-<target>.tar.gz`, its `.minisig`, and `SHA256SUMS` from
+<https://github.com/topos-sh/topos/releases>, verify the signature (`minisign -Vm
+topos-<target>.tar.gz -P <release public key>`), check the archive's SHA-256 against its manifest
 entry, and unpack the `topos` binary onto your PATH. Either way, `topos self-update` replaces the
-binary in place from then on (same checksum discipline).
+binary in place from then on — it compiles the release key in, so there the signature check is
+mandatory: a missing or bad signature aborts the update before the checksum is even reached.
 
 If this page arrived as part of a downloaded `topos` skill, add one step after the install:
 `topos add topos` lets this machine's topos manage that downloaded copy and keep it current.

@@ -97,10 +97,20 @@ Each invariant above is held by an automated gate, not by convention:
 
 ## What Topos deliberately does not do
 
-There is **no signing** anywhere in Topos: no signed pointers, no key pinning, no client-side signature
-verification, no anti-rollback cryptography. The accepted consequence is explicit — a compromised server can
-distribute bad content — and it is the same risk every team already accepts from its git host and CI.
+**Bundle content is not signed:** no signed pointers, no key pinning, no client-side signature verification
+of bundle bytes, no anti-rollback cryptography. The accepted consequence is explicit — a compromised server
+can distribute bad content — and it is the same risk every team already accepts from its git host and CI.
 Content addressing keeps optional signing available as a future layer without redesign.
+
+**The CLI's own release artifacts are the one signed channel.** Every published asset carries a minisign
+signature whose trusted comment binds it to its tag and filename. `topos self-update` compiles in the
+release public key and verification is **mandatory and fail-closed** — the `.minisig` is fetched and
+verified over the downloaded bytes *before* the checksum gate and long before the installed binary is
+touched; a missing or invalid signature aborts the update. `scripts/install.sh` embeds the same key and
+**always** fetches the `.minisig` (a signature it cannot download is a hard failure), but it can only
+*verify* when the `minisign` tool is present on the machine; without it the installer says so loudly and
+falls back to the never-skippable SHA-256 check, which rides the same origin as the asset — transit
+integrity, not origin integrity.
 
 ## Reporting a vulnerability
 

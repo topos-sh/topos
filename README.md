@@ -154,7 +154,7 @@ topos revert customer-lookup --to <version> --yes
 ### Keep a cloud agent current
 
 A scheduled agent triages new support tickets every night - labels them, routes escalations -
-with no human at the keyboard. Enroll it once, somewhere `~/.topos` persists (the login is one
+with no human at the keyboard. Log it in once, somewhere `~/.topos` persists (the login is one
 browser approval; naming the workspace goes straight to it):
 
 ```sh
@@ -206,7 +206,7 @@ every page is also plain markdown at its URL + `.md`, [topos.sh/agent](https://t
 is the setup walkthrough an agent can follow on its own, and
 [topos.sh/docs/agents](https://topos.sh/docs/agents) covers the JSON output and consent rules.
 
-Agents on an enrolled machine need none of this: the built-in `topos` skill in their skills
+Agents on a logged-in machine need none of this: the built-in `topos` skill in their skills
 directories already covers what Topos is, the commands, and when to offer sharing something
 back. If your repo has an `AGENTS.md`, one line routing agents to that skill is enough:
 

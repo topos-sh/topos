@@ -98,8 +98,9 @@ Authority splits cleanly across the front tier (the web app) and the back tier (
 **The web app is the front tier and the only public surface.** It owns identity and the whole directory in
 its own Postgres schema, `web`: people (`user`, `session`, `account`), **seats** (workspace membership, keyed
 by `user.id`), **CLI sessions** (`cli_session` — user × workspace × installation, minted by the login flow)
-and the login-flow rows, invitations, the bundle catalog (each row carrying a `kind` tag — `skill` today —
-that clients display but never branch on), channels (named, curated sets of bundles; the default channel is
+and the login-flow rows, invitations, the bundle catalog (each row carrying a `kind` tag — a closed
+vocabulary, `skill` and `mcp` today, that clients branch on to pick a bundle's delivery mechanics; a kind
+neither side knows is refused, never guessed at), channels (named, curated sets of bundles; the default channel is
 every member's baseline), **assignments** (one positive row — a bundle or a channel aimed at a person or at
 everyone; a curator's act and a person's own "add to mine" mint the same row) and **declines** (the one
 negative — per person per bundle, keyed to bundle identity so it survives version and channel changes),

@@ -19,10 +19,7 @@ WORKDIR /build
 # needs no live database.
 ENV SQLX_OFFLINE=true
 COPY . .
-# Optional cargo features for the vault build. Empty (the default, and what the published image is
-# built with) compiles exactly the standard vault; no optional features exist today.
-ARG FEATURES=""
-RUN cargo build --release --locked -p topos-plane ${FEATURES:+--features "$FEATURES"}
+RUN cargo build --release --locked -p topos-plane
 
 # ── runtime ──────────────────────────────────────────────────────────────────────────────────────────
 # Refresh: docker buildx imagetools inspect debian:bookworm-slim

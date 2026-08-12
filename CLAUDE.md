@@ -28,7 +28,7 @@ trust. Two motions: **distribute** (publish → every subscribed agent updates s
 - `docs/` — the MDX documentation source the web app serves at `/docs`; `docs/cli.md` is the
   generated CLI reference. `skills/topos/` — the built-in `topos` meta-skill source (embedded in
   the binary). `scripts/` — installer, compose init-db/smoke, grants check, release tooling.
-  `evals/` — the meta-skill eval harness. `deny.toml`, `RELEASING.md`, `docker-compose.yml` +
+  `deny.toml`, `RELEASING.md`, `docker-compose.yml` +
   `Dockerfile` — supply-chain policy, the release/signing scheme, the self-host stack.
 
 `AGENTS.md` in each folder symlinks to that folder's `CLAUDE.md`.

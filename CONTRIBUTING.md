@@ -64,7 +64,8 @@ Two things in this repo are **generated and drift-gated**, so a change there is 
 2. Keep the change focused; a small PR is reviewed faster than a large one.
 3. Add or update tests for behavior changes. Unit tests live inline (`#[cfg(test)] mod tests`); multi-file
    suites live in `src/tests/` or the workspace `tests/` crate.
-4. Update the living docs **in the same change**: the per-folder `CLAUDE.md` status lists. A doc that
+4. Update the living docs **in the same change**: every per-folder `CLAUDE.md` describes CURRENT state
+   only — never history, status narrative, or "what changed" (git history carries that). A doc that
    describes the old behavior is a bug.
 5. Make sure `cargo xtask ci` and `cargo test` are green locally.
 6. Write commit messages that say **what changed and why**, in the imperative mood. Keep them self-contained.

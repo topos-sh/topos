@@ -11,9 +11,6 @@ Cargo.lock.bak
 .claude/
 /target-musl/
 
-# Eval run artifacts (fixture homes carry extracted credentials — never tracked)
-/evals/meta-skill/.runs/
-
 # Local env — never tracked (the root DATABASE_URL the Rust suite reads).
 .env
 .env.*

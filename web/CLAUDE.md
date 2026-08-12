@@ -48,7 +48,7 @@ caller.
   catalog row was written.
 - **Auth guards fail closed** (`app/lib/auth/guards.server.ts` — the only minters of branded
   actors: `requireSession → requireMember → requireWorkspaceOwner`/`requireReviewer`,
-  `requireDeviceActor`); the brand symbol is module-private. **Misses render 404, never 403.**
+  `requireSessionActor`); the brand symbol is module-private. **Misses render 404, never 403.**
 
 ## The ceremonies (`app/lib/db/identity.server.ts` — FOR-UPDATE-fenced, audit inside)
 

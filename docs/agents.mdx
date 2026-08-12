@@ -186,8 +186,8 @@ divides the requests you can act on from the ones you hand back to the human.
 
 ## Aiming at one agent, or one folder
 
-`add` and `remove` both take `-a <agent>` (a registry slug like `codex`, repeatable, `'*'` = every
-detected agent) and `--dest <folder>` (an exact folder — a known config file when the source is an
+`add` and `remove` both take `-a <agent>` (a registry slug like `codex`, repeatable; a slug the
+registry does not know is refused, never guessed at) and `--dest <folder>` (an exact folder — a known config file when the source is an
 MCP server). Combined, their union is the destination set.
 
 ```bash

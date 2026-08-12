@@ -14,7 +14,6 @@
 //!                                     harness registry against it (network; NEVER in `ci`/CI).
 //! `cargo xtask ci`                  → the full non-DB gate sequence, in CI's order (fmt, clippy, doc,
 //!                                     the drift gates, check-arch) — the contributor's pre-push loop.
-//! `cargo xtask conformance`         → the store matrices (not yet implemented).
 //! `cargo xtask dist …`              → offline release packaging (deterministic tarball + SHA256SUMS) — see `dist.rs`.
 //!
 //! `gen-schema` also (re)generates + checks the plane OpenAPI (`contracts/openapi/openapi.json`, from
@@ -2723,31 +2722,40 @@ fn check_seam() -> Result<()> {
 
 /// The app-schema tables (plus retired plane-era spellings) the vault must never touch. `version`
 /// and `upload` are deliberately ABSENT — they are the vault's own tables.
-const APP_SCHEMA_TABLES: [&str; 26] = [
+const APP_SCHEMA_TABLES: [&str; 35] = [
     "user",
     "session",
     "account",
     "verification",
     "device",
     "device_auth_session",
+    "cli_session",
+    "login_flow",
     "workspace",
     "seat",
     "invitation",
     "bundle",
     "bundle_name_hint",
+    "bundle_identity",
+    "bundle_upstream",
+    "version_upstream",
     "channel",
     "channel_member",
     "channel_optout",
     "channel_bundle",
+    "assignment",
+    "decline",
     "bundle_subscription",
     "bundle_detachment",
     "device_exclusion",
     "device_bundle_state",
+    "session_bundle_state",
     "notice",
     "proposal",
     "approval",
     "proposal_comment",
     "audit_event",
+    "mail_event",
     "op_receipt",
     "op_receipts",
 ];
@@ -2916,11 +2924,10 @@ fn main() -> Result<()> {
         "check-arch" => check_arch()?,
         "check-registry-drift" => registry_drift::run()?,
         "ci" => ci()?,
-        "conformance" => println!("conformance: not yet implemented"),
         "dist" => dist::run(&args[1..])?,
         _ => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | gen-cli-ref [--check] | gen-registry [--check] | check-arch | check-registry-drift | ci | conformance | dist …>"
+                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | gen-cli-ref [--check] | gen-registry [--check] | check-arch | check-registry-drift | ci | dist …>"
             );
             std::process::exit(2);
         }

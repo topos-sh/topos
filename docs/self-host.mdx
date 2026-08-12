@@ -180,7 +180,7 @@ curl -fsS -H 'Accept: application/json' https://topos.example.com
 ```
 
 Liveness answers `{"ok":true}`, and the protocol card answers
-`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api","server_version":"0.1.20","min_cli_version":"0.1.15"}`.
+`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api","server_version":"0.1.35","min_cli_version":"0.1.15"}`.
 The last two fields are this deployment's compatibility declaration — the release it runs, and the
 oldest `topos` it still speaks to (see [Upgrades](#upgrades)). In the checkout,
 `bash scripts/compose-smoke.sh` runs the same end-to-end smoke the repo's CI does — it builds the
@@ -258,30 +258,6 @@ docker compose logs -f web
 The last command confirms the boot migration ran. Both applications migrate their own schema at
 boot, before binding a port — no migration command to run by hand, and a broken migration crashes
 loudly rather than serving an unmigrated database.
-
-<Note>
-  **Upgrading an install that was fetched, not cloned?** A deployment stood up from the served
-  `compose.yml`/`compose-init-db.sh` pair has no checkout to `git fetch` in. Either stay on the
-  fetched shape — re-fetch the two files, or move the `TOPOS_VERSION` pin in your `.env` to the new
-  tag — or adopt the clone in place: clone the tag into a fresh directory, copy your `.env` across,
-  and **delete any `TOPOS_VERSION` line an older release's quickstart wrote into it** — left
-  behind, it overrides the checkout's own pins and keeps pulling the release it names. Your data is
-  safe either way: the volumes belong to the compose project name (`topos`), not the directory, so
-  the moved checkout finds them (see the next note for installs that predate the pinned name).
-</Note>
-
-<Note>
-  **Upgrading an install older than the pinned project name?** The compose file now sets
-  `name: topos` rather than taking the project name from the directory. If your checkout lives in a
-  directory named something else, compose will look for `topos_*` volumes and find none — it starts
-  as an empty install rather than touching your data.
-
-  Keep your existing volumes by keeping your existing project name — `docker compose -p <your-old-name>`
-  on every command, or `COMPOSE_PROJECT_NAME=<your-old-name>` in your `.env`. **Renaming the directory
-  will not do it:** the `name:` field in the compose file overrides the directory, so the old
-  `<your-old-name>_*` volumes stay orphaned either way. To actually adopt the new name, move the data
-  across deliberately — restore a backup into the `topos_*` volumes (see [Backups](#backups)).
-</Note>
 
 **Back up first** — migrations apply automatically and there is no automated downgrade. Rolling
 back is: stop the stack, restore the pre-upgrade backup, check out the previous tag, `pull` and

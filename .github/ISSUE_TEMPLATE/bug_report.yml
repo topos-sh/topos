@@ -27,7 +27,6 @@ body:
       label: Component
       options:
         - topos (CLI)
-        - topos-plane (server)
         - installer / packaging
         - not sure
     validations:
