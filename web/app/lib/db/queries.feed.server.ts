@@ -1,10 +1,10 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { OwnerActor } from "@/lib/auth/guards.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { bundleStatusInTx } from "@/lib/db/queries.channels.server";
 import type { FeedActor } from "@/lib/db/queries.lane.server";
-import { bundle, channel, decline, seat } from "@/lib/db/schema.app";
+import { channel, decline, seat } from "@/lib/db/schema.app";
 
 /**
  * The FEED data access layer — the two row kinds that decide what the server says a person
@@ -29,56 +29,6 @@ import { bundle, channel, decline, seat } from "@/lib/db/schema.app";
  * authorization is being that person), and the curator ops take an OwnerActor and emit an
  * audit row, because aiming something at someone else has reach.
  */
-
-// ── The person's own view ────────────────────────────────────────────────────────────────────
-
-export interface FeedAssignmentView {
-  kind: "skill" | "channel";
-  /** The catalog kind for bundles ('skill' today); channel rows carry none. */
-  bundleKind?: string;
-  /** The bundle or channel id — the immutable key every form posts. */
-  targetId: string;
-  name: string;
-  /** Who it reaches: this person by name, or the whole workspace. */
-  audience: "you" | "everyone";
-  /** The person placed it themselves, so they can take it back (an unpick). */
-  own: boolean;
-}
-
-export interface FeedView {
-  assignments: FeedAssignmentView[];
-  /** The bundles this person has switched off, name-sorted (they stay visible, dimmed). */
-  declines: { skillId: string; name: string }[];
-}
-
-/** The person's own feed rows in this workspace, resolved to names (name-sorted per group). */
-export async function feedOf(actor: FeedActor): Promise<FeedView> {
-  const ws = actor.workspaceId;
-  const rows = await getDb().execute(sql`
-    SELECT a.user_id, a.created_by, a.self, a.bundle_id, a.channel_id,
-           b.name AS bundle_name, b.kind AS bundle_kind, c.name AS channel_name
-    FROM web.assignment a
-    LEFT JOIN web.bundle b ON b.id = a.bundle_id
-    LEFT JOIN web.channel c ON c.id = a.channel_id
-    WHERE a.workspace_id = ${ws} AND (a.user_id = ${actor.userId} OR a.user_id IS NULL)
-    ORDER BY COALESCE(b.name, c.name)
-  `);
-  const assignments: FeedAssignmentView[] = (rows.rows as Record<string, unknown>[]).map((r) => ({
-    kind: r.bundle_name !== null ? ("skill" as const) : ("channel" as const),
-    ...(r.bundle_name !== null ? { bundleKind: r.bundle_kind as string } : {}),
-    targetId: (r.bundle_id ?? r.channel_id) as string,
-    name: (r.bundle_name ?? r.channel_name) as string,
-    audience: r.user_id === null ? ("everyone" as const) : ("you" as const),
-    own: r.self === true,
-  }));
-  const declined = await getDb()
-    .select({ skillId: decline.bundleId, name: bundle.name })
-    .from(decline)
-    .innerJoin(bundle, and(eq(bundle.id, decline.bundleId), eq(bundle.workspaceId, ws)))
-    .where(and(eq(decline.workspaceId, ws), eq(decline.userId, actor.userId)))
-    .orderBy(asc(bundle.name));
-  return { assignments, declines: declined };
-}
 
 // ── The grouped read behind the assignments page ─────────────────────────────────────────────
 
@@ -460,35 +410,6 @@ export async function unassignChannelFromSelf(
       RETURNING channel_id
     `);
     return deleted.rows.length > 0 ? "unassigned" : "not_assigned";
-  });
-}
-
-/**
- * Switch off every bundle a channel carries TODAY — the convenience behind "I don't want this
- * set" when the set is not the person's to un-assign (the baseline) or when they want the
- * stance to survive the set being re-curated. Per-bundle by construction: bundles added later
- * still arrive.
- */
-export async function declineChannelContents(
-  actor: FeedActor,
-  channelId: string,
-): Promise<{ outcome: "declined"; count: number } | { outcome: "unknown_channel" }> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const row = await channelRowInTx(tx, ws, channelId);
-    if (row === undefined) {
-      return { outcome: "unknown_channel" };
-    }
-    const inserted = await tx.execute(sql`
-      INSERT INTO web.decline (workspace_id, user_id, bundle_id)
-      SELECT ${ws}, ${actor.userId}, cb.bundle_id
-      FROM web.channel_bundle cb
-      JOIN web.bundle b ON b.id = cb.bundle_id AND b.workspace_id = ${ws} AND b.status = 'active'
-      WHERE cb.workspace_id = ${ws} AND cb.channel_id = ${channelId}
-      ON CONFLICT DO NOTHING
-      RETURNING bundle_id
-    `);
-    return { outcome: "declined", count: inserted.rows.length };
   });
 }
 

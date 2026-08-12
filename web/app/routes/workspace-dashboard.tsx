@@ -17,7 +17,7 @@ import { theWorkspace } from "@/lib/db/identity.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
 import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
 import { workspaceSessionCount } from "@/lib/db/queries.sessions.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { publicOrigin } from "@/lib/plane/public-base.server";
 import { useWsPath } from "@/lib/ws-path";
 import { workspaceAddress } from "@/lib/ws-url.server";
 
@@ -69,7 +69,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // Signed in: the one membership-or-404 resolution (an unknown slug and a non-member land the
   // same uniform 404 here).
   const { workspace, actor: memberActor } = await memberInScope(actor, params);
-  const [index, roster, deviceCount] = await Promise.all([
+  const [index, roster, sessionCount] = await Promise.all([
     skillIndexOf(memberActor, workspace.id),
     // Direct seat rows: a seat IS membership, so the count is the roster's length.
     rosterOf(memberActor),
@@ -83,8 +83,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const memberCount = roster.length;
   const dismissCookie = `topos_onboard_dismissed_${workspace.id}`;
   const dismissed = (request.headers.get("cookie") ?? "").includes(`${dismissCookie}=1`);
-  const allDone = deviceCount >= 1 && publishedSkillCount >= 1 && memberCount >= 2;
-  const showOnboarding = !dismissed && !allDone && (publishedSkillCount === 0 || deviceCount < 2);
+  const allDone = sessionCount >= 1 && publishedSkillCount >= 1 && memberCount >= 2;
+  const showOnboarding = !dismissed && !allDone && (publishedSkillCount === 0 || sessionCount < 2);
   return {
     face: "page" as const,
     name: workspace.displayName,
@@ -96,9 +96,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     onboarding: showOnboarding
       ? {
           dismissCookie,
-          origin: followBase(request),
+          origin: publicOrigin(request),
           shareAddress: workspaceAddress(request, workspace.name),
-          deviceCount,
+          sessionCount,
           publishedSkillCount,
           memberCount,
         }

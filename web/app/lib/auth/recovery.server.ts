@@ -16,33 +16,6 @@ import { getDb } from "@/lib/db/index.server";
  */
 
 export const RECOVERY_IDENTIFIER_PREFIX = "topos-recovery:";
-const RECOVERY_TTL_MS = 15 * 60 * 1000;
-
-/**
- * Mint + store the code for an email's user; null when no such user exists (script prints a
- * miss). Mirrors scripts/mint-recovery-code.mjs — keep the SQL in lockstep.
- */
-export async function mintRecoveryCode(
-  email: string,
-): Promise<{ code: string; expiresInMinutes: number } | null> {
-  const db = getDb();
-  const lowered = email.trim().toLowerCase();
-  const users = await db.execute(sql`SELECT id FROM web."user" WHERE email = ${lowered}`);
-  const userId = (users.rows[0] as { id: string } | undefined)?.id;
-  if (!userId) {
-    return null;
-  }
-  const code = randomBytes(16).toString("base64url");
-  const identifier = `${RECOVERY_IDENTIFIER_PREFIX}${userId}`;
-  const expiresAt = new Date(Date.now() + RECOVERY_TTL_MS);
-  await db.execute(sql`DELETE FROM web.verification WHERE identifier = ${identifier}`);
-  await db.execute(
-    sql`INSERT INTO web.verification (id, identifier, value, expires_at, created_at, updated_at)
-        VALUES (${`rec_${randomBytes(12).toString("hex")}`}, ${identifier},
-                encode(sha256(convert_to(${code}, 'UTF8')), 'hex'), ${expiresAt}, now(), now())`,
-  );
-  return { code, expiresInMinutes: RECOVERY_TTL_MS / 60_000 };
-}
 
 /**
  * Consume a presented recovery code: match by hash, re-hash the new password with the

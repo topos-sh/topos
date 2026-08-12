@@ -1,14 +1,14 @@
-import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { MemberActor } from "@/lib/auth/guards.server";
 import { getDb } from "@/lib/db/index.server";
 import { auditEvent } from "@/lib/db/schema.app";
 
 /**
  * The admin ceremonies' audit writer + the history pages' reader, over the ONE `audit_event`
- * ledger (which absorbed the old per-surface event tables). ONE row per attempt, whatever the
+ * ledger. ONE row per attempt, whatever the
  * outcome (a refused attempt is as much a fact as a landed act; the trail must show both).
  * Kinds are an open vocabulary; subjects name the target (a user id, a bundle or channel name,
- * a device id). recordAdminEvent never throws into a ceremony: recording is best-effort by
+ * a session id). recordAdminEvent never throws into a ceremony: recording is best-effort by
  * design — an audit fault must not mask the act's own outcome. (Data-layer MUTATIONS emit
  * their rows in-transaction via auditInTx instead; this writer is for route-level ceremony
  * outcomes that have no surrounding transaction.)
@@ -82,7 +82,6 @@ export async function lastAuditEventOfKind(
         eq(auditEvent.kind, kind),
         // The panels narrate acts, not refusals.
         sql`${auditEvent.outcome} = 'ok'`,
-        isNotNull(auditEvent.createdAt),
       ),
     )
     .orderBy(desc(auditEvent.id))

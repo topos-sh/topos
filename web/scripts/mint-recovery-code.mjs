@@ -7,7 +7,8 @@ import { randomBytes } from "node:crypto";
  *
  *   DATABASE_URL=postgres://… node scripts/mint-recovery-code.mjs someone@example.com
  *
- * SAME SQL as app/lib/auth/recovery.server.ts's mintRecoveryCode — keep the SQL in lockstep.
+ * This script is the ONLY implementation of the mint — nothing in app/ writes a recovery code;
+ * app/lib/auth/recovery.server.ts holds the consuming half the /recovery form calls.
  * Only the code's sha256 is stored (identifier `topos-recovery:<user id>`, 15-minute expiry,
  * any older code replaced); the public /recovery form consumes it. An unknown email prints a
  * miss and exits 1 — this is an operator-only surface on the box's own terminal, so honesty

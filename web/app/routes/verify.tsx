@@ -35,7 +35,7 @@ import {
 } from "@/lib/db/identity.server";
 import { createWorkspacePrecheck, workspaceNameAvailable } from "@/lib/db/workspace-create.server";
 import { useSubmittingIntent } from "@/lib/pending";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { publicOrigin } from "@/lib/plane/public-base.server";
 import { allowVerifyLookup } from "@/lib/rate-limit.server";
 import { type Loopback, loopbackFrom, verifySelfPath } from "@/lib/verify-path";
 import {
@@ -135,7 +135,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     loopback,
     resolved,
     chooser: await chooserFor(actor),
-    origin: followBase(request),
+    origin: publicOrigin(request),
   };
 }
 

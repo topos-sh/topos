@@ -143,18 +143,6 @@ export async function channelRowById(
   return rows[0];
 }
 
-/** The name → immutable-key resolve for pages that need the id alone (the history page's
- * anchor: audit rows subject the channel ID, which outlives renames). */
-export async function channelKeyByName(
-  actor: MemberActor,
-  name: string,
-): Promise<ChannelKey | undefined> {
-  const row = await channelByName(actor.workspaceId, name);
-  return row === undefined
-    ? undefined
-    : { channelId: row.id, name: row.name, isDefault: row.isDefault };
-}
-
 /** One bundle reference a channel holds — joined to the catalog for its name/display/status. */
 export interface ChannelSkillRef {
   skillId: string;

@@ -1,10 +1,9 @@
-import { and, asc, count, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
   feedDemandSql,
-  mintChannelId,
   mintInvitationId,
   mintInviteToken,
   sessionUnexpiredSql,
@@ -12,12 +11,6 @@ import {
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
-import {
-  bundleStatusInTx,
-  CHANNEL_RESERVED,
-  placeBundleRefInTx,
-  unplaceBundleRefInTx,
-} from "@/lib/db/queries.channels.server";
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
   bundle,
@@ -26,7 +19,6 @@ import {
   invitation,
   notice,
   proposal,
-  seat,
   workspace,
 } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
@@ -47,11 +39,6 @@ import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody
  * Multi-read answers (delivery, the channels index) run inside ONE REPEATABLE READ
  * transaction — one snapshot, so the served sets can never straddle a feed change.
  */
-
-const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
-const CHANNEL_NAME_MAX = 64;
-
-type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
 
 /** A REAL `text[]` value — an `ARRAY[...]::text[]` constructor with every element its own bind
  * parameter, so no hand-rolled literal ever has to escape a value. NULL elements ride through
@@ -489,112 +476,6 @@ export interface FeedActor {
   readonly workspaceId: string;
 }
 
-// ── Curation (place / unplace, create-on-first-use) ─────────────────────────────────────────
-
-async function channelByNameInTx(tx: Tx, ws: string, name: string) {
-  // FOR UPDATE — the same pin every mode-gated channel read takes: a concurrent open→curated
-  // flip (or delete) conflicts with this transaction instead of letting a member's edit slip
-  // past a gate that changed after the read. (The insert arm's create-race re-read rides this
-  // same lock.)
-  const rows = await tx
-    .select({ id: channel.id, isDefault: channel.isDefault, mode: channel.mode })
-    .from(channel)
-    .where(and(eq(channel.workspaceId, ws), eq(channel.name, name)))
-    .limit(1)
-    .for("update");
-  return rows[0];
-}
-
-/**
- * Place a bundle reference into a channel — creating the channel on FIRST use (member-level).
- * Everything past the name resolution is the ONE curation core shared with the web page's
- * id-keyed functions (queries.channels.server.ts): the bundle-active gate, the CURATED
- * channel's reviewer+ gate (symmetric with removal), the idempotent insert, and the audit
- * row. The create-race loser places into the winner's row ('placed', never a raw conflict):
- * ids are minted randomly, so only the name unique can collide, and a re-select resolves it.
- */
-export async function lanePlaceBundle(
-  actor: SessionActor,
-  channelName: string,
-  bundleId: string,
-): Promise<
-  "placed" | "created" | "bad_name" | "unknown_skill" | "skill_not_active" | "curated_role_required"
-> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const status = await bundleStatusInTx(tx, ws, bundleId);
-    if (status === null) {
-      return "unknown_skill";
-    }
-    if (status !== "active") {
-      return "skill_not_active";
-    }
-    let row = await channelByNameInTx(tx, ws, channelName);
-    let created = false;
-    if (row === undefined) {
-      // The SAME name predicate the web door runs — reserved names included. A reserved name
-      // minted here would carry real reach while its page is unreachable (a top-level static
-      // route outranks the `:channel` face), i.e. an unlisted broadcast set with no curation or
-      // history surface.
-      if (
-        !CHANNEL_NAME.test(channelName) ||
-        channelName.length > CHANNEL_NAME_MAX ||
-        CHANNEL_RESERVED.has(channelName)
-      ) {
-        return "bad_name";
-      }
-      // ON CONFLICT (never try/catch): a unique violation would ABORT this whole transaction —
-      // Postgres refuses every later statement — so the race must be absorbed without raising.
-      // Ids are minted randomly, so only the name unique can collide.
-      const id = mintChannelId();
-      const inserted = await tx
-        .insert(channel)
-        .values({ id, workspaceId: ws, name: channelName, createdBy: actor.userId })
-        .onConflictDoNothing({ target: [channel.workspaceId, channel.name] })
-        .returning({ id: channel.id });
-      if (inserted.length > 0) {
-        row = { id, isDefault: false, mode: "open" };
-        created = true;
-        await auditInTx(tx, {
-          workspaceId: ws,
-          actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
-          kind: "channel_created",
-          subject: id,
-          outcome: "ok",
-          details: { name: channelName },
-        });
-      } else {
-        // The race loser: the name landed under someone else's insert — place into theirs.
-        row = await channelByNameInTx(tx, ws, channelName);
-        if (row === undefined) {
-          return "bad_name";
-        }
-      }
-    }
-    const placed = await placeBundleRefInTx(tx, actor, row, bundleId);
-    if (placed !== "placed") {
-      return placed;
-    }
-    return created ? "created" : "placed";
-  });
-}
-
-/** Remove a bundle reference from a channel — symmetric gate with place, the shared core. */
-export async function laneUnplaceBundle(
-  actor: SessionActor,
-  channelName: string,
-  bundleId: string,
-): Promise<"removed" | "not_placed" | "unknown_channel" | "curated_role_required"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const row = await channelByNameInTx(tx, ws, channelName);
-    if (row === undefined) {
-      return "unknown_channel";
-    }
-    return await unplaceBundleRefInTx(tx, actor, row, bundleId);
-  });
-}
-
 // ── Protection setters ───────────────────────────────────────────────────────────────────────
 
 /** Tightening takes reviewer+; loosening back to open widens what members can do — owner. */
@@ -897,12 +778,6 @@ export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillInd
 }
 
 // ── The shared helpers other DAL modules use ────────────────────────────────────────────────
-
-/** How many seats the workspace holds — the default channel's reach base. */
-export async function workspaceSeatCount(ws: string): Promise<number> {
-  const rows = await getDb().select({ n: count() }).from(seat).where(eq(seat.workspaceId, ws));
-  return rows[0]?.n ?? 0;
-}
 
 /** The open-proposal rows of one bundle (the session lane's list read). */
 export async function openProposalsOf(

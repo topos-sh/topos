@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { docsLlmsTxt } from "@/lib/docs/docs.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { publicOrigin } from "@/lib/plane/public-base.server";
 
 /**
  * GET /docs/llms.txt — the documentation index in the llms.txt convention: every page, its
@@ -13,7 +13,7 @@ import { followBase } from "@/lib/plane/follow-base.server";
  */
 
 export async function loader({ request }: LoaderFunctionArgs): Promise<Response> {
-  return new Response(docsLlmsTxt(followBase(request)), {
+  return new Response(docsLlmsTxt(publicOrigin(request)), {
     headers: {
       "content-type": "text/plain; charset=utf-8",
       "cache-control": "public, max-age=300",

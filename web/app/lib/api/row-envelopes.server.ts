@@ -1,7 +1,7 @@
 /**
  * The member-lane ROW-OP envelopes — the `JsonEnvelope` bodies every naturally-idempotent row op
- * answers (follow/unfollow/exclude, channel join/leave, curation place/unplace, protect, notices ack,
- * invitation). They sit alongside the transport-fault family in `wire.server.ts` (which this reuses
+ * answers (skill + channel protect, notices ack, session logout, invitation). They sit alongside
+ * the transport-fault family in `wire.server.ts` (which this reuses
  * for the uniform 404 + the 500), matching the vault's `wire::map` shapes field-for-field:
  *
  *  - an OK outcome → a 200 `ok_status_envelope` carrying a `status` string (or `ok_envelope` with a

@@ -83,11 +83,9 @@ describe("a self-pick and a curator assignment coexist", () => {
       await f.unassign(asOwner(ws, OWNER, "Olive"), { bundleId: SKILL.id }, { userId: MEMBER }),
     ).toBe("unassigned");
     const rows = await assignmentRows({ bundleId: SKILL.id });
+    // What survives is the person's OWN row; delivery still carries it.
     expect(rows.map((r) => r.self)).toEqual([true]);
-    // The feed still reads it as the person's own; delivery still carries it.
-    const view = await f.feedOf(member());
-    const mine = view.assignments.find((a) => a.targetId === SKILL.id);
-    expect(mine?.own).toBe(true);
+    expect(rows[0]?.created_by).toBe(MEMBER);
     const l = await lane();
     const body = await l.deliveryFor(member());
     expect(body.skills.some((s) => s.skill_id === SKILL.id)).toBe(true);

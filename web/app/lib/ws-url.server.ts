@@ -1,5 +1,5 @@
 import { composition } from "@/composition.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { publicOrigin } from "@/lib/plane/public-base.server";
 import { wsHref } from "@/lib/ws-path";
 
 /**
@@ -19,35 +19,35 @@ export function wsPathServer(workspaceName: string, sub?: string): string {
 }
 
 /**
- * The full shareable workspace address — what sharing/joining speak and the CLI follows verbatim.
+ * The full shareable workspace address — what sharing/joining speak and the CLI logs into verbatim.
  * Single tenancy → the BARE ORIGIN (the install IS the one workspace); multi → `<origin>/<name>`.
- * The origin resolution matches `followBase` exactly, so the address matches the printed setup line
+ * The origin resolution matches `publicOrigin` exactly, so the address matches the printed setup line
  * and the protocol card's base.
  */
 export function workspaceAddress(request: Request, workspaceName: string): string {
-  const base = followBase(request);
+  const base = publicOrigin(request);
   return composition.tenancy === "multi" ? `${base}/${workspaceName}` : base;
 }
 
 /**
  * This deployment's own agent-onboarding document (`<origin>/agent`) — what an invite (or the
  * dashboard checklist) tells a recipient's agent to fetch and follow. Same origin resolution as
- * the follow address, so the two lines in one mail can never disagree.
+ * the workspace address, so the two lines in one mail can never disagree.
  */
 export function agentDocUrl(request: Request): string {
-  return `${followBase(request)}/agent`;
+  return `${publicOrigin(request)}/agent`;
 }
 
 /**
  * The tokened invitation URL the invite mail carries — worth ONE invitation, never an account.
  * Single tenancy → origin-rooted `/invite/<token>`; multi → `<origin>/<name>/invite/<token>`.
- * Same origin resolution as the follow address (`followBase`), so the browser link, the agent
+ * Same origin resolution as the workspace address (`publicOrigin`), so the browser link, the agent
  * paste-block, and the terminal line in one mail all root identically.
  *
  * SECURITY — this is a CAPABILITY url: the token in it is the invitation. Its trust is only as
  * good as the origin it roots at, so a deployment that admits invitations MUST pin
- * `TOPOS_PUBLIC_URL` (the canonical origin `followBase` then returns). Absent that pin,
- * `followBase` falls back to the request's own Host — the same app-wide posture the claim link
+ * `TOPOS_PUBLIC_URL` (the canonical origin `publicOrigin` then returns). Absent that pin,
+ * `publicOrigin` falls back to the request's own Host — the same app-wide posture the claim link
  * and the device-flow verification URL already carry — and behind a proxy that forwards
  * arbitrary Host headers an authenticated inviter could root the mailed link at a host they
  * control, phishing the invitee's click for the token. The compose stack and every hosted
@@ -55,7 +55,7 @@ export function agentDocUrl(request: Request): string {
  * because there is no other host to forge.
  */
 export function inviteUrl(request: Request, workspaceName: string, token: string): string {
-  const base = followBase(request);
+  const base = publicOrigin(request);
   const root = composition.tenancy === "multi" ? `${base}/${workspaceName}` : base;
   return `${root}/invite/${token}`;
 }

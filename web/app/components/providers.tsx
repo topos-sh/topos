@@ -9,8 +9,9 @@ import { membershipsQueryKey } from "@/lib/query/memberships";
  * cycle the way the RSC layout did — instead the shell route's loader returns the workspace roster
  * and hands it here, and this provider seeds it straight into the cache under the memberships query
  * key. The rail's `useQuery` then paints from that server data on first render (no loading flash),
- * while React Query still owns refetch + invalidation on the client (create a workspace and the rail
- * refetches without a reload). `getQueryClient()` hands back a fresh client on the server and the
+ * while React Query owns refetch on the client: nothing invalidates the key by hand, so the seed
+ * is refreshed by the rail's own remount/focus refetches once it is older than the client's 60s
+ * staleTime. `getQueryClient()` hands back a fresh client on the server and the
  * browser singleton on the client, so the seed never leaks across requests.
  */
 export function Providers({

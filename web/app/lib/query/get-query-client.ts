@@ -19,7 +19,7 @@ let browserQueryClient: QueryClient | undefined;
 /**
  * Server: a FRESH client per request — never share cache across requests (one user's data must
  * not leak into another's render). Browser: a singleton, so navigations reuse one cache and a
- * mutation's invalidation reaches every mounted consumer.
+ * refetch past the staleTime reaches every mounted consumer of the key.
  */
 export function getQueryClient(): QueryClient {
   if (isServer) {

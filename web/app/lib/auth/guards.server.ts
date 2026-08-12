@@ -3,7 +3,7 @@ import { composition } from "@/composition.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
 import { seatOf, sessionActor, theWorkspace, workspaceByName } from "@/lib/db/identity.server";
 import { personDisplay } from "@/lib/person-display";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { publicOrigin } from "@/lib/plane/public-base.server";
 import { getAuth } from "./server";
 
 /** The workspace row a scoped page resolves — the non-null result of the tenancy lookup. */
@@ -217,7 +217,7 @@ export function assertSameOrigin(request: Request): void {
   // own internal host on `request.url` while the browser sends the PUBLIC one, so comparing
   // against either alone would refuse every real write on one topology or the other.
   const requestHost = new URL(request.url).host;
-  const publicHost = new URL(followBase(request)).host;
+  const publicHost = new URL(publicOrigin(request)).host;
   if (presented !== requestHost && presented !== publicHost) {
     throw uniformNotFound();
   }

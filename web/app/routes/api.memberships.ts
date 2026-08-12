@@ -4,9 +4,9 @@ import { getAuth } from "@/lib/auth/server";
 import { membershipsFor } from "@/lib/db/queries.server";
 
 /**
- * The signed-in user's seats as JSON — the client rail's refetch target (hit after a membership
- * change so the sidebar updates without a reload; zero or one rows on this single-tenant
- * install). Authorization is the SAME mint the pages use: a UserActor from the live session;
+ * The signed-in user's seats as JSON — the client rail's refetch target (hit when the rail
+ * remounts or the window regains focus past its 60s staleTime; zero or one rows on this
+ * single-tenant install). Authorization is the SAME mint the pages use: a UserActor from the live session;
  * anything else is a 401 (an API returns a status, never a redirect to /login). The seat table
  * is the sole source, read `no-store`.
  */

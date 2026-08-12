@@ -39,8 +39,8 @@ import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
  * Sequence per op: the caller already authenticated the device and replayed the op receipt;
  * this flow (c) resolves the protection gate, the kind gate, and — for an MCP bundle — the
  * server-document gate (app/lib/mcp/publish-gate.server.ts), (d) registers a GENESIS bundle
- * (server-minted id + birth name + birth KIND + `everyone`/`--to` placement + the author
- * self-follow), (e) makes the vault call, and (f) lands the final web transaction —
+ * (server-minted id + birth name + birth KIND + `everyone`/`--to` placement), (e) makes the
+ * vault call, and (f) lands the final web transaction —
  * registration/placement/proposal/audit writes + the op receipt carrying the terminal envelope
  * verbatim. Genesis registration happens on ONE path — the direct arm below, which a forced
  * proposal also takes when no bundle is registered yet (there is no base to review against) —

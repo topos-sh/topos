@@ -1,4 +1,4 @@
-import { relations, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -18,7 +18,7 @@ import { user, webSchema } from "./schema.auth";
 
 /**
  * The app-owned directory: schema `web` holds EVERY identity, policy, and product row —
- * sessions, workspace + seats, invitations, bundles, channels, per-person profiles, notices,
+ * sessions, workspace + seats, invitations, bundles, channels, assignments + declines, notices,
  * proposals, audit. The plane schema (read-only from this tier) holds byte custody only and
  * joins on opaque ids, never FKs.
  *
@@ -34,11 +34,11 @@ import { user, webSchema } from "./schema.auth";
  * Integrity posture:
  *   · Same-workspace coherence is FK-ENFORCED: bundle and channel expose (id, workspace_id)
  *     composite keys, and every row that pairs them carries workspace_id pinned by composite
- *     FKs — a channel can never carry another workspace's bundle, a profile entry can never
+ *     FKs — a channel can never carry another workspace's bundle, an assignment can never
  *     name a foreign bundle.
  *   · Standing policy rows anchor to SEAT, not user: deleting a seat cascades away the
- *     member's profile AND their sessions — revocation is ONE row delete, and a later
- *     re-invite starts clean.
+ *     member's assignments and declines AND their sessions — revocation is ONE row delete, and
+ *     a later re-invite starts clean.
  *   · In-lane protections (CHECKs, FKs) are BUG-guards: the app role owns its schema;
  *     append-only tables are append-only by code discipline + review gates. The cross-lane
  *     boundary (the app cannot write plane; the vault cannot read web) stays grant-enforced.
@@ -942,23 +942,3 @@ export const opReceipt = webSchema.table(
     check("op_receipt_request_sha256_check", sql`octet_length(${table.requestSha256}) = 32`),
   ],
 );
-
-// ── Relations (query-layer navigation; the FKs above are the integrity) ─────────────────────
-
-export const cliSessionRelations = relations(cliSession, ({ one }) => ({
-  workspace: one(workspace, { fields: [cliSession.workspaceId], references: [workspace.id] }),
-  user: one(user, { fields: [cliSession.userId], references: [user.id] }),
-}));
-
-export const seatRelations = relations(seat, ({ one }) => ({
-  workspace: one(workspace, { fields: [seat.workspaceId], references: [workspace.id] }),
-  user: one(user, { fields: [seat.userId], references: [user.id] }),
-}));
-
-export const bundleRelations = relations(bundle, ({ one }) => ({
-  workspace: one(workspace, { fields: [bundle.workspaceId], references: [workspace.id] }),
-}));
-
-export const channelRelations = relations(channel, ({ one }) => ({
-  workspace: one(workspace, { fields: [channel.workspaceId], references: [workspace.id] }),
-}));

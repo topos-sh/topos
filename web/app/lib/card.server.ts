@@ -1,15 +1,16 @@
 import { MIN_CLI_VERSION } from "@/lib/api/compat.server";
 import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
-import { apiBase } from "@/lib/plane/follow-base.server";
+import { apiBase } from "@/lib/plane/public-base.server";
 
 /**
  * The CONSTANT PROTOCOL CARD — the app's non-browser face for every resource address
  * (`/{workspace}`, `/{workspace}/channels/{name}`, `/{workspace}/skills/{name}`) and for any
  * unmatched path. A fetch that is not a browser must still teach a client what to do WITHOUT
  * leaking whether the path names anything: one constant card for every path and every caller —
- * no path echo, no existence signal. It mirrors the vault's own fallback card (same
- * negotiation, same teaching): a machine face (JSON — the discriminant, the API base to re-root
- * onto, and this deployment's version declaration) for a client asking for JSON, a human/agent
+ * no path echo, no existence signal. This tier is the ONLY place that serves it: the vault has
+ * no public listener and answers an unmatched path with its uniform JSON 404. Two faces: a
+ * machine face (JSON — the discriminant, the API base to re-root onto, and this deployment's
+ * version declaration) for a client asking for JSON, a human/agent
  * markdown card for everything that is not a browser. A browser (an Accept naming text/html)
  * gets `null` — the route renders its own HTML page, which must be equally constant for an
  * anonymous caller.
@@ -20,12 +21,12 @@ import { apiBase } from "@/lib/plane/follow-base.server";
  * public in the release the operator is running.
  */
 
-/** The checksum-verified installer one-liner (the same line the vault's card teaches). */
+/** The checksum-verified installer one-liner the card teaches a client that has no topos yet. */
 export const INSTALL_LINE =
   "curl -fsSL https://github.com/topos-sh/topos/releases/latest/download/install.sh | sh";
 
 /**
- * The vault card's Accept semantics, mirrored: any Accept value asking for JSON wins; a
+ * The card's Accept semantics: any Accept value asking for JSON wins; a
  * browser's text/html is the caller's to serve; everything else (curl's bare fetch, an agent's
  * fetch) reads the markdown card. Checked across EVERY Accept header value.
  */

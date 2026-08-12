@@ -31,6 +31,24 @@ async function q() {
   return import("@/lib/db/queries.channels.server");
 }
 
+/** The default channel's immutable id, read straight off the row the boot minted. */
+async function everyoneId(): Promise<string> {
+  const rows = await db.q<{ id: string }>(
+    `SELECT id FROM web.channel WHERE is_default AND workspace_id = $1`,
+    [wsId],
+  );
+  return rows[0]?.id ?? "";
+}
+
+/** A channel's CURRENT name, or undefined when nothing carries it (a rename moved it). */
+async function channelIdNamed(name: string): Promise<string | undefined> {
+  const rows = await db.q<{ id: string }>(
+    `SELECT id FROM web.channel WHERE workspace_id = $1 AND name = $2`,
+    [wsId, name],
+  );
+  return rows[0]?.id;
+}
+
 beforeAll(async () => {
   db = await createScratchDb("web_channels");
   wsId = await bootWorkspace();
@@ -160,18 +178,13 @@ describe("renameChannel (id-keyed, owner)", () => {
   it("refuses the default channel and a bad name; renames otherwise, id-keyed", async () => {
     const queries = await q();
     const owner = asOwner(wsId, "u_owner", "Owner");
-    const everyone = await queries.channelKeyByName(asMember(wsId, "u_ana"), "everyone");
-    expect(await queries.renameChannel(owner, everyone?.channelId ?? "", "all-hands")).toBe(
-      "builtin",
-    );
+    expect(await queries.renameChannel(owner, await everyoneId(), "all-hands")).toBe("builtin");
     expect(await queries.renameChannel(owner, engId, "Bad_Name")).toBe("bad_name");
     expect(await queries.renameChannel(owner, engId, "new")).toBe("bad_name");
     expect(await queries.renameChannel(owner, engId, "unknown-yet")).toBe("renamed");
     // The rename is visible under the NEW name; the old one no longer resolves.
-    expect(await queries.channelKeyByName(asMember(wsId, "u_ana"), "unknown-yet")).toMatchObject({
-      channelId: engId,
-    });
-    expect(await queries.channelKeyByName(asMember(wsId, "u_ana"), "eng")).toBeUndefined();
+    expect(await channelIdNamed("unknown-yet")).toBe(engId);
+    expect(await channelIdNamed("eng")).toBeUndefined();
     expect(await queries.renameChannel(owner, "c_nope", "whatever")).toBe("unknown_channel");
     // Restore for the later cases.
     expect(await queries.renameChannel(owner, engId, "eng")).toBe("renamed");
@@ -190,8 +203,7 @@ describe("deleteChannel (id-keyed, owner)", () => {
   it("cascades references + memberships; the audit trail keeps the channel id as subject", async () => {
     const queries = await q();
     const owner = asOwner(wsId, "u_owner", "Owner");
-    const everyone = await queries.channelKeyByName(asMember(wsId, "u_ana"), "everyone");
-    expect(await queries.deleteChannel(owner, everyone?.channelId ?? "")).toBe("builtin");
+    expect(await queries.deleteChannel(owner, await everyoneId())).toBe("builtin");
     expect(await queries.deleteChannel(owner, "c_nope")).toBe("unknown_channel");
 
     expect(await queries.deleteChannel(owner, engId)).toBe("deleted");

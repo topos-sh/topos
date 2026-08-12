@@ -6,7 +6,6 @@ import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
 import { action as catchAllAction, loader as catchAllLoader } from "@/routes/api.v1.$";
 import { action as channelProtAction } from "@/routes/api.v1.channel-protection";
 import { loader as channelsLoader, action as channelsWrongMethod } from "@/routes/api.v1.channels";
-import { action as curationAction } from "@/routes/api.v1.curation";
 import { loader as deliveryLoader, action as deliveryWrongMethod } from "@/routes/api.v1.delivery";
 import { action as invitationsAction } from "@/routes/api.v1.invitations";
 import { action as deviceAuthorizeAction } from "@/routes/api.v1.login-authorize";
@@ -462,20 +461,6 @@ const ALL_ROUTES: RouteCase[] = [
     body: { emails: ["x@y.z"] },
   },
   {
-    name: "place",
-    h: curationAction,
-    method: "PUT",
-    params: { channel: "eng", skill: "s_alpha" },
-    path: "/channels/eng/skills/s_alpha",
-  },
-  {
-    name: "unplace",
-    h: curationAction,
-    method: "DELETE",
-    params: { channel: "eng", skill: "s_alpha" },
-    path: "/channels/eng/skills/s_alpha",
-  },
-  {
     name: "skill-protect",
     h: skillProtAction,
     method: "PUT",
@@ -510,9 +495,12 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
 
   it("an ENDED session's credential → 404 (a write)", async () => {
     const res = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/eng/skills/s_beta`, { cred: CREDS.revoked }),
-      { ws: wsId, channel: "eng", skill: "s_beta" },
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_beta/protection`, {
+        cred: CREDS.revoked,
+        body: { level: "reviewed" },
+      }),
+      { ws: wsId, skill: "s_beta" },
     );
     await expectUniform404(res);
   });
@@ -537,9 +525,12 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
 
   it("an unsupported method on a served action → the uniform 404 (no method oracle)", async () => {
     const res = await drive(
-      curationAction,
-      req("POST", `/api/v1/workspaces/${wsId}/channels/eng/skills/s_alpha`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "eng", skill: "s_alpha" },
+      skillProtAction,
+      req("POST", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
+        cred: CREDS.mem,
+        body: { level: "reviewed" },
+      }),
+      { ws: wsId, skill: "s_alpha" },
     );
     await expectUniform404(res);
   });
@@ -564,11 +555,14 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
     );
   });
 
-  it("a curation write on an unknown skill folds to the uniform 404 (never an existence oracle)", async () => {
+  it("a write on an unknown skill folds to the uniform 404 (never an existence oracle)", async () => {
     const res = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/eng/skills/s_nope`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "eng", skill: "s_nope" },
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_nope/protection`, {
+        cred: CREDS.owner,
+        body: { level: "reviewed" },
+      }),
+      { ws: wsId, skill: "s_nope" },
     );
     await expectUniform404(res);
   });
@@ -779,24 +773,6 @@ describe("200 DENIED (a member's refusal names WHY, never a 403)", () => {
     expect(await res.json()).toEqual(deniedBody("protect", "REVIEWER_ROLE_REQUIRED"));
   });
 
-  it("a member curating into a CURATED channel → CURATED_ROLE_REQUIRED", async () => {
-    const res = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/locked/skills/s_beta`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "locked", skill: "s_beta" },
-    );
-    expect(await res.json()).toEqual(deniedBody("channel", "CURATED_ROLE_REQUIRED"));
-  });
-
-  it("a new channel name that violates the charset → BAD_NAME", async () => {
-    const res = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/Bad_Name/skills/s_beta`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "Bad_Name", skill: "s_beta" },
-    );
-    expect(await res.json()).toEqual(deniedBody("channel", "BAD_NAME"));
-  });
-
   it("inviting on the unarmed default deployment → MAIL_NOT_CONFIGURED, nothing written", async () => {
     // The test env carries no TOPOS_MAIL_SMTP_* — exactly a fresh self-host: the mailbox
     // round-trip IS the invited sign-up's identity rung, so the op refuses typed.
@@ -926,60 +902,6 @@ describe("delivery", () => {
     await db.q(`DELETE FROM web.assignment WHERE user_id = 'u_mem' AND channel_id = 'c_ops'`);
     await db.q(`DELETE FROM web.channel_bundle WHERE channel_id = 'c_ops'`);
     expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
-  });
-});
-
-// ── (g) curation ─────────────────────────────────────────────────────────────────────────────
-
-describe("curation", () => {
-  it("create-on-first-use, place, remove, then remove-again (not_placed)", async () => {
-    const created = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_beta`, {
-        cred: CREDS.mem,
-      }),
-      { ws: wsId, channel: "incubator", skill: "s_beta" },
-    );
-    expect(await created.json()).toEqual(okStatusBody("channel", "created"));
-    const placed = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_alpha`, {
-        cred: CREDS.mem,
-      }),
-      { ws: wsId, channel: "incubator", skill: "s_alpha" },
-    );
-    expect(await placed.json()).toEqual(okStatusBody("channel", "placed"));
-    const removed = await drive(
-      curationAction,
-      req("DELETE", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_alpha`, {
-        cred: CREDS.mem,
-      }),
-      { ws: wsId, channel: "incubator", skill: "s_alpha" },
-    );
-    expect(await removed.json()).toEqual(okStatusBody("channel", "removed"));
-    const notPlaced = await drive(
-      curationAction,
-      req("DELETE", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_alpha`, {
-        cred: CREDS.mem,
-      }),
-      { ws: wsId, channel: "incubator", skill: "s_alpha" },
-    );
-    expect(await notPlaced.json()).toEqual(okStatusBody("channel", "not_placed"));
-  });
-
-  it("a reviewer curates a CURATED channel; an inactive bundle refuses typed", async () => {
-    const placed = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/locked/skills/s_beta`, { cred: CREDS.rev }),
-      { ws: wsId, channel: "locked", skill: "s_beta" },
-    );
-    expect(await placed.json()).toEqual(okStatusBody("channel", "placed"));
-    const archived = await drive(
-      curationAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/ops/skills/s_arch`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "ops", skill: "s_arch" },
-    );
-    expect(await archived.json()).toEqual(deniedBody("channel", "SKILL_NOT_ACTIVE"));
   });
 });
 

@@ -664,16 +664,26 @@ describe("the feed (assignments − declines) + delivery", () => {
     // no `assigned_by` — their own act attributes to nobody else).
     expect(named?.via).toEqual({ channels: ["named-channel"], direct: true, picked: true });
 
-    // The person's own view: their rows, each labelled by audience and by who placed it.
-    const view = await feed.feedOf(actor);
-    expect(
-      view.assignments.map((a) => `${a.kind}:${a.name}:${a.audience}:${a.own}`).sort(),
-    ).toEqual([
+    // One row per provenance underneath, each labelled by audience and by who placed it: the
+    // workspace baseline reaches everyone and nobody picked it, while the two the person chose
+    // are theirs by name and carry the self flag.
+    const rows = await q<{ kind: string; name: string; audience: string; self: boolean }>(
+      `SELECT CASE WHEN a.bundle_id IS NULL THEN 'channel' ELSE 'skill' END AS kind,
+              COALESCE(b.name, c.name) AS name,
+              CASE WHEN a.user_id IS NULL THEN 'everyone' ELSE 'you' END AS audience,
+              a.self
+       FROM web.assignment a
+       LEFT JOIN web.bundle b ON b.id = a.bundle_id
+       LEFT JOIN web.channel c ON c.id = a.channel_id
+       WHERE a.workspace_id = $1 AND (a.user_id = 'u_ent' OR a.user_id IS NULL)`,
+      [wsId],
+    );
+    expect(rows.map((r) => `${r.kind}:${r.name}:${r.audience}:${r.self}`).sort()).toEqual([
       "channel:everyone:everyone:false",
       "channel:named-channel:you:true",
       "skill:via-named-channel:you:true",
     ]);
-    expect(view.declines).toEqual([]);
+    expect(await q(`SELECT 1 FROM web.decline WHERE user_id = 'u_ent'`)).toHaveLength(0);
   });
 
   it("an archived bundle refuses the add typed; an unknown one is unknown_skill", async () => {
@@ -706,11 +716,11 @@ describe("the feed (assignments − declines) + delivery", () => {
     let delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id)).toContain("s_curated");
     // The person did NOT place it, so it is not theirs to unpick — declining is their switch.
-    const view = await feed.feedOf(actor);
-    expect(view.assignments.find((a) => a.name === "curator-assigned")).toMatchObject({
-      audience: "you",
-      own: false,
-    });
+    expect(
+      await q<{ self: boolean }>(
+        `SELECT self FROM web.assignment WHERE bundle_id = 's_curated' AND user_id = 'u_ent'`,
+      ),
+    ).toEqual([{ self: false }]);
     expect(await feed.unpickBundle(actor, "s_curated")).toBe("not_picked");
     expect(await feed.declineBundle(actor, "s_curated")).toBe("declined");
     delivery = await lane.deliveryFor(actor);
@@ -752,33 +762,6 @@ describe("the feed (assignments − declines) + delivery", () => {
     expect(await feed.assignChannel(ownerActor, "c_nope", { everyone: true })).toBe(
       "unknown_channel",
     );
-  });
-
-  it("declining a channel's contents fans out per bundle, today's members only", async () => {
-    const feed = await import("@/lib/db/queries.feed.server");
-    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
-    const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
-    const everyoneChannel = (
-      await q<{ id: string }>(`SELECT id FROM web.channel WHERE is_default AND workspace_id = $1`, [
-        wsId,
-      ])
-    )[0]?.id as string;
-    const fanned = await feed.declineChannelContents(actor, everyoneChannel);
-    expect(fanned).toEqual({ outcome: "declined", count: 1 });
-    expect(
-      await q(`SELECT 1 FROM web.decline WHERE user_id = 'u_ent' AND bundle_id = 's_everyone'`),
-    ).toHaveLength(1);
-    // A bundle placed in the set AFTERWARDS is not covered — that is the point of per-bundle.
-    await seedBundle("s_later", "added-later");
-    await placeInEveryone("s_later");
-    const lane = await import("@/lib/db/queries.lane.server");
-    const delivery = await lane.deliveryFor(actor);
-    expect(delivery.skills.map((s) => s.skill_id)).toContain("s_later");
-    expect(await feed.declineChannelContents(actor, "c_nope")).toEqual({
-      outcome: "unknown_channel",
-    });
-    await q(`DELETE FROM web.decline WHERE user_id = 'u_ent'`);
-    await q(`DELETE FROM web.channel_bundle WHERE bundle_id = 's_later'`);
   });
 
   it("the delivery wire shape serves current, snake_case, with no pin field", async () => {

@@ -55,7 +55,6 @@ describe("workspacePolicyOf (the reads)", () => {
       sessionApproval: "off",
       sessionMaxAgeMs: null,
     });
-    expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(DEFAULT_WINDOW_MS);
   });
 });
 
@@ -64,9 +63,11 @@ describe("setStalenessWindow (bounded: 1ms .. 366 days)", () => {
     const queries = await q();
     const owner = asOwner(wsId, "u_owner", "Owner");
     expect(await queries.setStalenessWindow(owner, 1)).toBe("set");
-    expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(1);
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).stalenessWindowMs).toBe(1);
     expect(await queries.setStalenessWindow(owner, MAX_WINDOW_MS)).toBe("set");
-    expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(MAX_WINDOW_MS);
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).stalenessWindowMs).toBe(
+      MAX_WINDOW_MS,
+    );
 
     expect(await queries.setStalenessWindow(owner, 0)).toBe("bad_window");
     expect(await queries.setStalenessWindow(owner, -1)).toBe("bad_window");
@@ -74,7 +75,9 @@ describe("setStalenessWindow (bounded: 1ms .. 366 days)", () => {
     expect(await queries.setStalenessWindow(owner, 1.5)).toBe("bad_window");
     expect(await queries.setStalenessWindow(owner, Number.NaN)).toBe("bad_window");
     // The last accepted value stands; the refusals wrote nothing.
-    expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(MAX_WINDOW_MS);
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).stalenessWindowMs).toBe(
+      MAX_WINDOW_MS,
+    );
     expect(await auditRows("policy_staleness")).toEqual([
       { subject: "1", outcome: "ok" },
       { subject: String(MAX_WINDOW_MS), outcome: "ok" },

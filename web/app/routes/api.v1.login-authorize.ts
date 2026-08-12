@@ -6,7 +6,7 @@ import {
   type LoginBinding,
   startLoginFlow,
 } from "@/lib/db/identity.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { publicOrigin } from "@/lib/plane/public-base.server";
 import { isWorkspaceNameShape } from "@/lib/workspace-name";
 
 /**
@@ -88,9 +88,10 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   // How the approval outcome is ACCELERATED back — the CLI's own declaration, made because it
   // has just bound a 127.0.0.1 listener and can open a browser on this machine. WRITE-ONCE
   // from here: the binding is what gates the /verify card's URL pre-arm, so nothing downstream
-  // may re-read it from a request. Absent ⇒ `device`, which is exactly the classic flow, so a
-  // client that predates this field is unaffected. Either way the POLL is the one completion
-  // mechanism; a loopback redirect carries state + outcome only, never a secret.
+  // may re-read it from a request. The CLI sends the field ONLY when it bound a listener, so an
+  // absent value is a positive statement — this start wants the typed-code flow. Either way the
+  // POLL is the one completion mechanism; a loopback redirect carries state + outcome only,
+  // never a secret.
   if (body.redirect !== undefined && body.redirect !== "loopback" && body.redirect !== "device") {
     return badRequest("malformed login authorize body: redirect");
   }
@@ -102,7 +103,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     body.invite_token as string | undefined,
     binding,
   );
-  const origin = followBase(request);
+  const origin = publicOrigin(request);
   // The code never enters ANY URL: the CLI prints the bare /verify address and the short code
   // on separate lines, and the human types the code into the page's POST form.
   return Response.json({

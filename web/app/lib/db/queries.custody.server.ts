@@ -21,7 +21,7 @@ import { custodyVersionMetaFresh } from "@/lib/plane/reads.server";
 /**
  * The custody-op ORCHESTRATION's data half — everything the publish/propose/review/revert
  * routes read and write in the app's own rows: the op-receipt idempotency slots, the genesis
- * registration (bundle row + placement + the author's self-follow), the proposal rows, and the
+ * registration (bundle row + placement), the proposal rows, and the
  * verdict notices. The byte half lives in app/lib/plane/custody.server.ts; the routes sequence
  * the two (vault call first, then the final row transaction carrying the receipt).
  */
@@ -207,7 +207,8 @@ export type GenesisDestination = string | null | typeof NO_CHANNEL;
  * Register a NEW bundle at its genesis publish, inside the caller's final transaction: the
  * bundle row (name minted from the display name with suffix-on-collision — `name`, `name-2`,
  * `name-3`…; `kind` is the catalog tag the publish declared, 'skill' when it declared none —
- * birth-only, never rewritten), an EXCLUSIVE placement, and the author's self-follow stance.
+ * birth-only, never rewritten) and an EXCLUSIVE placement. The author gets no standing row of
+ * their own: publishing places the bundle, it does not assign it to the publisher.
  * Placement is exclusive because `--to` is the targeting mechanism: with NO `--to` the bundle
  * lands in the default `everyone` channel; with a `--to` channel named (`everyone` included — no
  * string-match bypass) it lands in THAT channel alone; with `NO_CHANNEL` it lands in none, which
@@ -216,7 +217,7 @@ export type GenesisDestination = string | null | typeof NO_CHANNEL;
  * channel, including genesis): a curated channel withholds a member's placement with
  * `curated_role_required`, riding the receipt details independent of the version gate. A
  * withheld placement leaves the bundle in NO channel (catalog-only) — the disclosure rides the
- * receipt and the author's self-follow still stands.
+ * receipt, and the bundle is registered either way.
  */
 /** The actor shape BOTH publish doors satisfy: the session lane's SessionActor and the web
  * add-from-GitHub page's MemberActor (sessionId rides into audit when present). */

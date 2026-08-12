@@ -6,7 +6,7 @@ import { announceCeremony, newlyCompleted } from "@/lib/ceremony-event";
 
 /**
  * The dashboard's onboarding checklist — three live steps whose checkmarks derive from real
- * rows (devices / published skills / seats), shown while the workspace is still getting going
+ * rows (sessions / published skills / seats), shown while the workspace is still getting going
  * (the loader decides visibility; this component only renders what it is given). AGENT-FIRST:
  * every step leads with the copyable "paste into your agent" prompt, with the manual terminal
  * commands folded behind a disclosure. Dismissal is a client-set cookie the loader reads back,
@@ -20,7 +20,7 @@ export interface OnboardingState {
   origin: string;
   /** The full shareable workspace address. */
   shareAddress: string;
-  deviceCount: number;
+  sessionCount: number;
   publishedSkillCount: number;
   memberCount: number;
 }
@@ -95,7 +95,7 @@ function Step({
 
 export function OnboardingChecklist({ state }: { state: OnboardingState }) {
   const [dismissed, setDismissed] = useState(false);
-  const { origin, shareAddress, deviceCount, publishedSkillCount, memberCount } = state;
+  const { origin, shareAddress, sessionCount, publishedSkillCount, memberCount } = state;
 
   // Ceremony announcements for steps FLIPPING to complete within this page lifetime: the first
   // observation is a silent baseline (a step already done at mount announces nothing), and each
@@ -103,13 +103,13 @@ export function OnboardingChecklist({ state }: { state: OnboardingState }) {
   // revalidation that completes a step dispatches once, and an unchanged re-run (dev
   // strict-mode's doubled effect included) dispatches nothing. The published-skills step's
   // 0→done flip additionally announces `first_publish_seen`.
-  const deviceDone = deviceCount >= 1;
+  const sessionDone = sessionCount >= 1;
   const publishDone = publishedSkillCount >= 1;
   const inviteDone = memberCount >= 2;
   const seenSteps = useRef<Record<string, boolean> | null>(null);
   useEffect(() => {
     const now = {
-      enroll_device: deviceDone,
+      login_machine: sessionDone,
       publish_skill: publishDone,
       invite_teammate: inviteDone,
     };
@@ -120,7 +120,7 @@ export function OnboardingChecklist({ state }: { state: OnboardingState }) {
       }
     }
     seenSteps.current = now;
-  }, [deviceDone, publishDone, inviteDone]);
+  }, [sessionDone, publishDone, inviteDone]);
 
   const announcedDismiss = useRef(false);
   if (dismissed) {
@@ -154,11 +154,11 @@ export function OnboardingChecklist({ state }: { state: OnboardingState }) {
       <div className="overflow-hidden rounded-lg border border-line-soft bg-panel">
         <ol>
           <Step
-            done={deviceCount >= 1}
+            done={sessionDone}
             index={1}
             title="Log in a machine"
             doneNote={
-              deviceCount === 1 ? "1 machine logged in" : `${deviceCount} machines logged in`
+              sessionCount === 1 ? "1 machine logged in" : `${sessionCount} machines logged in`
             }
             agentPrompt={`Set up Topos for us: fetch ${origin}/agent and follow it. Our workspace: ${shareAddress}`}
             manual={{

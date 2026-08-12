@@ -26,7 +26,7 @@ vi.mock("@/lib/db/workspace-create.server", () => ({
   createWorkspace: vi.fn(),
   workspaceNameAvailable: vi.fn(),
 }));
-vi.mock("@/lib/plane/follow-base.server", () => ({ followBase: vi.fn() }));
+vi.mock("@/lib/plane/public-base.server", () => ({ publicOrigin: vi.fn() }));
 vi.mock("@/lib/ws-url.server", () => ({ wsPathServer: vi.fn() }));
 vi.mock("@/components/ui", () => ({
   buttonClasses: () => "",

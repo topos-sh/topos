@@ -1,12 +1,12 @@
 import { Buffer } from "node:buffer";
 /**
- * The device-lane wire envelopes — the transport-fault family every `/api/v1` route answers with,
+ * The session-lane wire envelopes — the transport-fault family every `/api/v1` route answers with,
  * matching the vault's frozen shapes field-for-field (`JsonEnvelope` + flat `WireError`; the
  * committed OpenAPI is the contract, and the unit suite pins these literals against it).
  *
  * The posture, verbatim from the vault: a protocol outcome (OK / DENIED / CONFLICT) is ALWAYS a
  * 200 carrying its envelope; a non-2xx is ONLY a transport/auth fault — 400 for a malformed
- * body/id, 404 for EVERY miss (missing/blank credential, unknown credential, revoked device,
+ * body/id, 404 for EVERY miss (missing/blank credential, unknown credential, an ended session,
  * unknown workspace, non-member — one indistinguishable body, never a 401/403), 426 for a client
  * below the version floor, 429 from the belt, 500 for a store fault. Nothing here discloses what
  * exists.

@@ -50,10 +50,6 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
   };
 }
 
-export async function stalenessWindowOf(actor: MemberActor): Promise<number> {
-  return (await workspacePolicyOf(actor)).stalenessWindowMs;
-}
-
 /** One owner-gated knob write + its same-transaction audit row. */
 async function setKnob(
   actor: OwnerActor,

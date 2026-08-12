@@ -543,10 +543,11 @@ export async function startLoginFlow(
    * validated here (the unauthenticated start must not be a token oracle); the approval
    * resolves it under its own fence. */
   inviteToken?: string,
-  /** How the approval outcome is ACCELERATED back. WRITE-ONCE: the CLI declares it here,
-   * having just bound its own 127.0.0.1 listener, and nothing downstream may change it —
-   * the binding is what gates the /verify card's URL pre-arm. Absent ⇒ `device`, so a client
-   * that predates this field keeps the classic flow byte-for-byte. */
+  /** How the approval outcome is ACCELERATED back. WRITE-ONCE: the CLI declares it at the
+   * start, having just bound its own 127.0.0.1 listener, and nothing downstream may change it —
+   * the binding is what gates the /verify card's URL pre-arm. The route resolves it on every
+   * call; the `device` default is the typed-code flow, which is what a start that declares no
+   * acceleration is asking for. */
   binding: LoginBinding = "device",
 ): Promise<{ flowCode: string; userCode: string; expiresInSecs: number }> {
   const db = getDb();

@@ -13,7 +13,7 @@ import {
 /**
  * The copyable publish lines, composed for THIS workspace with its real address (loader-provided,
  * never computed client-side). The web app NEVER authors a bundle — publishing runs on the
- * enrolled DEVICE that holds the bytes — so these are honest stand-ins the person fills:
+ * logged-in machine that holds the bytes — so these are honest stand-ins the person fills:
  * `<skill>` and `<path-to-skill-directory>`. ONE component so the dialog and the dashboard's
  * empty-state card can never drift.
  */
@@ -26,7 +26,7 @@ export function PublishInstructions({ shareAddress }: { shareAddress: string }) 
   const agentHeadingId = useId();
   const cliHeadingId = useId();
   const agentPrompt = AGENT_PUBLISH_PROMPT;
-  const followCommand = `topos login ${shareAddress}`;
+  const loginCommand = `topos login ${shareAddress}`;
   const publishCommand = PUBLISH_COMMAND;
   return (
     <>
@@ -42,9 +42,9 @@ export function PublishInstructions({ shareAddress }: { shareAddress: string }) 
           <span id={cliHeadingId}>Or run it yourself</span>
         </SectionHeading>
         <p className="text-dim text-sm">
-          If this device isn&apos;t enrolled yet, follow the workspace once:
+          If this machine isn&apos;t logged in yet, log in to the workspace once:
         </p>
-        <CommandBlock command={followCommand} copyLabel="Copy the follow command" />
+        <CommandBlock command={loginCommand} copyLabel="Copy the login command" />
         <p className="text-dim text-sm">Then publish the skill&apos;s directory:</p>
         <CommandBlock command={publishCommand} copyLabel="Copy the publish command" />
       </section>

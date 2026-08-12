@@ -109,13 +109,13 @@ const serverSchema = z.object({
     z.string().max(200).optional(),
   ),
   /**
-   * The outbound-mail relay — BRING YOUR OWN SMTP, all five or none (the vault's old five-flag
-   * rule, moved app-side with the mail unification). With all five set, the app's ONE mail seam
-   * really sends: invite notices, the enrollment passcode, and a composition's magic links. Any
-   * missing ⇒ mail is off and every flow stays durable without it (the seat + the address stand,
-   * the passcode ack stays constant-shaped). Empty spells unset — how compose and every deploy
-   * panel spell it. The user/pass/from are credentials-adjacent: they live here and never in a
-   * log or an error (the transport throws coarse).
+   * The outbound-mail relay — BRING YOUR OWN SMTP, all five or none. With all five set, the
+   * app's ONE mail seam really sends: invitations, address verification, password reset, and a
+   * composition's magic links. Any missing ⇒ mail is off, and every flow that would have mailed
+   * refuses in a constant shape rather than half-working (an invitation is refused typed, so no
+   * row is written promising a mail nobody will get). Empty spells unset — how compose and every
+   * deploy panel spell it. The user/pass/from are credentials-adjacent: they live here and never
+   * in a log or an error (the transport throws coarse).
    */
   TOPOS_MAIL_SMTP_HOST: z.preprocess(
     (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),

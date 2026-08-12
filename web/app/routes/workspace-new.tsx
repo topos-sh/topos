@@ -19,7 +19,7 @@ import { announceCeremony } from "@/lib/ceremony-event";
 import { createWorkspace, workspaceNameAvailable } from "@/lib/db/workspace-create.server";
 import { destinationPathname } from "@/lib/destination-path";
 import { useSubmittingIntent } from "@/lib/pending";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { publicOrigin } from "@/lib/plane/public-base.server";
 import {
   ADDRESS_TAKEN,
   CREATE_RATE_LIMITED,
@@ -79,7 +79,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // Where to return after creating (e.g. a /verify approval that needed a workspace first).
   const nextParam = url.searchParams.get("next");
   const next = nextParam === null ? null : safeNextPath(nextParam);
-  return { origin: followBase(request), prefillName, next };
+  return { origin: publicOrigin(request), prefillName, next };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
