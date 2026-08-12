@@ -513,10 +513,15 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
   // THE ADVISORY PROBE for a re-publish, once the pointer has moved and the receipt is durable.
   // Not waited on, and it can change nothing above it (app/lib/mcp/probe.server.ts).
   //
-  // NOT PROBED, named rather than left to be discovered: the upstream checker's imports
-  // (app/lib/db/upstream.server.ts commits versions for GitHub-imported SKILLS, a kind with no
-  // endpoint), and every path that moves a pointer without creating a version — review approval,
-  // revert, unarchive — where the version already carries the answer from when it was made.
+  // NOT PROBED, named rather than left to be discovered:
+  //
+  //  · THE UPSTREAM CHECKER'S IMPORTS (app/lib/db/upstream.server.ts). It commits versions for any
+  //    kind, an MCP bundle with an upstream row included — but it runs as a SYSTEM act with no
+  //    actor at all, and a probe row is scoped by the actor's workspace. A version born there
+  //    therefore reads "not checked yet" until someone publishes over it, which is exactly true.
+  //  · EVERY PATH THAT MOVES A POINTER WITHOUT CREATING A VERSION — review approval, revert,
+  //    unarchive. Nothing new exists to ask about; the version already carries the answer from
+  //    when it was made.
   if (landed.refused === null && mcpServerName !== null) {
     schedulePublishProbe(actor, {
       bundleId,
