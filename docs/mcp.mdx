@@ -208,15 +208,18 @@ checkout. An MCP row in a project file lands **only in project-level config** �
 `.cursor/mcp.json`, `.codex/config.toml`, `opencode.json` — and never falls back to your home
 config, so a committed file can't quietly reconfigure a contributor's machine.
 
-Two agents have no project-level MCP config at all, and a project row says so instead of pretending:
+Two agents have no project-level MCP config at all, and the receipt that places a project row says
+so instead of pretending:
 
 ```
 openclaw: not placed — no project-level config
 hermes-agent: not placed — no project-level config
 ```
 
-Those two receive the same server through your machine-wide scope. A project config path that
-resolves outside the checkout is refused and named, never redirected.
+Those two receive the same server through your machine-wide scope, and `topos list <name>` shows
+the same per-agent state any time. An `update` that changes nothing folds the row into its summary
+count rather than repeating these standing facts. A project config path that resolves outside the
+checkout is refused and named, never redirected.
 
 <Note>
   Codex reads a project `.codex/config.toml` only once you have trusted that repo inside Codex.

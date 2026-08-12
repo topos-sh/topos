@@ -3870,19 +3870,24 @@ pub(crate) fn pull_tty(
                 kept_lines.push(kept_line(&s.skill, &s.kept));
             }
             // An up-to-date row stays out of the table — UNLESS it is an mcp bundle with a
-            // per-agent state that needs eyes (drift, a conflict, an unprovable surface): a
-            // compact receipt must not swallow those. A file this run wrote (`placed`) is not
-            // one of them: a row that moved bytes has already earned its own verb. A row that
-            // carries a NOTE has something to say by construction (an mcp bundle whose dest
-            // reaches no agent has no per-agent state to speak for it), so it is never swallowed
-            // either — a healthy row carries none.
+            // per-agent state that needs eyes: DIVERGENCE, person-owned or unresolved (a
+            // hand-edited entry, a key another entry holds, a file that could not be read), which
+            // is the mcp twin of a skill draft and keeps its row for the same reason. A standing
+            // structural fact does NOT qualify: a WITHHELD surface — an agent with no config of
+            // that kind at this scope — is not an event, it is how this machine is shaped. It was
+            // disclosed on the receipt that placed the entry, and `list <name>` answers it any
+            // time, so re-printing it on every no-op sweep only buries the rows that changed.
+            // A file this run wrote is not noteworthy either: a row that moved bytes has already
+            // earned its own verb. A row that carries a NOTE has something to say by construction
+            // (an mcp bundle whose dest reaches no agent has no per-agent state to speak for it),
+            // so it is never swallowed either — a healthy row carries none.
             // A DRAFTED row is noteworthy by construction: swallowing it is exactly how the
             // summary came to say "all up to date" about a bundle `list` was calling a draft.
             let noteworthy = s.draft
                 || s.note.is_some()
-                || s.harnesses.iter().any(|h| {
-                    !(h.state.wrote() || h.state == topos_types::results::TargetOutcome::Current)
-                });
+                || s.harnesses
+                    .iter()
+                    .any(|h| !(h.state.wrote() || mcp_state_settled(h.state)));
             if matches!(s.action, PullAction::UpToDate) && !noteworthy {
                 return None;
             }
@@ -3904,8 +3909,21 @@ pub(crate) fn pull_tty(
             // A row that WROTE a config file this run reads its untouched files as `unchanged`
             // beside the ones it placed — two words that answer the same question. A row that
             // wrote nothing has nothing to contrast with, so its files stay `current`.
+            //
+            // Which sub-lines print follows the same rule the row itself was judged by. A row
+            // that wrote is a WRITE-TIME receipt and prints the whole block: where the bytes
+            // landed, what stayed unchanged beside them, and which surfaces the reach missed —
+            // the reader is being told what this run did to the machine. A row that wrote
+            // nothing is here for a reason, and only the states that ARE that reason belong
+            // under it; a settled surface repeated beneath a drifted file is noise standing
+            // between a person and the one line they need to read.
             let wrote = s.harnesses.iter().any(|h| h.state.wrote());
-            extra.extend(s.harnesses.iter().map(|h| mcp_agent_line(h, wrote)));
+            extra.extend(
+                s.harnesses
+                    .iter()
+                    .filter(|h| wrote || !mcp_state_settled(h.state))
+                    .map(|h| mcp_agent_line(h, wrote)),
+            );
             Some((lead, line, extra))
         })
         .collect();
@@ -4145,6 +4163,20 @@ fn notice_line(n: &topos_types::requests::WireNotice) -> String {
             .clone()
             .unwrap_or_else(|| format!("{}: {skill}", n.kind)),
     }
+}
+
+/// Whether a per-agent outcome is SETTLED — a standing fact about how this machine is shaped,
+/// rather than something a person has to look at. Exactly two outcomes qualify: an entry found
+/// as recorded, and a surface deliberately not written (an agent with no config of that kind at
+/// this scope). Neither is an event: the first is the healthy case, and the second was disclosed
+/// on the receipt that placed the entry and stays answerable by `list <name>` forever after.
+///
+/// Everything else is DIVERGENCE — person-owned (a hand-edited entry), contested (a key another
+/// entry holds), or undecided (a file that could not be read) — and a receipt that hid it would
+/// be hiding the only thing on the row worth reading.
+const fn mcp_state_settled(state: topos_types::results::TargetOutcome) -> bool {
+    use topos_types::results::TargetOutcome;
+    matches!(state, TargetOutcome::Current | TargetOutcome::Withheld)
 }
 
 /// One MCP config outcome as a receipt sub-line, KEYED BY THE CONFIG FILE the entry lives in
@@ -6395,14 +6427,22 @@ mod tests {
             "Checked 2 bundles: all up to date."
         );
 
-        // A row with a per-agent state to show takes the same noun into the counted summary.
+        // A row with DIVERGENCE to show takes the same noun into the counted summary.
         let mut noteworthy = server("weather");
-        noteworthy.harnesses = vec![topos_types::results::McpAgentState {
-            agent: "openclaw".to_owned(),
-            state: topos_types::results::TargetOutcome::Withheld,
-            note: Some("no project-level config".to_owned()),
-            file: None,
-        }];
+        noteworthy.harnesses = vec![
+            agent_state(
+                "cursor",
+                Some("project/.cursor/mcp.json"),
+                topos_types::results::TargetOutcome::Drifted,
+                None,
+            ),
+            agent_state(
+                "openclaw",
+                None,
+                topos_types::results::TargetOutcome::Withheld,
+                Some("no project-level config"),
+            ),
+        ];
         let surfaced = PullData {
             skills: vec![noteworthy],
             proposals_awaiting: 0,
@@ -6416,9 +6456,174 @@ mod tests {
             out.contains("Checked 1 bundle: 1 already up to date."),
             "{out}"
         );
-        // …and the per-agent line reads in the shared vocabulary, never the raw engine token.
+    }
+
+    /// One `McpAgentState`, spelled where a test cares about the outcome and nothing else.
+    fn agent_state(
+        agent: &str,
+        file: Option<&str>,
+        state: topos_types::results::TargetOutcome,
+        note: Option<&str>,
+    ) -> topos_types::results::McpAgentState {
+        topos_types::results::McpAgentState {
+            agent: agent.to_owned(),
+            state,
+            note: note.map(str::to_owned),
+            file: file.map(str::to_owned),
+        }
+    }
+
+    fn mcp_row(name: &str, harnesses: Vec<topos_types::results::McpAgentState>) -> PullSkill {
+        PullSkill {
+            kind: Some("mcp".to_owned()),
+            harnesses,
+            ..row(name, PullAction::UpToDate)
+        }
+    }
+
+    fn one_row(s: PullSkill) -> String {
+        pull_tty(
+            &PullData {
+                skills: vec![s],
+                proposals_awaiting: 0,
+                notices: Vec::new(),
+                sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
+                scope: None,
+            },
+            &[],
+            &[],
+            &[],
+            &[],
+            0,
+        )
+    }
+
+    /// A SETTLED mcp row is as quiet as a settled skill row. Every surface is either current or
+    /// withheld — an agent with no config of that kind at this scope — and neither is an event:
+    /// the withheld surface was disclosed when the entry was placed and `list <name>` answers it
+    /// any time. Reprinting the same block on every no-op sweep is exactly how a real change gets
+    /// buried, so the row folds into the checked count like any other up-to-date bundle.
+    #[test]
+    fn an_up_to_date_server_whose_surfaces_are_settled_folds_into_the_summary() {
+        use topos_types::results::TargetOutcome;
+        let out = one_row(mcp_row(
+            "deepwiki",
+            vec![
+                agent_state(
+                    "claude-code",
+                    Some("project/.mcp.json"),
+                    TargetOutcome::Current,
+                    None,
+                ),
+                agent_state(
+                    "openclaw",
+                    None,
+                    TargetOutcome::Withheld,
+                    Some("no project-level config"),
+                ),
+            ],
+        ));
+        assert_eq!(out, "Checked 1 bundle: all up to date.");
+        assert!(!out.contains("openclaw"), "{out}");
+        assert!(!out.contains("not placed"), "{out}");
+    }
+
+    /// A row that surfaces prints ONLY what surfaced it. Drift keeps the row (a hand-edited entry
+    /// is the mcp twin of a draft), and the settled siblings stay out of the way: the person is
+    /// looking for the one file that needs them, not for a re-reading of the machine's shape.
+    #[test]
+    fn a_surfaced_server_row_prints_only_the_states_that_earned_it_the_spot() {
+        use topos_types::results::TargetOutcome;
+        let out = one_row(mcp_row(
+            "deepwiki",
+            vec![
+                agent_state(
+                    "claude-code",
+                    Some("project/.mcp.json"),
+                    TargetOutcome::Current,
+                    None,
+                ),
+                agent_state(
+                    "openclaw",
+                    None,
+                    TargetOutcome::Withheld,
+                    Some("no project-level config"),
+                ),
+                agent_state(
+                    "cursor",
+                    Some("project/.cursor/mcp.json"),
+                    TargetOutcome::Drifted,
+                    None,
+                ),
+            ],
+        ));
+        assert!(out.contains("deepwiki   up to date\n"), "{out}");
         assert!(
-            out.contains("openclaw: not placed — no project-level config"),
+            out.contains("    project/.cursor/mcp.json: hand-edited — left in place\n"),
+            "{out}"
+        );
+        assert!(!out.contains("project/.mcp.json: current"), "{out}");
+        assert!(!out.contains("not placed"), "{out}");
+        assert!(
+            out.contains("Checked 1 bundle: 1 already up to date."),
+            "{out}"
+        );
+    }
+
+    /// A row that WROTE keeps its whole block: a write-time receipt has to say where the bytes
+    /// landed, what stayed unchanged beside them, and what the reach cost — the withheld surface
+    /// included. And every one of those lines reads in the shared vocabulary, never the raw wire
+    /// token behind it.
+    #[test]
+    fn a_row_that_wrote_still_names_every_surface_it_reached_and_missed() {
+        use topos_types::results::TargetOutcome;
+        let out = one_row(PullSkill {
+            action: PullAction::Refreshed,
+            destinations: vec!["project/.mcp.json".to_owned()],
+            ..mcp_row(
+                "deepwiki",
+                vec![
+                    agent_state(
+                        "claude-code",
+                        Some("project/.mcp.json"),
+                        TargetOutcome::Created,
+                        None,
+                    ),
+                    agent_state(
+                        "codex",
+                        Some("project/.codex/config.toml"),
+                        TargetOutcome::Refreshed,
+                        None,
+                    ),
+                    agent_state(
+                        "cursor",
+                        Some("project/.cursor/mcp.json"),
+                        TargetOutcome::Current,
+                        None,
+                    ),
+                    agent_state(
+                        "openclaw",
+                        None,
+                        TargetOutcome::Withheld,
+                        Some("no project-level config"),
+                    ),
+                ],
+            )
+        });
+        assert!(out.contains("    project/.mcp.json: created\n"), "{out}");
+        assert!(
+            out.contains("    project/.codex/config.toml: refreshed\n"),
+            "{out}"
+        );
+        // Beside a written line, an untouched file reads `unchanged` — the answer to the question
+        // the written line just raised.
+        assert!(
+            out.contains("    project/.cursor/mcp.json: unchanged\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("    openclaw: not placed — no project-level config\n"),
             "{out}"
         );
         assert!(!out.contains("not-supported"), "{out}");
