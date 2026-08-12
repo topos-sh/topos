@@ -835,6 +835,311 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
     );
 }
 
+// =================================================================================================
+// The collision pre-flight: what already stands where a placement would go.
+// =================================================================================================
+
+/// The one line a collision earns, as a person reads it.
+fn warning_lines(out: &mcp_engine::ConvergeOutcome) -> Vec<String> {
+    crate::message::legacy_lines(&out.warnings)
+}
+
+/// **A server the agent already has, under a name topos would never recognize, is not placed
+/// over.** Claude Code (and others) de-duplicate by URL, so a second entry for one server is at
+/// best invisible and at worst the one that loses — topos reporting `current` over it would be
+/// lying about what the agent runs. The foreign entry is never touched; the refusal names it, the
+/// file, and what removing it buys; and the placement lands by itself on the next sweep once it
+/// is gone.
+#[test]
+fn a_foreign_entry_for_the_same_server_refuses_the_placement_and_says_how_to_free_it() {
+    let home = Scratch::new("collide-url");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let cursor = home.0.join(".cursor/mcp.json");
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    // THEIR entry: another name, the same server (spelled differently — one address, one server).
+    let theirs = "{\n  \"mcpServers\": {\n    \"linear\": { \"url\": \"HTTPS://MCP.Example:443/a/\" }\n  }\n}\n";
+    std::fs::write(&cursor, theirs).unwrap();
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a/"),
+    );
+    d.reach = Some(vec!["cursor".into()]);
+    let io = person_io(&fs, &layout, &home.0);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+
+    let state = state_of(&out, "s_a", "cursor");
+    assert_eq!(state.state, TargetOutcome::Conflicting);
+    assert_eq!(
+        state.file.as_deref(),
+        Some(cursor.display().to_string().as_str()),
+        "the state points at the file holding the entry in the way"
+    );
+    assert_eq!(
+        warning_lines(&out),
+        vec![format!(
+            "MCP_ENTRY_CONFLICT not placed in cursor: an entry for this server already exists \
+             (linear in {}) and topos does not manage it. Remove it to let topos manage this \
+             server, then run 'topos update'.",
+            cursor.display()
+        )]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cursor).unwrap(),
+        theirs,
+        "topos never edits an entry it does not own — not even to move it aside"
+    );
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
+    assert_eq!(custody.row_count(), 0, "nothing was recorded as placed");
+
+    // A SECOND sweep says exactly the same thing: the collision is re-decided from the file every
+    // run, never remembered.
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Conflicting
+    );
+    assert_eq!(warning_lines(&out).len(), 1);
+
+    // The person removes their entry. Nothing else changes, and the next sweep installs.
+    std::fs::write(&cursor, "{\n  \"mcpServers\": {}\n}\n").unwrap();
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        state_of(&out, "s_a", "cursor").state.wrote(),
+        "the collision cleared itself: {out:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("topos-eng-alpha")
+    );
+}
+
+/// A `topos-`-prefixed entry with no record behind it gets a DIFFERENT sentence: the prefix is a
+/// spelling, not a provenance, so the line says what it might be and never claims it. It blocks
+/// the placement exactly the same — and topos still deletes nothing.
+#[test]
+fn a_topos_looking_entry_with_no_record_is_named_a_possible_leftover_never_claimed() {
+    let home = Scratch::new("collide-leftover");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let cursor = home.0.join(".cursor/mcp.json");
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    let leftover = "{\n  \"mcpServers\": {\n    \"topos-eng-alpha\": { \"url\": \"https://elsewhere.example\" }\n  }\n}\n";
+    std::fs::write(&cursor, leftover).unwrap();
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.reach = Some(vec!["cursor".into()]);
+    let io = person_io(&fs, &layout, &home.0);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Conflicting
+    );
+    assert_eq!(
+        warning_lines(&out),
+        vec![format!(
+            "MCP_ENTRY_LEFTOVER possible leftover from an earlier topos version: topos-eng-alpha \
+             in {} is no longer managed. Remove it with: delete the \"topos-eng-alpha\" entry from \
+             that file.",
+            cursor.display()
+        )]
+    );
+    assert_eq!(std::fs::read_to_string(&cursor).unwrap(), leftover);
+}
+
+/// **A file the harness ALSO reads counts.** Claude Code keeps servers in `~/.claude.json` too —
+/// per project, in a slot topos never writes — and prefers them over the plugin dir topos owns. An
+/// entry there for the same server would make a placement that reports itself installed and never
+/// runs, so it refuses instead. The other harnesses are untouched by it: a conflict path belongs
+/// to the row that names it.
+#[test]
+fn an_entry_in_a_file_the_harness_also_reads_blocks_the_placement_there_and_nowhere_else() {
+    static WITH_CONFLICTS: &[KnownHarness] = &[
+        registry::home_rooted_mcp_row_with_conflicts(
+            "claude-code",
+            "Claude Code",
+            ".claude/skills/topos-mcp",
+            McpDialect::ClaudePluginDir,
+            None,
+            "reload claude",
+            &[registry::home_rooted_conflict_path(
+                ".claude.json",
+                McpDialect::ClaudeProjectJson,
+                "projects.*.mcpServers",
+            )],
+        ),
+        registry::home_rooted_mcp_row(
+            "cursor",
+            "Cursor",
+            ".cursor/mcp.json",
+            McpDialect::CursorJson,
+            None,
+            "restart cursor",
+        ),
+    ];
+    let table: Vec<&'static KnownHarness> = WITH_CONFLICTS.iter().collect();
+    let slugs: BTreeSet<String> = table.iter().map(|h| h.slug.to_owned()).collect();
+
+    let home = Scratch::new("collide-elsewhere");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let claude_json = home.0.join(".claude.json");
+    let user_entry = "{\n  \"mcpServers\": { \"unrelated\": { \"url\": \"https://other.example\" } },\n  \"projects\": {\n    \"/work/api\": { \"mcpServers\": { \"alpha\": { \"url\": \"https://mcp.example/a\" } } }\n  }\n}\n";
+    std::fs::write(&claude_json, user_entry).unwrap();
+
+    let d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    let io = person_io(&fs, &layout, &home.0);
+    let out = mcp_engine::converge(
+        &io,
+        &[d.clone().planned(&io, &table, &slugs)],
+        &table,
+        &slugs,
+        &no_hold(),
+        true,
+    );
+    assert_eq!(
+        state_of(&out, "s_a", "claude-code").state,
+        TargetOutcome::Conflicting,
+        "{out:?}"
+    );
+    assert_eq!(
+        warning_lines(&out),
+        vec![format!(
+            "MCP_ENTRY_CONFLICT not placed in claude-code: an entry for this server already exists \
+             (alpha in {}) and topos does not manage it. Remove it to let topos manage this \
+             server, then run 'topos update'.",
+            claude_json.display()
+        )]
+    );
+    assert!(
+        !home.0.join(".claude/skills/topos-mcp").exists(),
+        "nothing was written for the blocked harness"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&claude_json).unwrap(),
+        user_entry,
+        "the file topos only READS is never edited"
+    );
+    // Cursor names no such file, so its placement is untouched by somebody else's claude config.
+    assert!(state_of(&out, "s_a", "cursor").state.wrote());
+    assert!(
+        std::fs::read_to_string(home.0.join(".cursor/mcp.json"))
+            .unwrap()
+            .contains("topos-eng-alpha")
+    );
+}
+
+/// **Two topos bundles pointing at one server are not a collision.** Both entries are topos's, both
+/// are recorded, and the ownership record is what says so — the pre-flight only ever asks about
+/// entries nobody can prove are ours. And a foreign duplicate appearing LATER never uninstalls a
+/// placement that already stands: blocking a key topos holds here would take its own entry out
+/// through the drivers' removal.
+#[test]
+fn two_topos_bundles_on_one_server_both_place_and_a_later_duplicate_never_unplaces_them() {
+    let home = Scratch::new("collide-siblings");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let url = "https://mcp.example/shared";
+    let one = {
+        let mut d = demand("s_a", "alpha", Some("eng"), &server_json(url));
+        d.reach = Some(vec!["cursor".into()]);
+        d
+    };
+    let two = {
+        let mut d = demand("s_b", "beta", Some("eng"), &server_json(url));
+        d.reach = Some(vec!["cursor".into()]);
+        d
+    };
+    let io = person_io(&fs, &layout, &home.0);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![one.clone(), two.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(state_of(&out, "s_a", "cursor").state.wrote());
+    assert!(state_of(&out, "s_b", "cursor").state.wrote());
+    let cursor = home.0.join(".cursor/mcp.json");
+    let both = std::fs::read_to_string(&cursor).unwrap();
+    assert!(
+        both.contains("topos-eng-alpha") && both.contains("topos-eng-beta"),
+        "{both}"
+    );
+
+    // Somebody adds their own entry for the same server afterwards. Both placements STAY — the
+    // one thing a collision must never do is uninstall what it found standing.
+    let with_theirs = both.replace(
+        "\"mcpServers\": {",
+        &format!("\"mcpServers\": {{\n    \"mine\": {{ \"url\": \"{url}\" }},"),
+    );
+    std::fs::write(&cursor, &with_theirs).unwrap();
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![one, two]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    for bundle in ["s_a", "s_b"] {
+        assert_eq!(
+            state_of(&out, bundle, "cursor").state,
+            TargetOutcome::Current,
+            "{bundle}: {out:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&cursor).unwrap(),
+        with_theirs,
+        "nothing moved: not theirs, not ours"
+    );
+}
+
 #[test]
 fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     let home = Scratch::new("gate");

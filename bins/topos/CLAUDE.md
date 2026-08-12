@@ -165,7 +165,15 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
 - `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half: a store-only sync
   (lock custody, no dir placement) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, and the converge itself
-  is DEMAND (each bundle's entries plan) plus CUSTODY (its own recorded rows). Reach resolves at
+  is DEMAND (each bundle's entries plan) plus CUSTODY (its own recorded rows). Before a surface is
+  written a COLLISION PRE-FLIGHT asks what already stands where each entry would go — by name or by
+  canonical server address, in the dest file AND in the read-only files the harness also reads
+  servers from (the table's `conflict_paths`) — and an entry topos cannot prove is its own blocks
+  that one placement: `conflicting`, never touched, reported with the way out (a `topos-`-looking
+  name earns the possible-leftover wording, because a prefix is a spelling and not a provenance).
+  The verdict is re-decided every run from the files, so it clears itself; a key topos already
+  holds on that surface is never blocked, since dropping it from the desired set would uninstall
+  the placement that stands. Reach resolves at
   PLANNING and nowhere else: a row's `dest` config-file entries map to the harnesses that claim
   them (no dest = every MCP-capable agent), a targeted verb plans only the harnesses whose
   recorded rows prove the bundle already stands there (`recorded_reach`), and the plan carries the
@@ -189,12 +197,17 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `entries.json` only under `locks/mcp.lock`, which makes single-writer-per-file structural rather
   than a rule the two lock domains have to honour. A row is
   `{agent, file, key, fingerprint, owns_file, version_id}`, and its `fingerprint` is to an entry
-  what a dir's `materialized_sha` is to a folder. Readers that need both halves (list, the orphan
+  what a dir's `materialized_sha` is to a folder. Its `file` is the RESOLVED path, and every
+  comparison resolves too (`canonical_file`, over the seam's `canonicalize`): one config file
+  reached through two spellings — a symlinked agent home — is one surface, or topos disowns the
+  entry it just wrote. Readers that need both halves (list, the orphan
   resolution, remove's describe) read both files lock-free. Only two things outlive or span a
   bundle, and they live in
   the per-scope `state/config_custody.json`: the minted immutable config keys with their
   retirement reservations (a key names an OAuth trust surface — retired, never re-minted for
-  another bundle), and the intent journal every config write rides (one write covers many
+  another bundle WHILE ANYTHING STANDS UNDER IT: after a removal the scope's config files are read
+  and every reservation with no entry left under it is given back, with an unreadable surface
+  keeping the lot, because absence is what has to be proven), and the intent journal every config write rides (one write covers many
   bundles' entries; crash recovery promotes or drops per bundle record by OBSERVING the file, and
   an unreadable file keeps the standing row). `ScopeEntries` is the read-modify-write view that
   joins the scope document onto every bundle's rows as the one index the converge asks its

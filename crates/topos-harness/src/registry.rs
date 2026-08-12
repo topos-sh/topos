@@ -405,6 +405,21 @@ pub const fn home_rooted_mcp_row(
     })
 }
 
+/// A home-rooted [`McpConflictPath`] — the TEST fixture half of
+/// [`home_rooted_mcp_row_with_conflicts`]; an empty `selector` means the dialect's own slot.
+#[must_use]
+pub const fn home_rooted_conflict_path(
+    suffix: &'static str,
+    dialect: McpDialect,
+    selector: &'static str,
+) -> McpConflictPath {
+    McpConflictPath {
+        file: home(suffix),
+        dialect,
+        selector,
+    }
+}
+
 /// [`home_rooted_mcp_row`] with read-only conflict paths — the TEST fixture for a harness that
 /// also reads servers from a file topos never writes.
 #[must_use]

@@ -4,6 +4,11 @@
 //! The pure placement math lives in `topos_harness::mcp` (bytes in → an [`EditPlan`] out, one
 //! driver per dialect); THIS module owns everything stateful around it, per scope:
 //!
+//! - the COLLISION pre-flight ([`collisions`]): before a surface is written, what already stands
+//!   where each entry would go — by name or by the server it points at — in the dest file AND in
+//!   the read-only files the harness also reads servers from (the table's conflict paths). An
+//!   entry topos does not own blocks that one placement, is never touched, and is reported with
+//!   the way out,
 //! - the demand set — what the reconcile resolved this run, PLANNED onto this scope's config
 //!   surfaces ([`McpDemand`], built only by [`DemandedBundle::planned`]). Reach is the plan's
 //!   answer: the converge places a bundle exactly where its plan carries an entries target, and
@@ -41,8 +46,13 @@
 //! placement, an update to it, or the repair of one that was gone) · `current` (found already in
 //! order; nothing written) · `drifted` (hand-edited since topos wrote it — untouched) ·
 //! `not-supported` (withheld: capability or no surface at this scope) · `unprovable` (the surface
-//! cannot be safely edited) · `conflicting` (the desired config key is occupied by an entry topos
-//! does not own) · `removed` (removal receipts only).
+//! cannot be safely edited) · `conflicting` (an entry topos does not own already stands where this
+//! one would go — the same config key, or the same server under another name, here or in a file
+//! the harness also reads) · `removed` (removal receipts only).
+//!
+//! `conflicting` is DECIDED EVERY RUN from what the files hold, never stored: it appears the sweep
+//! after somebody else's entry does, and disappears the sweep after they remove it, when the
+//! placement lands normally.
 //!
 //! `placed` vs `current` is the ONE fact both channels answer with: the JSON state and the words a
 //! person reads come from the same [`EntryState`], so a receipt can never say a file was written
@@ -529,6 +539,34 @@ pub(crate) fn converge(
                 auth: p.auth,
             });
         }
+        // THE COLLISION PRE-FLIGHT — asked before the drivers, because the drivers can only see
+        // entries that LOOK like topos's. A server the agent already has under somebody else's
+        // name, here or in a file this harness also reads, is not something to write over or
+        // beside: the placement is skipped whole and the reason is said with the way out.
+        let blocked = collisions(io, &custody, h, &file, dialect, &desired);
+        for (key, hit) in &blocked {
+            if let Some(i) = desired_bundles.get(key) {
+                push_state(
+                    &mut states,
+                    *i,
+                    agent_state(
+                        h.slug,
+                        TargetOutcome::Conflicting,
+                        Some(hit.note()),
+                        Some(&hit.path),
+                    ),
+                );
+            }
+            let line = hit.message(h.slug);
+            if !out.warnings.contains(&line) {
+                out.warnings.push(line);
+            }
+        }
+        if !blocked.is_empty() {
+            desired.retain(|e| !blocked.contains_key(&e.key));
+            desired_bundles.retain(|key, _| !blocked.contains_key(key));
+        }
+
         // Parse-failed demands report per engaged harness (their entries are held above).
         for (i, reason) in &failed {
             if demands[*i].plan.entries_for(h.slug).is_some() {
@@ -602,6 +640,25 @@ pub(crate) fn converge(
                     }
                 }
             }
+        }
+    }
+
+    // A bundle every surface REFUSED is not an annotated success: nothing of it is installed
+    // anywhere, and its warning line already says so. It joins the failed count, so the summary
+    // and the exit status describe the same run — a line alone left "1 already up to date"
+    // printed over a machine holding nothing. A bundle blocked on ONE surface and placed on
+    // another is not this: it is installed, and its receipt row carries the collision beside the
+    // placements.
+    for (i, d) in demands.iter().enumerate() {
+        let blocked = states
+            .get(&i)
+            .is_some_and(|s| s.iter().any(|st| st.state == TargetOutcome::Conflicting));
+        if blocked
+            && !wrote.contains(&i)
+            && !custody.has_entries_for(&d.bundle_id)
+            && !out.failed_bundles.contains(&d.bundle_id)
+        {
+            out.failed_bundles.push(d.bundle_id.clone());
         }
     }
 
@@ -751,6 +808,133 @@ pub(crate) fn remove_bundle(
         custody.release_retired(standing.as_ref());
     }
     out.warnings.extend(custody.flush(io.fs, io.layout));
+    out
+}
+
+// =================================================================================================
+// The collision pre-flight — what already stands where a placement would go.
+// =================================================================================================
+
+/// One entry standing in the way of a placement: the name it goes by, the file it is in, and
+/// whether it LOOKS like something an older topos left (which is a different sentence, because
+/// nothing here can prove it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Collision {
+    name: String,
+    path: PathBuf,
+    /// A `topos-`-prefixed name with no record behind it. Named as a POSSIBILITY: the prefix is a
+    /// spelling, not a provenance, and topos does not claim what it cannot prove.
+    possible_leftover: bool,
+}
+
+impl Collision {
+    /// The short cause the per-agent state carries (the receipt prints it after the outcome).
+    fn note(&self) -> &'static str {
+        if self.possible_leftover {
+            "possibly left by an earlier topos version and no longer managed"
+        } else {
+            "an entry for this server already exists here and topos does not manage it"
+        }
+    }
+
+    /// The whole sentence, with the way out. A person's next move is to delete an entry topos will
+    /// never delete for them, so the line names WHICH entry, in WHICH file, and what happens then.
+    fn message(&self, slug: &str) -> Message {
+        let path = self.path.display();
+        let name = &self.name;
+        if self.possible_leftover {
+            return crate::message::failure(
+                "MCP_ENTRY_LEFTOVER",
+                format!(
+                    "possible leftover from an earlier topos version: {name} in {path} is no \
+                     longer managed. Remove it with: delete the \"{name}\" entry from that file."
+                ),
+            );
+        }
+        crate::message::failure(
+            "MCP_ENTRY_CONFLICT",
+            format!(
+                "not placed in {slug}: an entry for this server already exists ({name} in {path}) \
+                 and topos does not manage it. Remove it to let topos manage this server, then run \
+                 'topos update'."
+            ),
+        )
+    }
+}
+
+/// **What already stands where each desired entry would go** — by NAME or by the SERVER it points
+/// at, in this surface and in every file the harness also reads servers from ([`KnownHarness`]'s
+/// read-only conflict paths). Answers the desired keys that must not be placed, each with the
+/// entry blocking it.
+///
+/// Three rules make this safe rather than merely careful:
+///
+/// - **An entry topos owns here is never a collision.** A row proves topos wrote it; a second
+///   bundle pointing at the same server is the existing conflicting-key story, unchanged.
+/// - **A key topos already holds on this surface is never blocked.** Its entry is already there,
+///   and dropping it from the desired set would take it back out through the drivers' own removal
+///   — a foreign duplicate appearing later must never uninstall a placement that stands.
+/// - **A surface that will not read blocks nothing.** Absence is unprovable there, and a collision
+///   nobody can see is a duplicate at worst; refusing on a guess would strand a delivery.
+fn collisions(
+    io: &ScopeIo<'_>,
+    custody: &ScopeEntries<'_>,
+    h: &KnownHarness,
+    file: &Path,
+    dialect: McpDialect,
+    desired: &[McpEntry],
+) -> BTreeMap<String, Collision> {
+    let mut out = BTreeMap::new();
+    if desired.is_empty() {
+        return out;
+    }
+    // The keys topos's own record puts in THIS file — both the entries that are not collisions and
+    // the placements that must not be blocked.
+    let ours_here: BTreeSet<String> = custody
+        .rows_at(h.slug, file)
+        .into_iter()
+        .map(|(_, e)| e.key)
+        .collect();
+    // The dest file first (its entries may be topos's), then the read-only files, in table order.
+    let mut surfaces: Vec<(PathBuf, McpDialect, Option<&str>, bool)> =
+        vec![(file.to_path_buf(), dialect, None, true)];
+    surfaces.extend(
+        h.mcp_conflict_paths(&io.home)
+            .into_iter()
+            .map(|(path, dialect, selector)| (path, dialect, selector, false)),
+    );
+    for (path, dialect, selector, may_be_ours) in surfaces {
+        let Ok(Some(bytes)) = io.fs.read_opt(&path) else {
+            continue; // absent, or unreadable — nothing is provable there
+        };
+        let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), selector) else {
+            continue;
+        };
+        for entry in seen {
+            if may_be_ours && ours_here.contains(&entry.name) {
+                continue; // topos's own entry, this bundle's or another's
+            }
+            let address = entry.address.as_deref();
+            for want in desired {
+                if ours_here.contains(&want.key) || out.contains_key(&want.key) {
+                    continue;
+                }
+                let same_name = entry.name == want.key;
+                let same_server =
+                    address.is_some() && address == mcp::canonical_address(&want.url).as_deref();
+                if same_name || same_server {
+                    out.insert(
+                        want.key.clone(),
+                        Collision {
+                            name: entry.name.clone(),
+                            path: path.clone(),
+                            possible_leftover: entry.name.starts_with("topos-"),
+                        },
+                    );
+                }
+            }
+        }
+    }
     out
 }
 
