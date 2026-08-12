@@ -554,13 +554,12 @@ pub(crate) fn add_with_name(
 
     // Record the placement: the harness skill dir for a recognized skill (the path the harness reads),
     // else the canonical source. Topos writes NOTHING into this dir — it stays byte-identical.
-    let (placement, harness, harness_layer) = match &recognized {
+    let (placement, harness) = match &recognized {
         Some(p) => (
             p.path.to_string_lossy().into_owned(),
             Some(ctx.harness.id()),
-            p.layer.clone(),
         ),
-        None => (source_abs.to_string_lossy().into_owned(), None, None),
+        None => (source_abs.to_string_lossy().into_owned(), None),
     };
     doc::write_map(
         ctx.fs,
@@ -570,8 +569,6 @@ pub(crate) fn add_with_name(
             placements: vec![placement],
             applied_commit: version_hex.clone(),
             materialized_sha: digest_hex.clone(),
-            pre_existing_sha: None,
-            swap_capability: SwapCapability::Unsupported,
             // The adopted source dir is the ONE native placement (the adopted bytes ARE what topos
             // recorded, so the per-placement sha starts at the adopted digest — that baseline is
             // for DRIFT detection only). `adopted_source` marks a dir the USER owns — an
@@ -588,7 +585,6 @@ pub(crate) fn add_with_name(
                 claim: None,
             }],
             harness,
-            harness_layer,
             harness_slug: harness_slug.clone(),
         },
     )?;

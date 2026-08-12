@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PlacementMap",
-  "description": "`skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and\nexact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.\n\n**Schema v2** (its OWN ceiling, [`crate::PLACEMENT_MAP_SCHEMA_VERSION`]): a skill may hold SEVERAL\nplacements (the shared cross-agent dir + per-harness native dirs), each with its own durable state\nin [`Self::placement_state`], strictly 1:1 with [`Self::placements`]. A v1 document (one placement,\nmap-level state only) upgrades losslessly in memory on read; the map-level `materialized_sha` /\n`pre_existing_sha` / `swap_capability` fields remain the FIRST placement's mirror, so a v2 document\nstays legible to inspection tools that predate the per-placement shape.",
+  "description": "`skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and\nexact go-back. **Field-set pinned**.\n\n**Schema v2** (its OWN ceiling, [`crate::PLACEMENT_MAP_SCHEMA_VERSION`]): a skill may hold SEVERAL\nplacements (the shared cross-agent dir + per-harness native dirs), each with its own durable state\nin [`Self::placement_state`], strictly 1:1 with [`Self::placements`]. Per-placement state is the\ntruth; the one map-level summary that remains is [`Self::materialized_sha`], the FIRST placement's\ndigest — the answer a document with no placement state at all still carries.",
   "type": "object",
   "properties": {
     "applied_commit": {
@@ -20,13 +20,6 @@
         }
       ]
     },
-    "harness_layer": {
-      "description": "The harness layer the placement sits in (e.g. `\"user\"`), when a harness was recognized.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "harness_slug": {
       "description": "The registry slug (e.g. `claude-code`, `cursor`) of the agent this placement serves, when ONE\nagent owns it: the recognized harness, or the sole installed reader of the folder an added dir\nsits in. A folder several agents read has no single owner and a folder none reads has none at\nall — both leave this unset. A superset of [`Self::harness`]. **Additive optional.**",
       "type": [
@@ -35,12 +28,12 @@
       ]
     },
     "materialized_sha": {
-      "description": "sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source\n`bundle_digest` if a harness ever projected; with no projection the two match. The FIRST\nplacement's mirror in a v2 document (the per-placement truth is `placement_state`).",
+      "description": "sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source\n`bundle_digest` if a harness ever projected; with no projection the two match. The FIRST\nplacement's mirror (the per-placement truth is `placement_state`), and the only digest a\nrecord with no placement at all still carries.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "placement_state": {
-      "description": "Per-placement durable state, strictly 1:1 with [`Self::placements`] after the read upgrade.\nEmpty on disk only in a v1 document (the reader synthesizes the single entry from the\nmap-level fields).",
+      "description": "Per-placement durable state, strictly 1:1 with [`Self::placements`].",
       "type": "array",
       "items": {
         "$ref": "#/$defs/PlacementState"
@@ -53,31 +46,18 @@
         "type": "string"
       }
     },
-    "pre_existing_sha": {
-      "description": "sha256 of whatever was in the dir BEFORE placement — restored on uninstall (no-op uninstall).\nThe FIRST placement's mirror in a v2 document.",
-      "type": [
-        "string",
-        "null"
-      ],
-      "pattern": "^[0-9a-f]{64}$"
-    },
     "schema_version": {
       "type": "integer",
       "format": "uint32",
       "const": 2,
       "minimum": 0
-    },
-    "swap_capability": {
-      "description": "The FIRST placement's swap capability (the per-placement truth is `placement_state`).",
-      "$ref": "#/$defs/SwapCapability"
     }
   },
   "required": [
     "schema_version",
     "placements",
     "applied_commit",
-    "materialized_sha",
-    "swap_capability"
+    "materialized_sha"
   ],
   "$defs": {
     "HarnessId": {
@@ -117,7 +97,7 @@
       ]
     },
     "PlacementState": {
-      "description": "One placement's durable state (`map.json` v2), 1:1 with [`PlacementMap::placements`]. **Field-set\npinned**; the `kind` value set is INFERRED.",
+      "description": "One placement's durable state (`map.json` v2), 1:1 with [`PlacementMap::placements`]. **Field-set\npinned**; the `kind` and `swap_capability` value sets are INFERRED.",
       "type": "object",
       "properties": {
         "adopted_source": {

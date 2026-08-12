@@ -68,8 +68,6 @@ fn sample_map(tag: u8) -> PlacementMap {
         placements: vec![format!("/home/u/skills/s{tag}")],
         applied_commit: hex(tag),
         materialized_sha: hex(tag),
-        pre_existing_sha: None,
-        swap_capability: SwapCapability::Unsupported,
         placement_state: vec![topos_types::persisted::PlacementState {
             kind: topos_types::persisted::PlacementKind::Native,
             agent: None,
@@ -80,7 +78,6 @@ fn sample_map(tag: u8) -> PlacementMap {
             claim: None,
         }],
         harness: None,
-        harness_layer: None,
         harness_slug: None,
     }
 }

@@ -1988,8 +1988,6 @@ mod tests {
             placements: vec![dir.to_owned()],
             applied_commit: "0".repeat(64),
             materialized_sha: "0".repeat(64),
-            pre_existing_sha: None,
-            swap_capability: SwapCapability::Unsupported,
             placement_state: vec![PlacementState {
                 kind: PlacementKind::Native,
                 agent: Some("claude-code".to_owned()),
@@ -2000,7 +1998,6 @@ mod tests {
                 claim: None,
             }],
             harness: None,
-            harness_layer: None,
             harness_slug: None,
         }
     }

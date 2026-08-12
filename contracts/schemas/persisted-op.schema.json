@@ -10,7 +10,7 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "bundle_kind": {
-      "description": "The catalog `kind` a genesis publish/propose declares (`\"mcp\"`), replayed byte-identical on\na crash retry. `None` for skills, reverts/reviews, and pre-existing WALs. (Distinct from\n[`OpRecord::op`], the operation kind.)",
+      "description": "The catalog `kind` a genesis publish/propose declares (`\"mcp\"`), replayed byte-identical on\na crash retry. `None` for skills and reverts/reviews. (Distinct from\n[`OpRecord::op`], the operation kind.)",
       "type": [
         "string",
         "null"
@@ -22,14 +22,14 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "channel": {
-      "description": "The `--to` channel placement sent alongside a publish/propose so a replay re-sends the identical\nvalue. `None` when no placement was requested (and for a revert/review and pre-existing WALs).",
+      "description": "The `--to` channel placement sent alongside a publish/propose so a replay re-sends the identical\nvalue. `None` when no placement was requested (and for a revert/review).",
       "type": [
         "string",
         "null"
       ]
     },
     "display_name": {
-      "description": "The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a\nreplay re-sends the identical value. Advisory only — it names the follower's folder + the dashboard\nentry, never the digest or the op's bound identity. `None` for a revert/review and for pre-existing WALs.",
+      "description": "The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a\nreplay re-sends the identical value. Advisory only — it names the follower's folder + the dashboard\nentry, never the digest or the op's bound identity. `None` for a revert/review.",
       "type": [
         "string",
         "null"

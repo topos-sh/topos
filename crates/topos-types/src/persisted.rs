@@ -87,14 +87,13 @@ pub struct LockedFile {
 }
 
 /// `skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and
-/// exact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.
+/// exact go-back. **Field-set pinned**.
 ///
 /// **Schema v2** (its OWN ceiling, [`crate::PLACEMENT_MAP_SCHEMA_VERSION`]): a skill may hold SEVERAL
 /// placements (the shared cross-agent dir + per-harness native dirs), each with its own durable state
-/// in [`Self::placement_state`], strictly 1:1 with [`Self::placements`]. A v1 document (one placement,
-/// map-level state only) upgrades losslessly in memory on read; the map-level `materialized_sha` /
-/// `pre_existing_sha` / `swap_capability` fields remain the FIRST placement's mirror, so a v2 document
-/// stays legible to inspection tools that predate the per-placement shape.
+/// in [`Self::placement_state`], strictly 1:1 with [`Self::placements`]. Per-placement state is the
+/// truth; the one map-level summary that remains is [`Self::materialized_sha`], the FIRST placement's
+/// digest — the answer a document with no placement state at all still carries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PlacementMap {
@@ -108,19 +107,11 @@ pub struct PlacementMap {
     pub applied_commit: String,
     /// sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source
     /// `bundle_digest` if a harness ever projected; with no projection the two match. The FIRST
-    /// placement's mirror in a v2 document (the per-placement truth is `placement_state`).
+    /// placement's mirror (the per-placement truth is `placement_state`), and the only digest a
+    /// record with no placement at all still carries.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub materialized_sha: String,
-    /// sha256 of whatever was in the dir BEFORE placement — restored on uninstall (no-op uninstall).
-    /// The FIRST placement's mirror in a v2 document.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub pre_existing_sha: Option<String>,
-    /// The FIRST placement's swap capability (the per-placement truth is `placement_state`).
-    pub swap_capability: SwapCapability,
-    /// Per-placement durable state, strictly 1:1 with [`Self::placements`] after the read upgrade.
-    /// Empty on disk only in a v1 document (the reader synthesizes the single entry from the
-    /// map-level fields).
+    /// Per-placement durable state, strictly 1:1 with [`Self::placements`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub placement_state: Vec<PlacementState>,
     /// The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude
@@ -128,9 +119,6 @@ pub struct PlacementMap {
     /// auto-update trigger applies. **Additive optional** (a `None` placement omits it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<crate::HarnessId>,
-    /// The harness layer the placement sits in (e.g. `"user"`), when a harness was recognized.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_layer: Option<String>,
     /// The registry slug (e.g. `claude-code`, `cursor`) of the agent this placement serves, when ONE
     /// agent owns it: the recognized harness, or the sole installed reader of the folder an added dir
     /// sits in. A folder several agents read has no single owner and a folder none reads has none at
@@ -140,7 +128,7 @@ pub struct PlacementMap {
 }
 
 /// One placement's durable state (`map.json` v2), 1:1 with [`PlacementMap::placements`]. **Field-set
-/// pinned**; the `kind` value set is INFERRED.
+/// pinned**; the `kind` and `swap_capability` value sets are INFERRED.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PlacementState {
@@ -398,11 +386,11 @@ pub struct OpRecord {
     pub good: Option<String>,
     /// The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a
     /// replay re-sends the identical value. Advisory only — it names the follower's folder + the dashboard
-    /// entry, never the digest or the op's bound identity. `None` for a revert/review and for pre-existing WALs.
+    /// entry, never the digest or the op's bound identity. `None` for a revert/review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// The `--to` channel placement sent alongside a publish/propose so a replay re-sends the identical
-    /// value. `None` when no placement was requested (and for a revert/review and pre-existing WALs).
+    /// value. `None` when no placement was requested (and for a revert/review).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     /// The upstream-provenance block this publish carries (an imported bundle remembers its
@@ -410,7 +398,7 @@ pub struct OpRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<crate::requests::WireUpstream>,
     /// The catalog `kind` a genesis publish/propose declares (`"mcp"`), replayed byte-identical on
-    /// a crash retry. `None` for skills, reverts/reviews, and pre-existing WALs. (Distinct from
+    /// a crash retry. `None` for skills and reverts/reviews. (Distinct from
     /// [`OpRecord::op`], the operation kind.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_kind: Option<String>,

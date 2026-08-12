@@ -206,14 +206,12 @@ pub(crate) fn commit_docs(
     Ok(())
 }
 
-/// Refresh the map-level summary fields from the FIRST placement's state (the v1-legible mirror).
+/// Refresh the map-level summary digest from the FIRST placement's state.
 pub(crate) fn mirror_first_placement(map: &mut PlacementMap) {
-    if let Some(first) = map.placement_state.first() {
-        if let Some(sha) = &first.materialized_sha {
-            map.materialized_sha = sha.clone();
-        }
-        map.pre_existing_sha = first.pre_existing_sha.clone();
-        map.swap_capability = first.swap_capability;
+    if let Some(first) = map.placement_state.first()
+        && let Some(sha) = &first.materialized_sha
+    {
+        map.materialized_sha = sha.clone();
     }
 }
 
@@ -1358,8 +1356,6 @@ mod tests {
                 .collect(),
             applied_commit: "0".repeat(64),
             materialized_sha: materialized.to_owned(),
-            pre_existing_sha: None,
-            swap_capability: cap,
             placement_state: dirs
                 .iter()
                 .map(|_| PlacementState {
@@ -1373,7 +1369,6 @@ mod tests {
                 })
                 .collect(),
             harness: None,
-            harness_layer: None,
             harness_slug: None,
         }
     }

@@ -26,7 +26,6 @@ mod connect;
 mod contribute;
 pub(crate) mod dest_select;
 mod diff;
-mod feed_migration;
 mod fmt;
 mod init;
 pub(crate) mod inventory;
@@ -81,7 +80,6 @@ pub(crate) use builtin::{
     placement_dirs as builtin_placement_dirs, remove_builtin as builtin_remove,
 };
 pub(crate) use diff::{DiffBudget, diff, diff_resolved};
-pub(crate) use feed_migration::ensure_feed_migration;
 pub(crate) use fmt::fmt_manifest;
 pub(crate) use init::init;
 pub(crate) use inventory::ScopeView;
@@ -120,11 +118,6 @@ pub(crate) use reconcile::{
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use reconcile::orphan_fact;
-// The handover is driven by the reconcile; the direct re-export serves the custody-first
-// regression tests (retire only after verifiable project adoption; park, never delete).
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use reconcile::handover_legacy_project_rows;
 pub(crate) use reference::{
     AddManyOutcome, AddRefOutcome, GovernedOutcome, WriteLane, add_forge_selected, add_reference,
     find_path_line, path_row_kind, resolve_session_lane, rewrite_to_governed,

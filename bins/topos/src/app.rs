@@ -402,12 +402,6 @@ fn run_command(
         progress: &*progress,
     };
 
-    // The one-time feed-line upgrade migration — silent, behavior-preserving, marker-gated (a
-    // cheap document read once done). It runs before every dispatched verb below; `uninstall`
-    // and `status` dispatched earlier by design (the teardown must survive corrupt state, and
-    // `status` promises a byte-untouched sidecar).
-    ops::ensure_feed_migration(&ctx);
-
     // The credentialed device connectors — every credentialed route presents the device's ONE Bearer
     // credential. Built as closures so `credentials.json` is re-read FRESH on each build: a `follow
     // <address>` mints it mid-invocation (at the granted poll), and the continued describe/apply must

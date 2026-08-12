@@ -790,10 +790,7 @@ mod tests {
                 placements: vec![placement.to_string_lossy().into_owned()],
                 applied_commit: "b".repeat(64),
                 materialized_sha: "e".repeat(64),
-                pre_existing_sha: None,
-                swap_capability: SwapCapability::Unsupported,
                 harness: None,
-                harness_layer: None,
                 harness_slug: None,
                 placement_state: vec![PlacementState {
                     kind: PlacementKind::Native,

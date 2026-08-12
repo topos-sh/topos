@@ -296,22 +296,11 @@ impl Layout {
         self.identity_dir().join("host.json")
     }
 
-    /// `instance.json` — RETIRED (the pre-session pinned-plane doc). Named only so recovery can
-    /// delete a leftover on sight.
-    pub(crate) fn instance_path(&self) -> PathBuf {
-        self.home.join("instance.json")
-    }
-
-    /// `follows.json` — RETIRED (the pre-manifest subscription doc). Named only so recovery can
-    /// delete a leftover on sight (an old file may still hold a legacy `read_token`).
-    pub(crate) fn follows_path(&self) -> PathBuf {
-        self.home.join("follows.json")
-    }
-
-    /// `identity/credentials.json` — RETIRED (the pre-session machine-wide credential doc, a
-    /// secret). Named only so recovery can delete a leftover on sight — a leftover credential is a
-    /// secret with no reader.
-    pub(crate) fn credentials_path(&self) -> PathBuf {
+    /// `identity/credentials.json` — a machine-wide bearer credential no build issues or reads any
+    /// more. Named ONLY so the recovery sweep can shred it on sight: this is a SECURITY reap of
+    /// secret material, permanent and unconditional, never a compatibility shim. A credential left
+    /// on disk with no reader is still a live credential.
+    pub(crate) fn retired_secret_credentials_path(&self) -> PathBuf {
         self.identity_dir().join("credentials.json")
     }
 
@@ -320,12 +309,6 @@ impl Layout {
     /// lock.
     pub(crate) fn sessions_path(&self) -> PathBuf {
         self.identity_dir().join("sessions.json")
-    }
-
-    /// `identity/user.json` — RETIRED (the pre-session workspace-metadata doc). Named only so
-    /// recovery can delete a leftover on sight.
-    pub(crate) fn user_path(&self) -> PathBuf {
-        self.identity_dir().join("user.json")
     }
 
     /// `identity/enrollment.json` — the in-flight LOGIN WAL (a `0600` secret: it holds the flow
@@ -933,16 +916,15 @@ pub(crate) fn recover(
     recover_park_journal(fs, layout, now_millis, warnings)?;
     recover_conflict_staging(fs, layout)?;
 
-    // Sweep the retired device-era identity documents on sight: the keypair seed, the pinned
-    // instance, the device credential, the membership roster, and the subscription file — the
-    // SESSION model (`identity/sessions.json` + manifests + the delivery cache) replaced them
-    // all, and a leftover credential is a secret with no reader.
+    // SHRED SECRET MATERIAL topos no longer issues or reads: the machine-wide keypair seed and the
+    // machine-wide bearer credential. Sessions hold the only credentials now, so nothing will ever
+    // consume these two files again — but an unread private key and an unread bearer token are
+    // still a private key and a bearer token, and the only safe place for them is gone. This is a
+    // standing security reap, not a compatibility step: it runs on every command, forever, and
+    // costs two `exists` probes.
     for dead in [
         layout.identity_dir().join("device.key"),
-        layout.instance_path(),
-        layout.credentials_path(),
-        layout.user_path(),
-        layout.follows_path(),
+        layout.retired_secret_credentials_path(),
     ] {
         if fs.exists(&dead) {
             fs.remove_file(&dead)?;
@@ -1477,8 +1459,6 @@ mod tests {
                 placements: vec![placement.to_string_lossy().into_owned()],
                 applied_commit: "1".repeat(64),
                 materialized_sha: baseline.clone(),
-                pre_existing_sha: None,
-                swap_capability: SwapCapability::Unsupported,
                 placement_state: vec![PlacementState {
                     kind: PlacementKind::Native,
                     agent: None,
@@ -1489,7 +1469,6 @@ mod tests {
                     claim: None,
                 }],
                 harness: None,
-                harness_layer: None,
                 harness_slug: None,
             },
         )
@@ -1561,8 +1540,6 @@ mod tests {
                 placements: vec![placement.to_string_lossy().into_owned()],
                 applied_commit: "1".repeat(64),
                 materialized_sha: baseline.clone(),
-                pre_existing_sha: None,
-                swap_capability: SwapCapability::Unsupported,
                 placement_state: vec![PlacementState {
                     kind: PlacementKind::Native,
                     agent: None,
@@ -1573,7 +1550,6 @@ mod tests {
                     claim: None,
                 }],
                 harness: None,
-                harness_layer: None,
                 harness_slug: None,
             },
         )

@@ -33,7 +33,7 @@ use std::rc::Rc;
 use topos_core::digest::to_hex;
 use topos_gitstore::Store;
 use topos_types::PERSISTED_SCHEMA_VERSION;
-use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
+use topos_types::persisted::{Lock, PlacementMap, SyncState};
 use topos_types::requests::{WireChannelIndex, WireSkillIndex, WireSkillIndexEntry};
 use topos_types::results::{
     ExchangeFault, PullAction, PullData, PullSkill, TargetOutcome, WorkspaceSyncReport,
@@ -1368,7 +1368,7 @@ pub(crate) fn manifest_update(
     }
 
     // Every manifest dir up the chain — NOT a resolution input (nearest wins whole); the store
-    // surfaces (lazy recovery, the pre-1.0 handover) still visit each one.
+    // surfaces (lazy recovery) still visit each one.
     let manifest_dirs: Vec<PathBuf> = match &cwd {
         Some(cwd) => scopes::manifest_dirs_up(ctx.fs, cwd, home.as_deref()),
         None => Vec::new(),
@@ -1391,23 +1391,6 @@ pub(crate) fn manifest_update(
             ));
         }
     }
-    // Pre-1.0 handover: HOME-store map rows that point into the ACTIVE project are the OLD
-    // blended model's leftovers — dropped (bytes stay in place) only once the project store has
-    // verifiably adopted the skill. ONLY the nearest, parsed manifest's dir participates: a
-    // parse failure froze the scope (a typo must keep state, never retire it), and an ancestor a
-    // nearer file shadows gets no project pass this run, so nothing may retire toward it.
-    let handover_dirs: Vec<PathBuf> = if project_frozen {
-        Vec::new()
-    } else {
-        project.iter().map(|(dir, _)| dir.clone()).collect()
-    };
-    handover_legacy_project_rows(
-        ctx,
-        &handover_dirs,
-        &mut sweep.advisories,
-        &mut sweep.warnings,
-    );
-
     // The follow seam for this run: current deliveries first, the cache behind them.
     let mut follow = CacheFollow::load(ctx.fs, &ctx.layout);
     for run in &runs {
@@ -3206,11 +3189,8 @@ fn sync_workspace_skill<'a>(
             placements: Vec::new(),
             applied_commit: String::new(),
             materialized_sha: String::new(),
-            pre_existing_sha: None,
-            swap_capability: SwapCapability::Unsupported,
             placement_state: Vec::new(),
             harness: None,
-            harness_layer: None,
             harness_slug: None,
         };
         let plan = plan_fn(&run_ctx, &target.skill_id, &baseline_lock, &empty);
@@ -4025,9 +4005,8 @@ fn reconcile_repo_set(
     //
     // An import that recorded NO member set is not evidence of completeness either: "nothing is
     // missing" and "nothing is known" are different answers, and reading the second as the first
-    // pins a legacy-shaped import to whatever partial landing it happens to hold, forever. So the
-    // absent record is UNSETTLED: the next update refetches ONCE, records the archive's member
-    // list (below), and converges — after which the ordinary predicate answers.
+    // pins an import to whatever partial landing it happens to hold, forever. So the absent record
+    // is UNSETTLED and the row keeps converging until a landing writes one.
     let members_complete = recorded_member_set(&tracked)
         .is_some_and(|recorded| recorded.iter().all(|m| is_tracked_name(m)));
     let pin_satisfied = pin.as_ref().is_some_and(|p| {
@@ -4154,11 +4133,6 @@ fn reconcile_repo_set(
     for name in &discovered {
         sweep.mention(&sc.label, name);
     }
-    // The fetch this run just made is also the answer to "what does this archive hold?" — so an
-    // import that recorded no member set gets one now, from the archive itself. That is what makes
-    // the refetch above a ONE-TIME cost: the next run's predicate can tell a partial landing from
-    // a complete one, and a settled pin stops dialing.
-    record_member_sets(&sctx, &tracked, &resolved, &discovered, &mut sweep.warnings);
     // Every discovered member really sits on the fetched commit: settled. (An UNTRACKED member at
     // the same commit — a partial add landing — still installs below.)
     //
@@ -4580,48 +4554,6 @@ fn placed_under(sctx: &Ctx<'_>, import: &ForgeImport, root: &Path) -> bool {
         .any(|p| Path::new(p).starts_with(root))
 }
 
-/// Backfill the archive's MEMBER SET onto tracked imports that recorded none (see
-/// [`recorded_member_set`]): the fetch that proved what the archive holds is the one chance to
-/// write it down, and doing so is what lets a pinned row ever read as settled again.
-///
-/// ONLY onto imports sitting at the commit this fetch resolved — a member list is a fact about ONE
-/// commit, and writing a newer archive's list beside an older import's hash would make the pair
-/// lie. An import at another commit is about to be refreshed anyway, and its fresh `origin.json`
-/// records the pair correctly. Best-effort per import — a document this build cannot read is left
-/// exactly as it is, with a line.
-fn record_member_sets(
-    sctx: &Ctx<'_>,
-    tracked: &[ForgeImport],
-    resolved: &str,
-    discovered: &[String],
-    warnings: &mut Vec<Message>,
-) {
-    if discovered.is_empty() || resolved.is_empty() {
-        return;
-    }
-    for import in tracked.iter().filter(|i| {
-        i.members.is_empty()
-            && commit_matches(i.origin.commit.as_deref().unwrap_or_default(), resolved)
-    }) {
-        let path = sctx.layout.published(&import.sid).origin;
-        let existing = match doc::read_doc::<super::add::OriginDoc>(sctx.fs, &path) {
-            Ok(Some(d)) => d,
-            Ok(None) => continue,
-            Err(e) => {
-                warnings.push(members_unrecorded(&import.lock.name, &e.detail()));
-                continue;
-            }
-        };
-        let next = super::add::OriginDoc {
-            members: discovered.to_vec(),
-            ..existing
-        };
-        if let Err(e) = doc::write_doc(sctx.fs, &path, &next) {
-            warnings.push(members_unrecorded(&import.lock.name, &e.detail()));
-        }
-    }
-}
-
 /// Install one repo skill, or re-import a tracked one at the new commit, ONCE PER SLOT — every
 /// store op through `sctx`, the SCOPE's own store (the refresh's stash/restore therefore never
 /// reaches across checkouts). The row's demand already exists — the reconcile NEVER writes a
@@ -5019,18 +4951,6 @@ fn git_updated_line(
     crate::message::disclosure("GIT_UPDATED", line)
 }
 
-/// A member set this fetch proved but could not write down — the pair (commit, members) is simply
-/// not recorded, so the next run asks the repository for it again.
-fn members_unrecorded(name: &str, detail: &str) -> Message {
-    crate::message::failure(
-        "MEMBERS_UNRECORDED",
-        format!(
-            "{name}: topos could not record which bundles this repository holds ({detail}), so it \
-             will ask the repository again next time."
-        ),
-    )
-}
-
 /// A commit's first 12 characters — enough to recognize, short enough to read.
 fn short_commit(c: &str) -> &str {
     &c[..c.len().min(12)]
@@ -5101,8 +5021,8 @@ pub(crate) fn tracked_repo_members(ctx: &Ctx<'_>, origin_source: &str) -> Vec<Fo
 
 /// The MEMBER SET a pinned repo-set row must see landed before it is settled: the union of the
 /// member lists the tracked imports recorded at landing. `None` when NO tracked import records one
-/// (a pre-`members` import, or none at all) — the caller then cannot tell a partial landing from a
-/// complete one and keeps the older, weaker predicate rather than inventing a fact.
+/// — the caller then cannot tell a partial landing from a complete one and keeps the weaker
+/// predicate rather than inventing a fact.
 fn recorded_member_set(tracked: &[ForgeImport]) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     let mut any = false;
@@ -6756,166 +6676,6 @@ pub(super) fn item_failure(name: &str, e: &ClientError) -> Message {
     )
 }
 
-/// Pre-1.0 old-state handover (no compatibility machinery): before per-scope stores, ONE home map
-/// blended home and project placements. A home-store row that points INTO the ACTIVE project
-/// directory is legacy — dropped from the home map with its BYTES LEFT IN PLACE — but ONLY once
-/// the project store has VERIFIABLY ADOPTED the skill (a project-store skill records that exact
-/// placement path): custody must be established before the old record lets go, so an empty or
-/// not-yet-reconciled project manifest hands nothing over (the next sweep, after the project pass
-/// adopts, does). The caller passes ONLY the active project plan's dir — never an ancestor a
-/// nearer manifest shadows, and nothing at all when the nearest manifest failed to parse (a typo
-/// must keep state, never retire it). Two kinds of rows are additionally NOT handed over:
-///
-/// - agent-less native rows (kind `native`, no agent) — the user's own chosen locations (an
-///   adopt-in-place working copy, an explicit placement pin), which the person-scope record keeps
-///   managing;
-/// - rows of a skill imported from an external source (`origin.json` present) — those keep their home
-///   custody for now.
-///
-/// A skill whose home map ends EMPTY after the drop was project-only. Its home state dir is
-/// retired by PARKING, never deleting: the embedded history and draft snapshots in it were not
-/// carried into the project store's fresh baseline, so the dir is renamed to a
-/// `.topos-handover-*` sibling (outside every sweep's reach), disclosed with a warning line, and
-/// journaled in the log — a person can delete it deliberately; topos does not.
-///
-/// The two channels are not interchangeable. A PARK that landed is an advisory — it says where
-/// the person's old history now lives, and a handover that worked must not make the run report a
-/// failure or exit non-zero. A handover that could NOT complete is a real fault and rides
-/// `warnings`.
-pub(crate) fn handover_legacy_project_rows(
-    ctx: &Ctx<'_>,
-    project_dirs: &[PathBuf],
-    advisories: &mut Vec<Message>,
-    warnings: &mut Vec<Message>,
-) {
-    use topos_types::persisted::PlacementKind;
-    if project_dirs.is_empty() {
-        return;
-    }
-    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
-        return;
-    };
-    for entry in entries {
-        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(sid) = SkillId::parse(id) else {
-            continue;
-        };
-        if sidecar::record_retired(ctx.fs, &ctx.layout, &sid) {
-            continue; // a retired record left every surface — never handed over
-        }
-        let sp = ctx.layout.published(&sid);
-        if matches!(ctx.fs.read_opt(&sp.origin), Ok(Some(_))) {
-            continue; // an external import keeps its home custody
-        }
-        let Ok(_guard) = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, &sid) else {
-            continue;
-        };
-        let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
-            continue;
-        };
-        let legacy: Vec<usize> = map
-            .placements
-            .iter()
-            .zip(&map.placement_state)
-            .enumerate()
-            .filter(|(_, (p, st))| {
-                (st.agent.is_some() || st.kind == PlacementKind::Shared)
-                    && project_dirs.iter().any(|pd| {
-                        Path::new(p).starts_with(pd)
-                            // The adoption witness: retire the home row only once the project
-                            // store's own record covers this exact path — custody first.
-                            && project_store_tracks(ctx, pd, Path::new(p))
-                    })
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if legacy.is_empty() {
-            continue;
-        }
-        let mut next = map.clone();
-        let keep: Vec<bool> = (0..map.placements.len())
-            .map(|i| !legacy.contains(&i))
-            .collect();
-        let mut it = keep.iter();
-        next.placements.retain(|_| *it.next().unwrap_or(&true));
-        let mut it = keep.iter();
-        next.placement_state.retain(|_| *it.next().unwrap_or(&true));
-        let done = if next.placements.is_empty() {
-            // Project-only: the project store owns the scope now, but the home dir still holds
-            // embedded history + draft snapshots no adoption carried over — PARK it (rename to a
-            // `.topos-handover-*` sibling no sweep touches), disclose, and log; never delete.
-            // The park is JOURNALED before the rename and the entry settled only AFTER the
-            // disclosure lands: a crash in between leaves the entry, recovery restores the dir,
-            // and the handover simply re-runs — the park can never sit undisclosed.
-            match crate::materialize::park_aside_journaled(
-                ctx.fs,
-                &ctx.layout,
-                &ctx.layout.skill_dir(&sid),
-                "handover",
-                true,
-                Some(&sid),
-            ) {
-                Ok(parked) => {
-                    advisories.push(crate::message::advisory(
-                        "STATE_HANDOVER",
-                        format!(
-                            "{id}: this project now keeps this bundle's record. The old \
-                             machine-wide copy of its history and draft snapshots is preserved at \
-                             {} — delete that folder when you no longer want it.",
-                            parked.display()
-                        ),
-                    ));
-                    let _ = crate::logfile::append_event(
-                        ctx.fs,
-                        &ctx.layout.log_path(),
-                        &serde_json::json!({
-                            "action": "handover_store_parked",
-                            "skill_id": id,
-                            "kept_at": parked.to_string_lossy(),
-                            "at": ctx.clock.now_unix_millis(),
-                        }),
-                    );
-                    // The disclosure above IS this park's conclusion — the parked history is a
-                    // deliberate, named leftover now, not a stranded one.
-                    crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            crate::materialize::mirror_first_placement(&mut next);
-            doc::write_map(ctx.fs, &sp.map, &next)
-        };
-        if let Err(e) = done {
-            warnings.push(crate::message::failure(
-                "STATE_HANDOVER_FAILED",
-                format!(
-                    "{id}: topos could not hand this bundle's old machine-wide record over to \
-                     this project ({}). Nothing was deleted.",
-                    e.detail()
-                ),
-            ));
-        }
-    }
-}
-
-/// Whether the project store at `pd` verifiably tracks a skill whose recorded placements cover
-/// `path` (canonical compare — the same predicate `add`'s already-tracked guard uses). `false`
-/// when the store does not exist, the path no longer resolves, or nothing records it — every
-/// one of which means custody is NOT established and the home row must stay.
-fn project_store_tracks(ctx: &Ctx<'_>, pd: &Path, path: &Path) -> bool {
-    let Some(playout) = sidecar::existing_project_store(ctx.fs, pd) else {
-        return false;
-    };
-    let Ok(canonical) = path.canonicalize() else {
-        return false;
-    };
-    let pctx = super::pull::ctx_with_layout(ctx, &playout);
-    matches!(super::add::tracked_skill_at(&pctx, &canonical), Ok(Some(_)))
-}
-
 /// Upcast helpers — `Box<dyn ReconcileTransport>` to its two supertrait views.
 trait TransportViews {
     fn as_plane(&self) -> &dyn PlaneSource;
@@ -6988,11 +6748,8 @@ pub(crate) fn lay_baseline_with_plan(
         placements: Vec::new(),
         applied_commit: ZERO_HEX.to_owned(),
         materialized_sha: ZERO_HEX.to_owned(),
-        pre_existing_sha: None,
-        swap_capability: SwapCapability::Unsupported,
         placement_state: Vec::new(),
         harness: Some(ctx.harness.id()),
-        harness_layer: None,
         harness_slug: Some(ctx.harness.id().slug().to_owned()),
     };
     let mut map = crate::placement::reconcile_map(&baseline, plan);

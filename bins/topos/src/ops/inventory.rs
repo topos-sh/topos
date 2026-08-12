@@ -1788,10 +1788,7 @@ pub(crate) mod testkit {
                         placements: placements.iter().map(|p| (*p).to_owned()).collect(),
                         applied_commit: version.to_owned(),
                         materialized_sha: "e".repeat(64),
-                        pre_existing_sha: None,
-                        swap_capability: SwapCapability::Unsupported,
                         harness: None,
-                        harness_layer: None,
                         harness_slug: None,
                         placement_state: placements
                             .iter()

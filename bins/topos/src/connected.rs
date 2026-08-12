@@ -1,5 +1,5 @@
 //! `state/connected.json` — the machine-local record of every workspace this machine has EVER
-//! connected to, plus the one-time feed-line migration's done marker.
+//! connected to.
 //!
 //! `topos login` writes a workspace's feed line (`"<host>/<workspace>" = "*"`) into the global
 //! manifest only on this machine's FIRST connection to that workspace — this document is the
@@ -33,14 +33,11 @@ use crate::fs_seam::FsOps;
 use crate::sidecar::Layout;
 
 /// The whole document: the workspaces this machine has ever connected to (a `BTreeSet`, so the
-/// on-disk bytes are deterministic), and the one-time feed-line migration marker.
+/// on-disk bytes are deterministic).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConnectedWorkspaces {
     #[serde(default)]
     pub schema_version: u32,
-    /// The one-time feed-line migration's done marker (see `crate::ops::ensure_feed_migration`).
-    #[serde(default)]
-    pub migrated: bool,
     /// `"<host>/<workspace-name>"` keys — the manifest reference grammar's feed spelling.
     #[serde(default)]
     pub workspaces: BTreeSet<String>,
@@ -180,7 +177,6 @@ mod tests {
         record(&fs, &layout, "topos.example.com", "acme").unwrap();
         let doc = read(&fs, &layout).unwrap().unwrap();
         assert_eq!(doc.workspaces.len(), 2);
-        assert!(!doc.migrated);
         assert_eq!(doc.schema_version, PERSISTED_SCHEMA_VERSION);
     }
 

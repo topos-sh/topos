@@ -532,11 +532,8 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
             placements: Vec::new(),
             applied_commit: version_hex.clone(),
             materialized_sha: digest_hex.clone(),
-            pre_existing_sha: None,
-            swap_capability: topos_types::persisted::SwapCapability::Unsupported,
             placement_state: Vec::new(),
             harness: None,
-            harness_layer: None,
             harness_slug: None,
         },
     )?;

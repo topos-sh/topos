@@ -107,17 +107,4 @@ mod tests {
         assert!(text.contains("device_id"));
         assert!(!text.contains("key"), "host.json is key-free: {text}");
     }
-
-    #[test]
-    fn a_stale_host_doc_with_extra_fields_still_loads_its_device_id() {
-        // A pre-flip host.json carried a device-key reference block; serde ignores unknown fields, so
-        // the id survives an upgrade without a migration.
-        let fs = RealFs;
-        let layout = Layout::new(&scratch("stale"));
-        std::fs::create_dir_all(layout.identity_dir()).unwrap();
-        let stale =
-            br#"{"schema_version":1,"device_id":"d_stable","device_key":{"alg":"Ed25519"}}"#;
-        std::fs::write(layout.host_path(), stale).unwrap();
-        assert_eq!(load_or_create_device_id(&fs, &layout).unwrap(), "d_stable");
-    }
 }

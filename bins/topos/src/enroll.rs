@@ -3,7 +3,9 @@
 //! resumes it, and deletes it once the granted poll persists the session). Everything else this
 //! module once held — the pinned instance, the device credential, the membership roster, the
 //! subscription file — is RETIRED: sessions (`identity/sessions.json`) are the identity, and
-//! demand lives in manifests. The recovery sweep still deletes those legacy files on sight.
+//! demand lives in manifests. Only the SECRET of that set is still swept — the recovery pass
+//! shreds a stray `identity/credentials.json` (and the `device.key` beside it) on sight, because
+//! an unread credential is still a credential; the plain documents are simply inert.
 
 use serde::{Deserialize, Serialize};
 
