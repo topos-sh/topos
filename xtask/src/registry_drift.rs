@@ -1,12 +1,18 @@
-//! `check-registry-drift` — an OPT-IN, advisory check that the baked harness registry
+//! `check-registry-drift` — an OPT-IN, advisory check that the committed harness registry
 //! ([`topos_harness::registry`]) still matches vercel-labs/skills' upstream `src/agents.ts`.
 //!
-//! This command FETCHES the current upstream file over HTTPS at runtime and diffs it against the baked
-//! table. It is deliberately **not** part of `cargo xtask ci` and NEVER runs in CI: the baked table is a
-//! committed artifact, and re-syncing it is a human decision (an upstream agent's dirs are load-bearing
+//! This command FETCHES the current upstream file over HTTPS at runtime and diffs it against the
+//! committed table. It is deliberately **not** part of `cargo xtask ci` and never gates a push: the table is
+//! a committed artifact, and re-syncing it is a human decision (an upstream agent's dirs are load-bearing
 //! for on-disk skill discovery, so a table change deserves a real look). Run it by hand —
 //! `cargo xtask check-registry-drift` — when you want to know whether upstream moved; it prints a
-//! human-readable report and exits **nonzero on any drift** so the drift is impossible to miss.
+//! human-readable report and exits **nonzero on any drift** so the drift is impossible to miss. A
+//! weekly scheduled workflow (`.github/workflows/registry-drift.yml`) runs it on its own lane and
+//! opens no PR: the report is the product, and the re-sync is still a person's decision.
+//!
+//! It reads the table through [`topos_harness::registry::known_harnesses`], so it sees exactly what
+//! the binary sees — the committed `crates/topos-harness/registry.toml`, which is where a re-sync
+//! is written.
 //!
 //! ## What it parses, and its limits
 //! The upstream source is TypeScript, so this is a LIGHTWEIGHT line parse of the `agents` object literal
@@ -238,14 +244,14 @@ pub(crate) fn run() -> Result<()> {
     mismatches.sort();
 
     println!(
-        "\nupstream agents: {}   |   baked harnesses: {}",
+        "\nupstream agents: {}   |   known harnesses: {}",
         upstream.len(),
         local.len()
     );
 
     if missing_local.is_empty() && missing_upstream.is_empty() && mismatches.is_empty() {
         println!(
-            "\nno drift — the baked registry matches upstream agents.ts (slugs + project/global dirs)."
+            "\nno drift — the committed registry matches upstream agents.ts (slugs + project/global dirs)."
         );
         println!(
             "(note: detectInstalled bodies are not parsed — a detect-only upstream change is not \
@@ -255,7 +261,8 @@ pub(crate) fn run() -> Result<()> {
     }
 
     println!(
-        "\nDRIFT DETECTED — re-sync crates/topos-harness/src/registry.rs against upstream agents.ts:\n"
+        "\nDRIFT DETECTED — re-sync crates/topos-harness/registry.toml against upstream agents.ts (bump \
+         its `version` in the same edit):\n"
     );
     if !missing_local.is_empty() {
         println!("  rows upstream but MISSING locally (add them, in upstream file order):");
@@ -351,7 +358,7 @@ export async function detectInstalledAgents() { return []; }
     }
 
     #[test]
-    fn canonical_forms_agree_with_the_baked_accessors() {
+    fn canonical_forms_agree_with_the_registry_accessors() {
         // The parse's canonical strings must line up with the registry's own rendering for the same
         // rows — otherwise a clean re-sync would still report false drift.
         let agents = parse_upstream(SAMPLE).expect("parses");
@@ -368,7 +375,7 @@ export async function detectInstalledAgents() { return []; }
             assert_eq!(
                 local[slug].user_dir_specs().first().map(String::as_str),
                 Some(up.as_str()),
-                "{slug}: parsed global dir must equal the baked accessor's first user dir",
+                "{slug}: parsed global dir must equal the registry accessor's first user dir",
             );
             assert_eq!(
                 by[slug].project_dir.as_deref(),

@@ -1,0 +1,32 @@
+name: registry drift
+
+# The harness registry's own lane, on its own schedule. It fetches vercel-labs/skills' `agents.ts`
+# and diffs it against the committed `crates/topos-harness/registry.toml`, so a vendor that moves a
+# skills directory surfaces here instead of in a support thread.
+#
+# Deliberately NOT a push/PR gate: the check reaches the network, and re-syncing the table is a
+# person's decision (dirs are load-bearing for on-disk discovery). A red run is a report to read,
+# not a broken build — nothing here blocks a merge, and nothing opens a PR on its own.
+on:
+  schedule:
+    # Mondays, 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: harness registry vs upstream agents.ts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # Honors rust-toolchain.toml (pinned channel + components) — do NOT pin a channel here.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - name: check registry drift
+        run: cargo run -p xtask --locked -- check-registry-drift

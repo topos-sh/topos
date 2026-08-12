@@ -98,8 +98,22 @@ never learns which machinery served which harness.
   planning an edit when the input does not re-serialize byte-identical through its own dialect
   (a BOM, unusual line endings): the round-trip precondition is the dispatcher's, not each
   driver's discretion.
-- **`registry`** — the ONE baked ~76-harness table: every row carries its skills dirs, detection
+- **`registry`** — the ONE ~76-harness table: every row carries its skills dirs, detection
   probes, MCP surfaces, and shared-dir claim, so a capability is a column rather than a table.
+  **The rows are DATA** — `registry.toml` at the crate root, `include_str!`d in, parsed by
+  `registry::format`, and served byte-identically by the web app (`cargo xtask gen-registry`
+  vendors it into `web/public/`, and `--check` gates the copy). `known_harnesses()` resolves
+  THREE levels once per process behind a `OnceLock` — `~/.topos/harness-registry/override.toml`,
+  then a downloaded `registry.toml` strictly newer than the bundled one, then the bundled table —
+  leaking the rows so every `&'static` signature is unchanged; each failure downgrades exactly
+  one level with one stderr warning. The fences are all client-side and all red-tested:
+  `schema_version` equality, a `min_engine_version` ceiling (`REGISTRY_ENGINE_VERSION`),
+  strictly-greater dotted-numeric versions with equal-version-different-bytes an ERROR, the
+  known-slugs-only rule (a downloaded row naming a slug the BUNDLED table does not define is
+  warned about and skipped — remote data never adds a write target, and a new harness still needs
+  a release), path validation on every downloaded dir, no absolute root outside the bundled
+  table, and a 256 KB ceiling. The refresher is the client's (`topos::harness_registry`, on the
+  forge lane's clock); there is no hot reload — the next process reads what landed.
   Which harnesses topos can PLACE into and ARM is NOT a column — it is decided per port
   (`HarnessAdapter` impls, `triggers::adapter_for_slug`). Attribution is ONE query,
   `folder_readers` (with its `folder_reader_slugs` spelling): every INSTALLED harness whose user

@@ -282,3 +282,11 @@ If you build or maintain an agent, you can make it topos-deliverable with a pull
 [`topos-sh/topos`](https://github.com/topos-sh/topos) naming those two facts — the registry is
 one table row, and a refresh trigger is usually a screenful of code following an existing
 pattern. Open an issue with the two facts if you'd rather we write the row.
+
+The table of directories ships inside the binary, and it also refreshes as data: topos
+re-downloads the published copy a few times a day, on the same slow rhythm it uses for a GitHub
+source, and the next command reads it. So an agent that moves its skills folder reaches installed
+machines without anyone waiting for a release. That path only corrects agents already on this
+page — a **new** agent still needs a release, because its refresh trigger is code — and topos
+ignores a downloaded row naming an agent it doesn't know. Set
+`TOPOS_NO_HARNESS_REGISTRY_UPDATE=1` to keep only the table your binary was built with.

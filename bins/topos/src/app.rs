@@ -1674,6 +1674,24 @@ fn run_command(
                     i64::try_from(clock.now_unix_millis()).unwrap_or(now_ms),
                 );
             }
+            // The HARNESS TABLE rides the same sweep, on the forge lane's own much slower clock:
+            // which directories an agent reads changes when a vendor ships, not when topos does,
+            // so a machine keeps its copy current between releases. LAST, and best-effort by
+            // construction — it moves no skill bytes, nothing downstream depends on it, and a
+            // table that lands here is read by the NEXT process, never this one.
+            if bare_sweep {
+                let _ = crate::harness_registry::refresh_if_due(
+                    &fs,
+                    &ctx.layout,
+                    i64::try_from(clock.now_unix_millis()).unwrap_or(now_ms),
+                    i64::try_from(crate::ids::IdSource::jitter_below(
+                        &ids,
+                        u64::try_from(crate::harness_registry::CHECK_JITTER_MS).unwrap_or(0),
+                    ))
+                    .unwrap_or(0),
+                    &crate::plane_http::UreqHarnessRegistry::new(),
+                );
+            }
             if quiet {
                 // NEAR-byte-silent stdout (a session-start hook's stdout reaches the session).
                 // ONE renderer decides what a hook hears, always, in the CALLING trigger's dialect

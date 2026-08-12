@@ -1,0 +1,623 @@
+# The harness registry — ONE row per agent harness, and the SOURCE OF TRUTH for the table
+# `topos_harness::registry` serves. The binary embeds this file (`include_str!`); the web app
+# serves these exact bytes at `/harness-registry.toml`; a machine may carry a newer copy of it
+# under `~/.topos/harness-registry/` without a new release.
+#
+# Rows are kept in `vercel-labs/skills`'s `src/agents.ts` file order, which fixes the "first
+# matching harness" tie-break for a shared dir — moving a row changes behaviour.
+#
+# Every dir is `<root-tag>/<suffix>`: `home`, `configHome`, `codexHome`, `claudeHome`, `vibeHome`,
+# `hermesHome`, `autohandHome`, `grokHome`, `cwd`, `APPDATA`, `FLATPAK_XDG_CONFIG_HOME`, or a
+# leading `/` for an absolute path (which only THIS file, the built-in table, may name). Each root
+# resolves through its own env override, falling back to a `home`-relative default.
+#
+# `version` is dotted numeric and MUST be bumped by hand on every edit: a downloaded copy is
+# accepted only when it is strictly newer than the copy the reading binary was built with, and a
+# same-version file whose bytes differ is an error, never a silent update.
+#
+# `schema_version` is the GRAMMAR (a reader that does not know it refuses the file whole);
+# `min_engine_version` is what a reader must PROVIDE to be allowed to read this file.
+
+schema_version = 1
+version = "2026.8.11.1"
+min_engine_version = 1
+
+[[harness]]
+slug = "aider-desk"
+display_name = "AiderDesk"
+user_dirs = ["home/.aider-desk/skills"]
+project_dir = ".aider-desk/skills"
+detect_dirs = ["home/.aider-desk"]
+
+[[harness]]
+# Vendor manual lists `~/.agents/skills` among its skills dirs (closed source — docs only).
+slug = "amp"
+display_name = "Amp"
+user_dirs = ["configHome/agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["configHome/amp"]
+shared_dir = { level = "docs", covered = true }
+
+[[harness]]
+slug = "antigravity"
+display_name = "Antigravity"
+user_dirs = ["home/.gemini/antigravity/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.gemini/antigravity"]
+
+[[harness]]
+slug = "antigravity-cli"
+display_name = "Antigravity CLI"
+user_dirs = ["home/.gemini/antigravity-cli/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.gemini/antigravity-cli"]
+
+[[harness]]
+slug = "astrbot"
+display_name = "AstrBot"
+user_dirs = ["home/.astrbot/data/skills"]
+project_dir = "data/skills"
+detect_dirs = ["cwd/data/skills", "home/.astrbot"]
+
+[[harness]]
+slug = "autohand-code"
+display_name = "Autohand Code CLI"
+user_dirs = ["autohandHome/skills"]
+project_dir = ".autohand/skills"
+detect_dirs = ["autohandHome"]
+
+[[harness]]
+slug = "augment"
+display_name = "Augment"
+user_dirs = ["home/.augment/skills"]
+project_dir = ".augment/skills"
+detect_dirs = ["home/.augment"]
+
+[[harness]]
+slug = "bob"
+display_name = "IBM Bob"
+user_dirs = ["home/.bob/skills"]
+project_dir = ".bob/skills"
+detect_dirs = ["home/.bob"]
+
+[[harness]]
+slug = "claude-code"
+display_name = "Claude Code"
+user_dirs = ["claudeHome/skills"]
+project_dir = ".claude/skills"
+detect_dirs = ["claudeHome"]
+
+[harness.mcp]
+reload_note = "loads next session; /reload-plugins reloads live; sign in with /mcp"
+# An OWNED plugin DIRECTORY: the `.mcp.json` under it is patched through the strict JSON
+# driver; `plugin_dir` renders the constant `.claude-plugin/plugin.json` beside it.
+user = { dir = "claudeHome/skills/topos-mcp", dialect = "claude-plugin-dir" }
+project = { path = ".mcp.json", dialect = "claude-project-json" }
+
+[[harness]]
+# Verified against a live containerized install of openclaw@2026.7.1 on 2026-07-16:
+# `~/.agents/skills` is a recognized skills root, higher precedence than `~/.openclaw/skills`.
+slug = "openclaw"
+display_name = "OpenClaw"
+user_dirs = ["home/.openclaw/skills", "home/.clawdbot/skills", "home/.moltbot/skills"]
+project_dir = "skills"
+detect_dirs = ["home/.openclaw", "home/.clawdbot", "home/.moltbot"]
+shared_dir = { level = "probed", covered = true }
+
+[harness.mcp]
+reload_note = "picked up automatically; sign in with `openclaw mcp login <name>`"
+user = { dir = "home/.openclaw/openclaw.json", dialect = "openclaw-json" }
+
+[[harness]]
+# Verified against cline 3.0.43 source on 2026-07-16: `~/.agents/skills` is in the global
+# skills search paths (upgrades the registry-derived docs-level claim).
+slug = "cline"
+display_name = "Cline"
+user_dirs = ["home/.agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.cline"]
+shared_dir = { level = "probed", covered = true }
+
+[[harness]]
+slug = "codearts-agent"
+display_name = "CodeArts Agent"
+user_dirs = ["home/.codeartsdoer/skills"]
+project_dir = ".codeartsdoer/skills"
+detect_dirs = ["home/.codeartsdoer"]
+
+[[harness]]
+slug = "codebuddy"
+display_name = "CodeBuddy"
+user_dirs = ["home/.codebuddy/skills"]
+project_dir = ".codebuddy/skills"
+detect_dirs = ["cwd/.codebuddy", "home/.codebuddy"]
+
+[[harness]]
+slug = "codemaker"
+display_name = "Codemaker"
+user_dirs = ["home/.codemaker/skills"]
+project_dir = ".codemaker/skills"
+detect_dirs = ["home/.codemaker"]
+
+[[harness]]
+slug = "codestudio"
+display_name = "Code Studio"
+user_dirs = ["home/.codestudio/skills"]
+project_dir = ".codestudio/skills"
+detect_dirs = ["home/.codestudio"]
+
+[[harness]]
+# Verified against a live codex-cli 0.144.4 binary on 2026-07-16: no `.agents/skills` path
+# literal exists in the build; its only user skills root is `$CODEX_HOME/skills`.
+slug = "codex"
+display_name = "Codex"
+user_dirs = ["codexHome/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["codexHome", "/etc/codex"]
+shared_dir = { level = "probed", covered = false }
+
+[harness.mcp]
+reload_note = "restart codex; sign in with `codex mcp login <name>`"
+user = { dir = "codexHome/config.toml", dialect = "codex-toml" }
+# Codex honors a project config only once the user trusts the repo in Codex.
+project = { path = ".codex/config.toml", dialect = "codex-toml" }
+
+[[harness]]
+slug = "command-code"
+display_name = "Command Code"
+user_dirs = ["home/.commandcode/skills"]
+project_dir = ".commandcode/skills"
+detect_dirs = ["home/.commandcode"]
+
+[[harness]]
+slug = "continue"
+display_name = "Continue"
+user_dirs = ["home/.continue/skills"]
+project_dir = ".continue/skills"
+detect_dirs = ["cwd/.continue", "home/.continue"]
+
+[[harness]]
+slug = "cortex"
+display_name = "Cortex Code"
+user_dirs = ["home/.snowflake/cortex/skills"]
+project_dir = ".cortex/skills"
+detect_dirs = ["home/.snowflake/cortex"]
+
+[[harness]]
+# Verified against crush v0.85.0 source on 2026-07-16: `~/.agents/skills` is in the global
+# skills dirs ("Per the Agent Skills spec"); its own user dir alone would derive nothing.
+slug = "crush"
+display_name = "Crush"
+user_dirs = ["home/.config/crush/skills"]
+project_dir = ".crush/skills"
+detect_dirs = ["home/.config/crush"]
+shared_dir = { level = "probed", covered = true }
+
+[[harness]]
+slug = "cursor"
+display_name = "Cursor"
+user_dirs = ["home/.cursor/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.cursor"]
+
+[harness.mcp]
+reload_note = "restart Cursor"
+user = { dir = "home/.cursor/mcp.json", dialect = "cursor-json" }
+project = { path = ".cursor/mcp.json", dialect = "cursor-json" }
+
+[[harness]]
+slug = "deepagents"
+display_name = "Deep Agents"
+user_dirs = ["home/.deepagents/agent/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.deepagents"]
+
+[[harness]]
+slug = "devin"
+display_name = "Devin for Terminal"
+user_dirs = ["configHome/devin/skills"]
+project_dir = ".devin/skills"
+detect_dirs = ["configHome/devin"]
+
+[[harness]]
+slug = "dexto"
+display_name = "Dexto"
+user_dirs = ["home/.agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.dexto"]
+
+[[harness]]
+slug = "droid"
+display_name = "Droid"
+user_dirs = ["home/.factory/skills"]
+project_dir = ".factory/skills"
+detect_dirs = ["home/.factory"]
+
+[[harness]]
+# A cwd-only harness: no global scope at all, so it has no user dir.
+slug = "eve"
+display_name = "Eve"
+user_dirs = []
+project_dir = "agent/skills"
+detect_dirs = ["cwd/agent"]
+
+[[harness]]
+slug = "firebender"
+display_name = "Firebender"
+user_dirs = ["home/.firebender/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.firebender"]
+
+[[harness]]
+slug = "forgecode"
+display_name = "ForgeCode"
+user_dirs = ["home/.forge/skills"]
+project_dir = ".forge/skills"
+detect_dirs = ["home/.forge"]
+
+[[harness]]
+# Vendor docs list `~/.agents/skills`.
+slug = "gemini-cli"
+display_name = "Gemini CLI"
+user_dirs = ["home/.gemini/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.gemini"]
+shared_dir = { level = "docs", covered = true }
+
+[[harness]]
+# Vendor docs list `~/.agents/skills`.
+slug = "github-copilot"
+display_name = "GitHub Copilot"
+user_dirs = ["home/.copilot/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.copilot"]
+shared_dir = { level = "docs", covered = true }
+
+[[harness]]
+# Verified LIVE against goose 1.43.0 in a container on 2026-07-16: a skill placed at
+# `~/.agents/skills/<name>` appears in `goose skills list` (and `~/.agents/skills` is the
+# build's writable global skills dir).
+slug = "goose"
+display_name = "Goose"
+user_dirs = ["configHome/goose/skills"]
+project_dir = ".goose/skills"
+detect_dirs = ["configHome/goose"]
+shared_dir = { level = "probed", covered = true }
+
+[[harness]]
+slug = "grok"
+display_name = "Grok Build"
+user_dirs = ["grokHome/skills"]
+project_dir = ".grok/skills"
+detect_dirs = ["grokHome"]
+
+[[harness]]
+slug = "hermes-agent"
+display_name = "Hermes Agent"
+user_dirs = ["hermesHome/skills"]
+project_dir = ".hermes/skills"
+detect_dirs = ["hermesHome"]
+
+[harness.mcp]
+reload_note = "/reload-mcp in a session, or next session"
+user = { dir = "hermesHome/config.yaml", dialect = "hermes-yaml" }
+
+[[harness]]
+slug = "inference-sh"
+display_name = "inference.sh"
+user_dirs = ["home/.inferencesh/skills"]
+project_dir = ".inferencesh/skills"
+detect_dirs = ["home/.inferencesh"]
+
+[[harness]]
+slug = "jazz"
+display_name = "Jazz"
+user_dirs = ["home/.jazz/skills"]
+project_dir = ".jazz/skills"
+detect_dirs = ["home/.jazz", "cwd/.jazz"]
+
+[[harness]]
+slug = "junie"
+display_name = "Junie"
+user_dirs = ["home/.junie/skills"]
+project_dir = ".junie/skills"
+detect_dirs = ["home/.junie"]
+
+[[harness]]
+slug = "iflow-cli"
+display_name = "iFlow CLI"
+user_dirs = ["home/.iflow/skills"]
+project_dir = ".iflow/skills"
+detect_dirs = ["home/.iflow"]
+
+[[harness]]
+slug = "kilo"
+display_name = "Kilo Code"
+user_dirs = ["home/.kilocode/skills"]
+project_dir = ".kilocode/skills"
+detect_dirs = ["home/.kilocode"]
+
+[[harness]]
+# A literal `~/.config` dir, NOT the XDG-overridable config home (`crush` is the precedent) —
+# upstream joins it onto `home`, so `$XDG_CONFIG_HOME` does not move it.
+slug = "kimchi"
+display_name = "Kimchi"
+user_dirs = ["home/.config/kimchi/harness/skills"]
+project_dir = ".kimchi/skills"
+detect_dirs = ["home/.config/kimchi"]
+
+[[harness]]
+slug = "kimi-code-cli"
+display_name = "Kimi Code CLI"
+user_dirs = ["home/.agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.kimi-code", "home/.kimi"]
+
+[[harness]]
+slug = "kiro-cli"
+display_name = "Kiro CLI"
+user_dirs = ["home/.kiro/skills"]
+project_dir = ".kiro/skills"
+detect_dirs = ["home/.kiro"]
+
+[[harness]]
+slug = "kode"
+display_name = "Kode"
+user_dirs = ["home/.kode/skills"]
+project_dir = ".kode/skills"
+detect_dirs = ["home/.kode"]
+
+[[harness]]
+slug = "lingma"
+display_name = "Lingma"
+user_dirs = ["home/.lingma/skills"]
+project_dir = ".lingma/skills"
+detect_dirs = ["home/.lingma"]
+
+[[harness]]
+slug = "loaf"
+display_name = "Loaf"
+user_dirs = ["home/.agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.loaf"]
+
+[[harness]]
+slug = "mcpjam"
+display_name = "MCPJam"
+user_dirs = ["home/.mcpjam/skills"]
+project_dir = ".mcpjam/skills"
+detect_dirs = ["home/.mcpjam"]
+
+[[harness]]
+# Present when either the home config dir OR the macOS app bundle exists — the `.app` path is
+# joined onto the filesystem root, like `zcode`'s.
+slug = "minimax-code"
+display_name = "MiniMax Code"
+user_dirs = ["home/.minimax/skills"]
+project_dir = ".minimax/skills"
+detect_dirs = ["home/.minimax", "/Applications/MiniMax Code.app"]
+
+[[harness]]
+slug = "mistral-vibe"
+display_name = "Mistral Vibe"
+user_dirs = ["vibeHome/skills"]
+project_dir = ".vibe/skills"
+detect_dirs = ["vibeHome"]
+
+[[harness]]
+slug = "moxby"
+display_name = "Moxby"
+user_dirs = ["home/.moxby/skills"]
+project_dir = ".moxby/skills"
+detect_dirs = ["home/.moxby"]
+
+[[harness]]
+slug = "mux"
+display_name = "Mux"
+user_dirs = ["home/.mux/skills"]
+project_dir = ".mux/skills"
+detect_dirs = ["home/.mux"]
+
+[[harness]]
+# Verified against a live containerized opencode-ai 1.18.3 on 2026-07-16: the binary's own
+# help text names `~/.agents/skills/<name>/SKILL.md` as an auto-loaded external skills dir.
+# The project config sits at the checkout root, not under a dot-dir; the reload is automatic
+# on 401 + dynamic client registration.
+slug = "opencode"
+display_name = "OpenCode"
+user_dirs = ["configHome/opencode/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["configHome/opencode"]
+shared_dir = { level = "probed", covered = true }
+
+[harness.mcp]
+reload_note = "restart opencode"
+user = { dir = "configHome/opencode/opencode.json", dialect = "opencode-json" }
+project = { path = "opencode.json", dialect = "opencode-json" }
+
+[[harness]]
+slug = "openhands"
+display_name = "OpenHands"
+user_dirs = ["home/.openhands/skills"]
+project_dir = ".openhands/skills"
+detect_dirs = ["home/.openhands"]
+
+[[harness]]
+slug = "ona"
+display_name = "Ona"
+user_dirs = ["home/.ona/skills"]
+project_dir = ".ona/skills"
+detect_dirs = ["home/.ona"]
+
+[[harness]]
+slug = "pi"
+display_name = "Pi"
+user_dirs = ["home/.pi/agent/skills"]
+project_dir = ".pi/skills"
+detect_dirs = ["home/.pi/agent"]
+
+[[harness]]
+slug = "qoder"
+display_name = "Qoder"
+user_dirs = ["home/.qoder/skills"]
+project_dir = ".qoder/skills"
+detect_dirs = ["home/.qoder"]
+
+[[harness]]
+slug = "qoder-cn"
+display_name = "Qoder CN"
+user_dirs = ["home/.qoder-cn/skills"]
+project_dir = ".qoder/skills"
+detect_dirs = ["home/.qoder-cn"]
+
+[[harness]]
+slug = "qwen-code"
+display_name = "Qwen Code"
+user_dirs = ["home/.qwen/skills"]
+project_dir = ".qwen/skills"
+detect_dirs = ["home/.qwen"]
+
+[[harness]]
+slug = "replit"
+display_name = "Replit"
+user_dirs = ["configHome/agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["cwd/.replit"]
+
+[[harness]]
+slug = "reasonix"
+display_name = "Reasonix"
+user_dirs = ["home/.reasonix/skills"]
+project_dir = ".reasonix/skills"
+detect_dirs = ["home/.reasonix"]
+
+[[harness]]
+slug = "rovodev"
+display_name = "Rovo Dev"
+user_dirs = ["home/.rovodev/skills"]
+project_dir = ".rovodev/skills"
+detect_dirs = ["home/.rovodev"]
+
+[[harness]]
+slug = "roo"
+display_name = "Roo Code"
+user_dirs = ["home/.roo/skills"]
+project_dir = ".roo/skills"
+detect_dirs = ["home/.roo"]
+
+[[harness]]
+slug = "tabnine-cli"
+display_name = "Tabnine CLI"
+user_dirs = ["home/.tabnine/agent/skills"]
+project_dir = ".tabnine/agent/skills"
+detect_dirs = ["home/.tabnine"]
+
+[[harness]]
+slug = "terramind"
+display_name = "Terramind"
+user_dirs = ["home/.terramind/skills"]
+project_dir = ".terramind/skills"
+detect_dirs = ["home/.terramind"]
+
+[[harness]]
+slug = "tinycloud"
+display_name = "Tinycloud"
+user_dirs = ["home/.tinycloud/skills"]
+project_dir = ".tinycloud/skills"
+detect_dirs = ["home/.tinycloud"]
+
+[[harness]]
+slug = "trae"
+display_name = "Trae"
+user_dirs = ["home/.trae/skills"]
+project_dir = ".trae/skills"
+detect_dirs = ["home/.trae"]
+
+[[harness]]
+slug = "trae-cn"
+display_name = "Trae CN"
+user_dirs = ["home/.trae-cn/skills"]
+project_dir = ".trae/skills"
+detect_dirs = ["home/.trae-cn"]
+
+[[harness]]
+slug = "warp"
+display_name = "Warp"
+user_dirs = ["home/.agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["home/.warp"]
+
+[[harness]]
+slug = "windsurf"
+display_name = "Windsurf"
+user_dirs = ["home/.codeium/windsurf/skills"]
+project_dir = ".windsurf/skills"
+detect_dirs = ["home/.codeium/windsurf"]
+
+[[harness]]
+slug = "zed"
+display_name = "Zed"
+user_dirs = ["home/.agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = ["configHome/zed", "APPDATA/Zed", "FLATPAK_XDG_CONFIG_HOME/zed"]
+
+[[harness]]
+# Present when either the home config dir OR the macOS app bundle exists (the reference probes
+# both) — the `.app` path is joined onto the filesystem root, like `codex`'s `/etc/codex`.
+slug = "zcode"
+display_name = "ZCode"
+user_dirs = ["home/.zcode/skills"]
+project_dir = ".zcode/skills"
+detect_dirs = ["home/.zcode", "/Applications/ZCode.app"]
+
+[[harness]]
+slug = "zencoder"
+display_name = "Zencoder"
+user_dirs = ["home/.zencoder/skills"]
+project_dir = ".zencoder/skills"
+detect_dirs = ["home/.zencoder"]
+
+[[harness]]
+slug = "zenflow"
+display_name = "Zenflow"
+user_dirs = ["home/.zencoder/skills"]
+project_dir = ".zencoder/skills"
+detect_dirs = ["home/.zencoder"]
+
+[[harness]]
+slug = "neovate"
+display_name = "Neovate"
+user_dirs = ["home/.neovate/skills"]
+project_dir = ".neovate/skills"
+detect_dirs = ["home/.neovate"]
+
+[[harness]]
+slug = "pochi"
+display_name = "Pochi"
+user_dirs = ["home/.pochi/skills"]
+project_dir = ".pochi/skills"
+detect_dirs = ["home/.pochi"]
+
+[[harness]]
+# A cwd-only harness: no global scope at all, so it has no user dir.
+slug = "promptscript"
+display_name = "PromptScript"
+user_dirs = []
+project_dir = ".agents/skills"
+detect_dirs = ["cwd/.promptscript", "cwd/promptscript.yaml"]
+
+[[harness]]
+slug = "adal"
+display_name = "AdaL"
+user_dirs = ["home/.adal/skills"]
+project_dir = ".adal/skills"
+detect_dirs = ["home/.adal"]
+
+[[harness]]
+# The SENTINEL row: no detection probe, so it is never independently present — its dirs are
+# covered by the concrete harnesses that share them.
+slug = "universal"
+display_name = "Universal"
+user_dirs = ["configHome/agents/skills"]
+project_dir = ".agents/skills"
+detect_dirs = []

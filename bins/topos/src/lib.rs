@@ -32,6 +32,7 @@ pub(crate) mod error;
 pub(crate) mod forge_check;
 pub(crate) mod fs_seam;
 pub(crate) mod git_source;
+pub(crate) mod harness_registry;
 pub(crate) mod id;
 pub(crate) mod identity;
 pub(crate) mod ids;

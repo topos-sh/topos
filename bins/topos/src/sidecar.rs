@@ -433,6 +433,14 @@ impl Layout {
         self.state_dir().join("version_check.json")
     }
 
+    /// `state/harness_registry.json` — the harness TABLE's own auto-update clock and last outcome
+    /// (see `crate::harness_registry`). The table itself lands beside the sidecar rather than under
+    /// it, at `harness-registry/registry.toml`, because the crate that READS it resolves that path
+    /// on its own before any of this layout exists.
+    pub(crate) fn harness_registry_path(&self) -> PathBuf {
+        self.state_dir().join("harness_registry.json")
+    }
+
     /// `ops/` — the contribute write-ahead log directory (`ops/<op_id>.json`, one per in-flight op). A
     /// home-level dir (outside `skills/<id>/`, so a publish rename never disturbs an in-flight record), it
     /// is covered by the footprint walk + uninstall like any other `~/.topos/` path.
