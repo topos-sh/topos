@@ -222,6 +222,9 @@ function looksRandom(token: string): boolean {
   return mixed && entropyOf(token) >= SECRET_ENTROPY.threshold;
 }
 
+/** 64 lowercase hex — the schema's own `fileSha256` shape, and the WHOLE of a sha-256 digest. */
+const FILE_HASH_HEX = /^[a-f0-9]{64}$/;
+
 /**
  * Is the run starting at `at` an INTEGRITY DIGEST rather than a credential?
  *
@@ -232,8 +235,13 @@ function looksRandom(token: string): boolean {
  * Without this carve-out no pinned container image and no MCPB package could ever be published
  * here, which would make the pinning rule below unsatisfiable.
  *
- * Two spellings, and only these two — read from the characters immediately BEFORE the run, so
- * nothing about the run itself relaxes:
+ * THE RUN ITSELF MUST BE A WHOLE DIGEST — 64 lowercase hex characters, nothing more and nothing
+ * less. Without that the carve-out is a prefix anyone can type: `sha256:` in front of a generated
+ * key exempted the key. A digest is a fixed shape, so demanding the shape costs a publisher
+ * nothing and closes the door.
+ *
+ * Then the CONTEXT, read from the characters immediately before the run — two spellings and only
+ * these two, so nothing about the run itself relaxes:
  *
  *  · `sha256:` directly in front of it (the OCI/registry digest spelling, wherever it appears);
  *  · a JSON key ENDING in that word, then `": "`, then the run (`"fileSha256": "<hex>"`).
@@ -242,7 +250,10 @@ function looksRandom(token: string): boolean {
  * carries no regex engine and the two have to answer identically. This READS a digest somebody
  * else published; it computes none (the tier's boundary gate names this carve-out by file).
  */
-function isIntegrityDigest(raw: string, at: number): boolean {
+function isIntegrityDigest(raw: string, at: number, run: string): boolean {
+  if (!FILE_HASH_HEX.test(run)) {
+    return false;
+  }
   const before = raw.slice(0, at);
   if (before.slice(-7).toLowerCase() === "sha256:") {
     return true;
@@ -272,16 +283,21 @@ export function findSecret(raw: string): string | null {
     }
   }
   for (const match of raw.matchAll(TOKEN_RUN)) {
-    if (looksRandom(match[0]) && !isIntegrityDigest(raw, match.index)) {
+    if (looksRandom(match[0]) && !isIntegrityDigest(raw, match.index, match[0])) {
       return "high-entropy value";
     }
   }
   return null;
 }
 
-/** A JSON key whose VALUE is an integrity digest by name — the `fileSha256` family. */
-function isDigestKey(key: string): boolean {
-  return key.slice(-6).toLowerCase() === "sha256";
+/**
+ * A JSON key whose VALUE is an integrity digest by name — the `fileSha256` family — holding a
+ * value that IS one. Both halves, because the key alone is a name a publisher chooses: a slot
+ * called `fileSha256` carrying anything but 64 lowercase hex is not a digest, and skipping it
+ * would let the name exempt whatever was put in it.
+ */
+function isDigestUnderKey(key: string, value: string): boolean {
+  return key.slice(-6).toLowerCase() === "sha256" && FILE_HASH_HEX.test(value);
 }
 
 /**
@@ -300,7 +316,8 @@ export function findSecretDeep(value: unknown): string | null {
   // change with the traversal mechanics. A value carries the KEY it sits under, because one
   // question about a string cannot be answered from the string alone: a 64-hex value under
   // `fileSha256` is an integrity digest, and the raw pass reads that from the bytes in front of
-  // it (see `isIntegrityDigest`) where this pass has only the key.
+  // it (see `isIntegrityDigest`) where this pass has only the key. Key AND value are read here —
+  // the key alone is a name a publisher chooses.
   type Item = { key: string } | { value: unknown; underKey?: string };
   const stack: Item[] = [{ value }];
   for (let item = stack.pop(); item !== undefined; item = stack.pop()) {
@@ -313,7 +330,7 @@ export function findSecretDeep(value: unknown): string | null {
     }
     const current = item.value;
     if (typeof current === "string") {
-      if (item.underKey !== undefined && isDigestKey(item.underKey)) {
+      if (item.underKey !== undefined && isDigestUnderKey(item.underKey, current)) {
         continue;
       }
       const hit = findSecret(current);
@@ -434,8 +451,6 @@ const RESERVED_VERSION = "latest";
 
 /** A sha-256 digest as the OCI reference spells it. */
 const OCI_DIGEST = /@sha256:[a-f0-9]{64}$/;
-/** 64 lowercase hex — the schema's own `fileSha256` shape. */
-const FILE_HASH_HEX = /^[a-f0-9]{64}$/;
 
 /**
  * Does this OCI reference name ONE image? The version lives inside the identifier for this type

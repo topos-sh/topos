@@ -261,6 +261,16 @@
     "note": "A tab inside the host is deleted by one parser before it parses and refused outright by the other. An address whose meaning depends on who reads it is not one."
   },
   {
+    "file": "invalid/digest-prefix-not-a-digest.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A digest is 64 hex characters, so the carve-out demands 64 hex characters: typing sha256: in front of a generated key exempts nothing."
+  },
+  {
+    "file": "invalid/digest-key-not-a-digest.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "The same closing on the other spelling — a fileSha256 key is a name a publisher chooses, and the value under it has to be a whole digest to be read as one."
+  },
+  {
     "file": "valid/astral-description.json",
     "verdict": "ok",
     "note": "A description of 84 characters that occupies 134 UTF-16 units: the ceiling counts CHARACTERS on both tiers, so an emoji costs one wherever it is measured."

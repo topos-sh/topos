@@ -1,0 +1,17 @@
+{
+  "name": "io.github.acme/graph",
+  "description": "A generated key wearing a digest's prefix.",
+  "version": "3.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://graph.acme.example/mcp",
+      "headers": [
+        {
+          "name": "X-Build",
+          "value": "sha256:aB3xK9pQ7rT2vY5wZ8mN4jH6"
+        }
+      ]
+    }
+  ]
+}

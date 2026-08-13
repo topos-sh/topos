@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/graph",
+  "description": "A generated key filed under a digest's key name.",
+  "version": "3.0.0",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://downloads.acme.example/mcp-graph.mcpb",
+      "fileSha256": "aB3xK9pQ7rT2vY5wZ8mN4jH6",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
