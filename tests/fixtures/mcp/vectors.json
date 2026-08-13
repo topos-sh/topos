@@ -105,6 +105,21 @@
     "note": "The name says nothing and the entropy belt sees an ordinary word, but the document itself says the slot is secret — and it arrives filled in. The publisher's own word outranks every heuristic."
   },
   {
+    "file": "invalid/package-env-declared-secret-default.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "The same declaration, with the credential parked in `default` instead of `value`. A default is what every machine runs with when nothing else supplies one, so it travels exactly as far — the slot rule reads both spellings."
+  },
+  {
+    "file": "invalid/package-arg-secret-default.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A flag named for a credential, carrying it as the default. The name vocabulary and the default spelling meet here: nothing about the value looks generated, and it would still be written into every agent's command line."
+  },
+  {
+    "file": "valid/package-npm-default-value.json",
+    "verdict": "ok",
+    "note": "The other half of that rule: an ORDINARY default publishes, because a default is how the format states a plain setting. The credential-declared slot beside it stays empty and each machine fills it."
+  },
+  {
     "file": "invalid/package-env-random-value.json",
     "verdict": "MCP_SECRET_REFUSED",
     "note": "The name says nothing, the value reads as a generated key: the credential scan reads package environment values exactly as it reads header ones."
