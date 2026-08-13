@@ -115,6 +115,16 @@
     "note": "The registry format spells arguments as objects that state their own type; a bare string array is a different format's shape."
   },
   {
+    "file": "invalid/package-transport-not-a-url.json",
+    "verdict": "MCP_INVALID",
+    "note": "A package that speaks http names an address, and an address is judged as one — a string with spaces in it is nothing any machine could dial."
+  },
+  {
+    "file": "invalid/package-transport-userinfo.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "userinfo is a credential in the address itself wherever the address is declared: a package transport answers the same rule a remote does."
+  },
+  {
     "file": "invalid/package-no-transport.json",
     "verdict": "MCP_INVALID",
     "note": "transport is one of the three fields the schema requires — without it nothing knows how the installed server is spoken to."

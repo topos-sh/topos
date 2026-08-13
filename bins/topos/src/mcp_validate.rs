@@ -639,6 +639,45 @@ fn is_unambiguous_endpoint(url: &str) -> bool {
     url.contains("://") && !url.contains(['\\', '\t', '\r', '\n'])
 }
 
+/// THE ADDRESS RULES, one function for every endpoint a document names — a `remotes[]` entry's and
+/// a package transport's alike. A URL is a URL: an http one is as much in the clear when a package
+/// declares it, `{tenant}` is as unfillable, and `user:pass@` is as much somebody's credential.
+/// Judging one of the two and not the other left a package declaring `not a URL` publishable and
+/// `https://user:pass@host` a way past the explicit URL credential rule.
+///
+/// # Errors
+/// One [`McpRefusal`]; the check order is the web tier's, exactly.
+fn check_endpoint_url(url: &str) -> Result<(), McpRefusal> {
+    // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES, and
+    // would otherwise pass as an https address whose host is a literal brace word.
+    if url.contains('{') || url.contains('}') {
+        return refuse(
+            McpRefusalCode::UrlTemplate,
+            "its endpoint carries a {placeholder} — that is a template, not an address every \
+             machine can use",
+        );
+    }
+    // BEFORE the parse, and BEFORE the userinfo rule: the spellings the two tiers would read
+    // DIFFERENTLY. Answering the same code on both is what this ordering buys — a document
+    // refused here can never be published on one tier and then refuse forever on the other.
+    if !is_unambiguous_endpoint(url) {
+        return refuse(McpRefusalCode::Invalid, AMBIGUOUS_ENDPOINT_MESSAGE);
+    }
+    match parse_endpoint_url(url) {
+        EndpointUrl::Invalid => refuse(McpRefusalCode::Invalid, "its endpoint is not a URL"),
+        // userinfo in the address IS a credential — refused before the scheme is even judged, so
+        // an http URL carrying one still names the real problem.
+        EndpointUrl::Userinfo => refuse(
+            McpRefusalCode::SecretRefused,
+            "its endpoint carries credentials (user:password@) — a shared bundle never holds one",
+        ),
+        EndpointUrl::Scheme(scheme) if scheme == "https" => Ok(()),
+        EndpointUrl::Scheme(_) => {
+            refuse(McpRefusalCode::InsecureUrl, "its endpoint must be https")
+        }
+    }
+}
+
 /// The hygiene and credential rules ONE `remotes[]` entry answers to, whichever entry it is:
 /// the address is a plain https URL with no template, no userinfo and a host that parses; the
 /// entry reserves no per-installation fill-in; and every header carries a literal, credential-free
@@ -649,39 +688,7 @@ fn is_unambiguous_endpoint(url: &str) -> bool {
 fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
     // An entry with no string `url` names no address — there is nothing to judge but its headers.
     if let Some(url) = remote.get("url").and_then(Value::as_str) {
-        // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES,
-        // and would otherwise pass as an https address whose host is a literal brace word.
-        if url.contains('{') || url.contains('}') {
-            return refuse(
-                McpRefusalCode::UrlTemplate,
-                "its endpoint carries a {placeholder} — that is a template, not an address every \
-                 machine can use",
-            );
-        }
-        // BEFORE the parse, and BEFORE the userinfo rule: the spellings the two tiers would read
-        // DIFFERENTLY. Answering the same code on both is what this ordering buys — a document
-        // refused here can never be published on one tier and then refuse forever on the other.
-        if !is_unambiguous_endpoint(url) {
-            return refuse(McpRefusalCode::Invalid, AMBIGUOUS_ENDPOINT_MESSAGE);
-        }
-        match parse_endpoint_url(url) {
-            EndpointUrl::Invalid => {
-                return refuse(McpRefusalCode::Invalid, "its endpoint is not a URL");
-            }
-            // userinfo in the address IS a credential — refused before the scheme is even judged,
-            // so an http URL carrying one still names the real problem.
-            EndpointUrl::Userinfo => {
-                return refuse(
-                    McpRefusalCode::SecretRefused,
-                    "its endpoint carries credentials (user:password@) — a shared bundle never \
-                     holds one",
-                );
-            }
-            EndpointUrl::Scheme(scheme) if scheme == "https" => {}
-            EndpointUrl::Scheme(_) => {
-                return refuse(McpRefusalCode::InsecureUrl, "its endpoint must be https");
-            }
-        }
+        check_endpoint_url(url)?;
     }
     // A remote-level `variables` block only exists to fill a template in. There is no template
     // left by now, so it is a fill-in slot with nothing to fill — and the thing it would fill is
@@ -1196,17 +1203,19 @@ fn check_package(entry: &Value) -> Result<(), McpRefusal> {
         );
     }
     let transport = entry.get("transport").unwrap_or(&Value::Null);
-    if transport_type != "stdio"
-        && transport
+    if transport_type != "stdio" {
+        let url = transport
             .get("url")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .is_empty()
-    {
-        return refuse(
-            McpRefusalCode::Invalid,
-            "a package that speaks http declares the URL it listens on",
-        );
+            .unwrap_or_default();
+        if url.is_empty() {
+            return refuse(
+                McpRefusalCode::Invalid,
+                "a package that speaks http declares the URL it listens on",
+            );
+        }
+        // The SAME rules a remote's address answers to — see [`check_endpoint_url`].
+        check_endpoint_url(url)?;
     }
     // A package's own transport headers are the machine's to fill; a filled-in credential is not.
     if let Some(headers) = transport.get("headers").filter(|h| !h.is_null()) {

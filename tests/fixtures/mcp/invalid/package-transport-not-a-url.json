@@ -1,0 +1,16 @@
+{
+  "name": "io.github.acme/files",
+  "description": "A package whose declared endpoint is not an address.",
+  "version": "2.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-files",
+      "version": "2.1.0",
+      "transport": {
+        "type": "streamable-http",
+        "url": "not a URL"
+      }
+    }
+  ]
+}
