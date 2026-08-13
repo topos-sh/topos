@@ -425,6 +425,14 @@ fn parse_view(spec: &DialectSpec, text: &str) -> Result<Value, String> {
     }
 }
 
+/// One file as a plain [`Value`], read the way the most permissive dialect here reads it — the
+/// test-only spelling of [`lenient_view`], so a suite can assert on the entry that LANDED rather
+/// than on the value that was rendered.
+#[cfg(test)]
+pub(crate) fn parsed_for_tests(text: &str) -> Option<Value> {
+    lenient_view(text).ok()
+}
+
 fn lenient_view(text: &str) -> Result<Value, ()> {
     let options = parse_options(Strictness::Jsonc);
     // The library's scanner tolerates single-quoted strings unconditionally — that is JSON5,
@@ -762,6 +770,15 @@ mod tests {
             McpDialect::OpencodeJson,
             McpDialect::OpenclawJson,
             McpDialect::ClaudePluginDir,
+            McpDialect::VscodeJson,
+            McpDialect::CopilotCliJson,
+            McpDialect::LmStudioJson,
+            McpDialect::ClaudeDesktopJson,
+            McpDialect::GeminiJson,
+            McpDialect::WindsurfJson,
+            McpDialect::ClineJson,
+            McpDialect::RooJson,
+            McpDialect::ZedJson,
         ] {
             assert!(dialect_spec(dialect).is_some(), "{dialect:?}");
         }

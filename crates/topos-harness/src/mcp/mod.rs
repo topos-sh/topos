@@ -56,6 +56,8 @@
 //! list of its own. [`entry_value`] answers `None` for the one pair no vendor evidence covers — a
 //! program in Hermes's YAML — and every driver turns that into a refusal rather than a guess.
 
+#[cfg(test)]
+mod breadth;
 pub mod descriptor;
 pub mod jsonc_edit;
 pub mod plugin_dir;
@@ -983,10 +985,7 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
         // address; Claude Desktop documents a program and only a program — its remote servers are
         // added in the app, through a flow no config file takes part in, so the bridge is how a
         // shared address reaches it and there is no URL key to invent beside that.
-        (
-            McpDialect::HermesYaml | McpDialect::LmStudioJson,
-            McpTarget::Local { .. },
-        )
+        (McpDialect::HermesYaml | McpDialect::LmStudioJson, McpTarget::Local { .. })
         | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. }) => return None,
     }
     Some(Value::Object(m))
