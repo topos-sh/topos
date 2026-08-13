@@ -1,0 +1,16 @@
+{
+  "name": "io.github.acme/files",
+  "description": "A package endpoint carrying a sign-in in the address.",
+  "version": "2.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-files",
+      "version": "2.1.0",
+      "transport": {
+        "type": "streamable-http",
+        "url": "https://reader:hunter2@files.acme.example/mcp"
+      }
+    }
+  ]
+}

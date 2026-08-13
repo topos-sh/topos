@@ -725,6 +725,11 @@ function checkPackage(entry: unknown): { ok: true; summary: McpPackage } | McpRe
     if (typeof url !== "string" || url.length === 0) {
       return refuse("MCP_INVALID", "a package that speaks http declares the URL it listens on");
     }
+    // The SAME rules a remote's address answers to — see `checkEndpointUrl`.
+    const bad = checkEndpointUrl(url);
+    if (bad !== null) {
+      return bad;
+    }
   }
   // A package's own transport headers are the machine's to fill; a filled-in credential is not.
   const transportHeaders = transport.headers;
@@ -867,6 +872,48 @@ function codePointLength(text: string): number {
 }
 
 /**
+ * THE ADDRESS RULES, one function for every endpoint a document names — a `remotes[]` entry's and
+ * a package transport's alike. A URL is a URL: an http one is as much in the clear when a package
+ * declares it, `{tenant}` is as unfillable, and `user:pass@` is as much somebody's credential.
+ * Judging one of the two and not the other left a package declaring `not a URL` publishable and
+ * `https://user:pass@host` a way past the explicit URL credential rule.
+ */
+function checkEndpointUrl(url: string): McpRefusal | null {
+  // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES, and
+  // would otherwise pass as an https address whose host is a literal brace word.
+  if (/[{}]/.test(url)) {
+    return refuse(
+      "MCP_URL_TEMPLATE",
+      "the endpoint carries a {placeholder} — it is a template, not an address every machine can use",
+    );
+  }
+  // BEFORE the parse, and BEFORE the userinfo rule: the spellings the two tiers would read
+  // DIFFERENTLY. Answering the same code on both is what this ordering buys — a document
+  // refused here can never be published on one tier and then refuse forever on the other.
+  if (!endpointIsUnambiguous(url)) {
+    return refuse("MCP_INVALID", AMBIGUOUS_ENDPOINT_MESSAGE);
+  }
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return refuse("MCP_INVALID", "the endpoint is not a URL");
+  }
+  // userinfo in the address IS a credential — refused before the scheme is even judged, so an
+  // http URL carrying one still names the real problem.
+  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+    return refuse(
+      "MCP_SECRET_REFUSED",
+      "the endpoint URL carries credentials (user:password@) — a shared bundle never holds one",
+    );
+  }
+  if (parsedUrl.protocol !== "https:") {
+    return refuse("MCP_INSECURE_URL", "the endpoint must be https");
+  }
+  return null;
+}
+
+/**
  * The hygiene and credential rules ONE `remotes[]` entry answers to, whichever entry it is: the
  * address is a plain https URL with no template, no userinfo and a host that parses; the entry
  * reserves no per-installation fill-in; and every header carries a literal, credential-free value.
@@ -875,37 +922,9 @@ function codePointLength(text: string): number {
 function checkRemote(remote: Record<string, unknown>): RemoteCheck {
   // An entry with no string `url` names no address — there is nothing to judge but its headers.
   if (typeof remote.url === "string") {
-    const url = remote.url;
-    // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES, and
-    // would otherwise pass as an https address whose host is a literal brace word.
-    if (/[{}]/.test(url)) {
-      return refuse(
-        "MCP_URL_TEMPLATE",
-        "the endpoint carries a {placeholder} — it is a template, not an address every machine can use",
-      );
-    }
-    // BEFORE the parse, and BEFORE the userinfo rule: the spellings the two tiers would read
-    // DIFFERENTLY. Answering the same code on both is what this ordering buys — a document
-    // refused here can never be published on one tier and then refuse forever on the other.
-    if (!endpointIsUnambiguous(url)) {
-      return refuse("MCP_INVALID", AMBIGUOUS_ENDPOINT_MESSAGE);
-    }
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return refuse("MCP_INVALID", "the endpoint is not a URL");
-    }
-    // userinfo in the address IS a credential — refused before the scheme is even judged, so an
-    // http URL carrying one still names the real problem.
-    if (parsedUrl.username !== "" || parsedUrl.password !== "") {
-      return refuse(
-        "MCP_SECRET_REFUSED",
-        "the endpoint URL carries credentials (user:password@) — a shared bundle never holds one",
-      );
-    }
-    if (parsedUrl.protocol !== "https:") {
-      return refuse("MCP_INSECURE_URL", "the endpoint must be https");
+    const bad = checkEndpointUrl(remote.url);
+    if (bad !== null) {
+      return bad;
     }
   }
   // A remote-level `variables` block only exists to fill a template in. There is no template
