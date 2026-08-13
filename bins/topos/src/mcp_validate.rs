@@ -1049,11 +1049,16 @@ fn oci_reference_is_pinned(identifier: &str) -> bool {
 
 /// One `KeyValueInput` / `Argument` that arrives with its VALUE filled in — the shape the
 /// credential rule judges. A slot with no value is a slot, which is fine.
+///
+/// `default` COUNTS. The official format states it as the value used when nothing else supplies
+/// one, and that is exactly what every renderer here does with it ([`crate::mcp_render`] writes it
+/// into each agent's config), so a credential parked in `default` travels to every machine just as
+/// one parked in `value` does. The two are one question, and this is the one place it is asked.
 fn literal_value_of(entry: &Value) -> Option<&str> {
-    entry
-        .get("value")
-        .and_then(Value::as_str)
-        .filter(|v| !v.is_empty())
+    ["value", "default"]
+        .iter()
+        .filter_map(|key| entry.get(*key).and_then(Value::as_str))
+        .find(|v| !v.is_empty())
 }
 
 /// The named-slot rule, one sentence for environment variables, flags and package headers alike.
@@ -2199,6 +2204,24 @@ mod tests {
                 "{name}"
             );
         }
+        // A `default` IS the value, because it is what every machine runs with when nothing else
+        // supplies one — and it is what the renderer writes into each agent's config. Both rules
+        // read it, and an ordinary setting stated that way still publishes.
+        assert_eq!(
+            code(r#"{"name":"SESSION","isSecret":true,"default":"changeme"}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        assert_eq!(
+            code(r#"{"name":"GITHUB_TOKEN","default":"filled-in"}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        assert_eq!(code(r#"{"name":"ACME_ROOT","default":"/srv"}"#), Ok(()));
+        // …and the entropy belt reads the whole raw text, so a generated-looking default answers
+        // to it whatever the slot is called.
+        assert_eq!(
+            code(r#"{"name":"ACME_ROOT","default":"aB3xY7zQ1mN4pR8sT2vW5yZ0"}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
         // A nameless slot is malformed, not secret.
         assert_eq!(
             code(r#"{"value":"anything"}"#),

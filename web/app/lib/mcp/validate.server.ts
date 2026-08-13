@@ -613,10 +613,20 @@ const PACKAGE_TRANSPORTS = new Set(["stdio", STREAMABLE_HTTP, "sse"]);
 /**
  * One KeyValueInput / Argument that arrives with its VALUE filled in — the shape the credential
  * rule below judges. A slot with no value is a slot, which is fine.
+ *
+ * `default` COUNTS. The official format states it as the value used when nothing else supplies
+ * one, and that is exactly what a client does with it: the rendered agent config carries the
+ * default verbatim. So a credential parked in `default` travels to every machine just as one
+ * parked in `value` does. The two are one question, and this is the one place it is asked.
  */
 function literalValueOf(entry: Record<string, unknown>): string | null {
-  const value = entry.value;
-  return typeof value === "string" && value.length > 0 ? value : null;
+  for (const key of ["value", "default"] as const) {
+    const value = entry[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return null;
 }
 
 /**

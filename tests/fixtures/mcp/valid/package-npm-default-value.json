@@ -1,0 +1,25 @@
+{
+  "name": "io.github.acme/regions",
+  "description": "A package whose ordinary settings arrive as defaults.",
+  "version": "1.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-regions",
+      "version": "1.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "ACME_REGION",
+          "default": "eu-west-1"
+        },
+        {
+          "name": "ACME_TOKEN",
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
