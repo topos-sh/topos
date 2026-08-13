@@ -705,7 +705,10 @@ fn read_body_reported_limited(
 /// is all a generic plane call can honestly say about itself. An unparseable base falls back to the
 /// base verbatim: a progress label is never worth an error, and the base is already safe to print
 /// (every secret rides a header, never the URL).
-fn host_label(base_url: &str) -> String {
+///
+/// Shared with [`crate::ops`]'s verification arm, which builds the same sentences out of
+/// [`transport_reason`] and must name the host the same way.
+pub(crate) fn host_label(base_url: &str) -> String {
     base_url
         .parse::<ureq::http::Uri>()
         .ok()

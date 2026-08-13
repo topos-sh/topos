@@ -373,6 +373,19 @@ pub(crate) enum Command {
         #[arg(long, value_name = "BYTES")]
         max_bytes: Option<u64>,
     },
+    /// Check that an MCP server is actually working, right now, from this machine. Topos dials
+    /// the address the bundle names (or runs its package) and asks the server for its tools, then
+    /// prints what happened. Nothing is stored and nothing is installed — it is a live check, not
+    /// a delivery state. A server that asks for a sign-in is healthy: topos holds no credential,
+    /// and your agent app signs in on first use. Exit codes: `0` responding, `3` sign-in required,
+    /// `4` not reachable, `5` reachable but not answering as an MCP server.
+    Verify {
+        /// The MCP server bundle's name.
+        name: String,
+        /// Check the server your machine-wide scope holds, even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
+    },
     /// Show a skill's history — every version with its message and id.
     Log {
         /// The skill name.
@@ -558,6 +571,7 @@ impl Command {
             Command::Remove { .. } => "remove",
             Command::List { .. } => "list",
             Command::Diff { .. } => "diff",
+            Command::Verify { .. } => "verify",
             Command::Log { .. } => "log",
             Command::Publish { .. } => "publish",
             Command::Review { .. } => "review",

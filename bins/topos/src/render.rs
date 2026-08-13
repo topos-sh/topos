@@ -1163,6 +1163,17 @@ pub(crate) fn add_describe_tty(
     s
 }
 
+/// The `verify` receipt — the ONE sentence, and nothing else.
+///
+/// The verdict's own line already says everything a person asked for, and the two facts a header
+/// line would add (the bundle's name, the address dialed) are already on the screen: the name was
+/// just typed, and every not-reachable reason names the host itself. A second line here would be a
+/// line nobody needs, over an answer that is one sentence long. The full detail — address, command,
+/// protocol revision, exit code — rides `--json`.
+pub(crate) fn verify_tty(data: &topos_types::results::VerifyData) -> String {
+    data.line.clone()
+}
+
 /// The `fmt` receipt — one line: what moved, or that nothing had to.
 pub(crate) fn fmt_tty(data: &topos_types::results::FmtData) -> String {
     if data.changed {

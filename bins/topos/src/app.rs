@@ -1445,6 +1445,16 @@ fn run_command(
             ),
             &diag,
         ),
+        // `verify <name> [-g]` — the LIVE check of one MCP server. Read-only end to end: it stores
+        // nothing, and its finisher maps the verdict onto the verb's own exit codes (0/3/4/5).
+        Command::Verify { name, global } => {
+            let store_scope = if global {
+                ops::StoreScope::Machine
+            } else {
+                ops::StoreScope::Here
+            };
+            finish_verify(json, cmd_name, ops::verify(&ctx, &name, store_scope), &diag)
+        }
         Command::Log {
             skill,
             limit,
@@ -1904,6 +1914,37 @@ fn finish<T: Serialize>(
                 outln!("{}", tty(&data));
             }
             ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `verify`'s finisher — like [`finish`], except the SUCCESS path does not always exit `0`.
+///
+/// A verification that ran is a successful command whatever it found: the envelope stays `ok: true`
+/// and the payload carries the verdict. What the verdict decides is the PROCESS exit code — `0`
+/// responding · `3` sign-in required (healthy) · `4` not reachable · `5` reachable but not
+/// answering as an MCP server — so a script can branch on the answer without parsing a word of it.
+/// The code is also carried IN the payload, because an agent reading `--json` through a wrapper may
+/// never see the process's own.
+///
+/// A REFUSAL (no such bundle, an ambiguous name, a skill) is a different thing entirely and keeps
+/// the ordinary `1`: nothing was verified, so there is no verdict to report.
+fn finish_verify(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::VerifyData, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                outln!("{}", render::verify_tty(&data));
+            }
+            ExitCode::from(data.exit_code)
         }
         Err(e) => emit_err(json, command, &e, diag),
     }

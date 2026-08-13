@@ -1400,3 +1400,80 @@ fn a_reader_that_leaves_ends_the_run_cleanly() {
     }
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// **`verify` reports through the PROCESS exit code**, not only through its document — which is the
+/// whole point of the verb for a script.
+///
+/// A live check that RAN is a successful command whatever it found: the envelope stays `ok: true`
+/// and the payload carries the verdict, while the process exits `4` for a server nothing could
+/// reach. A REFUSAL (a name nothing here tracks) is a different thing and keeps the ordinary `1`,
+/// because nothing was verified and there is no verdict to report.
+///
+/// The address is a loopback port bound only long enough to learn its number and then closed: the
+/// dial is refused instantly, with no name lookup and no network.
+#[test]
+fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
+    use std::net::{Ipv4Addr, TcpListener};
+
+    let home = scratch("verify-home");
+    let port = {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port");
+        listener.local_addr().unwrap().port()
+    };
+    let bundle = scratch("verify-bundle").join("weather");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(
+        bundle.join("server.json"),
+        format!(
+            r#"{{"name":"io.github.acme/weather","description":"Conditions for a named place.",
+                "version":"1.4.0","remotes":[{{"type":"streamable-http",
+                "url":"https://127.0.0.1:{port}/mcp"}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let (ok, _) = run(
+        &home,
+        &[
+            "--json",
+            "add",
+            "-g",
+            "--kind",
+            "mcp",
+            bundle.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "the server bundle adopts");
+
+    let out = run_raw(&home, &["--json", "verify", "weather"], false);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "the verdict IS the exit code: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("non-JSON stdout: {}", String::from_utf8_lossy(&out.stdout)));
+    assert_eq!(v["command"], "verify");
+    assert_eq!(v["ok"], true, "a check that ran is a successful command");
+    assert_eq!(v["data"]["name"], "weather");
+    assert_eq!(v["data"]["target"], "address");
+    assert_eq!(v["data"]["state"], "not_reachable");
+    assert_eq!(v["data"]["exit_code"], 4);
+    assert!(
+        v["data"]["line"]
+            .as_str()
+            .is_some_and(|l| l.starts_with("not reachable: ")),
+        "{}",
+        v["data"]["line"]
+    );
+
+    // A refusal is not a verdict: exit 1, `ok: false`, and no payload at all.
+    let out = run_raw(&home, &["--json", "verify", "no-such-bundle"], false);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("an error envelope");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "NO_SUCH_SKILL");
+
+    let _ = std::fs::remove_dir_all(&home);
+}

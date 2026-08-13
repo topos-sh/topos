@@ -18,8 +18,9 @@ use topos_harness::registry::{self, KnownHarness};
 
 /// The behavior verbs grouped by SCOPE — the KNOWN verb lists drive the grouping (not clap metadata),
 /// so the reference reads the way the tool is taught: self-scoped, then team-scoped, then maintenance.
-const SELF_SCOPED: [&str; 11] = [
-    "status", "login", "logout", "init", "fmt", "add", "remove", "update", "list", "diff", "log",
+const SELF_SCOPED: [&str; 12] = [
+    "status", "login", "logout", "init", "fmt", "add", "remove", "update", "list", "diff",
+    "verify", "log",
 ];
 const TEAM_SCOPED: [&str; 5] = ["publish", "review", "revert", "protect", "invite"];
 const MAINTENANCE: [&str; 3] = ["self-update", "auth", "uninstall"];
@@ -368,7 +369,13 @@ fn render_md(table: &[&'static KnownHarness]) -> String {
          happen, then add `--yes` to apply. Everything else applies immediately and prints what \
          changed, along with the command that undoes it.\n\n\
          Exit codes: `0` — success. `1` — the operation was refused or failed (with `--json`, the \
-         `error` object says which and how to fix it). `2` — the command line itself was invalid.\n\n",
+         `error` object says which and how to fix it). `2` — the command line itself was invalid.\n\n\
+         `topos verify` reports what it found through its exit code as well, so a script can branch \
+         without parsing anything: `0` — the server is responding. `3` — the server asks for a \
+         sign-in, which is healthy (your agent app signs in on first use). `4` — the server is not \
+         reachable from this machine. `5` — something answered, but not as an MCP server. It still \
+         uses `1` for a refusal (no such bundle, the name is ambiguous, the bundle is a skill) and \
+         `2` for a bad command line.\n\n",
     );
 
     // The JSON contract — the envelope's shape and where the full schemas live. Rendered here so
