@@ -258,17 +258,14 @@ fn converse(child: &mut Running, deadline: Instant) -> Verdict {
             Route::Legacy => legacy(child, deadline),
             Route::Unnegotiable(supported) => wire::verdict_unsupported_version(&supported),
         },
-        // A recognized modern error means modern-but-not-at-this-version; anything else is the
-        // handshake era saying so in its own words.
-        Ok(Reply::Error(e)) if e.is_modern() => {
-            if e.supported.iter().any(|v| v.as_str() <= LEGACY_REVISION) {
-                legacy(child, deadline)
-            } else if e.supported.is_empty() {
-                Verdict::NotMcp { detail: e.detail() }
-            } else {
-                wire::verdict_unsupported_version(&e.supported)
-            }
-        }
+        // A recognized modern error means modern-but-not-at-this-version, over the ONE
+        // renegotiation rule both transports read; anything else is the handshake era saying so in
+        // its own words.
+        Ok(Reply::Error(e)) if e.is_modern() => match wire::renegotiation(&e) {
+            wire::Renegotiation::Handshake => legacy(child, deadline),
+            wire::Renegotiation::Refused => Verdict::NotMcp { detail: e.detail() },
+            wire::Renegotiation::Unnegotiable => wire::verdict_unsupported_version(&e.supported),
+        },
         Ok(Reply::Error(_)) => legacy(child, deadline),
         // No answer within the probe's budget, or the child ended: both are legacy signals — a
         // handshake-era server may simply ignore what it cannot parse. A child that has ENDED,
@@ -297,7 +294,7 @@ fn modern_route(result: &Value) -> Route {
     if versions.is_empty() || versions.iter().any(|v| v == MODERN_REVISION) {
         return Route::Modern;
     }
-    if versions.iter().any(|v| v.as_str() <= LEGACY_REVISION) {
+    if versions.iter().any(|v| wire::speaks_handshake_era(v)) {
         return Route::Legacy;
     }
     Route::Unnegotiable(versions)

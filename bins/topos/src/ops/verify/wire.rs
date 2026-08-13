@@ -507,6 +507,37 @@ pub(crate) fn verdict_of_tools(reply: &Reply, protocol: &str) -> Verdict {
     }
 }
 
+/// Whether a protocol revision string belongs to the handshake era — every revision up to and
+/// including [`LEGACY_REVISION`]. Compared as the dated strings they are, which is exactly how the
+/// versioning scheme is defined (`YYYY-MM-DD`, lexicographically ordered by construction).
+pub(crate) fn speaks_handshake_era(revision: &str) -> bool {
+    revision <= LEGACY_REVISION
+}
+
+/// What to do about a modern peer that refused this build's revision — ONE rule, and both
+/// transports read it here rather than each spelling its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Renegotiation {
+    /// It offers a handshake-era version: that is how to reach it.
+    Handshake,
+    /// It named nothing to negotiate on (a header mismatch, a missing capability). The request was
+    /// refused and the server's own message is the whole evidence.
+    Refused,
+    /// It speaks only versions this build does not — and it named them.
+    Unnegotiable,
+}
+
+/// [`Renegotiation`], read off the error the peer sent.
+pub(crate) fn renegotiation(error: &RpcError) -> Renegotiation {
+    if error.supported.iter().any(|v| speaks_handshake_era(v)) {
+        Renegotiation::Handshake
+    } else if error.supported.is_empty() {
+        Renegotiation::Refused
+    } else {
+        Renegotiation::Unnegotiable
+    }
+}
+
 /// The verdict for a modern peer this build cannot negotiate a version with. It IS an MCP server,
 /// and the honest thing to say is which versions it offered — a person reading this needs to know
 /// their topos is the old half.
@@ -747,6 +778,40 @@ mod tests {
         assert_eq!(
             v.detail().unwrap(),
             "it answered with protocol error -32601 (Method not found)"
+        );
+    }
+
+    #[test]
+    fn the_handshake_era_is_every_revision_up_to_the_last_one_that_had_a_handshake() {
+        assert!(speaks_handshake_era("2025-11-25"));
+        assert!(speaks_handshake_era("2025-06-18"));
+        assert!(speaks_handshake_era("2024-11-05"));
+        assert!(!speaks_handshake_era("2026-07-28"));
+        assert!(!speaks_handshake_era("2027-01-01"));
+    }
+
+    #[test]
+    fn the_one_renegotiation_rule_reads_the_version_list_the_peer_named() {
+        let error = |supported: &[&str]| RpcError {
+            code: ERR_UNSUPPORTED_PROTOCOL_VERSION,
+            message: "Unsupported protocol version".to_owned(),
+            supported: supported.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        // A handshake-era version anywhere in the list is how to reach it.
+        assert_eq!(
+            renegotiation(&error(&["2025-11-25"])),
+            Renegotiation::Handshake
+        );
+        assert_eq!(
+            renegotiation(&error(&["2027-01-01", "2024-11-05"])),
+            Renegotiation::Handshake
+        );
+        // Nothing to negotiate on: the message is the whole evidence.
+        assert_eq!(renegotiation(&error(&[])), Renegotiation::Refused);
+        // Newer than this build, and named.
+        assert_eq!(
+            renegotiation(&error(&["2029-01-01"])),
+            Renegotiation::Unnegotiable
         );
     }
 

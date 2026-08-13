@@ -141,9 +141,10 @@ pub(crate) fn probe(agent: &ureq::Agent, url: &str, headers: &[(String, String)]
     }
 }
 
-/// A modern peer that refused this build's revision. When the versions it named include one from
-/// the handshake era, the handshake is how to reach it; otherwise it speaks something newer than
-/// this topos, and the honest answer names the versions rather than blaming the server.
+/// A modern peer that refused this build's revision, over the ONE renegotiation rule
+/// ([`wire::renegotiation`]): the handshake where it offers a handshake-era version, the server's
+/// own message where it named nothing to negotiate on, and otherwise the honest answer that names
+/// the versions rather than blaming the server.
 fn renegotiate(
     agent: &ureq::Agent,
     url: &str,
@@ -151,24 +152,13 @@ fn renegotiate(
     host: &str,
     error: &wire::RpcError,
 ) -> Verdict {
-    if error.supported.iter().any(|v| speaks_handshake_era(v)) {
-        return legacy(agent, url, headers, host);
-    }
-    if error.supported.is_empty() {
-        // A modern error that named nothing to negotiate on (a header mismatch, a missing
-        // capability): the request was refused, and the message is the whole evidence.
-        return Verdict::NotMcp {
+    match wire::renegotiation(error) {
+        wire::Renegotiation::Handshake => legacy(agent, url, headers, host),
+        wire::Renegotiation::Refused => Verdict::NotMcp {
             detail: error.detail(),
-        };
+        },
+        wire::Renegotiation::Unnegotiable => wire::verdict_unsupported_version(&error.supported),
     }
-    wire::verdict_unsupported_version(&error.supported)
-}
-
-/// Whether a protocol revision string belongs to the handshake era — every revision up to and
-/// including [`LEGACY_REVISION`]. Compared as the dated strings they are, which is exactly how the
-/// versioning scheme is defined (`YYYY-MM-DD`, lexicographically ordered by construction).
-fn speaks_handshake_era(revision: &str) -> bool {
-    revision <= LEGACY_REVISION
 }
 
 /// **The handshake era**: `initialize` → `notifications/initialized` → `tools/list`.
@@ -303,15 +293,6 @@ fn post(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_handshake_era_is_every_revision_up_to_the_last_one_that_had_a_handshake() {
-        assert!(speaks_handshake_era("2025-11-25"));
-        assert!(speaks_handshake_era("2025-06-18"));
-        assert!(speaks_handshake_era("2024-11-05"));
-        assert!(!speaks_handshake_era("2026-07-28"));
-        assert!(!speaks_handshake_era("2027-01-01"));
-    }
 
     #[test]
     fn the_negotiated_version_is_the_servers_word_and_falls_back_to_the_one_asked_for() {
