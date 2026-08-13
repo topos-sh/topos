@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "command": "verify",
+  "ok": true,
+  "data": {
+    "address": "https://weather.acme.example/mcp",
+    "exit_code": 0,
+    "line": "responding (12 tools)",
+    "name": "weather",
+    "protocol_version": "2026-07-28",
+    "state": "responding",
+    "target": "address",
+    "tools": 12
+  },
+  "warnings": [],
+  "next_actions": []
+}

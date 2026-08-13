@@ -1331,6 +1331,61 @@ pub struct McpPackageSummary {
     pub version: String,
 }
 
+/// `verify <name>` — the LIVE check of one MCP server bundle, printed and never stored. The verdict
+/// is about this moment and this machine: it is not a delivery state, and nothing in the sidecar
+/// remembers it. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct VerifyData {
+    /// The bundle's name.
+    pub name: String,
+    /// What was checked: `address` (an endpoint this machine dialed) or `program` (a package this
+    /// machine ran and spoke to over its pipes).
+    pub target: String,
+    /// The endpoint dialed, when the check dialed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// The program run, as the command and its arguments, when the check ran one. No environment
+    /// value ever appears here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    /// The verdict.
+    pub state: VerifyState,
+    /// How many tools the server listed. Present only on `responding`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<u32>,
+    /// The plain-words reason behind anything other than `responding` — the same words the printed
+    /// line carries after its colon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The MCP protocol revision the server answered on (`2026-07-28` for the current revision,
+    /// `2025-11-25` for the handshake era). Absent when nothing answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<String>,
+    /// The process exit code this verdict produces: `0` responding · `3` sign-in required ·
+    /// `4` not reachable · `5` not answering as an MCP server.
+    pub exit_code: u8,
+    /// The one sentence the terminal prints — relay it verbatim.
+    pub line: String,
+}
+
+/// The four things a live check can conclude. **INFERRED value set** (additive-only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyState {
+    /// It answered as an MCP server and listed its tools.
+    Responding,
+    /// It refused without a sign-in — a HEALTHY server. The agent app completes the sign-in on
+    /// first use; topos holds no credential and never will.
+    SignInRequired,
+    /// Nothing answered: the name did not resolve, the connection failed or timed out, or the
+    /// server is having trouble right now. Never a statement about the protocol.
+    NotReachable,
+    /// Something answered, but not as an MCP server.
+    NotAnMcpServer,
+}
+
 /// `fmt [-g]` — rewrite a manifest into the normal form. **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]

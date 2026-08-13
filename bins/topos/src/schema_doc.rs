@@ -204,6 +204,10 @@ const SCHEMAS: &[(&str, &str)] = &[
         include_str!("../../../contracts/schemas/uninstall-describe-data.schema.json"),
     ),
     (
+        "verify-data",
+        include_str!("../../../contracts/schemas/verify-data.schema.json"),
+    ),
+    (
         "wire-applied-report",
         include_str!("../../../contracts/schemas/wire-applied-report.schema.json"),
     ),
