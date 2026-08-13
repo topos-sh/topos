@@ -1159,6 +1159,66 @@ fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
     );
 }
 
+/// **A row that promises more than its dialect can spell costs ONE placement, not a whole file.**
+/// The capability columns and the dialect are separate columns, and a table can set them at odds
+/// (a downloaded one, an override). If the mismatch reached the driver it would refuse the surface
+/// whole — taking every other bundle's entry in that file with it — so it is answered where the
+/// capability is read.
+#[test]
+fn a_row_claiming_a_shape_its_dialect_cannot_spell_withholds_only_that_placement() {
+    static OVERPROMISED: &[KnownHarness] = &[registry::home_rooted_mcp_row_with_caps(
+        "hermes-agent",
+        "Hermes Agent",
+        ".hermes/config.yaml",
+        McpDialect::HermesYaml,
+        None,
+        "/reload-mcp",
+        true,
+        true, // …but this dialect has no grammar for a program
+        topos_harness::mcp::descriptor::EnvRef::DollarBrace,
+    )];
+    let table: Vec<&'static KnownHarness> = OVERPROMISED.iter().collect();
+    let slugs: BTreeSet<String> = table.iter().map(|h| h.slug.to_owned()).collect();
+
+    let home = Scratch::new("overpromised");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let rows = vec![
+        demand(
+            "s_a",
+            "acme",
+            Some("eng"),
+            &package_server_json("npm", "@acme/server", "2.1.0"),
+        ),
+        demand(
+            "s_b",
+            "linear",
+            Some("eng"),
+            &server_json("https://mcp.example/linear"),
+        ),
+    ];
+    let demands: Vec<mcp_engine::McpDemand> = rows
+        .into_iter()
+        .map(|r| r.planned(&io, &table, &slugs))
+        .collect();
+    let out = mcp_engine::converge(&io, &demands, &table, &slugs, &no_hold(), true);
+
+    assert_eq!(
+        state_of(&out, "s_a", "hermes-agent").state,
+        TargetOutcome::Withheld,
+        "the package bundle is the one that cannot be spelled"
+    );
+    assert_eq!(
+        state_of(&out, "s_b", "hermes-agent").state,
+        TargetOutcome::Created,
+        "the address bundle lands in the same file, untouched by the other's gap"
+    );
+    let written = std::fs::read_to_string(home.0.join(".hermes/config.yaml")).expect("hermes");
+    assert!(written.contains("topos-eng-linear"), "{written}");
+    assert!(!written.contains("topos-eng-acme"), "{written}");
+}
+
 /// **An agent that cannot dial an address still gets the server** — through the bridge, pinned in
 /// the table, with headers carried the one way that survives Windows and Cursor.
 #[test]
