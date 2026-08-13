@@ -141,7 +141,11 @@ impl Selection {
         };
         for slug in &self.agents {
             let entry = if mcp {
-                let known = crate::manifest::dest::mcp_dest_spelling(slug, scope);
+                // Spelled for THIS MACHINE: three agents keep their machine config under the
+                // platform's application-support directory, which the table has no single token
+                // for, and `-a` refused them outright while `--dest` accepted the very path it
+                // could not produce.
+                let known = crate::manifest::dest::mcp_dest_spelling_here(slug, scope);
                 if known.is_none() && topos_harness::mcp::descriptor::mcp_harness(slug).is_none() {
                     return Err(unknown_agent(slug, true));
                 }
@@ -367,16 +371,20 @@ fn unknown_agent(slug: &str, mcp: bool) -> ClientError {
 }
 
 /// A known slug with nothing at this scope — refused, never silently dropped.
+///
+/// The way out names what `--dest` actually takes for this kind: an MCP server lands as an ENTRY
+/// in a config FILE, and telling a person to name a folder for one sent them somewhere no MCP
+/// entry has ever been written.
 fn no_scope_dir(slug: &str, scope: ManifestScope, mcp: bool) -> ClientError {
-    let (what, scope_word) = match (mcp, scope) {
-        (true, ManifestScope::Global) => ("config file", "machine-wide"),
-        (true, ManifestScope::Project) => ("project config file", "project"),
-        (false, ManifestScope::Global) => ("machine-wide skills folder", "machine-wide"),
-        (false, ManifestScope::Project) => ("project skills folder", "project"),
+    let (what, scope_word, way_out) = match (mcp, scope) {
+        (true, ManifestScope::Global) => ("config file", "machine-wide", "file"),
+        (true, ManifestScope::Project) => ("project config file", "project", "file"),
+        (false, ManifestScope::Global) => ("machine-wide skills folder", "machine-wide", "folder"),
+        (false, ManifestScope::Project) => ("project skills folder", "project", "folder"),
     };
     ClientError::SelectionRefused(format!(
         "agent `{slug}` has no {what} — `-a {slug}` cannot place at the {scope_word} scope; name \
-         a folder with `--dest` instead"
+         a {way_out} with `--dest` instead"
     ))
 }
 
