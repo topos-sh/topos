@@ -663,9 +663,9 @@ fn bridged(
         return Err(Gap::MissingRuntime { tool: NODE });
     }
     let mut args = vec!["-y".to_owned(), bridge.spec(), remote.url.clone()];
-    let mut env = Vec::with_capacity(remote.headers.len());
+    let mut env: Vec<(String, EnvValue)> = Vec::with_capacity(remote.headers.len());
     for (name, value) in &remote.headers {
-        let var = header_var(name);
+        let var = header_var(name, &env);
         args.push("--header".to_owned());
         args.push(format!("{name}:${{{var}}}"));
         // Every slot the bridge carries is a LITERAL header value the gate approved. Nothing here
@@ -682,9 +682,17 @@ fn bridged(
     })
 }
 
-/// The environment variable one bridged header's value travels in — deterministic, and named so a
-/// person reading the config can see which header it belongs to.
-fn header_var(name: &str) -> String {
+/// The environment variable one bridged header's value travels in — named so a person reading the
+/// config can see which header it belongs to, and DISTINCT from every variable the headers before
+/// it took.
+///
+/// The folding that makes the name a legal variable also makes two different headers one word:
+/// `X-A` and `X_A` both read as `TOPOS_HEADER_X_A`, and a map keyed on that keeps one value for
+/// both — so one of the two headers would go out carrying the other's value. A header whose name
+/// is already taken gets a numeric tail instead, counting from its own position in the document,
+/// which keeps the whole rendering a function of the document: the same bundle mints the same
+/// variables on every machine and on every sweep.
+fn header_var(name: &str, taken: &[(String, EnvValue)]) -> String {
     let sanitized: String = name
         .chars()
         .map(|c| {
@@ -695,7 +703,19 @@ fn header_var(name: &str) -> String {
             }
         })
         .collect();
-    format!("TOPOS_HEADER_{sanitized}")
+    let base = format!("TOPOS_HEADER_{sanitized}");
+    let is_taken = |candidate: &str| taken.iter().any(|(var, _)| var == candidate);
+    if !is_taken(&base) {
+        return base;
+    }
+    let mut n = taken.len() + 1;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// The PACKAGE renderings — one arm per registry this build can run:
@@ -1238,6 +1258,62 @@ mod tests {
             env.is_empty(),
             "no credential, and nothing to stand in for one"
         );
+    }
+
+    /// **Two headers that fold to the same variable name get two variables.** The folding that
+    /// makes a header name legal also erases the difference between `X-A` and `X_A`; one variable
+    /// for both would send one header's value under the other's name.
+    #[test]
+    fn two_headers_that_fold_alike_still_travel_separately() {
+        let colliding = doc(
+            r#"{"name": "io.github.acme/server", "description": "d", "version": "1.0.0",
+                "remotes": [{"type": "streamable-http", "url": "https://mcp.example/x",
+                  "headers": [
+                    {"name": "X-A", "value": "first"},
+                    {"name": "X_A", "value": "second"},
+                    {"name": "X.A", "value": "third"}
+                  ]}]}"#,
+        );
+        let render = || {
+            local(
+                &select(
+                    &colliding,
+                    caps(false, true),
+                    Some(&BRIDGE),
+                    &EVERYTHING,
+                    Machine::default(),
+                )
+                .expect("placed"),
+            )
+        };
+        let (_, args, env) = render();
+        assert_eq!(
+            env,
+            [
+                ("TOPOS_HEADER_X_A".to_owned(), "first".to_owned()),
+                ("TOPOS_HEADER_X_A_2".to_owned(), "second".to_owned()),
+                ("TOPOS_HEADER_X_A_3".to_owned(), "third".to_owned()),
+            ],
+            "one variable per header, each carrying its own value"
+        );
+        assert_eq!(
+            args,
+            [
+                "-y",
+                "mcp-remote@0.1.38",
+                "https://mcp.example/x",
+                "--header",
+                "X-A:${TOPOS_HEADER_X_A}",
+                "--header",
+                "X_A:${TOPOS_HEADER_X_A_2}",
+                "--header",
+                "X.A:${TOPOS_HEADER_X_A_3}",
+            ],
+            "and each argument names the variable its own value is in"
+        );
+        // The whole rendering is a function of the document, so a second sweep writes the same
+        // bytes and the entry's fingerprint does not move.
+        assert_eq!(render(), (NPX.to_owned(), args, env));
     }
 
     /// **A config written into a WSL distribution is read by a Linux agent, so this machine's
