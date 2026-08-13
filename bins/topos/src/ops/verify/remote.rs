@@ -16,10 +16,13 @@
 //!    a modern error at all, means the handshake era: `initialize` →
 //!    `notifications/initialized` → `tools/list`, with the server's session id captured from the
 //!    `initialize` response and resent on both follow-ups, and `MCP-Protocol-Version` naming the
-//!    version the server negotiated.
+//!    version the server negotiated. A session the server issued is then CLOSED (`DELETE`), on the
+//!    way out of every ending — a verification is a moment, and a moment must not leave a session
+//!    behind on a stateful server.
 //!
-//! Round-trip cost: **1** against a modern server, 4 against a legacy one. The reverse order costs
-//! 3 and 4 — symmetric in the worst case, worse on the era the specification calls current.
+//! Round-trip cost: **1** against a modern server, 4 against a legacy one (5 where it hands out a
+//! session, the fifth being the close). The reverse order costs 3 and 4 — symmetric in the worst
+//! case, worse on the era the specification calls current.
 //!
 //! ## What this arm never does
 //!
@@ -185,7 +188,14 @@ fn renegotiate(
     }
 }
 
-/// **The handshake era**: `initialize` → `notifications/initialized` → `tools/list`.
+/// **The handshake era**: `initialize` → `notifications/initialized` → `tools/list`, and then the
+/// close.
+///
+/// A handshake-era server may assign a SESSION, and a session it assigned is a session it holds
+/// until something ends it. A verification is a moment, not a state: on every exit after
+/// `initialize` — the verdict a success earns and the verdict a failure earns alike — the session
+/// is closed with the transport's own `DELETE`. Otherwise `topos verify` would cost a stateful
+/// server one live session per run until expiry.
 fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &str) -> Verdict {
     // 1. `initialize` — no protocol header yet, because the version is what it negotiates.
     let answer = match post(
@@ -207,14 +217,32 @@ fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &s
         Ok(Reply::Error(e)) => return Verdict::NotMcp { detail: e.detail() },
         Err(detail) => return Verdict::NotMcp { detail },
     };
-    // The session the server assigned, if it assigned one — resent on BOTH follow-ups.
+    // The session the server assigned, if it assigned one — resent on BOTH follow-ups, and named
+    // by the close at the end.
+    let issued_session = answer.session.is_some();
     let mut extra: Vec<(&str, String)> = vec![(PROTOCOL_HEADER, negotiated.clone())];
     if let Some(session) = answer.session {
         extra.push((SESSION_HEADER, session));
     }
+    let verdict = after_initialize(agent, url, headers, host, &extra, &negotiated);
+    if issued_session {
+        close_session(agent, url, headers, &extra);
+    }
+    verdict
+}
 
+/// The two steps that follow a `initialize` the server answered, as ONE fallible stretch — so
+/// [`legacy`] has a single place to close the session, whatever any of them returned.
+fn after_initialize(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &[(String, String)],
+    host: &str,
+    extra: &[(&str, String)],
+    negotiated: &str,
+) -> Verdict {
     // 2. `notifications/initialized` — a notification, so the answer is a status and no body.
-    let answer = match post(agent, url, headers, &wire::legacy_initialized(), &extra) {
+    let answer = match post(agent, url, headers, &wire::legacy_initialized(), extra) {
         Ok(a) => a,
         Err(reason) => return Verdict::NotReachable { reason },
     };
@@ -237,7 +265,7 @@ fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &s
         url,
         headers,
         &wire::legacy_tools_list(ID_LEGACY_TOOLS),
-        &extra,
+        extra,
     ) {
         Ok(a) => a,
         Err(reason) => return Verdict::NotReachable { reason },
@@ -247,9 +275,33 @@ fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &s
         StatusRead::ReadBody => {}
     }
     match wire::correlate(&answer.content_type, &answer.body, ID_LEGACY_TOOLS) {
-        Ok(reply) => wire::verdict_of_tools(&reply, &negotiated),
+        Ok(reply) => wire::verdict_of_tools(&reply, negotiated),
         Err(detail) => Verdict::NotMcp { detail },
     }
+}
+
+/// **The session close** — the transport's `DELETE` at the same address, carrying the session the
+/// server issued and the version it negotiated.
+///
+/// Best-effort BY DESIGN: the verdict is already decided and nothing here can change it. A server
+/// that answers `405` has told the truth (the specification lets it refuse to let a client end a
+/// session), a server that is gone cannot be told, and either way the machine has done the one
+/// polite thing available to it. No body, no answer read.
+fn close_session(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &[(String, String)],
+    extra: &[(&str, String)],
+) {
+    let mut request = agent.delete(url);
+    for (name, value) in headers.iter().filter(|(name, _)| !is_reserved(name)) {
+        request = request.header(name, value);
+    }
+    request = request.header("accept", ACCEPT);
+    for (name, value) in extra {
+        request = request.header(*name, value);
+    }
+    let _ = request.call();
 }
 
 /// The revision the `initialize` result named, or the one this client asked for when it named none.

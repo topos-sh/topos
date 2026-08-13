@@ -527,8 +527,8 @@ fn a_four_hundred_with_a_non_modern_body_falls_back_and_carries_the_session() {
     let seen = stub.requests();
     assert_eq!(
         seen.len(),
-        4,
-        "one rejected modern attempt + the three-step handshake"
+        5,
+        "one rejected modern attempt + the three-step handshake + the session close"
     );
     assert!(
         seen[1].body.contains(r#""method":"initialize""#),
@@ -540,7 +540,7 @@ fn a_four_hundred_with_a_non_modern_body_falls_back_and_carries_the_session() {
         "{}",
         seen[2].body
     );
-    for step in &seen[2..] {
+    for step in &seen[2..4] {
         assert_eq!(
             step.header("mcp-session-id"),
             Some("sess-abc123"),
@@ -553,6 +553,70 @@ fn a_four_hundred_with_a_non_modern_body_falls_back_and_carries_the_session() {
         );
         assert_eq!(step.method, "POST");
     }
+    // And the way out: the session the server issued is ENDED, naming itself and its version.
+    let close = &seen[4];
+    assert_eq!(close.method, "DELETE");
+    assert_eq!(close.header("mcp-session-id"), Some("sess-abc123"));
+    assert_eq!(close.header("mcp-protocol-version"), Some("2025-06-18"));
+    assert_eq!(close.body, "", "a close carries no body");
+}
+
+/// The close is not a reward for a good verdict: a handshake that got as far as a session and THEN
+/// failed has still taken one, and leaves it behind unless it says so. Here the listing comes back
+/// `500` — not reachable, never a protocol verdict — and the `DELETE` goes out all the same.
+#[test]
+fn a_session_is_closed_on_the_way_out_of_a_failure_too() {
+    let stub = Stub::serve(|index, _| match index {
+        0 => (400, ct("text/plain"), "not initialized".to_owned()),
+        1 => (
+            200,
+            vec![
+                ("Content-Type", JSON.to_owned()),
+                ("Mcp-Session-Id", "sess-doomed".to_owned()),
+            ],
+            r#"{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25"}}"#.to_owned(),
+        ),
+        2 => (202, Vec::new(), String::new()),
+        // The listing never lands: the server is having trouble.
+        _ => (500, ct(JSON), r#"{"error":"boom"}"#.to_owned()),
+    });
+    let v = dial(&stub);
+    assert_eq!(v.exit_code(), 4, "{}", v.line());
+    assert_eq!(v.state(), VerifyState::NotReachable);
+
+    let seen = stub.requests();
+    assert_eq!(seen.len(), 5, "the verdict failed; the close still went");
+    assert_eq!(seen[4].method, "DELETE");
+    assert_eq!(seen[4].header("mcp-session-id"), Some("sess-doomed"));
+}
+
+/// A `DELETE` a server refuses changes NOTHING — the verdict was decided before it was sent, and a
+/// server is allowed to say a client may not end its sessions.
+#[test]
+fn a_refused_close_never_changes_the_verdict() {
+    let stub = Stub::serve(|index, _| match index {
+        0 => (400, ct("text/plain"), "not initialized".to_owned()),
+        1 => (
+            200,
+            vec![
+                ("Content-Type", JSON.to_owned()),
+                ("Mcp-Session-Id", "sess-sticky".to_owned()),
+            ],
+            r#"{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25"}}"#.to_owned(),
+        ),
+        2 => (202, Vec::new(), String::new()),
+        3 => (
+            200,
+            ct(JSON),
+            r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"only"}]}}"#.to_owned(),
+        ),
+        // The close: "you may not end this session".
+        _ => (405, ct("text/plain"), "method not allowed".to_owned()),
+    });
+    let v = dial(&stub);
+    assert_eq!(v.line(), "responding (1 tools)");
+    assert_eq!(v.exit_code(), 0);
+    assert_eq!(stub.requests()[4].method, "DELETE");
 }
 
 /// The OTHER legacy shape: `200` with a JSON-RPC error whose code the current revision does not
@@ -586,6 +650,9 @@ fn an_unrecognized_json_rpc_error_at_two_hundred_is_also_an_era_signal() {
     // No session header was issued, so none is sent — an absent session is not an empty one.
     let seen = stub.requests();
     assert_eq!(seen[3].header("mcp-session-id"), None);
+    // And nothing is closed that was never opened: the four steps, and no `DELETE`.
+    assert_eq!(seen.len(), 4);
+    assert!(seen.iter().all(|step| step.method == "POST"), "{seen:?}");
 }
 
 /// A modern peer that refuses this build's version but offers a handshake-era one is reached
