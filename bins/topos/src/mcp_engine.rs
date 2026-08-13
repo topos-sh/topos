@@ -184,6 +184,16 @@ pub(crate) struct BundleStates {
     /// placement is an INSTALL however the store got its bytes; a write over a bundle the custody
     /// already placed is a repair. False whenever `wrote` is.
     pub first_placement: bool,
+    /// The agents whose state ALREADY HAS A LINE of its own in this converge's typed channels — a
+    /// capability gap, an entry topos does not own, a surface that could not be written.
+    ///
+    /// One canonical sentence per fact: those lines carry the whole story AND the way out, so a
+    /// receipt that also printed the state's short cause said one thing twice, at two lengths, in
+    /// two wordings. A caller rendering per-agent rows skips these and lets the sentence speak. It
+    /// is a SET OF SLUGS rather than a flag on the state, because the state's shape cannot tell an
+    /// ordinary structural narrowing (an agent with no config at this scope — no line anywhere,
+    /// so its row is the only thing that says it) from a capability gap, which has one.
+    pub spoken_for: BTreeSet<String>,
 }
 
 /// One removed placement (removal convergence / the `remove` verb's inline converge).
@@ -207,6 +217,17 @@ pub(crate) struct ConvergeOutcome {
     /// when its last entry left). A line describing something that worked belongs here: routed
     /// into the warning channel it would make a clean run report itself broken.
     pub notices: Vec<Message>,
+    /// STANDING NOT-PLACED facts — a capability this build or this machine does not have, and an
+    /// entry topos does not own already sitting where a placement would go. They print their line
+    /// on every run (the condition is re-decided from the files each time, so the line stops the
+    /// moment the condition does), and they never fail the run.
+    ///
+    /// The rule they are the reason for: **a run fails only when an act it attempted failed.**
+    /// Nothing was attempted here — no config file was written, none could be — so there is no
+    /// fault to report. Routed into `warnings` these exited non-zero forever on any machine that
+    /// merely has an agent topos cannot render this bundle for, which taught an agent watching the
+    /// exit status that its converging machine was broken.
+    pub advisories: Vec<Message>,
     /// The BUNDLE IDENTITIES this converge could not place — a `server.json` the gate refused, a
     /// document that would not parse. Each already has a line in `warnings`, but a line is not a
     /// bundle: the sweep counts BUNDLES, and a gate failure that rode only the line channel exited
@@ -218,6 +239,12 @@ pub(crate) struct ConvergeOutcome {
     /// and a local `linear` can stand in one scope, and a name would make them one bundle: one
     /// tally entry for two failures, and one bundle's failure standing the other's row down.
     pub failed_bundles: Vec<String>,
+    /// The BUNDLE IDENTITIES that reached NO surface for a STANDING reason — every agent's
+    /// placement withheld by a capability gap, or blocked by an entry topos does not own. Keyed
+    /// exactly like [`Self::failed_bundles`], and counted in the summary's own clause (`not
+    /// placed`) rather than under `failed`: nothing broke, and nothing arrived either, so the two
+    /// facts get one word each instead of the wrong one twice.
+    pub unplaced_bundles: Vec<String>,
 }
 
 // =================================================================================================
@@ -406,6 +433,22 @@ pub(crate) fn converge(
     // ordinary structural narrowings — a scope with no surface, a `dest` that excludes an agent —
     // and those are not a bundle failing to arrive.
     let mut capability_gaps: BTreeSet<usize> = BTreeSet::new();
+    // The STANDING not-placed lines, collected rather than pushed: which bundle a cause belongs to
+    // is only answerable once every harness has answered, and a line two bundles share has to name
+    // them or it attributes one bundle's gap to the other. `(code, sentence) → the demands`, in
+    // first-seen order, so the emitted order is still the descriptor order the receipt reads in.
+    let mut standing: Vec<(&'static str, String, BTreeSet<usize>)> = Vec::new();
+    // Per demand, the agents whose state already HAS a line — see [`BundleStates::spoken_for`].
+    let mut spoken: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+    let mut note_standing = |code: &'static str, text: String, demand: usize| match standing
+        .iter_mut()
+        .find(|(c, t, _)| *c == code && *t == text)
+    {
+        Some((_, _, who)) => {
+            who.insert(demand);
+        }
+        None => standing.push((code, text, BTreeSet::from([demand]))),
+    };
 
     for h in descriptors {
         // WHAT THE PLANS WITHHELD from this surface — one line per placeable demand that asked for
@@ -502,12 +545,15 @@ pub(crate) fn converge(
                     push_state(
                         &mut states,
                         *i,
-                        agent_state(h.slug, TargetOutcome::Withheld, Some(&gap.note()), None),
+                        agent_state(
+                            h.slug,
+                            TargetOutcome::Withheld,
+                            Some(&gap.note(h.slug)),
+                            None,
+                        ),
                     );
-                    let line = crate::message::failure(gap.code(), gap.message(h.slug));
-                    if !out.warnings.contains(&line) {
-                        out.warnings.push(line);
-                    }
+                    note_standing(gap.code(), gap.message(h.slug), *i);
+                    spoken.entry(*i).or_default().insert(h.slug.to_owned());
                     capability_gaps.insert(*i);
                     continue;
                 }
@@ -533,14 +579,13 @@ pub(crate) fn converge(
                     agent_state(
                         h.slug,
                         TargetOutcome::Conflicting,
-                        Some(hit.note()),
+                        Some(&hit.note()),
                         Some(&hit.path),
                     ),
                 );
-            }
-            let line = hit.message(h.slug);
-            if !out.warnings.contains(&line) {
-                out.warnings.push(line);
+                let (code, text) = hit.message(h.slug, &io.home);
+                note_standing(code, text, *i);
+                spoken.entry(*i).or_default().insert(h.slug.to_owned());
             }
         }
         if !blocked.is_empty() {
@@ -598,6 +643,16 @@ pub(crate) fn converge(
             &provenance,
             &names,
         );
+        // A surface that could not be WRITTEN says so in a sentence of its own, keyed by its file
+        // — so the per-agent row for the same surface would be that sentence again, shorter and
+        // without the way out.
+        if !surface_out.warnings.is_empty() {
+            for key in surface_out.states.iter().map(|(k, _)| k) {
+                if let Some(i) = desired_bundles.get(key) {
+                    spoken.entry(*i).or_default().insert(h.slug.to_owned());
+                }
+            }
+        }
         out.warnings.extend(surface_out.warnings);
         out.notices.extend(surface_out.notices);
         for key in &surface_out.wrote {
@@ -605,7 +660,21 @@ pub(crate) fn converge(
                 wrote.insert(*i);
             }
         }
+        // WHAT ELSE DIALS THIS SERVER, asked of the entries topos already HOLDS. The pre-flight
+        // above deliberately never blocks a key topos owns here — dropping it would uninstall a
+        // placement that stands — but "never block it" is not "never mention it": a foreign entry
+        // for the same server in a file this agent reads FIRST makes topos's own entry dead
+        // config, and the machine looked converged while the agent used somebody else's copy.
+        // Re-read from the files every run and stored nowhere, so it clears itself the moment the
+        // other entry goes.
+        let shadowed = shadows(io, h, &desired, &blocked);
         for (key, state) in surface_out.states {
+            let mut state = state;
+            if state.state == TargetOutcome::Current
+                && let Some(note) = shadowed.get(&key)
+            {
+                state.note = Some(note.clone());
+            }
             match desired_bundles.get(&key) {
                 Some(i) => push_state(&mut states, *i, state),
                 None => {
@@ -624,13 +693,31 @@ pub(crate) fn converge(
         }
     }
 
+    // THE STANDING LINES, once each, in descriptor order. A cause TWO bundles share is said once
+    // per bundle with the bundle named: the sentence itself carries no name, so a bare dedup
+    // printed one machine's missing node over both bundles and attributed it to neither.
+    for (code, text, who) in standing {
+        let attributed = who.len() > 1;
+        for i in who {
+            let text = if attributed {
+                format!("{}: {text}", demands[i].name)
+            } else {
+                text.clone()
+            };
+            let line = crate::message::advisory(code, text);
+            if !out.advisories.contains(&line) {
+                out.advisories.push(line);
+            }
+        }
+    }
+
     // A bundle every surface REFUSED is not an annotated success: nothing of it is installed
-    // anywhere, and its warning line already says so. It joins the failed count, so the summary
-    // and the exit status describe the same run — a line alone left "1 already up to date"
-    // printed over a machine holding nothing. A bundle blocked on ONE surface and placed on
-    // another is not this: it is installed, and its receipt row carries the collision beside the
-    // placements. A CAPABILITY gap counts the same way, and for the same reason: a machine with
-    // no node holds nothing of an npm bundle, whatever the store says.
+    // anywhere. It is not a FAILURE either — nothing was attempted, so nothing failed — so it
+    // takes the summary's own `not placed` clause, which is the one word that is true about it.
+    // Counting it under `failed` (and exiting non-zero on it, forever) called a machine that
+    // merely lacks node broken; leaving it out of the count entirely printed "1 already up to
+    // date" over a machine holding nothing. A bundle blocked on ONE surface and placed on another
+    // is neither: it is installed, and its receipt row carries the collision beside the placements.
     for (i, d) in demands.iter().enumerate() {
         let blocked = capability_gaps.contains(&i)
             || states
@@ -640,8 +727,9 @@ pub(crate) fn converge(
             && !wrote.contains(&i)
             && !custody.has_entries_for(&d.bundle_id)
             && !out.failed_bundles.contains(&d.bundle_id)
+            && !out.unplaced_bundles.contains(&d.bundle_id)
         {
-            out.failed_bundles.push(d.bundle_id.clone());
+            out.unplaced_bundles.push(d.bundle_id.clone());
         }
     }
 
@@ -669,6 +757,7 @@ pub(crate) fn converge(
             states: states.remove(&i).unwrap_or_default(),
             wrote: wrote.contains(&i),
             first_placement: wrote.contains(&i) && !placed_before.contains(&d.bundle_id),
+            spoken_for: spoken.remove(&i).unwrap_or_default(),
         })
         .collect();
     out
@@ -797,43 +886,91 @@ pub(crate) fn remove_bundle(
 struct Collision {
     name: String,
     path: PathBuf,
-    /// A `topos-`-prefixed name with no record behind it. Named as a POSSIBILITY: the prefix is a
-    /// spelling, not a provenance, and topos does not claim what it cannot prove.
+    /// WHICH identity matched. A name a person can see is taken and an address hiding under
+    /// somebody else's name are different discoveries, and a line that called the second one a
+    /// name clash sent a reader looking for a name that was never there.
+    by: CollisionBy,
+    /// A `topos-`-prefixed name with no record behind it, IN A FILE TOPOS WRITES. Named as a
+    /// POSSIBILITY: the prefix is a spelling, not a provenance, and topos does not claim what it
+    /// cannot prove. Never claimed in a file topos only reads — anyone may name an entry anything
+    /// there, and calling a stranger's entry topos's leftover is a guess about somebody else's
+    /// file.
     possible_leftover: bool,
+}
+
+/// The two ways an entry topos does not own blocks a placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollisionBy {
+    /// It holds the very key topos would write.
+    Name,
+    /// It points at the same server under a different name.
+    Address,
+}
+
+/// A path as a person reads it — this scope's home abbreviated to `~`, the spelling every other
+/// receipt line uses. One receipt printing `~/.cursor/mcp.json` on one line and
+/// `/Users/somebody/.claude.json` on the next reads as two different machines.
+///
+/// The client's own `inventory::pretty` does this from a `Ctx`; the converge holds only its
+/// `ScopeIo`, and the rule is one line long, so it is spelled here against the home the converge
+/// already resolved rather than by threading a context through the engine.
+fn tilde(home: &Path, path: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 impl Collision {
     /// The short cause the per-agent state carries (the receipt prints it after the outcome).
-    fn note(&self) -> &'static str {
+    fn note(&self) -> String {
         if self.possible_leftover {
-            "possibly left by an earlier topos version and no longer managed"
-        } else {
-            "an entry for this server already exists here and topos does not manage it"
+            return "possibly left by an earlier topos version and no longer managed".to_owned();
+        }
+        match self.by {
+            CollisionBy::Name => format!(
+                "an entry named \"{}\" is already here and topos does not manage it",
+                self.name
+            ),
+            CollisionBy::Address => format!(
+                "already dials this server's address as \"{}\", and topos does not manage it",
+                self.name
+            ),
         }
     }
 
     /// The whole sentence, with the way out. A person's next move is to delete an entry topos will
     /// never delete for them, so the line names WHICH entry, in WHICH file, and what happens then.
-    fn message(&self, slug: &str) -> Message {
-        let path = self.path.display();
+    fn message(&self, slug: &str, home: &Path) -> (&'static str, String) {
+        let path = tilde(home, &self.path);
         let name = &self.name;
         if self.possible_leftover {
-            return crate::message::failure(
+            return (
                 "MCP_ENTRY_LEFTOVER",
                 format!(
                     "possible leftover from an earlier topos version: {name} in {path} is no \
-                     longer managed. Remove it with: delete the \"{name}\" entry from that file."
+                     longer managed. Remove it by deleting the \"{name}\" entry from that file."
                 ),
             );
         }
-        crate::message::failure(
-            "MCP_ENTRY_CONFLICT",
-            format!(
-                "not placed in {slug}: an entry for this server already exists ({name} in {path}) \
-                 and topos does not manage it. Remove it to let topos manage this server, then run \
-                 'topos update'."
+        match self.by {
+            CollisionBy::Name => (
+                "MCP_ENTRY_CONFLICT",
+                format!(
+                    "not placed in {slug}: an entry for this server already exists ({name} in \
+                     {path}) and topos does not manage it. Remove it to let topos manage this \
+                     server, then run 'topos update'."
+                ),
             ),
-        )
+            CollisionBy::Address => (
+                "MCP_ENTRY_CONFLICT",
+                format!(
+                    "not placed in {slug}: an entry topos does not manage ({name} in {path}) \
+                     already dials this server's address. Remove it to let topos manage this \
+                     server, then run 'topos update'."
+                ),
+            ),
+        }
     }
 }
 
@@ -911,8 +1048,75 @@ fn collisions(
                         Collision {
                             name: entry.name.clone(),
                             path: path.clone(),
-                            possible_leftover: entry.name.starts_with("topos-"),
+                            by: if same_name {
+                                CollisionBy::Name
+                            } else {
+                                CollisionBy::Address
+                            },
+                            // Only where topos itself writes: a `topos-` name in a file topos
+                            // merely READS is somebody else's entry with a familiar-looking name,
+                            // and the leftover wording would claim a provenance nobody can prove.
+                            possible_leftover: may_be_ours && entry.name.starts_with("topos-"),
                         },
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+/// **What ELSE dials the same server, in a file this harness reads BEFORE the one topos writes.**
+///
+/// The collision pre-flight answers "may this entry be written"; this answers the question that
+/// only matters once it HAS been — whether the agent will ever read it. A harness's
+/// [`KnownHarness::mcp_conflict_paths`] are read-only surfaces it consults itself, and an entry
+/// there for the same server wins: topos's entry stands, byte-perfect and recorded, and the agent
+/// uses the other one. Reporting nothing left a machine looking fully converged while every call
+/// went through somebody else's copy.
+///
+/// It is a NOTE and never a refusal: nothing is wrong with either entry, the person may well have
+/// meant it, and topos deletes neither. It is re-decided from the files on every run and stored
+/// nowhere, so removing the other entry clears it on the next sweep with no state to reconcile.
+///
+/// Keys already BLOCKED by the pre-flight are skipped — they have a louder line of their own —
+/// and so is any surface that will not read, exactly as the pre-flight does: an unprovable
+/// absence is not evidence of one.
+fn shadows(
+    io: &ScopeIo<'_>,
+    h: &KnownHarness,
+    desired: &[McpEntry],
+    blocked: &BTreeMap<String, Collision>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let wanted: Vec<(&str, String)> = desired
+        .iter()
+        .filter(|e| !blocked.contains_key(&e.key))
+        .filter_map(|e| e.address().map(|a| (e.key.as_str(), a)))
+        .collect();
+    if wanted.is_empty() {
+        return out;
+    }
+    for (path, dialect, selector) in h.mcp_conflict_paths(&io.home) {
+        let Ok(Some(bytes)) = io.fs.read_opt(&path) else {
+            continue;
+        };
+        let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), selector) else {
+            continue;
+        };
+        for entry in seen {
+            for (key, address) in &wanted {
+                if out.contains_key(*key) || entry.name == *key {
+                    continue; // the same key in both files is one entry's story, not two
+                }
+                if entry.address.as_deref() == Some(address.as_str()) {
+                    out.insert(
+                        (*key).to_owned(),
+                        format!(
+                            "also configured as \"{}\" in {}, which this agent prefers",
+                            entry.name,
+                            tilde(&io.home, &path)
+                        ),
                     );
                 }
             }
@@ -1504,12 +1708,22 @@ fn converge_surface(
                         // A SUCCESS notice, not a fault: the file went because the last entry
                         // topos owned left it, which is the removal working. Pushed into the
                         // warning channel it would make a clean sweep count itself failed.
+                        //
+                        // It names WHAT WENT. The plugin surface is a whole topos-owned DIRECTORY
+                        // — the entries file, the manifest beside it, and the folder itself all
+                        // leave together — and naming only the `.mcp.json` described a third of
+                        // the deletion to a person who might well go looking for the rest.
+                        let gone = match (is_plugin, manifest_kept.is_none()) {
+                            (true, true) => path.parent().unwrap_or(path),
+                            _ => path,
+                        };
+                        let what = if gone == path { "file" } else { "folder" };
                         surface.notices.push(crate::message::disclosure(
                             "MCP_FILE_REMOVED",
                             format!(
-                                "{}: this file held only entries topos placed, so topos deleted \
+                                "{}: this {what} held only entries topos placed, so topos deleted \
                                  it with the last one.",
-                                path.display()
+                                tilde(&io.home, gone)
                             ),
                         ));
                     }

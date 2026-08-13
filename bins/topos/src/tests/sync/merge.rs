@@ -459,7 +459,7 @@ fn keep_mine_settles_every_structural_collision_the_way_git_does() {
             "{label}: the receipt never names the team's change it dropped ({dropped}):\n{dd}"
         );
         // And the rendered row says it in the one voice a person reads.
-        let rendered = crate::render::pull_tty(&escaped, &[], &[], &[], &[], 0);
+        let rendered = crate::render::pull_tty(&escaped, &[], &[], &[], &[], 0, 0);
         assert!(
             rendered.contains("kept your wording where you both changed the same lines"),
             "{label}: {rendered}"
@@ -981,7 +981,7 @@ fn a_placement_holding_the_marker_tree_is_never_committed_as_the_persons_work() 
             .collect::<Vec<_>>(),
         vec![topos_types::results::ConflictHolds::MarkedUp]
     );
-    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0);
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0, 0);
     let leaf = rig
         .placement()
         .file_name()
@@ -1298,7 +1298,7 @@ fn a_narrowed_reset_leaves_per_folder_truth_on_both_surfaces() {
 
     // And the receipt says the three of them one at a time — never the aggregate sentence, which
     // is false of two of these folders.
-    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0);
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0, 0);
     assert!(
         !tty.contains("your agents are unaffected"),
         "the aggregate promise is false here: {tty}"

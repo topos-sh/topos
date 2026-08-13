@@ -798,6 +798,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_says_nothing_about_
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(!tty.contains("behind"), "{tty}");
     assert!(!tty.contains("VERSION_SPLIT"), "{tty}");
@@ -867,6 +868,7 @@ fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() 
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),
@@ -950,6 +952,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(!tty.contains("behind"), "{tty}");
 
@@ -990,6 +993,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),

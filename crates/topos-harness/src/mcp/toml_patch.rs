@@ -495,7 +495,7 @@ mod tests {
                 local_entry(
                     "topos-p",
                     "uvx",
-                    &["acme-server==1.2.3"],
+                    &["acme-server@1.2.3"],
                     &[("ACME_REGION", "eu")],
                 ),
             ],
@@ -506,7 +506,7 @@ mod tests {
             write_of(&out),
             "[mcp_servers.topos-acme-linear]\nurl = \"https://mcp.example/linear\"\n\n\
              [mcp_servers.topos-h]\nhttp_headers = { X-T = \"v\" }\nurl = \"https://h.example\"\n\n\
-             [mcp_servers.topos-p]\nargs = [\"acme-server==1.2.3\"]\ncommand = \"uvx\"\nenv = { ACME_REGION = \"eu\" }\n"
+             [mcp_servers.topos-p]\nargs = [\"acme-server@1.2.3\"]\ncommand = \"uvx\"\nenv = { ACME_REGION = \"eu\" }\n"
         );
     }
 

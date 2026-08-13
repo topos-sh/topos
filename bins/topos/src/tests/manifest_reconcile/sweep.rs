@@ -414,6 +414,7 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         tty.contains(

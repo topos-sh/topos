@@ -335,6 +335,7 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
             &out.advisories,
             &out.disclosures,
             out.failed_bundles.len(),
+            out.unplaced_bundles.len(),
         )
     };
     sweep(&ctx, &plane, &dir);
@@ -422,6 +423,7 @@ fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
             &out.advisories,
             &out.disclosures,
             out.failed_bundles.len(),
+            out.unplaced_bundles.len(),
         )
     };
 
@@ -735,6 +737,7 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
         &clean.advisories,
         &clean.disclosures,
         clean.failed_bundles.len(),
+        clean.unplaced_bundles.len(),
     );
     assert!(
         receipt.contains("warning: \"alpha\" (person): the dest entry `~/.notepad/mcp.json`"),
@@ -836,6 +839,7 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
         &clean.advisories,
         &clean.disclosures,
         clean.failed_bundles.len(),
+        clean.unplaced_bundles.len(),
     );
     assert!(
         receipt.contains("alpha") && receipt.contains("reaches no agent"),

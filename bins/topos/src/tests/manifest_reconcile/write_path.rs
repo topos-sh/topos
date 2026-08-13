@@ -1144,6 +1144,7 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     let expected_block = concat!(
         "deploy   github.com/o/r has a newer version, and taking it would overwrite your edits. ",

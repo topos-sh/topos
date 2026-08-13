@@ -270,7 +270,7 @@ fn adopt_local(
     fold_receipt(&mut data, &summary, Some(dir), agents, &converge);
     Ok(McpAdded {
         reached_nobody: converge.reached_nobody(),
-        messages: converge.messages,
+        messages: converge.all_messages(),
         data: Box::new(data),
     })
 }
@@ -294,20 +294,37 @@ pub(crate) struct ConvergeReceipt {
     resolved: Vec<String>,
     /// One typed failure per surface that could not be written.
     messages: Vec<topos_types::Message>,
-    /// The SHORT cause behind each failure, de-duplicated in order — what a receipt puts after a
-    /// dash, where the message carries the whole sentence keyed by its file.
-    causes: Vec<String>,
+    /// The STANDING not-placed lines — a capability this build or this machine does not have, an
+    /// entry topos does not own. They ride the typed channel beside the failures (an agent reading
+    /// `--json` needs them) and they fail nothing: no act was attempted, so no act failed.
+    advisories: Vec<topos_types::Message>,
     /// How many surfaces now hold this bundle's entry. Zero with failures standing is the state
     /// that makes the whole add a failure.
     placed: usize,
 }
 
 impl ConvergeReceipt {
-    /// The add landed a row and delivered NOTHING: every surface it planned failed. Distinct from
-    /// a machine with no MCP-capable agent on it (nothing failed there — there was nothing to
-    /// reach), which stays an ordinary success.
+    /// The add landed a row and delivered NOTHING **because something broke**: every surface it
+    /// planned failed to be written. Distinct from a machine with no MCP-capable agent on it
+    /// (nothing failed there — there was nothing to reach), and from a machine none of whose
+    /// agents this bundle can be set up for, which is [`Self::placed_nothing`]: a condition, not a
+    /// fault. This one alone decides `ok` and the exit status.
     fn reached_nobody(&self) -> bool {
         self.placed == 0 && !self.messages.is_empty()
+    }
+
+    /// Nothing of this bundle stands anywhere after the add — for ANY reason, broken or standing.
+    /// What the receipt says out loud, so a person is never left to infer it from the absence of
+    /// placement lines.
+    fn placed_nothing(&self) -> bool {
+        self.placed == 0 && !(self.messages.is_empty() && self.advisories.is_empty())
+    }
+
+    /// Every typed line, failures first — the channel the `--json` envelope carries whole.
+    fn all_messages(&self) -> Vec<topos_types::Message> {
+        let mut out = self.messages.clone();
+        out.extend(self.advisories.iter().cloned());
+        out
     }
 }
 
@@ -378,6 +395,7 @@ fn converge_one(
     let mut out = ConvergeReceipt {
         lines: filter_warnings,
         messages: outcome.warnings,
+        advisories: outcome.advisories,
         ..ConvergeReceipt::default()
     };
     for bundle in outcome.bundles {
@@ -388,38 +406,35 @@ fn converge_one(
         // the receipt's headline has to follow the bytes.
         out.resolved
             .extend(states.iter().filter_map(|s| s.file.clone()));
-        for state in &states {
-            if stands(state.state) {
-                out.placed += 1;
-            } else if let Some(cause) = &state.note
-                && !out.causes.contains(cause)
-            {
-                // The SHORT cause, de-duplicated: eleven surfaces failing for one reason is one
-                // reason, and a receipt that repeats it eleven times is a wall, not an answer.
-                out.causes.push(cause.clone());
-            }
-        }
-        out.lines.extend(states.iter().map(agent_line));
+        out.placed += states.iter().filter(|s| s.state.stands()).count();
+        // ONE CANONICAL SENTENCE PER FACT. An agent whose outcome already has a sentence of its
+        // own below — a capability gap, an entry topos does not own, a surface that would not be
+        // written — is not given a short second version of it here. Two lines for one fact, in two
+        // wordings and at two lengths, is what a person met when eleven surfaces failed for one
+        // reason; the sentence is the one that carries the way out, so the sentence is the one
+        // that stays.
+        out.lines.extend(
+            states
+                .iter()
+                .filter(|s| !bundle.spoken_for.contains(&s.agent))
+                .map(agent_line),
+        );
     }
     out.resolved.dedup();
     out.lines
         .extend(outcome.notices.iter().map(|n| n.text.clone()));
-    out.lines
-        .extend(out.messages.iter().map(|w| w.text.clone()));
+    // ONE CANONICAL SENTENCE PER FACT. Each typed line is said once, in the words it was written
+    // in — the per-agent row above carries the short cause, and this carries the whole sentence
+    // with the way out. They used to be joined into one blob behind semicolons on a
+    // reached-nobody add, which fused reasons that had nothing to do with each other and closed
+    // with a `Run 'topos update'` that could not fix any of them; each sentence carries its own
+    // remedy, or honestly carries none.
+    for line in out.messages.iter().chain(&out.advisories) {
+        if !out.lines.contains(&line.text) {
+            out.lines.push(line.text.clone());
+        }
+    }
     out
-}
-
-/// Whether a converge outcome means the bundle's entry now STANDS in that config file — the only
-/// question "did this reach an agent" is asking. A hand-edited entry counts: something is there,
-/// and it is the person's.
-fn stands(state: TargetOutcome) -> bool {
-    matches!(
-        state,
-        TargetOutcome::Created
-            | TargetOutcome::Refreshed
-            | TargetOutcome::Current
-            | TargetOutcome::Drifted
-    )
 }
 
 /// One config outcome as an add-receipt line, KEYED BY THE CONFIG FILE the entry landed in —
@@ -443,9 +458,13 @@ fn agent_line(state: &topos_types::results::McpAgentState) -> String {
             }
         }
         TargetOutcome::Drifted => format!("{where_}: hand-edited entry left in place"),
-        TargetOutcome::Conflicting => {
-            format!("{where_}: an entry topos does not own already holds that name")
-        }
+        // The cause, not a guess at it: an entry holding the NAME and an entry pointing at the
+        // same SERVER under another name are different discoveries, and this line called both a
+        // name clash — sending a reader to look for a name that was never there.
+        TargetOutcome::Conflicting => match &state.note {
+            Some(note) => format!("{where_}: {note}"),
+            None => format!("{where_}: an entry topos does not manage already stands here"),
+        },
         other => match &state.note {
             Some(note) => format!(
                 "{}: {} — {note}",
@@ -629,7 +648,18 @@ fn what_it_is(summary: &McpSummary) -> String {
     match crate::mcp_render::preferred_package(&summary.packages)
         .or_else(|| summary.packages.first())
     {
-        Some(package) if package.version.is_empty() => {
+        // An identifier that already PINS is the whole coordinate: a container image names its
+        // digest inside the identifier (`ghcr.io/acme/x@sha256:8ba1…`), and the document still
+        // carries a `version` beside it for people to read. Appending that produced
+        // `…@sha256:8ba1…@1.0.0`, which is not a thing anyone can paste anywhere.
+        //
+        // The `@` must be an INNER one. An npm scope leads with the same character
+        // (`@acme/weather-mcp`) and pins nothing, so a naive "contains an @" test dropped the
+        // version off every scoped npm package on the way to fixing the digests.
+        Some(package)
+            if package.version.is_empty()
+                || package.identifier.trim_start_matches('@').contains('@') =>
+        {
             format!(
                 "the {} package {}, run on this machine",
                 package.registry, package.identifier
@@ -668,7 +698,11 @@ fn fold_receipt(
         Some(hint) => format!(", auth {}", hint.as_str()),
         None => String::new(),
     };
-    medit::push_note(
+    // EACH FACT ON ITS OWN LINE. These are sentences, not asides, and the `·` fold that suits
+    // two short row notes ran the server summary, the reached-nobody statement and the first
+    // per-config line together into one paragraph while the other fourteen config lines sat
+    // underneath it, one to a line.
+    medit::push_note_line(
         data,
         format!(
             "MCP server {} v{} — {}{auth}",
@@ -677,25 +711,23 @@ fn fold_receipt(
             what_it_is(summary)
         ),
     );
-    if converge.reached_nobody() {
-        // NOTHING was delivered. The row is real and the fix is one command, so the receipt states
-        // both facts and the cause ONCE — not once per surface behind separators, which is what a
-        // reader met when eleven agents failed for one reason.
-        medit::push_note(
+    if converge.placed_nothing() {
+        // NOTHING stands anywhere. The row is real, so the receipt says the one thing a reader
+        // cannot see from the lines below — and then lets each line say its own reason and its own
+        // way out. It used to fuse every reason behind semicolons and close with `Run 'topos
+        // update' to finish the delivery`, which is a cure for exactly one of them: a machine
+        // missing node finishes nothing by re-running, and told to re-run it does, forever.
+        medit::push_note_line(
             data,
-            format!(
-                "\"{}\" was recorded, and it reached no agent — {}. Run 'topos update' to finish \
-                 the delivery.",
-                data.name,
-                converge.causes.join("; ")
-            ),
+            format!("\"{}\" was recorded, and it reached no agent.", data.name),
         );
-    } else if !lines.is_empty() {
+    }
+    if !lines.is_empty() {
         // ONE CLAUSE PER LINE — surfaces differ here, so each says its own thing.
-        medit::push_note(data, lines.join("\n"));
+        medit::push_note_line(data, lines.join("\n"));
     }
     if nobody {
-        medit::push_note(
+        medit::push_note_line(
             data,
             "No MCP-capable agent is set up here yet — the row waits for one",
         );
@@ -764,6 +796,19 @@ mod tests {
         assert_eq!(
             what_it_is(&summary(vec![package("nuget", "Acme.X", "stdio")])),
             "the nuget package Acme.X@1.2.3, run on this machine"
+        );
+        // AN IDENTIFIER THAT ALREADY PINS IS THE WHOLE COORDINATE. A container image carries its
+        // digest inside the identifier and the document still states a `version` beside it for
+        // people to read; appending that produced `…@sha256:8ba1…@1.2.3`, which is not a thing
+        // anyone can paste anywhere. The `@` that leads an npm scope pins nothing, and the
+        // scoped packages above prove it still keeps its version.
+        assert_eq!(
+            what_it_is(&summary(vec![package(
+                "oci",
+                "ghcr.io/acme/x@sha256:8ba1",
+                "stdio"
+            )])),
+            "the oci package ghcr.io/acme/x@sha256:8ba1, run on this machine"
         );
         // An address outranks every package — it is what the agent will actually use.
         let mut dialed = summary(vec![package("npm", "@acme/x", "stdio")]);

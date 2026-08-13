@@ -446,6 +446,12 @@ struct Sweep {
     /// down with the failed one. Scopes are unblended, so one identity may legitimately fail once
     /// per scope. Display names ride the warning lines and nothing else.
     failed_bundles: std::collections::BTreeSet<(String, String)>,
+    /// The BUNDLES nothing was placed for because nothing COULD be — every agent's placement
+    /// withheld by a capability this build or this machine lacks, or blocked by an entry topos
+    /// does not own. Keyed like [`Sweep::failed_bundles`], counted under the summary's own `not
+    /// placed` clause, and never under `failed`: no act was attempted, so no act failed, and the
+    /// run exits 0.
+    unplaced_bundles: std::collections::BTreeSet<(String, String)>,
     /// ADVISORIES — real `warning:` lines about a row that still DELIVERED (an unknown MCP dest
     /// entry dropped from a bundle's narrowing). They ride the same `--json` `warnings` array and
     /// print with the warnings, but the summary never counts them: the bundle they annotate has
@@ -1814,6 +1820,7 @@ pub(crate) fn manifest_update(
         },
         warnings: sweep.warnings,
         failed_bundles: sweep.failed_bundles,
+        unplaced_bundles: sweep.unplaced_bundles,
         fault_actions: sweep.fault_actions,
         decisions: sweep.decisions,
         advisories: sweep.advisories,
@@ -5273,6 +5280,14 @@ fn run_mcp_converge(
             allow_removals,
         );
         sweep.warnings.extend(outcome.warnings);
+        // The STANDING not-placed lines print with the warnings and count as none of them: a
+        // capability this build does not have and an entry topos does not own are conditions, not
+        // faults, and a run that reports them is converging exactly as designed.
+        for advisory in outcome.advisories {
+            if !sweep.advisories.contains(&advisory) {
+                sweep.advisories.push(advisory);
+            }
+        }
         // A bundle the converge could not place is a FAILED BUNDLE, not merely a warning line —
         // the summary counts bundles, and a gate refusal that rode only the line channel printed
         // "1 already up to date" on a run that exited non-zero.
@@ -5290,7 +5305,11 @@ fn run_mcp_converge(
         // holds positions in `sweep.rows`, so removing a row mid-fold would re-point every later
         // bundle's lookup at its neighbour; the marked rows leave together at the end, where no
         // index is live any more.
-        for bundle_id in &outcome.failed_bundles {
+        for bundle_id in outcome
+            .failed_bundles
+            .iter()
+            .chain(&outcome.unplaced_bundles)
+        {
             if let Some(at) = sweep.mcp_rows.get(&(label.clone(), bundle_id.clone())) {
                 stood_down.insert(*at);
             }
@@ -5298,6 +5317,15 @@ fn run_mcp_converge(
         sweep.failed_bundles.extend(
             outcome
                 .failed_bundles
+                .iter()
+                .map(|id| (label.clone(), id.clone())),
+        );
+        // A bundle nothing was placed for because nothing COULD be gets the summary's own word.
+        // Its row stands down beside a failed one's, for the same reason: the row would say `up to
+        // date` about a bundle this machine holds no entry for anywhere.
+        sweep.unplaced_bundles.extend(
+            outcome
+                .unplaced_bundles
                 .iter()
                 .map(|id| (label.clone(), id.clone())),
         );

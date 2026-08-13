@@ -378,7 +378,12 @@ impl Verdict {
     /// The ONE sentence, printed and relayed.
     pub(crate) fn line(&self) -> String {
         match self {
-            Self::Responding { tools, .. } => format!("responding ({tools} tools)"),
+            Self::Responding { tools, .. } => {
+                format!(
+                    "responding ({tools} tool{})",
+                    if *tools == 1 { "" } else { "s" }
+                )
+            }
             Self::SignInRequired => {
                 "sign-in required - healthy; your agent app completes sign-in on first use"
                     .to_owned()
@@ -719,6 +724,24 @@ mod tests {
         assert_eq!(responding.exit_code(), 0);
         assert_eq!(responding.detail(), None);
         assert_eq!(responding.protocol(), Some("2026-07-28"));
+        // The noun counts. A server offering exactly one tool answered `1 tools`, which is the
+        // kind of line a person reads as a bug in the thing that printed it.
+        assert_eq!(
+            Verdict::Responding {
+                tools: 1,
+                protocol: MODERN_REVISION.to_owned(),
+            }
+            .line(),
+            "responding (1 tool)"
+        );
+        assert_eq!(
+            Verdict::Responding {
+                tools: 0,
+                protocol: MODERN_REVISION.to_owned(),
+            }
+            .line(),
+            "responding (0 tools)"
+        );
 
         assert_eq!(
             Verdict::SignInRequired.line(),

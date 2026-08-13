@@ -2545,7 +2545,13 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     // find a path's start in, and the count of copies — the thing this line exists to report — is
     // unreadable at a glance. Same shape whatever the count, so a second copy never changes how
     // the answer is read.
-    if !detail.placements.is_empty() {
+    //
+    // NEVER for a config-placed bundle. `placed in:` means "topos put a copy of this here", and an
+    // MCP bundle has no such folder: what stood in that list was the adopted SOURCE folder, which
+    // the `source:` line above already names and which topos writes nothing into. Its "where" is
+    // the per-agent block below.
+    let is_mcp = BundleKind::of_tag(detail.kind.as_deref()) == Some(BundleKind::Mcp);
+    if !detail.placements.is_empty() && !is_mcp {
         s.push_str("\n  placed in:");
         for p in &detail.placements {
             s.push_str(&format!("\n    {p}"));
@@ -2553,7 +2559,7 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     }
     // An mcp bundle's "where": per-agent config entries (placed file + state), instead of
     // placement dirs.
-    if BundleKind::of_tag(detail.kind.as_deref()) == Some(BundleKind::Mcp) {
+    if is_mcp {
         if let Some(why) = &detail.mcp_unreachable {
             // "not recorded yet" would be a lie of omission here: nothing is coming. The row's own
             // dest is what withholds it, so the line names the cause and the files that would work.
@@ -2561,7 +2567,12 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
                 "\n  an MCP server bundle that reaches no agent — {why}"
             ));
         } else if detail.harnesses.is_empty() {
-            s.push_str("\n  an MCP server bundle — no agent config entries recorded yet");
+            // "not recorded YET" promised something on its way, on the same answer whose state
+            // line says `applied` — two claims a reader cannot hold at once. The bytes ARE here
+            // and no agent config holds an entry for them, which is one sentence, and true
+            // whether that is because no agent is set up, because none can be given this bundle,
+            // or because every entry was refused.
+            s.push_str("\n  an MCP server bundle — no agent config here holds an entry for it");
         } else {
             // "as of the last converge": these entries are what the ledger / delivery cache
             // recorded when topos last wrote — a hand edit since then surfaces only when the
@@ -3813,6 +3824,10 @@ pub(crate) fn pull_tty(
     // `failed`: how many BUNDLES this run could not carry forward — the sweep's own count,
     // never `warnings.len()`. See the arithmetic at the summary below.
     failed: usize,
+    // `unplaced`: how many BUNDLES nothing could be placed for — a capability this build or this
+    // machine lacks, an entry topos does not own. They are neither failures nor up to date, and
+    // the summary needs both words for the parts to keep summing to the total.
+    unplaced: usize,
 ) -> String {
     let scope = PullReceiptScope::read(data.scope.as_deref());
     if data.skills.is_empty()
@@ -3820,6 +3835,7 @@ pub(crate) fn pull_tty(
         && warnings.is_empty()
         && advisories.is_empty()
         && disclosures.is_empty()
+        && unplaced == 0
     {
         // A run that moved nothing says exactly that. What a person standing in a project could
         // once MISREAD here — an untouched machine-wide set taken for an emptied one — is answered
@@ -3900,7 +3916,7 @@ pub(crate) fn pull_tty(
                 || s.note.is_some()
                 || s.harnesses
                     .iter()
-                    .any(|h| !(h.state.wrote() || mcp_state_settled(h.state)));
+                    .any(|h| !(h.state.wrote() || mcp_state_settled(h)));
             if matches!(s.action, PullAction::UpToDate) && !noteworthy {
                 return None;
             }
@@ -3934,7 +3950,7 @@ pub(crate) fn pull_tty(
             extra.extend(
                 s.harnesses
                     .iter()
-                    .filter(|h| wrote || !mcp_state_settled(h.state))
+                    .filter(|h| wrote || !mcp_state_settled(h))
                     .map(|h| mcp_agent_line(h, wrote)),
             );
             Some((lead, line, extra))
@@ -3992,11 +4008,12 @@ pub(crate) fn pull_tty(
     // document) is one line about no bundle at all, and two lines can be about one bundle. Counting
     // lines invented bundles that do not exist and then reported them failed — `Checked 3 skills:
     // 2 already up to date, 1 failed` over a machine holding two.
-    let total = primary.len() + failed + decisions.len();
-    let noun = managed_noun(&data.skills, total);
+    let total = primary.len() + failed + unplaced + decisions.len();
+    let noun = managed_noun(&data.skills, total, unplaced > 0);
     tally.failed = failed;
+    tally.not_placed = unplaced;
     tally.waiting += decisions.len();
-    if rows.is_empty() && warnings.is_empty() && kept_lines.is_empty() {
+    if rows.is_empty() && warnings.is_empty() && kept_lines.is_empty() && unplaced == 0 {
         out.push_str(&format!("Checked {total} {noun}: all up to date."));
     } else {
         out.push_str(&format!("Checked {total} {noun}"));
@@ -4030,6 +4047,10 @@ struct PullTally {
     no_longer_shared: usize,
     held: usize,
     failed: usize,
+    /// Bundles nothing was placed for because nothing COULD be. Not `failed` (no act was
+    /// attempted, so none failed) and not `already up to date` (nothing of them stands anywhere) —
+    /// the word is the one the per-agent lines already use for the same fact.
+    not_placed: usize,
     /// Bundles carrying local edits that are not shared — the same fact `list` prints as
     /// `(draft)` and `status` counts as `drafts ahead`.
     drafts_ahead: usize,
@@ -4074,6 +4095,7 @@ impl PullTally {
             (self.waiting, "waiting on you"),
             (self.no_longer_shared, "no longer shared"),
             (self.held, "held"),
+            (self.not_placed, "not placed"),
             (self.failed, "failed"),
         ]
         .into_iter()
@@ -4096,6 +4118,7 @@ impl PullTally {
             + self.waiting
             + self.no_longer_shared
             + self.held
+            + self.not_placed
             + self.failed
             + self.drafts_ahead
     }
@@ -4104,8 +4127,15 @@ impl PullTally {
 /// The noun a receipt counts its rows in. `skill` while every row IS one — the word a person
 /// reads most and the one the rest of the CLI uses — and the generic `bundle` the moment a row of
 /// another kind rode along, because one summary cannot call a server a skill and stay true.
-fn managed_noun(skills: &[PullSkill], total: usize) -> &'static str {
-    match (skills.iter().any(|s| s.kind.is_some()), total == 1) {
+///
+/// `other_kinds` is the same question asked of what the rows CANNOT answer: a bundle that reached
+/// no agent has no row on this receipt (it stands down), so `Checked 1 skill: 1 not placed` was a
+/// summary calling an MCP server a skill precisely on the run where nothing else named it.
+fn managed_noun(skills: &[PullSkill], total: usize, other_kinds: bool) -> &'static str {
+    match (
+        other_kinds || skills.iter().any(|s| s.kind.is_some()),
+        total == 1,
+    ) {
         (true, true) => "bundle",
         (true, false) => "bundles",
         (false, true) => "skill",
@@ -4187,9 +4217,21 @@ fn notice_line(n: &topos_types::requests::WireNotice) -> String {
 /// Everything else is DIVERGENCE — person-owned (a hand-edited entry), contested (a key another
 /// entry holds), or undecided (a file that could not be read) — and a receipt that hid it would
 /// be hiding the only thing on the row worth reading.
-const fn mcp_state_settled(state: topos_types::results::TargetOutcome) -> bool {
+/// `current` and `not placed` are the two standing facts a no-op sweep may swallow.
+///
+/// A NOTED `current` is the exception, because a healthy one carries none: the note exists only
+/// where something ELSE is true of an entry that is otherwise perfect — another file dialing the
+/// same server ahead of it — and swallowing that is how a machine came to look fully converged
+/// while its agent used somebody else's copy. `not placed` keeps its note either way: the note
+/// there is the ordinary shape of this machine (an agent with no config of that kind at this
+/// scope), which the placing receipt already disclosed and `list` answers any time.
+fn mcp_state_settled(h: &topos_types::results::McpAgentState) -> bool {
     use topos_types::results::TargetOutcome;
-    matches!(state, TargetOutcome::Current | TargetOutcome::Withheld)
+    match h.state {
+        TargetOutcome::Current => h.note.is_none(),
+        TargetOutcome::Withheld => true,
+        _ => false,
+    }
 }
 
 /// One MCP config outcome as a receipt sub-line, KEYED BY THE CONFIG FILE the entry lives in
@@ -4482,14 +4524,16 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
 /// (2 folders)` / `(2 config files)`), none prints the bare verb.
 fn destination_column(verb: &str, s: &PullSkill) -> String {
     let subject = crate::actions::Subject::of_kind(s.kind.as_deref());
-    // A COUNT HEADS THE LIST IT HEADS. A config-placed row's detail lines are its per-agent
-    // lines — one per config file, whatever happened in each — while `destinations` holds only
-    // the files this run WROTE. Counting the written subset printed "(5 config files)" above six
-    // lines, and the reader was left to work out which of the two numbers was the lie.
+    // A COUNT SAYS WHAT THE VERB DID. A config-placed row's per-agent lines cover every surface
+    // the run considered, including the ones that got nothing — so counting them all made
+    // `installed (16 config files)` the headline over thirteen files that hold an entry and three
+    // that do not, and `topos` was overstating its own reach on the very line a person reads
+    // first. Counted here are the surfaces that now HOLD the entry; the ones that do not have
+    // their own lines below, which is where a reason belongs.
     let listed = if s.harnesses.is_empty() {
         s.destinations.len()
     } else {
-        s.harnesses.len()
+        s.harnesses.iter().filter(|h| h.state.stands()).count()
     };
     match (listed, s.destinations.as_slice()) {
         (0, _) => verb.to_owned(),
@@ -6176,7 +6220,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[], 0);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
 
         // Fast-forwarded says only that it moved — the pointer's internal edition count is a
         // `--json` field, never the human line (versions are named by hash, git-style).
@@ -6243,7 +6287,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[], 0);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
         assert!(
             out.contains("+ @acme/deploy-checklist   installed (2 folders)\n"),
             "{out}"
@@ -6253,6 +6297,66 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("agent"), "never an agent: {out}");
+    }
+
+    /// **A COUNT SAYS WHAT THE VERB DID.** A config-placed row's per-agent lines cover every
+    /// surface the run considered, the ones that got nothing included — so counting them all made
+    /// `installed (16 config files)` the headline over thirteen files that hold an entry and three
+    /// that do not, and topos overstated its own reach on the line a person reads first. Counted
+    /// are the surfaces that now HOLD the entry; the rest keep their own lines, which is where a
+    /// reason belongs.
+    #[test]
+    fn the_destination_count_names_only_the_files_that_hold_an_entry() {
+        use topos_types::results::TargetOutcome;
+        let mut linear = row("linear", PullAction::Installed);
+        linear.display = Some("@acme/linear".to_owned());
+        linear.kind = Some("mcp".to_owned());
+        linear.destinations = vec!["~/.cursor/mcp.json".to_owned()];
+        linear.harnesses = vec![
+            agent_state(
+                "cursor",
+                Some("~/.cursor/mcp.json"),
+                TargetOutcome::Created,
+                None,
+            ),
+            agent_state(
+                "codex",
+                Some("~/.codex/config.toml"),
+                TargetOutcome::Current,
+                None,
+            ),
+            agent_state(
+                "goose",
+                None,
+                TargetOutcome::Withheld,
+                Some("this version of topos cannot set up a program in goose"),
+            ),
+            agent_state(
+                "claude-code",
+                Some("~/.claude.json"),
+                TargetOutcome::Conflicting,
+                Some("an entry named \"linear\" is already here and topos does not manage it"),
+            ),
+        ];
+        let data = PullData {
+            skills: vec![linear],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: None,
+        };
+        let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
+        assert!(
+            out.contains("+ @acme/linear   installed (2 config files)\n"),
+            "two of the four surfaces hold an entry: {out}"
+        );
+        // The other two are not hidden — they say what happened, each in its own line.
+        assert!(out.contains("goose: not placed —"), "{out}");
+        assert!(
+            out.contains("~/.claude.json: held by another entry —"),
+            "{out}"
+        );
     }
 
     /// Exactly ONE destination prints its path instead of a count — for a skill folder and for a
@@ -6311,7 +6415,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[], 0);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
         assert!(
             out.contains("- @acme/deploy-checklist   removed (2 folders)\n"),
             "{out}"
@@ -6415,7 +6519,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&only_a_server, &[], &[], &[], &[], 0),
+            pull_tty(&only_a_server, &[], &[], &[], &[], 0, 0),
             "Checked 1 bundle: all up to date."
         );
 
@@ -6429,7 +6533,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&mixed, &[], &[], &[], &[], 0),
+            pull_tty(&mixed, &[], &[], &[], &[], 0, 0),
             "Checked 2 bundles: all up to date."
         );
 
@@ -6457,7 +6561,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&surfaced, &[], &[], &[], &[], 0);
+        let out = pull_tty(&surfaced, &[], &[], &[], &[], 0, 0);
         assert!(
             out.contains("Checked 1 bundle: 1 already up to date."),
             "{out}"
@@ -6501,6 +6605,7 @@ mod tests {
             &[],
             &[],
             &[],
+            0,
             0,
         )
     }
@@ -6691,7 +6796,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&clean, &[], &[], &[], &[], 0),
+            pull_tty(&clean, &[], &[], &[], &[], 0, 0),
             "Checked 2 skills: all up to date."
         );
         // Nothing followed at all.
@@ -6704,7 +6809,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&empty, &[], &[], &[], &[], 0),
+            pull_tty(&empty, &[], &[], &[], &[], 0, 0),
             "Nothing to update here — no manifest or profile demands anything in this directory."
         );
         // A failed skill renders visibly and is counted (even when every synced row was current).
@@ -6713,7 +6818,7 @@ mod tests {
             "IO_ERROR",
             "s_docs: a filesystem operation failed.".to_owned(),
         )];
-        let out = pull_tty(&clean, &[], &warnings, &[], &[], warnings.len());
+        let out = pull_tty(&clean, &[], &warnings, &[], &[], warnings.len(), 0);
         assert!(
             out.contains("warning: s_docs: a filesystem operation failed."),
             "{out}"
@@ -6729,7 +6834,7 @@ mod tests {
             "NOTHING_ASSIGNED",
             "topos.sh/acme: reached, and nothing is assigned to you yet.".to_owned(),
         )];
-        let out = pull_tty(&empty, &[], &[], &[], &disclosures, 0);
+        let out = pull_tty(&empty, &[], &[], &[], &disclosures, 0, 0);
         assert!(
             out.contains("note: topos.sh/acme: reached, and nothing is assigned to you yet."),
             "{out}"
@@ -6746,7 +6851,7 @@ mod tests {
              config file, so it was skipped."
                 .to_owned(),
         )];
-        let out = pull_tty(&clean, &[], &[], &advisories, &[], 0);
+        let out = pull_tty(&clean, &[], &[], &advisories, &[], 0, 0);
         assert!(out.contains("warning: \"linear\" (person):"), "{out}");
         assert!(!out.contains("MCP_DEST_UNKNOWN"), "{out}");
         assert!(out.contains("Checked 2 skills: all up to date."), "{out}");
@@ -6776,7 +6881,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[], 0),
+            pull_tty(&data, &[], &[], &[], &[], 0, 0),
             "updated project (~/Forward/labs/topos_test)\n\
              coolify-deploy   updated (2 folders)\n\
              \x20   project/.agents/skills/coolify-deploy\n\
@@ -6802,7 +6907,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[], 0),
+            pull_tty(&data, &[], &[], &[], &[], 0, 0),
             "updated project (~/Forward/labs/topos_test)\n\
              coolify-deploy   updated (project/.claude/skills/coolify-deploy)\n\
              Checked 1 skill: 1 updated."
@@ -6827,7 +6932,7 @@ mod tests {
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[], 0),
+            pull_tty(&data, &[], &[], &[], &[], 0, 0),
             "updated machine-wide\n\
              coolify-deploy   updated (2 folders)\n\
              \x20   ~/.agents/skills/coolify-deploy\n\
@@ -6856,7 +6961,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[], 0),
+            pull_tty(&data, &[], &[], &[], &[], 0, 0),
             "updated project (~/Forward/labs/topos_test)\n\
              + coolify-deploy   installed (project/.claude/skills/coolify-deploy)\n\
              \x20   also updated project/.agents/skills/coolify-deploy\n\
@@ -6879,7 +6984,7 @@ mod tests {
                 behind_elsewhere: Vec::new(),
                 scope: None,
             };
-            let out = pull_tty(&data, &[], warnings, &[], &[], failed);
+            let out = pull_tty(&data, &[], warnings, &[], &[], failed, 0);
             out.lines().last().unwrap_or_default().to_owned()
         };
         let summary = |skills: Vec<PullSkill>, warnings: &[topos_types::Message]| {
@@ -6969,7 +7074,7 @@ mod tests {
                 behind_elsewhere: Vec::new(),
                 scope: None,
             };
-            pull_tty(&data, &[], &[], &[], &[], 0)
+            pull_tty(&data, &[], &[], &[], &[], 0, 0)
         };
         assert!(!whole.contains("all up to date"), "{whole}");
         // The ROW says what `list` says, and names the one command that shares the work.
@@ -7114,7 +7219,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &warnings, &[], &[], warnings.len());
+        let out = pull_tty(&data, &[], &warnings, &[], &[], warnings.len(), 0);
         let line = out
             .lines()
             .find(|l| l.starts_with("Checked "))
@@ -7165,7 +7270,7 @@ mod tests {
                 behind_elsewhere: entries,
                 scope: None,
             };
-            let out = pull_tty(&data, &[], &[], &[], &[], 0);
+            let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
             out.lines().skip(1).collect::<Vec<_>>().join("\n")
         };
         let machine = |name: &str| BehindElsewhere {
@@ -7214,7 +7319,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/api".to_owned()),
         };
         assert_eq!(
-            pull_tty(&empty(Vec::new()), &[], &[], &[], &[], 0),
+            pull_tty(&empty(Vec::new()), &[], &[], &[], &[], 0, 0),
             "Up to date."
         );
         assert_eq!(
@@ -7234,6 +7339,7 @@ mod tests {
                 &[],
                 &[],
                 0,
+                0,
             ),
             "Up to date.\n2 bundles behind machine-wide — `topos update -g` updates them."
         );
@@ -7243,7 +7349,7 @@ mod tests {
             project_dir: None,
         }]);
         awaiting.proposals_awaiting = 1;
-        let out = pull_tty(&awaiting, &[], &[], &[], &[], 0);
+        let out = pull_tty(&awaiting, &[], &[], &[], &[], 0, 0);
         assert!(
             out.starts_with("Up to date.\n1 bundle behind machine-wide"),
             "{out}"
@@ -7280,7 +7386,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[], 0);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
         // The verdict shows its outcome + reason, and sorts before the closure.
         let v = out.find("was rejected").expect("the verdict is shown");
         assert!(
@@ -8163,6 +8269,7 @@ mod tests {
                 &[],
                 &[],
                 0,
+                0,
             )
         };
 
@@ -8325,6 +8432,7 @@ mod tests {
             &[],
             &[],
             0,
+            0,
         );
         assert!(!workbenchless.contains("that folder"), "{workbenchless}");
         assert!(
@@ -8375,7 +8483,7 @@ mod tests {
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[], 0),
+            pull_tty(&data, &[], &[], &[], &[], 0, 0),
             "updated machine-wide\n\
              legacy-deploy   acme stopped sharing this — topos will not update it any more\n\
              \x20   the files stay where they are, and are yours to keep or delete: \
@@ -8407,7 +8515,7 @@ mod tests {
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[], 0),
+            pull_tty(&data, &[], &[], &[], &[], 0, 0),
             "updated machine-wide\n\
              @acme/frontend-design   acme stopped sharing this — topos will not update it any more\n\
              \x20   the files stay where they are, and are yours to keep or delete:\n\
@@ -9316,7 +9424,7 @@ mod tests {
                 behind_elsewhere: Vec::new(),
                 scope: None,
             };
-            pull_tty(&data, &[], &[], &[], &[], 0)
+            pull_tty(&data, &[], &[], &[], &[], 0, 0)
         };
         let kept_mine = |took: Vec<String>| MergeReport {
             drop_diff: Some("--- a\n+++ b\n".to_owned()),
@@ -9607,7 +9715,7 @@ mod tests {
                 behind_elsewhere: Vec::new(),
                 scope: None,
             };
-            pull_tty(&data, &[], &[], &[], &[], 0)
+            pull_tty(&data, &[], &[], &[], &[], 0, 0)
         };
 
         let marked = "to merge by hand, both versions are marked up here:";

@@ -100,6 +100,13 @@ pub(crate) struct PullOutcome {
     /// workspace `linear` and a local `linear` failing in ONE scope are two bundles and count as
     /// two. Names appear in the warning lines and nowhere else.
     pub failed_bundles: std::collections::BTreeSet<(String, String)>,
+    /// The BUNDLES nothing was placed for because nothing COULD be — an MCP server this build or
+    /// this machine cannot set up for any engaged agent, or one every agent already holds under an
+    /// entry topos does not own. Keyed exactly like `failed_bundles` and counted in its own
+    /// summary clause: they are not failures (no act was attempted, so none failed) and they are
+    /// not up to date either (nothing of them stands anywhere), and the receipt has to be able to
+    /// say the second thing without saying the first.
+    pub unplaced_bundles: std::collections::BTreeSet<(String, String)>,
     /// The RUNNABLE fixes for the faults in `warnings`, for the faults that have one — the
     /// `--json` lane's share of what the prose line already tells a person. Empty on a clean run.
     pub fault_actions: Vec<topos_types::NextAction>,
@@ -265,6 +272,7 @@ impl PullOutcome {
             data,
             warnings,
             failed_bundles,
+            unplaced_bundles: BTreeSet::new(),
             fault_actions: Vec::new(),
             decisions: Vec::new(),
             advisories: Vec::new(),
