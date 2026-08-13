@@ -91,6 +91,56 @@ fn dialect_spec(dialect: McpDialect) -> Option<DialectSpec> {
             strictness: Strictness::Jsonc,
             name: "OpenClaw",
         },
+        // `servers`, not `mcpServers` — and JSONC, which costs nothing and buys the commented
+        // file a person edits in VS Code itself: comments are only ever PRESERVED here, never
+        // written, so a stricter parser downstream sees exactly the bytes it already accepted.
+        McpDialect::VscodeJson => DialectSpec {
+            path: &["servers"],
+            strictness: Strictness::Jsonc,
+            name: "VS Code",
+        },
+        McpDialect::CopilotCliJson => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "GitHub Copilot CLI",
+        },
+        McpDialect::LmStudioJson => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "LM Studio",
+        },
+        McpDialect::ClaudeDesktopJson => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "Claude Desktop",
+        },
+        McpDialect::GeminiJson => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "Gemini CLI",
+        },
+        McpDialect::WindsurfJson => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "Windsurf",
+        },
+        McpDialect::ClineJson => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "Cline",
+        },
+        McpDialect::RooJson => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "Roo Code",
+        },
+        // The whole editor's settings, commented as a matter of course — JSONC for the same
+        // reason VS Code's file is, and with more at stake in the file's other bytes.
+        McpDialect::ZedJson => DialectSpec {
+            path: &["context_servers"],
+            strictness: Strictness::Jsonc,
+            name: "Zed",
+        },
         _ => return None,
     })
 }

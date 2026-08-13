@@ -546,7 +546,16 @@ pub fn observe_entries(
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
         | McpDialect::OpenclawJson
-        | McpDialect::ClaudePluginDir => jsonc_edit::observe_entries(dialect, current, selector),
+        | McpDialect::ClaudePluginDir
+        | McpDialect::VscodeJson
+        | McpDialect::CopilotCliJson
+        | McpDialect::LmStudioJson
+        | McpDialect::ClaudeDesktopJson
+        | McpDialect::GeminiJson
+        | McpDialect::WindsurfJson
+        | McpDialect::ClineJson
+        | McpDialect::RooJson
+        | McpDialect::ZedJson => jsonc_edit::observe_entries(dialect, current, selector),
         McpDialect::CodexToml => toml_patch::observe_entries(current, selector),
         McpDialect::HermesYaml => yaml_splice::observe_entries(current, selector),
     }
@@ -610,7 +619,16 @@ pub fn apply(
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
         | McpDialect::OpenclawJson
-        | McpDialect::ClaudePluginDir => jsonc_edit::apply(dialect, current, desired, prior),
+        | McpDialect::ClaudePluginDir
+        | McpDialect::VscodeJson
+        | McpDialect::CopilotCliJson
+        | McpDialect::LmStudioJson
+        | McpDialect::ClaudeDesktopJson
+        | McpDialect::GeminiJson
+        | McpDialect::WindsurfJson
+        | McpDialect::ClineJson
+        | McpDialect::RooJson
+        | McpDialect::ZedJson => jsonc_edit::apply(dialect, current, desired, prior),
         McpDialect::CodexToml => toml_patch::apply(current, desired, prior),
         McpDialect::HermesYaml => yaml_splice::apply(current, desired, prior),
     };
@@ -639,7 +657,16 @@ fn input_round_trips(dialect: McpDialect, bytes: &[u8]) -> bool {
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
         | McpDialect::OpenclawJson
-        | McpDialect::ClaudePluginDir => jsonc_edit::round_trips(dialect, text),
+        | McpDialect::ClaudePluginDir
+        | McpDialect::VscodeJson
+        | McpDialect::CopilotCliJson
+        | McpDialect::LmStudioJson
+        | McpDialect::ClaudeDesktopJson
+        | McpDialect::GeminiJson
+        | McpDialect::WindsurfJson
+        | McpDialect::ClineJson
+        | McpDialect::RooJson
+        | McpDialect::ZedJson => jsonc_edit::round_trips(dialect, text),
         McpDialect::CodexToml => toml_patch::round_trips(text),
         // The Hermes splicer is line-surgical: its "parse" IS the input lines, untouched lines
         // are carried verbatim by construction, and its own verification asserts the output
@@ -657,7 +684,16 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
         | McpDialect::OpenclawJson
-        | McpDialect::ClaudePluginDir => jsonc_edit::observe(dialect, current),
+        | McpDialect::ClaudePluginDir
+        | McpDialect::VscodeJson
+        | McpDialect::CopilotCliJson
+        | McpDialect::LmStudioJson
+        | McpDialect::ClaudeDesktopJson
+        | McpDialect::GeminiJson
+        | McpDialect::WindsurfJson
+        | McpDialect::ClineJson
+        | McpDialect::RooJson
+        | McpDialect::ZedJson => jsonc_edit::observe(dialect, current),
         McpDialect::CodexToml => toml_patch::observe(current),
         McpDialect::HermesYaml => yaml_splice::observe(current),
     }
@@ -684,7 +720,16 @@ pub fn holds_unmanaged_content(dialect: McpDialect, current: Option<&[u8]>) -> b
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
         | McpDialect::OpenclawJson
-        | McpDialect::ClaudePluginDir => jsonc_edit::holds_unmanaged(dialect, bytes),
+        | McpDialect::ClaudePluginDir
+        | McpDialect::VscodeJson
+        | McpDialect::CopilotCliJson
+        | McpDialect::LmStudioJson
+        | McpDialect::ClaudeDesktopJson
+        | McpDialect::GeminiJson
+        | McpDialect::WindsurfJson
+        | McpDialect::ClineJson
+        | McpDialect::RooJson
+        | McpDialect::ZedJson => jsonc_edit::holds_unmanaged(dialect, bytes),
         McpDialect::CodexToml => toml_patch::holds_unmanaged(bytes),
         McpDialect::HermesYaml => yaml_splice::holds_unmanaged(bytes),
     }
@@ -744,27 +789,68 @@ fn write_canonical(value: &Value, out: &mut String) {
 /// order so serialization is deterministic under either serde_json map backend. Empty `headers`
 /// (and an empty `env`) are omitted in every dialect.
 ///
-/// `None` means the dialect CANNOT EXPRESS that target — today exactly one pair: a program-run
-/// server in Hermes's YAML, whose entry grammar this build has vendor evidence only for in its
-/// address form. It is not an error and never a guess: the caller withholds the placement and
-/// says so, and every driver refuses the whole edit rather than writing a shape it invented.
+/// `None` means the dialect CANNOT EXPRESS that target — the pairs no vendor evidence covers: a
+/// program-run server in Hermes's YAML and in LM Studio's `mcp.json` (both documented only in
+/// their address form), and an ADDRESS in Claude Desktop's config, which reaches a remote server
+/// through the bridge and through no key of its own. It is not an error and never a guess: the
+/// caller withholds the placement and says so, and every driver refuses the whole edit rather than
+/// writing a shape it invented. The answer is on the SHAPE alone, never the contents — which is
+/// what lets a caller ask it once, of an empty target, before it has anything to place.
 #[must_use]
 pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
     let mut m = Map::new();
     match (dialect, &entry.target) {
-        // `type` is MANDATORY here — Claude Code refuses a typeless remote entry.
+        // `type` is MANDATORY here — Claude Code refuses a typeless remote entry, VS Code
+        // documents the key as required, and Gemini's own `mcp add` writes `url` + `type: http`
+        // (its `httpUrl` is the deprecated spelling of the same thing).
         (
-            McpDialect::ClaudePluginDir | McpDialect::ClaudeProjectJson,
+            McpDialect::ClaudePluginDir
+            | McpDialect::ClaudeProjectJson
+            | McpDialect::VscodeJson
+            | McpDialect::GeminiJson,
             McpTarget::Remote { url, headers },
         ) => {
             insert_pairs(&mut m, "headers", headers);
             m.insert("type".to_owned(), Value::String("http".to_owned()));
             m.insert("url".to_owned(), Value::String(url.clone()));
         }
-        // NEVER a `type` key: a `type: "streamable-http"` makes cursor-agent silently drop the
-        // ENTIRE file.
-        (McpDialect::CursorJson, McpTarget::Remote { url, headers }) => {
+        // The SAME `type` key, spelled differently by each — and left out it silently means SSE in
+        // both, which is a server that answers nothing while the config looks right. Stated
+        // always, and stated in each one's own spelling.
+        (McpDialect::ClineJson | McpDialect::RooJson, McpTarget::Remote { url, headers }) => {
             insert_pairs(&mut m, "headers", headers);
+            let word = if dialect == McpDialect::ClineJson {
+                "streamableHttp"
+            } else {
+                "streamable-http"
+            };
+            m.insert("type".to_owned(), Value::String(word.to_owned()));
+            m.insert("url".to_owned(), Value::String(url.clone()));
+        }
+        // NEVER a `type` key: a `type: "streamable-http"` makes cursor-agent silently drop the
+        // ENTIRE file. LM Studio and Zed join it for the opposite reason — no documented entry of
+        // theirs carries a `type` at all, so the key that is not there is the grounded one. A Zed
+        // entry with no headers is also how its own OAuth sign-in gets to run, which is the trust
+        // moment topos wants anyway.
+        (
+            McpDialect::CursorJson | McpDialect::LmStudioJson | McpDialect::ZedJson,
+            McpTarget::Remote { url, headers },
+        ) => {
+            insert_pairs(&mut m, "headers", headers);
+            m.insert("url".to_owned(), Value::String(url.clone()));
+        }
+        // Windsurf spells the address itself differently — `serverUrl`, and no type beside it.
+        (McpDialect::WindsurfJson, McpTarget::Remote { url, headers }) => {
+            insert_pairs(&mut m, "headers", headers);
+            m.insert("serverUrl".to_owned(), Value::String(url.clone()));
+        }
+        // Copilot CLI names the tools it will expose from a server on the entry itself. `["*"]` is
+        // the documented default AND what its own examples write — the same allowance a person
+        // adding this server by hand would get, stated rather than left to be inferred.
+        (McpDialect::CopilotCliJson, McpTarget::Remote { url, headers }) => {
+            insert_pairs(&mut m, "headers", headers);
+            m.insert("tools".to_owned(), all_tools());
+            m.insert("type".to_owned(), Value::String("http".to_owned()));
             m.insert("url".to_owned(), Value::String(url.clone()));
         }
         (McpDialect::OpencodeJson, McpTarget::Remote { url, headers }) => {
@@ -805,17 +891,27 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
             insert_pairs(&mut m, "headers", headers);
             m.insert("url".to_owned(), Value::String(url.clone()));
         }
-        // The stdio shape three of the four JSON families share verbatim (`command`/`args`/`env`),
-        // and Codex's TOML spells identically. `type: "stdio"` where the harness declares the key
-        // (Claude Code, OpenClaw); never for Cursor, which drops a whole file over a `type` it
-        // dislikes and infers stdio from the command anyway. `auth` belongs to an address, so a
-        // program-run entry never carries it — a bridged remote signs itself in.
+        // The stdio shape most of the JSON families share verbatim (`command`/`args`/`env`), and
+        // Codex's TOML spells identically. `type: "stdio"` where the harness declares the key
+        // (Claude Code, VS Code, OpenClaw's `transport`, Copilot CLI's own word for it); never for
+        // Cursor, which drops a whole file over a `type` it dislikes and infers stdio from the
+        // command anyway, and never for Claude Desktop, whose every documented entry is the bare
+        // triple. `auth` belongs to an address, so a program-run entry never carries it — a
+        // bridged remote signs itself in.
         (
             McpDialect::ClaudePluginDir
             | McpDialect::ClaudeProjectJson
             | McpDialect::CursorJson
             | McpDialect::OpenclawJson
-            | McpDialect::CodexToml,
+            | McpDialect::CodexToml
+            | McpDialect::VscodeJson
+            | McpDialect::CopilotCliJson
+            | McpDialect::ClaudeDesktopJson
+            | McpDialect::GeminiJson
+            | McpDialect::WindsurfJson
+            | McpDialect::ClineJson
+            | McpDialect::RooJson
+            | McpDialect::ZedJson,
             McpTarget::Local {
                 command,
                 args,
@@ -845,11 +941,21 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
                 insert_pairs(&mut m, "env", &rendered(env, *env_ref));
             }
             match dialect {
-                McpDialect::ClaudePluginDir | McpDialect::ClaudeProjectJson => {
+                McpDialect::ClaudePluginDir
+                | McpDialect::ClaudeProjectJson
+                | McpDialect::VscodeJson
+                | McpDialect::ClineJson
+                | McpDialect::RooJson => {
                     m.insert("type".to_owned(), Value::String("stdio".to_owned()));
                 }
                 McpDialect::OpenclawJson => {
                     m.insert("transport".to_owned(), Value::String("stdio".to_owned()));
+                }
+                // Copilot CLI's word for a program it runs is `local` — the spelling its own
+                // documentation writes, and it carries the same tools allowance an address does.
+                McpDialect::CopilotCliJson => {
+                    m.insert("tools".to_owned(), all_tools());
+                    m.insert("type".to_owned(), Value::String("local".to_owned()));
                 }
                 _ => {}
             }
@@ -873,18 +979,37 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
             insert_pairs(&mut m, "environment", &rendered(env, *env_ref));
             m.insert("type".to_owned(), Value::String("local".to_owned()));
         }
-        (McpDialect::HermesYaml, McpTarget::Local { .. }) => return None,
+        // The pairs no vendor evidence covers. LM Studio documents an address and only an
+        // address; Claude Desktop documents a program and only a program — its remote servers are
+        // added in the app, through a flow no config file takes part in, so the bridge is how a
+        // shared address reaches it and there is no URL key to invent beside that.
+        (
+            McpDialect::HermesYaml | McpDialect::LmStudioJson,
+            McpTarget::Local { .. },
+        )
+        | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. }) => return None,
     }
     Some(Value::Object(m))
 }
 
+/// The tools a topos-placed entry exposes, for the dialects that name them on the entry: all of
+/// them. It is the documented default, so stating it changes nothing about what the agent can do —
+/// it only spells the answer where the file expects one.
+fn all_tools() -> Value {
+    Value::Array(vec![Value::String("*".to_owned())])
+}
+
 /// Whether `dialect` can express `target` at all — [`entry_value`]'s question, asked before a
-/// placement is planned rather than after it fails.
+/// placement is planned rather than after it fails. The answer is on the target's SHAPE, never its
+/// contents, so a caller may ask it of an empty one.
 #[must_use]
 pub fn dialect_expresses(dialect: McpDialect, target: &McpTarget) -> bool {
     !matches!(
         (dialect, target),
-        (McpDialect::HermesYaml, McpTarget::Local { .. })
+        (
+            McpDialect::HermesYaml | McpDialect::LmStudioJson,
+            McpTarget::Local { .. }
+        ) | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. })
     )
 }
 

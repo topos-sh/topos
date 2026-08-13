@@ -6,9 +6,12 @@
 # Rows are kept in `vercel-labs/skills`'s `src/agents.ts` file order, which fixes the "first
 # matching harness" tie-break for a shared dir — moving a row changes behaviour.
 #
-# Every dir is `<root-tag>/<suffix>`: `home`, `configHome`, `codexHome`, `claudeHome`, `vibeHome`,
-# `hermesHome`, `autohandHome`, `grokHome`, `cwd`, `APPDATA` or `FLATPAK_XDG_CONFIG_HOME`. Each
-# root resolves through its own env override, falling back to a `home`-relative default.
+# Every dir is `<root-tag>/<suffix>`: `home`, `configHome`, `appSupport`, `codexHome`, `claudeHome`,
+# `vibeHome`, `hermesHome`, `autohandHome`, `grokHome`, `cwd`, `APPDATA` or
+# `FLATPAK_XDG_CONFIG_HOME`. Each root resolves through its own env override, falling back to a
+# `home`-relative default. `appSupport` is the one whose base differs by PLATFORM — macOS
+# `~/Library/Application Support`, Windows `%APPDATA%`, elsewhere the XDG config home — which is
+# what an app following each platform's own convention (rather than XDG everywhere) needs.
 # NO ROW MAY NAME AN ABSOLUTE PATH. The grammar still spells one (a leading `/`) and only this
 # file could carry it — but these bytes are also the SERVED copy, which every client reads under
 # the fenced rules that refuse absolute paths, and one refused dir refuses the whole file. A row
@@ -28,8 +31,8 @@
 # `brace-env` = `{env:VAR}`, `dollar-brace-env` = `${env:VAR}`; `dollar-brace` unless stated).
 
 schema_version = 1
-version = "2026.8.13.3"
-min_engine_version = 2
+version = "2026.8.13.4"
+min_engine_version = 3
 
 # The remote-to-stdio BRIDGE: the program topos runs so an agent that cannot dial an MCP address
 # reaches one anyway. Pinned to one exact version, because every machine in a workspace runs the
@@ -161,6 +164,13 @@ user_dirs = ["home/.agents/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["home/.cline"]
 shared_dir = { level = "probed", covered = true }
+
+[harness.mcp]
+reload_note = "picked up automatically; Cline watches this file"
+# Cline's own home, shared by its VS Code, JetBrains and CLI clients — NOT the VS Code extension
+# storage its older builds used, which the current source names only to warn against.
+user = { dir = "home/.cline/data/settings/cline_mcp_settings.json", dialect = "cline-json" }
+env_ref = "dollar-brace-env"
 
 [[harness]]
 slug = "codearts-agent"
@@ -310,6 +320,13 @@ project_dir = ".agents/skills"
 detect_dirs = ["home/.gemini"]
 shared_dir = { level = "docs", covered = true }
 
+[harness.mcp]
+reload_note = "restart gemini; /mcp reload does not re-read this file"
+# The CLI's WHOLE settings file: every other key in it is somebody else's, and its server entries
+# are validated closed, so only the keys Gemini itself writes are written.
+user = { dir = "home/.gemini/settings.json", dialect = "gemini-json" }
+project = { path = ".gemini/settings.json", dialect = "gemini-json" }
+
 [[harness]]
 # Vendor docs list `~/.agents/skills`.
 slug = "github-copilot"
@@ -318,6 +335,10 @@ user_dirs = ["home/.copilot/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["home/.copilot"]
 shared_dir = { level = "docs", covered = true }
+
+[harness.mcp]
+reload_note = "picked up on the next copilot run; /mcp lists them"
+user = { dir = "home/.copilot/mcp-config.json", dialect = "copilot-cli-json" }
 
 [[harness]]
 # Verified LIVE against goose 1.43.0 in a container on 2026-07-16: a skill placed at
@@ -555,7 +576,20 @@ slug = "roo"
 display_name = "Roo Code"
 user_dirs = ["home/.roo/skills"]
 project_dir = ".roo/skills"
-detect_dirs = ["home/.roo"]
+# The extension's own storage dir is a detection probe as well as the place its servers live: it
+# is the signal that proves the file below is one a Roo actually reads, and topos never
+# materializes another program's storage dir on a guess.
+detect_dirs = [
+  "home/.roo",
+  "appSupport/Code/User/globalStorage/rooveterinaryinc.roo-cline",
+]
+
+[harness.mcp]
+reload_note = "picked up automatically; Roo watches this file"
+user = { dir = "appSupport/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json", dialect = "roo-json" }
+# A project entry SHADOWS a same-named one at user scope — which is what makes it worth writing.
+project = { path = ".roo/mcp.json", dialect = "roo-json" }
+env_ref = "dollar-brace-env"
 
 [[harness]]
 slug = "tabnine-cli"
@@ -606,12 +640,27 @@ user_dirs = ["home/.codeium/windsurf/skills"]
 project_dir = ".windsurf/skills"
 detect_dirs = ["home/.codeium/windsurf"]
 
+[harness.mcp]
+reload_note = "press refresh in Cascade's MCP panel"
+# The Windsurf EDITOR's file. Its IDE plugin reads `~/.codeium/mcp_config.json` instead — a second
+# surface for one row, which is out of this table's grammar and so is left alone rather than
+# guessed at.
+user = { dir = "home/.codeium/windsurf/mcp_config.json", dialect = "windsurf-json" }
+env_ref = "dollar-brace-env"
+
 [[harness]]
 slug = "zed"
 display_name = "Zed"
 user_dirs = ["home/.agents/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["configHome/zed", "APPDATA/Zed", "FLATPAK_XDG_CONFIG_HOME/zed"]
+
+[harness.mcp]
+reload_note = "Zed picks up the new server; it signs itself in on first use"
+# The user's ENTIRE editor configuration, comments and all. Zed keeps it under the XDG config home
+# on macOS too; the Windows and Flatpak spellings above are detection probes this one surface does
+# not follow.
+user = { dir = "configHome/zed/settings.json", dialect = "zed-json" }
 
 [[harness]]
 # Detected by its home config dir. The macOS app-bundle probe the reference also uses is
@@ -665,6 +714,53 @@ display_name = "AdaL"
 user_dirs = ["home/.adal/skills"]
 project_dir = ".adal/skills"
 detect_dirs = ["home/.adal"]
+
+[[harness]]
+# The last three rows are MCP-ONLY: apps that run MCP servers and read no skills folder at all, so
+# they carry no skills dirs and never claim one. They sit at the end because row order is the
+# tie-break for a SHARED skills dir, and a row claiming none can never win one.
+slug = "vscode"
+display_name = "VS Code"
+user_dirs = []
+project_dir = ""
+detect_dirs = ["appSupport/Code/User"]
+
+[harness.mcp]
+reload_note = "restart the server from VS Code's MCP view"
+# `servers`, not `mcpServers` — and beside it stand `inputs` and `sandbox`, which are the user's.
+user = { dir = "appSupport/Code/User/mcp.json", dialect = "vscode-json" }
+project = { path = ".vscode/mcp.json", dialect = "vscode-json" }
+env_ref = "dollar-brace-env"
+
+[[harness]]
+slug = "lm-studio"
+display_name = "LM Studio"
+user_dirs = []
+project_dir = ""
+detect_dirs = ["home/.lmstudio"]
+
+# An ADDRESS and nothing else: LM Studio's documented entry is a url with optional headers, and no
+# documented entry of its own runs a local program — so a bundle that offers only a package is
+# reported unplaceable here rather than written in an invented shape.
+[harness.mcp]
+reload_note = "loads automatically when the file is saved"
+user = { dir = "home/.lmstudio/mcp.json", dialect = "lm-studio-json" }
+stdio = false
+
+[[harness]]
+slug = "claude-desktop"
+display_name = "Claude Desktop"
+user_dirs = []
+project_dir = ""
+detect_dirs = ["appSupport/Claude"]
+
+# The MIRROR of LM Studio: a PROGRAM and nothing else. Claude Desktop's remote servers are added
+# in the app, through a flow no config file takes part in, so a shared address reaches it the one
+# way this file can express — the bridge.
+[harness.mcp]
+reload_note = "quit Claude Desktop completely and reopen it"
+user = { dir = "appSupport/Claude/claude_desktop_config.json", dialect = "claude-desktop-json" }
+remote = false
 
 [[harness]]
 # The SENTINEL row: no detection probe, so it is never independently present — its dirs are

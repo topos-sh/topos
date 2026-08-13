@@ -184,6 +184,16 @@ pub enum Root {
     Home,
     /// `$XDG_CONFIG_HOME`, else `home/.config`.
     Config,
+    /// **The dir this PLATFORM keeps application config in** — macOS `home/Library/Application
+    /// Support`, Windows `$APPDATA` (`None` when unset), everywhere else `$XDG_CONFIG_HOME` else
+    /// `home/.config`.
+    ///
+    /// Distinct from [`Root::Config`] on macOS alone, and that is exactly why it exists: an
+    /// XDG-native program (Zed, Goose) keeps its config in `~/.config` on every platform, while a
+    /// program built to each platform's own convention (VS Code and the extensions storing state
+    /// beside it, Claude Desktop) keeps it under `Application Support` there. One dir spec has to
+    /// resolve to the right one of those on every machine, since a row states a surface once.
+    AppSupport,
     /// `$CODEX_HOME`, else `home/.codex`.
     CodexHome,
     /// `$CLAUDE_CONFIG_DIR`, else `home/.claude`.
@@ -220,6 +230,7 @@ impl Root {
     const ALL: &'static [Root] = &[
         Root::Home,
         Root::Config,
+        Root::AppSupport,
         Root::CodexHome,
         Root::ClaudeHome,
         Root::VibeHome,
@@ -249,6 +260,7 @@ impl Root {
         match self {
             Root::Home => "home",
             Root::Config => "configHome",
+            Root::AppSupport => "appSupport",
             Root::CodexHome => "codexHome",
             Root::ClaudeHome => "claudeHome",
             Root::VibeHome => "vibeHome",
@@ -264,8 +276,11 @@ impl Root {
 
     /// The `~/`-spelled base this root resolves to with NO env override — the spelling a manifest `dest`
     /// entry and the generated agent tables name a machine path by. `None` for a root that has no
-    /// machine-file spelling at all: the project dir, and the two Windows/Flatpak roots that exist only
-    /// as an environment variable.
+    /// machine-file spelling at all: the project dir, the two Windows/Flatpak roots that exist only
+    /// as an environment variable, and [`Root::AppSupport`], whose base is a different directory on
+    /// each platform. A `dest` entry is text a person writes and a generated table is committed
+    /// bytes, so a root with no single spelling has none here rather than a spelling that is right
+    /// on one machine and wrong on the next.
     #[must_use]
     pub fn default_spelling(self) -> Option<&'static str> {
         Some(match self {
@@ -278,7 +293,7 @@ impl Root {
             Root::AutohandHome => "~/.autohand",
             Root::GrokHome => "~/.grok",
             Root::Abs => "",
-            Root::Cwd | Root::Appdata | Root::FlatpakConfig => return None,
+            Root::Cwd | Root::Appdata | Root::FlatpakConfig | Root::AppSupport => return None,
         })
     }
 }
@@ -535,6 +550,13 @@ impl KnownHarness {
         self.user_dirs.iter().map(|s| s.raw()).collect()
     }
 
+    /// Each DETECTION probe as a canonical RAW spec string ([`DirSpec::raw`]) — the twin of
+    /// [`Self::user_dir_specs`], for the question "what proves this harness is installed".
+    #[must_use]
+    pub fn detect_dir_specs(&self) -> Vec<String> {
+        self.detect_dirs.iter().map(|s| s.raw()).collect()
+    }
+
     /// This harness's MCP-server config surfaces, or `None` when it has no MCP support.
     #[must_use]
     pub fn mcp(&self) -> Option<&McpSurfaces> {
@@ -776,6 +798,17 @@ pub fn resolve_root(root: Root, home: &Path, cwd: Option<&Path>) -> Option<PathB
         Root::Config => {
             Some(env_override("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")))
         }
+        // The platform's own convention, decided at COMPILE time: this is a fact about the machine
+        // topos is running on, not about the table, so no row and no downloaded file can move it.
+        Root::AppSupport => {
+            if cfg!(target_os = "macos") {
+                Some(home.join("Library").join("Application Support"))
+            } else if cfg!(windows) {
+                env_override("APPDATA")
+            } else {
+                Some(env_override("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")))
+            }
+        }
         Root::CodexHome => Some(env_override("CODEX_HOME").unwrap_or_else(|| home.join(".codex"))),
         Root::ClaudeHome => {
             Some(env_override("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude")))
@@ -959,6 +992,29 @@ mod tests {
         found.iter().filter(|d| d.path.starts_with(root)).collect()
     }
 
+    /// The platform-config root resolves to THIS platform's own application-config dir, and says
+    /// so in exactly one way: the assertion is written per-platform because the answer is, and a
+    /// root whose base differs per machine offers no single `~/` spelling to a `dest` line.
+    #[test]
+    fn the_platform_config_root_is_this_platform_s_own() {
+        let home = Path::new("/test-home");
+        let resolved = resolve_root(Root::AppSupport, home, None);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                resolved,
+                Some(PathBuf::from("/test-home/Library/Application Support"))
+            );
+            // …and it is NOT the XDG root, which is the whole reason it exists.
+            assert_ne!(resolved, resolve_root(Root::Config, home, None));
+        } else if cfg!(windows) {
+            assert_eq!(resolved, env_override("APPDATA"));
+        } else {
+            assert_eq!(resolved, resolve_root(Root::Config, home, None));
+        }
+        assert_eq!(Root::AppSupport.default_spelling(), None);
+        assert_eq!(Root::from_tag("appSupport"), Some(Root::AppSupport));
+    }
+
     #[test]
     fn skills_root_resolves_the_write_destination_or_none() {
         let home = TempTree::new("root-home");
@@ -1044,7 +1100,20 @@ mod tests {
         // The BUNDLED table: a shape pin answers for the commit, never for whatever
         // `~/.topos/harness-registry/` the developer running it happens to keep.
         let all = bundled_harnesses();
-        assert_eq!(all.len(), 76, "every vercel-labs/skills agent is ported");
+        assert_eq!(
+            all.len(),
+            79,
+            "every vercel-labs/skills agent is ported, plus the MCP-only apps that read no \
+             skills folder at all"
+        );
+        // The MCP-only rows are the tail, and they claim no skills dir — row order is the
+        // tie-break for a SHARED skills folder, and a row claiming none can never take one.
+        for slug in ["vscode", "lm-studio", "claude-desktop"] {
+            let row = all.iter().find(|h| h.slug == slug).expect(slug);
+            assert!(row.user_dirs().is_empty(), "{slug} claims no skills dir");
+            assert!(row.project_dir().is_empty(), "{slug}");
+            assert!(row.mcp().is_some(), "{slug} exists for its MCP surface");
+        }
 
         // Slugs are unique.
         let mut slugs: Vec<&str> = all.iter().map(|h| h.slug).collect();

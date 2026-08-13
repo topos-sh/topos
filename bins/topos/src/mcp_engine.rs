@@ -471,12 +471,14 @@ pub(crate) fn converge(
         // installed, a value only a person can fill in — is WITHHELD with the reason said in
         // plain words, and re-decided from scratch on the next sweep.
         let caps = h.mcp().map(|m| crate::mcp_render::HarnessCaps {
-            remote: m.remote,
-            // A ROW may not promise a program shape its DIALECT has no grammar for. The two are
-            // separate columns, and a table that set them at odds — a downloaded one, an
-            // override — would have the driver refuse the whole surface, taking every OTHER
-            // bundle's entry in that file down with it. Answering here withholds one placement
-            // instead, which is what a capability gap is supposed to cost.
+            // A ROW may not promise a shape its DIALECT has no grammar for — in EITHER direction.
+            // The capability and the dialect are separate columns, and a table that set them at
+            // odds (a downloaded one, an override) would have the driver refuse the whole surface,
+            // taking every OTHER bundle's entry in that file down with it. Answering here
+            // withholds one placement instead, which is what a capability gap is supposed to cost.
+            // Both questions are asked of an EMPTY target, because the dialect answers on the
+            // shape and never on the contents.
+            remote: m.remote && mcp::dialect_expresses(dialect, &EMPTY_ADDRESS),
             stdio: m.stdio && mcp::dialect_expresses(dialect, &EMPTY_PROGRAM),
             env_ref: m.env_ref,
         });
@@ -1051,6 +1053,14 @@ static EMPTY_PROGRAM: mcp::McpTarget = mcp::McpTarget::Local {
     args: Vec::new(),
     env: Vec::new(),
     env_ref: topos_harness::mcp::descriptor::EnvRef::DollarBrace,
+};
+
+/// The same probe for the other shape — a dialed ADDRESS with nothing in it. A config file whose
+/// harness reaches remote servers somewhere other than the file (Claude Desktop adds them in the
+/// app) has no address key to write, and says so here rather than at the driver.
+static EMPTY_ADDRESS: mcp::McpTarget = mcp::McpTarget::Remote {
+    url: String::new(),
+    headers: Vec::new(),
 };
 
 fn agent_state(
