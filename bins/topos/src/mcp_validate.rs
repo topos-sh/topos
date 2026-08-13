@@ -489,12 +489,20 @@ fn token_runs(raw: &str) -> Vec<(usize, &str)> {
 /// Without this carve-out no pinned container image and no MCPB package could ever be published,
 /// which would make the pinning rule below unsatisfiable.
 ///
-/// Two spellings, and only these two — read from the characters immediately BEFORE the run, so
-/// nothing about the run itself relaxes:
+/// THE RUN ITSELF MUST BE A WHOLE DIGEST — 64 lowercase hex characters, nothing more and nothing
+/// less. Without that the carve-out is a prefix anyone can type: `sha256:` in front of a generated
+/// key exempted the key. A digest is a fixed shape, so demanding the shape costs a publisher
+/// nothing and closes the door.
+///
+/// Then the CONTEXT, read from the characters immediately BEFORE the run — two spellings and only
+/// these two, so nothing about the run itself relaxes:
 ///
 ///  · `sha256:` directly in front of it (the OCI/registry digest spelling, wherever it appears);
 ///  · a JSON key ENDING in `sha256`, then `": "`, then the run (`"fileSha256": "<hex>"`).
-fn is_integrity_digest(raw: &str, at: usize) -> bool {
+fn is_integrity_digest(raw: &str, at: usize, run: &str) -> bool {
+    if !is_file_sha256(run) {
+        return false;
+    }
     let before = &raw[..at];
     if before.len() >= 7 && before[before.len() - 7..].eq_ignore_ascii_case("sha256:") {
         return true;
@@ -521,16 +529,19 @@ pub(crate) fn find_secret(raw: &str) -> Option<&'static str> {
     }
     if token_runs(raw)
         .into_iter()
-        .any(|(at, run)| looks_random(run) && !is_integrity_digest(raw, at))
+        .any(|(at, run)| looks_random(run) && !is_integrity_digest(raw, at, run))
     {
         return Some("high-entropy value");
     }
     None
 }
 
-/// A JSON key whose VALUE is an integrity digest by name — the `fileSha256` family.
-fn is_digest_key(key: &str) -> bool {
-    key.len() >= 6 && key[key.len() - 6..].eq_ignore_ascii_case("sha256")
+/// A JSON key whose VALUE is an integrity digest by name — the `fileSha256` family — holding a
+/// value that IS one. Both halves, because the key alone is a name a publisher chooses: a slot
+/// called `fileSha256` carrying anything but 64 lowercase hex is not a digest, and skipping it
+/// would let the name exempt whatever was put in it.
+fn is_digest_under_key(key: &str, value: &str) -> bool {
+    key.len() >= 6 && key[key.len() - 6..].eq_ignore_ascii_case("sha256") && is_file_sha256(value)
 }
 
 /// The same scan over the PARSED document: every decoded string — keys and values, at any depth —
@@ -539,14 +550,15 @@ fn is_digest_key(key: &str) -> bool {
 ///
 /// One question cannot be answered from a string alone: a 64-hex value under `fileSha256` is an
 /// integrity digest, and the raw pass reads that from the bytes in front of it where this pass has
-/// only the key. So a digest-keyed string value is skipped here, exactly as the web tier skips it.
+/// only the key. So a digest-keyed value that IS a whole digest is skipped here — key AND value,
+/// exactly as the web tier skips it; the key alone is a name a publisher chooses.
 fn find_secret_deep(value: &Value) -> Option<&'static str> {
     match value {
         Value::String(s) => find_secret(s),
         Value::Array(list) => list.iter().find_map(find_secret_deep),
         Value::Object(map) => map.iter().find_map(|(k, v)| {
             find_secret(k).or_else(|| {
-                if v.is_string() && is_digest_key(k) {
+                if v.as_str().is_some_and(|s| is_digest_under_key(k, s)) {
                     None
                 } else {
                     find_secret_deep(v)
