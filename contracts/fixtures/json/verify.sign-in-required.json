@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "command": "verify",
+  "ok": true,
+  "data": {
+    "address": "https://weather.acme.example/mcp",
+    "exit_code": 3,
+    "line": "sign-in required - healthy; your agent app completes sign-in on first use",
+    "name": "weather",
+    "state": "sign_in_required",
+    "target": "address"
+  },
+  "warnings": [],
+  "next_actions": []
+}

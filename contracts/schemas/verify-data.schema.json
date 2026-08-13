@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VerifyData",
+  "description": "`verify <name>` — the LIVE check of one MCP server bundle, printed and never stored. The verdict\nis about this moment and this machine: it is not a delivery state, and nothing in the sidecar\nremembers it. **INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "address": {
+      "description": "The endpoint dialed, when the check dialed one.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "command": {
+      "description": "The program run, as the command and its arguments, when the check ran one. No environment\nvalue ever appears here.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "detail": {
+      "description": "The plain-words reason behind anything other than `responding` — the same words the printed\nline carries after its colon.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "exit_code": {
+      "description": "The process exit code this verdict produces: `0` responding · `3` sign-in required ·\n`4` not reachable · `5` not answering as an MCP server.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0
+    },
+    "line": {
+      "description": "The one sentence the terminal prints — relay it verbatim.",
+      "type": "string"
+    },
+    "name": {
+      "description": "The bundle's name.",
+      "type": "string"
+    },
+    "protocol_version": {
+      "description": "The MCP protocol revision the server answered on (`2026-07-28` for the current revision,\n`2025-11-25` for the handshake era). Absent when nothing answered.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state": {
+      "description": "The verdict.",
+      "$ref": "#/$defs/VerifyState"
+    },
+    "target": {
+      "description": "What was checked: `address` (an endpoint this machine dialed) or `program` (a package this\nmachine ran and spoke to over its pipes).",
+      "type": "string"
+    },
+    "tools": {
+      "description": "How many tools the server listed. Present only on `responding`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "name",
+    "target",
+    "state",
+    "exit_code",
+    "line"
+  ],
+  "$defs": {
+    "VerifyState": {
+      "description": "The four things a live check can conclude. **INFERRED value set** (additive-only).",
+      "oneOf": [
+        {
+          "description": "It answered as an MCP server and listed its tools.",
+          "type": "string",
+          "const": "responding"
+        },
+        {
+          "description": "It refused without a sign-in — a HEALTHY server. The agent app completes the sign-in on\nfirst use; topos holds no credential and never will.",
+          "type": "string",
+          "const": "sign_in_required"
+        },
+        {
+          "description": "Nothing answered: the name did not resolve, the connection failed or timed out, or the\nserver is having trouble right now. Never a statement about the protocol.",
+          "type": "string",
+          "const": "not_reachable"
+        },
+        {
+          "description": "Something answered, but not as an MCP server.",
+          "type": "string",
+          "const": "not_an_mcp_server"
+        }
+      ]
+    }
+  }
+}

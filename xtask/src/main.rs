@@ -175,6 +175,10 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::results::FmtData)),
         ),
         (
+            "verify-data",
+            emit(schemars::schema_for!(topos_types::results::VerifyData)),
+        ),
+        (
             "log-data",
             emit(schemars::schema_for!(topos_types::results::LogData)),
         ),
@@ -441,7 +445,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         PublishData, PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult,
         PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
         RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SkillEntry, SkillStatus,
-        StatusData, StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
+        StatusData, StatusScope, StatusScopeSummary, StatusTrigger, VerifyData, VerifyState,
+        WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -1462,6 +1467,60 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // `verify <name>` — the live check that ANSWERED. The command succeeded (`ok: true`); what the
+    // verdict decides is the process exit code, which the payload also carries so an agent reading
+    // this document through a wrapper never has to see the process's own.
+    let verify_responding = JsonEnvelope {
+        schema_version: 1,
+        command: "verify".to_owned(),
+        ok: true,
+        data: serde_json::to_value(VerifyData {
+            name: "weather".to_owned(),
+            target: "address".to_owned(),
+            address: Some("https://weather.acme.example/mcp".to_owned()),
+            command: vec![],
+            state: VerifyState::Responding,
+            tools: Some(12),
+            detail: None,
+            protocol_version: Some("2026-07-28".to_owned()),
+            exit_code: 0,
+            line: "responding (12 tools)".to_owned(),
+        })
+        .expect("VerifyData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // The SAME verb over an OAuth-gated server: healthy, and exit code 3. Topos holds no credential
+    // and sends none, so this is the expected answer for every server behind a sign-in.
+    let verify_sign_in = JsonEnvelope {
+        schema_version: 1,
+        command: "verify".to_owned(),
+        ok: true,
+        data: serde_json::to_value(VerifyData {
+            name: "weather".to_owned(),
+            target: "address".to_owned(),
+            address: Some("https://weather.acme.example/mcp".to_owned()),
+            command: vec![],
+            state: VerifyState::SignInRequired,
+            tools: None,
+            detail: None,
+            protocol_version: None,
+            exit_code: 3,
+            line: "sign-in required - healthy; your agent app completes sign-in on first use"
+                .to_owned(),
+        })
+        .expect("VerifyData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
     // `review` (bare) — the review INBOX/OUTBOX across enrolled workspaces, author-message first.
     let review_inbox = JsonEnvelope {
         schema_version: 1,
@@ -2046,6 +2105,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/remove.describe", emit_json(&remove_describe)),
         ("json/remove.ok", emit_json(&remove_ok)),
         ("json/protect.describe", emit_json(&protect_describe)),
+        ("json/verify.responding", emit_json(&verify_responding)),
+        ("json/verify.sign-in-required", emit_json(&verify_sign_in)),
         ("json/review.inbox", emit_json(&review_inbox)),
         ("json/invite.read", emit_json(&invite_read)),
         ("json/publish.describe", emit_json(&publish_describe)),
