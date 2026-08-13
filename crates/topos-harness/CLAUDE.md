@@ -90,8 +90,10 @@ never learns which machinery served which harness.
   managed entries — same key contract, same fingerprint ledger, same drift rules — and the CALLER
   decides which one a given harness gets, rendering every machine-local spelling before it builds
   the entry: the `cmd /c` wrapper Windows needs for Node's shim commands (`windows_wrap`, skipped
-  for a WSL UNC destination), the bridge argv, and an env-var reference in the harness's own
-  syntax (`EnvRef`). `entry_value` answers `None` for the one pair no vendor evidence covers — a
+  for a WSL UNC destination — and escaping every wrapped element for the EXTRA parse that wrapper
+  costs, since `cmd` reads the tail again after the spawn API has encoded it and would otherwise
+  split a bridged URL at its `&`; `cmd_unescape` is the inverse the address comparison runs), the
+  bridge argv, and an env-var reference in the harness's own syntax (`EnvRef`). `entry_value` answers `None` for the one pair no vendor evidence covers — a
   program in Hermes's YAML — and every driver turns that into a refusal, never a guess. The
   surfaces (user/project + dialect + reload copy + the read-only `conflict_paths` a harness ALSO
   reads servers from) and the CAPABILITY columns (does it dial an address, does it run a program,

@@ -280,8 +280,15 @@ pub const WINDOWS_WRAPPED_COMMANDS: &[&str] =
 /// `C:\…\npx.cmd` spelling wraps too), and never twice — a command that is already `cmd` is left
 /// alone. `wsl` says the config file being written lives inside a WSL distribution
 /// (`\\wsl$\…`, `\\wsl.localhost\…`): the harness reading it runs Linux, where the wrapper would
-/// be nonsense. Argument VALUES are never quoted here — every dialect writes argv as a list, and
-/// the quoting rule for a list is that there is none: a value with spaces stays one element.
+/// be nonsense.
+///
+/// **Everything after `/c` is read TWICE**, and that is what [`cmd_escape`] is for: the harness
+/// spawns `cmd.exe` with these arguments, `cmd` re-parses the command line it receives, and only
+/// then does the real program get its own argv. A `&` in a bridged URL's query would end the
+/// command there and run the rest as another one. Each wrapped element is therefore escaped for
+/// that middle parse; the elements the wrapper itself adds (`/c`, and the command's own name) are
+/// left alone, since one is a switch and the other is a program name Windows would not accept
+/// with a metacharacter in it anyway.
 #[must_use]
 pub fn windows_wrap(
     command: &str,
@@ -295,8 +302,86 @@ pub fn windows_wrap(
     let mut wrapped = Vec::with_capacity(args.len() + 2);
     wrapped.push("/c".to_owned());
     wrapped.push(command.to_owned());
-    wrapped.extend_from_slice(args);
+    wrapped.extend(args.iter().map(|a| cmd_escape(a)));
     ("cmd".to_owned(), wrapped)
+}
+
+/// The characters `cmd.exe` acts on instead of passing through, when it meets them OUTSIDE double
+/// quotes: the four that redirect or chain (`&`, `|`, `<`, `>`), the two that group, and the caret
+/// that escapes any of them (and so must escape itself).
+///
+/// `%` is deliberately NOT here. Its expansion happens inside quotes as well as outside, so no
+/// positional rule can protect it, and the only known counter — the `%%cd:~,%` no-op substitution —
+/// needs the whole command line to be built by the escaper (it is not: a harness builds it) and
+/// command extensions to be on. What `%` costs in practice is narrow: on a command line, `%NAME%`
+/// is left verbatim unless NAME names a variable that is actually set, so percent-encoding in a URL
+/// (`%20`) passes through untouched.
+const CMD_METACHARACTERS: [char; 7] = ['^', '&', '|', '<', '>', '(', ')'];
+
+/// **One argument, made safe for the extra `cmd /c` parse** — the escape that survives the whole
+/// chain a config entry goes through on Windows.
+///
+/// Three readers see these bytes, in order, and the escape has to be right for all three:
+///
+/// 1. the harness SPAWNS `cmd.exe` with this argument list, and the spawn API encodes it into one
+///    command line by the C runtime's rules: an element containing a space, a tab or a quote is
+///    wrapped in double quotes (an inner quote written `\"`), everything else is written bare;
+/// 2. `cmd.exe` parses that line — acting on [`CMD_METACHARACTERS`] wherever they fall outside
+///    double quotes, and consuming a caret to take the next character literally;
+/// 3. the real program parses what `cmd` passed on, by the C runtime's rules again, which undo
+///    step 1.
+///
+/// So the only characters that need escaping are the metacharacters that end up OUTSIDE the quotes
+/// step 1 writes — and where those fall is decidable from the argument alone: an element with no
+/// space, tab or quote in it is written bare and is outside quotes throughout; an element that gets
+/// wrapped starts INSIDE the quotes, and each `"` in it flips that. Everything inside is already
+/// literal to `cmd`, and a caret there would reach the program as a caret, so this escapes exactly
+/// the outside ones and nothing else.
+///
+/// [`cmd_unescape`] is its inverse, so an entry read back off disk answers the same address
+/// question as the one that wrote it.
+/// The one place the three-reader chain is not decidable: an argument carrying a `"` but no space
+/// is quoted by some spawners (libuv's, and therefore every Node harness) and written bare by
+/// others (Rust's, which quotes on whitespace alone), which puts the same metacharacter inside the
+/// quotes for one and outside for the other. The C-runtime rule below is the one the majority of
+/// MCP harnesses spawn by; under the other, such an argument keeps a literal caret. Documented
+/// rather than papered over — there is no encoding that is right for both.
+#[must_use]
+pub fn cmd_escape(arg: &str) -> String {
+    let quoted_by_the_spawner = arg.is_empty() || arg.contains([' ', '\t', '"']);
+    let mut inside = quoted_by_the_spawner;
+    let mut out = String::with_capacity(arg.len());
+    for c in arg.chars() {
+        if !inside && CMD_METACHARACTERS.contains(&c) {
+            out.push('^');
+        }
+        out.push(c);
+        if c == '"' {
+            inside = !inside;
+        }
+    }
+    out
+}
+
+/// [`cmd_escape`]'s inverse: drop one caret before each character it protects. Applied when a
+/// `cmd /c` wrapper is stripped, so the argv two entries are compared on is the argv the program
+/// actually receives — an escaped URL and a bare one name one server, not two.
+#[must_use]
+pub fn cmd_unescape(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len());
+    let mut chars = arg.chars();
+    while let Some(c) = chars.next() {
+        if c == '^'
+            && let Some(next) = chars.clone().next()
+            && CMD_METACHARACTERS.contains(&next)
+        {
+            chars.next();
+            out.push(next);
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Whether `command` is one of the shim commands Windows cannot spawn directly. The comparison is
@@ -337,16 +422,24 @@ pub fn is_wsl_unc(path: &str) -> bool {
 
 /// `command` + `args` with any Windows `cmd /c` wrapper removed — the spelling two machines can be
 /// compared on, since one may have written the wrapper and the other not.
+///
+/// Removing the wrapper also undoes its escaping ([`cmd_unescape`]), because the arguments that
+/// reach the PROGRAM are the ones the extra `cmd` parse leaves behind: an entry that bridges
+/// `https://x?a=1^&b=2` and one that bridges `https://x?a=1&b=2` reach the same server, and a
+/// collision question that said otherwise would place a second entry beside the first.
 #[must_use]
-fn unwrapped<'a>(command: &'a str, args: &'a [String]) -> (&'a str, &'a [String]) {
+fn unwrapped(command: &str, args: &[String]) -> (String, Vec<String>) {
     let is_cmd = command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe");
     if is_cmd
         && let [flag, inner, rest @ ..] = args
         && flag.eq_ignore_ascii_case("/c")
     {
-        return (inner.as_str(), rest);
+        return (
+            inner.clone(),
+            rest.iter().map(|a| cmd_unescape(a)).collect(),
+        );
     }
-    (command, args)
+    (command.to_owned(), args.to_vec())
 }
 
 /// **The ONE spelling of a program-run server's address** — the twin of [`canonical_address`] for
@@ -367,7 +460,7 @@ pub fn local_address(command: &str, args: &[String]) -> Option<String> {
     if command.is_empty() {
         return None;
     }
-    if let Some(url) = bridged_url(command, args) {
+    if let Some(url) = bridged_url(command, &args) {
         return canonical_address(&url);
     }
     let mut parts: Vec<&str> = Vec::with_capacity(args.len() + 1);
@@ -1392,6 +1485,244 @@ mod tests {
         ] {
             assert!(!is_wsl_unc(local), "{local}");
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The `cmd /c` chain, simulated end to end.
+    // ------------------------------------------------------------------------------------------
+
+    /// Stage 1: what a spawn API writes as ONE command line for `cmd.exe`, by the C runtime's
+    /// rules — quote an element that is empty or holds a space, a tab or a quote; write an inner
+    /// quote as `\"`, doubling the backslashes that precede it. (libuv's `quote_cmd_arg`, which is
+    /// what every Node harness spawns through.)
+    fn c_runtime_encode(args: &[&str]) -> String {
+        let mut line = String::new();
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                line.push(' ');
+            }
+            if !(arg.is_empty() || arg.contains([' ', '\t', '"'])) {
+                line.push_str(arg);
+                continue;
+            }
+            line.push('"');
+            let mut backslashes = 0usize;
+            for c in arg.chars() {
+                match c {
+                    '\\' => backslashes += 1,
+                    '"' => {
+                        line.extend(std::iter::repeat_n('\\', backslashes + 1));
+                        backslashes = 0;
+                        line.push('"');
+                    }
+                    _ => {
+                        backslashes = 0;
+                        line.push(c);
+                    }
+                }
+            }
+            line.extend(std::iter::repeat_n('\\', backslashes));
+            line.push('"');
+        }
+        line
+    }
+
+    /// Stage 2: what `cmd.exe` hands on. It acts on its metacharacters outside quotes — here the
+    /// test only needs to know WHETHER it would (a split means the tail was torn apart) — and
+    /// consumes a caret to take the next character literally. Returns `None` when the line would
+    /// be split or redirected, which is the bug this whole mechanism exists to prevent.
+    fn cmd_parse(line: &str) -> Option<String> {
+        let mut out = String::with_capacity(line.len());
+        let mut inside = false;
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => {
+                    inside = !inside;
+                    out.push(c);
+                }
+                '^' if !inside => match chars.next() {
+                    Some(next) => out.push(next),
+                    None => return None,
+                },
+                '&' | '|' | '<' | '>' | '(' | ')' if !inside => return None,
+                _ => out.push(c),
+            }
+        }
+        Some(out)
+    }
+
+    /// Stage 3: the real program's own argv, parsed off that line by the C runtime's rules.
+    fn c_runtime_parse(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current = String::new();
+        let mut started = false;
+        let mut inside = false;
+        let mut backslashes = 0usize;
+        let flush = |current: &mut String, started: &mut bool, out: &mut Vec<String>| {
+            if *started {
+                out.push(std::mem::take(current));
+                *started = false;
+            }
+        };
+        for c in line.chars() {
+            match c {
+                '\\' => {
+                    backslashes += 1;
+                    started = true;
+                }
+                '"' => {
+                    current.extend(std::iter::repeat_n('\\', backslashes / 2));
+                    if backslashes % 2 == 1 {
+                        current.push('"');
+                    } else {
+                        inside = !inside;
+                    }
+                    backslashes = 0;
+                    started = true;
+                }
+                ' ' | '\t' if !inside => {
+                    current.extend(std::iter::repeat_n('\\', backslashes));
+                    backslashes = 0;
+                    flush(&mut current, &mut started, &mut out);
+                }
+                _ => {
+                    current.extend(std::iter::repeat_n('\\', backslashes));
+                    backslashes = 0;
+                    current.push(c);
+                    started = true;
+                }
+            }
+        }
+        current.extend(std::iter::repeat_n('\\', backslashes));
+        flush(&mut current, &mut started, &mut out);
+        out
+    }
+
+    /// **The whole chain**: what topos writes → what the harness's spawn API encodes → what
+    /// `cmd.exe` leaves → what the program parses. The program must get back exactly the argv the
+    /// bundle stated, metacharacters and all.
+    #[test]
+    fn a_wrapped_tail_reaches_the_program_as_the_bundle_stated_it() {
+        let survives = |argv: &[&str]| {
+            let args: Vec<String> = argv.iter().map(|a| (*a).to_owned()).collect();
+            let (command, wrapped) = windows_wrap("npx", &args, true, false);
+            assert_eq!(command, "cmd");
+            let line: Vec<&str> = std::iter::once(command.as_str())
+                .chain(wrapped.iter().map(String::as_str))
+                .collect();
+            let after_cmd = cmd_parse(&c_runtime_encode(&line))
+                .unwrap_or_else(|| panic!("cmd tore the line apart: {argv:?}"));
+            // Everything after `cmd /c npx` is what the program itself receives.
+            let received = c_runtime_parse(&after_cmd);
+            assert_eq!(&received[..3], ["cmd", "/c", "npx"], "{argv:?}");
+            assert_eq!(&received[3..], argv, "{argv:?}");
+        };
+
+        // The case that made this necessary: a bridged URL whose query joins two parameters.
+        survives(&[
+            "-y",
+            "mcp-remote@0.1.38",
+            "https://mcp.example/x?team=eng&mode=read",
+            "--header",
+            "X-Team:${TOPOS_HEADER_X_TEAM}",
+        ]);
+        // Spaces, quotes, and both at once — the shapes the encoding stage treats differently.
+        survives(&[
+            "--note",
+            "a b",
+            "--json",
+            r#"{"k": "v"}"#,
+            "--say",
+            "he said \"hi\"",
+        ]);
+        // …and a metacharacter that a quote inside the value pushes back out of the quoting.
+        survives(&["--say", r#"say "a&b" now"#, "--also", r#"a"b&c"#]);
+        // Every metacharacter, alone and in company.
+        survives(&["a&b", "a|b", "a<b", "a>b", "a^b", "a(b)c", "a&b|c>d"]);
+        survives(&["--root", "/srv/notes", "run"]);
+
+        // …and the escaping is the ONLY thing that changed: strip it and the same tail is torn.
+        let bare = [
+            "cmd",
+            "/c",
+            "npx",
+            "https://mcp.example/x?team=eng&mode=read",
+        ];
+        assert_eq!(
+            cmd_parse(&c_runtime_encode(&bare)),
+            None,
+            "the unescaped tail is exactly what cmd splits"
+        );
+    }
+
+    /// The escape is a RENDERING, not a state: rendering the same argv twice writes the same
+    /// bytes (so an entry never rewrites itself), and stripping the wrapper undoes it (so a
+    /// bridged entry names one server whether or not Windows wrapped it).
+    #[test]
+    fn the_wrapper_is_idempotent_and_its_escaping_reverses() {
+        let argv =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|a| (*a).to_owned()).collect() };
+        let args = argv(&[
+            "-y",
+            "mcp-remote@0.1.38",
+            "https://mcp.example/x?team=eng&mode=read",
+        ]);
+        let (command, once) = windows_wrap("npx", &args, true, false);
+        let (again_command, again) = windows_wrap("npx", &args, true, false);
+        assert_eq!((&command, &once), (&again_command, &again));
+        assert_eq!(
+            once,
+            [
+                "/c",
+                "npx",
+                "-y",
+                "mcp-remote@0.1.38",
+                "https://mcp.example/x?team=eng^&mode=read"
+            ]
+        );
+        // The wrapper is never applied to its own output, so nothing can escape twice.
+        assert!(!needs_windows_wrap(&command));
+
+        // One server, wrapped or not.
+        assert_eq!(
+            local_address(&command, &once),
+            local_address("npx", &args),
+            "the escaped bridge and the bare one name one address"
+        );
+        assert_eq!(
+            local_address(&command, &once).as_deref(),
+            Some("https://mcp.example/x?team=eng&mode=read")
+        );
+        // The same for a program that is not a bridge.
+        let plain = argv(&["--url", "https://x/y?a=1&b=2"]);
+        let (wrapped_command, wrapped) = windows_wrap("npx", &plain, true, false);
+        assert_eq!(
+            local_address(&wrapped_command, &wrapped),
+            local_address("npx", &plain)
+        );
+
+        // The escape and its inverse, character by character.
+        for (raw, escaped) in [
+            ("plain", "plain"),
+            ("a&b", "a^&b"),
+            ("a|b^c", "a^|b^^c"),
+            ("a<b>c", "a^<b^>c"),
+            ("(x)", "^(x^)"),
+            // A value the spawner will quote is already protected — a caret there would reach the
+            // program as a caret.
+            ("a & b", "a & b"),
+            // …and a quote INSIDE it closes that protection, because the spawner writes an inner
+            // quote as `\"` and cmd counts every quote it sees.
+            (r#"say "a&b" now"#, r#"say "a^&b" now"#),
+            (r#"a"b&c"#, r#"a"b^&c"#),
+        ] {
+            assert_eq!(cmd_escape(raw), escaped, "{raw}");
+            assert_eq!(cmd_unescape(escaped), raw, "{escaped}");
+        }
+        // A caret in front of anything else is somebody's literal caret, and stays one.
+        assert_eq!(cmd_unescape("a^b"), "a^b");
+        assert_eq!(cmd_unescape("trailing^"), "trailing^");
     }
 
     #[test]
