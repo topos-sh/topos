@@ -1,4 +1,5 @@
-//! The Hermes `config.yaml` splicer — [`McpDialect::HermesYaml`], hand-rolled in the exact
+//! The YAML `config.yaml` splicer — [`McpDialect::HermesYaml`] and [`McpDialect::GooseYaml`],
+//! hand-rolled in the exact
 //! idiom of the `hermes` adapter's hooks merge (`split_inclusive('\n')`, zero-indent anchors,
 //! region scanning; no YAML dependency): total over exactly the shapes it can prove, fail-closed
 //! on everything else, untouched lines preserved byte-for-byte.
@@ -11,8 +12,17 @@
 //!   topos-acme-linear: {url: "https://…", headers: {X-T: "v"}, auth: oauth}  # topos:mcp
 //! ```
 //!
+//! TWO harnesses share it and differ in everything a [`YamlSpec`] holds: the top-level key
+//! (`mcp_servers` / `extensions`), the display name a refusal carries, and the entry grammar
+//! [`render_line`] emits. Goose is the harder of the two, because the block topos writes into is
+//! the one goose's OWN bundled extensions live in — each of them a block mapping several lines
+//! deep. They are read (a name, and no address this parser claims to have read) and never
+//! touched; the sentinel is what separates them from topos's, and a name that merely LOOKS like
+//! topos's without one is Foreign, exactly as everywhere else.
+//!
 //! `auth: oauth` is emitted ONLY for [`AuthHint::Oauth`] (Hermes needs the explicit opt-in but
-//! must not be sent into OAuth for a no-auth server). The url and header values are ALWAYS
+//! must not be sent into OAuth for a no-auth server) and ONLY for Hermes, whose key it is; goose
+//! runs its own sign-in and would find the word unreadable. The url and header values are ALWAYS
 //! double-quoted (PyYAML is YAML 1.1 — an unquoted scalar can coerce); header names follow the
 //! example spelling (bare for `[A-Za-z0-9_-]`, double-quoted otherwise); the entry key stays
 //! bare (`[a-z0-9-]` is safe). Managed lines are identified by the sentinel suffix ALONE, and
@@ -21,7 +31,7 @@
 //! copy of one), and reasoning around it could re-insert a key the block already holds, minting
 //! a duplicate YAML key that bricks the whole config.
 //!
-//! Unprovable (zero writes): a BOM; duplicate `mcp_servers:` keys; a flow-style value on the key
+//! Unprovable (zero writes): a BOM; duplicate key lines; a flow-style value on the key
 //! line (any non-comment remainder after the colon); quoted/alternate key spellings; tab
 //! indentation in the block; a sentinel line at an indent other than the child indent; a
 //! sentinel line whose KEY cannot even be read; a duplicate managed key. A sentinel line whose
@@ -46,29 +56,71 @@ use super::{
 /// The line-ownership sentinel (a YAML comment outside the flow mapping).
 const SENTINEL: &str = "# topos:mcp";
 
-/// The one top-level key this splicer may touch the block of (plain spelling only).
-const KEY_PREFIX: &str = "mcp_servers:";
+/// One YAML surface's parameters: the top-level key this splicer may touch the block of (plain
+/// spelling only, colon included), the harness display name an honest refusal names, and the
+/// dialect whose entry grammar [`render_line`] emits.
+///
+/// TWO harnesses share this driver and nothing else: Hermes lists its servers under
+/// `mcp_servers`, Goose its extensions under `extensions`, and the one-line flow-mapping idiom is
+/// legal YAML in both. Everything that differs between them is here.
+#[derive(Debug, Clone, Copy)]
+struct YamlSpec {
+    /// The key line's exact spelling, colon included (`mcp_servers:`).
+    key: &'static str,
+    /// The bare key, for the refusals a person reads.
+    word: &'static str,
+    /// The harness's display name, same purpose.
+    name: &'static str,
+    dialect: McpDialect,
+}
+
+const HERMES: YamlSpec = YamlSpec {
+    key: "mcp_servers:",
+    word: "mcp_servers",
+    name: "Hermes",
+    dialect: McpDialect::HermesYaml,
+};
+
+/// Goose keeps its MCP servers among its EXTENSIONS, which is also where its own built-in ones
+/// live — hence the sentinel, and hence the rule that nothing without it is ever touched.
+const GOOSE: YamlSpec = YamlSpec {
+    key: "extensions:",
+    word: "extensions",
+    name: "Goose",
+    dialect: McpDialect::GooseYaml,
+};
+
+/// The surface `dialect` names — the one place this driver's two harnesses are told apart.
+fn spec(dialect: McpDialect) -> YamlSpec {
+    match dialect {
+        McpDialect::GooseYaml => GOOSE,
+        // UNREPRESENTABLE, not worded: `super::apply` is the one dispatcher and routes every other
+        // dialect to its own editor before this is reached (`every_yaml_dialect_has_a_spec`).
+        _ => HERMES,
+    }
+}
 
 /// The child indent used when the block is empty (or freshly created).
 const DEFAULT_INDENT: usize = 2;
 
-/// Compute the placement plan for a Hermes `config.yaml`. See the module doc for the contract.
+/// Compute the placement plan for one YAML `config.yaml`. See the module doc for the contract.
 #[must_use]
 pub fn apply(
+    dialect: McpDialect,
     current: Option<&[u8]>,
     desired: &[McpEntry],
     prior: &BTreeMap<String, String>,
 ) -> ApplyOutcome {
+    let spec = spec(dialect);
     if let Err(reason) = validate_desired(desired) {
         return unprovable(reason);
     }
     // A PROGRAM-run server has no proven spelling in this file (see the module doc), so the whole
     // edit refuses before a line is planned rather than inventing one.
-    let desired_fps: Vec<String> =
-        match super::desired_fingerprints(McpDialect::HermesYaml, desired) {
-            Ok(fps) => fps,
-            Err(reason) => return unprovable(reason),
-        };
+    let desired_fps: Vec<String> = match super::desired_fingerprints(dialect, desired) {
+        Ok(fps) => fps,
+        Err(reason) => return unprovable(reason),
+    };
 
     if current.is_none() {
         if desired.is_empty() {
@@ -81,15 +133,15 @@ pub fn apply(
                 .push((e.key.clone(), desired_fps[i].clone()));
         }
         return outcome(
-            EditPlan::Write(creation_block(desired).into_bytes()),
+            EditPlan::Write(creation_block(spec, desired).into_bytes()),
             rec,
             true,
         );
     }
     let Ok(text) = std::str::from_utf8(current.unwrap_or_default()) else {
-        return unprovable("the Hermes config is not UTF-8");
+        return unprovable(format!("the {} config is not UTF-8", spec.name));
     };
-    let shape = match analyze(text) {
+    let shape = match analyze(spec, text) {
         Ok(shape) => shape,
         Err(reason) => return unprovable(reason),
     };
@@ -116,7 +168,8 @@ pub fn apply(
                 }
                 if found.contains_key(key) {
                     return unprovable(format!(
-                        "the Hermes config lists `{key}` twice under mcp_servers"
+                        "the {} config lists `{key}` twice under {}",
+                        spec.name, spec.word
                     ));
                 }
                 found.insert(key.clone(), FoundEntry::OpaqueForeign);
@@ -130,10 +183,10 @@ pub fn apply(
     }
 
     let out_text = match region {
-        None => append_block(text, desired, &rec.inserts),
-        Some(region) => splice(text, region, desired, &rec),
+        None => append_block(spec, text, desired, &rec.inserts),
+        Some(region) => splice(spec, text, region, desired, &rec),
     };
-    if let Err(reason) = verify(text, &out_text, desired, &desired_fps, &rec) {
+    if let Err(reason) = verify(spec, text, &out_text, desired, &desired_fps, &rec) {
         return unprovable(reason);
     }
     outcome(EditPlan::Write(out_text.into_bytes()), rec, false)
@@ -143,7 +196,7 @@ pub fn apply(
 /// entry (a mangled sentinel line has no structural value to report; `apply` classifies it
 /// `Drifted`).
 #[must_use]
-pub fn observe(current: Option<&[u8]>) -> Observed {
+pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
     let unreadable = Observed {
         entries: BTreeMap::new(),
         parseable: false,
@@ -157,7 +210,7 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
     let Ok(text) = std::str::from_utf8(current.unwrap_or_default()) else {
         return unreadable;
     };
-    let Ok(shape) = analyze(text) else {
+    let Ok(shape) = analyze(spec(dialect), text) else {
         return unreadable;
     };
     let mut entries = BTreeMap::new();
@@ -174,7 +227,7 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
     }
 }
 
-/// Every entry under `mcp_servers` — sentinel-marked and plain alike (see
+/// Every entry under the dialect's own key — sentinel-marked and plain alike (see
 /// [`super::observe_entries`]). A `selector` cannot be honoured in this dialect (the splicer reads
 /// exactly one block, by construction), so one answers UNREADABLE rather than a wrong slot.
 ///
@@ -183,6 +236,7 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
 /// claimed to match.
 #[must_use]
 pub fn observe_entries(
+    dialect: McpDialect,
     current: Option<&[u8]>,
     selector: Option<&str>,
 ) -> Option<Vec<super::SeenEntry>> {
@@ -193,7 +247,7 @@ pub fn observe_entries(
         return Some(Vec::new());
     }
     let text = std::str::from_utf8(current.unwrap_or_default()).ok()?;
-    let Shape::Region(region) = analyze(text).ok()? else {
+    let Shape::Region(region) = analyze(spec(dialect), text).ok()? else {
         return Some(Vec::new());
     };
     let seen = |(name, value): (&String, &Option<Value>)| super::SeenEntry {
@@ -211,15 +265,16 @@ pub fn observe_entries(
 }
 
 /// Whether the file holds content beyond what topos itself writes: anything but the one bare
-/// `mcp_servers:` key line, blank lines, and sentinel-managed entry lines at the child indent.
+/// key line, blank lines, and sentinel-managed entry lines at the child indent.
 /// Comments, plain child keys, other top-level keys, and every unprovable shape answer `true` —
 /// the caller's whole-file-ownership reasoning fails TOWARD keeping the file.
 #[must_use]
-pub fn holds_unmanaged(bytes: &[u8]) -> bool {
+pub fn holds_unmanaged(dialect: McpDialect, bytes: &[u8]) -> bool {
+    let spec = spec(dialect);
     let Ok(text) = std::str::from_utf8(bytes) else {
         return true;
     };
-    let Ok(shape) = analyze(text) else {
+    let Ok(shape) = analyze(spec, text) else {
         return true;
     };
     let lines = split_lines(text);
@@ -234,7 +289,7 @@ pub fn holds_unmanaged(bytes: &[u8]) -> bool {
         if Some(i) == key_idx {
             // The key line must be EXACTLY the bare spelling topos writes (a trailing comment
             // is somebody's annotation).
-            return line.trim_end() != "mcp_servers:";
+            return line.trim_end() != spec.key;
         }
         if managed_lines.contains(&i) {
             return false;
@@ -247,9 +302,9 @@ pub fn holds_unmanaged(bytes: &[u8]) -> bool {
 // Analysis — the provable-shape gate.
 // ---------------------------------------------------------------------------------------------
 
-/// The parsed `mcp_servers` region.
+/// The parsed key's region.
 struct Region {
-    /// Index of the `mcp_servers:` key line.
+    /// Index of the key line.
     key_idx: usize,
     /// The block's child indent (first content line's, else 2).
     child_indent: usize,
@@ -264,7 +319,7 @@ struct Region {
 }
 
 enum Shape {
-    /// No top-level `mcp_servers:` key — a block can be appended at EOF.
+    /// No top-level key line — a block can be appended at EOF.
     NoKey,
     Region(Region),
 }
@@ -282,15 +337,20 @@ fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
-/// A zero-indent line that spells the `mcp_servers` key in a form OTHER than the one canonical
-/// `mcp_servers:` — quoted, or with whitespace before the colon. Such a file already HAS the
+/// A zero-indent line that spells the dialect's key in a form OTHER than the one canonical
+/// spelling — quoted, or with whitespace before the colon. Such a file already HAS the
 /// key; reasoning about the canonical spelling beside it would be wrong, so it forces the
 /// fail-closed path.
-fn is_alternate_spelling(line: &str) -> bool {
-    line.starts_with("\"mcp_servers\"")
-        || line.starts_with("'mcp_servers'")
-        || (line.starts_with("mcp_servers")
-            && matches!(line.as_bytes().get("mcp_servers".len()), Some(b' ' | b'\t')))
+fn is_alternate_spelling(spec: YamlSpec, line: &str) -> bool {
+    let quoted = |q: char| {
+        line.starts_with(q)
+            && line[1..].starts_with(spec.word)
+            && line[1 + spec.word.len()..].starts_with(q)
+    };
+    quoted('"')
+        || quoted('\'')
+        || (line.starts_with(spec.word)
+            && matches!(line.as_bytes().get(spec.word.len()), Some(b' ' | b'\t')))
 }
 
 /// The exclusive end of the zero-indent key's region (blank lines and comments stay in-region —
@@ -308,39 +368,46 @@ fn region_end(lines: &[&str], start: usize) -> usize {
     end
 }
 
-fn analyze(text: &str) -> Result<Shape, String> {
+fn analyze(spec: YamlSpec, text: &str) -> Result<Shape, String> {
     // A byte-order mark hides the first line's true column 0 from every zero-indent anchor.
     if text.starts_with('\u{feff}') {
-        return Err("Hermes config carries a BOM; refusing to reason about column 0".to_owned());
+        return Err(format!(
+            "{} config carries a BOM; refusing to reason about column 0",
+            spec.name
+        ));
     }
     let lines = split_lines(text);
-    if lines.iter().any(|l| is_alternate_spelling(l)) {
-        return Err("mcp_servers is spelled in a form this merge never writes".to_owned());
+    if lines.iter().any(|l| is_alternate_spelling(spec, l)) {
+        return Err(format!(
+            "{} is spelled in a form this merge never writes",
+            spec.word
+        ));
     }
     let key_lines: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.starts_with(KEY_PREFIX))
+        .filter(|(_, l)| l.starts_with(spec.key))
         .map(|(i, _)| i)
         .collect();
     let key_idx = match key_lines.as_slice() {
         [] => return Ok(Shape::NoKey),
         [one] => *one,
-        _ => return Err("duplicate top-level mcp_servers keys".to_owned()),
+        _ => return Err(format!("duplicate top-level {} keys", spec.word)),
     };
     // Any non-comment remainder after the colon (a flow value, an anchor, a tag) is a shape this
     // splicer cannot own lines under.
-    let remainder = lines[key_idx][KEY_PREFIX.len()..].trim();
+    let remainder = lines[key_idx][spec.key.len()..].trim();
     if !remainder.is_empty() && !remainder.starts_with('#') {
-        return Err(
-            "mcp_servers carries an inline value; only a block form is provable".to_owned(),
-        );
+        return Err(format!(
+            "{} carries an inline value; only a block form is provable",
+            spec.word
+        ));
     }
     let end = region_end(&lines, key_idx);
     for line in &lines[key_idx + 1..end] {
         let leading = &line[..line.len() - line.trim_start().len()];
         if leading.contains('\t') {
-            return Err("tab indentation inside the mcp_servers block".to_owned());
+            return Err(format!("tab indentation inside the {} block", spec.word));
         }
     }
     let child_indent = (key_idx + 1..end)
@@ -358,11 +425,11 @@ fn analyze(text: &str) -> Result<Shape, String> {
                 // re-indented (or a pasted copy). Treating it as invisible would let the splice
                 // re-insert a key the block already holds — a duplicate YAML key that can brick
                 // the whole config — or silently drop the original from every report.
-                return Err(
-                    "a topos:mcp sentinel line sits at an unexpected indent under mcp_servers; \
-                     refusing to touch the block"
-                        .to_owned(),
-                );
+                return Err(format!(
+                    "a topos:mcp sentinel line sits at an unexpected indent under {}; refusing \
+                     to touch the block",
+                    spec.word
+                ));
             }
             let Some((key, body)) = trimmed.split_once(':') else {
                 return Err("a topos:mcp sentinel line has no readable key".to_owned());
@@ -372,7 +439,7 @@ fn analyze(text: &str) -> Result<Shape, String> {
                 return Err("a topos:mcp sentinel line has no readable key".to_owned());
             }
             if managed.iter().any(|(_, k, _)| k == key) {
-                return Err(format!("duplicate managed key `{key}` under mcp_servers"));
+                return Err(format!("duplicate managed key `{key}` under {}", spec.word));
             }
             let body = body.trim_end().strip_suffix(SENTINEL).map(str::trim_end);
             let value = body.and_then(parse_flow_mapping);
@@ -472,7 +539,15 @@ fn parse_mapping(src: &str, chars: &mut Chars<'_>) -> Option<Value> {
                 if word.is_empty() {
                     return None;
                 }
-                Value::String(word.to_owned())
+                // A bare `true`/`false` is a BOOLEAN in YAML, and reading it back as the string
+                // "true" would make an entry topos itself just wrote fingerprint differently from
+                // the value it rendered — permanent, silent drift on the one harness whose entry
+                // carries a boolean at all. Every other bare word stays the text it is.
+                match word {
+                    "true" => Value::Bool(true),
+                    "false" => Value::Bool(false),
+                    _ => Value::String(word.to_owned()),
+                }
             }
         };
         map.insert(key, value);
@@ -533,14 +608,25 @@ fn header_name(name: &str) -> String {
 
 /// The one-line managed entry at `indent`. ADDRESS entries only — `apply` refuses a desired set
 /// carrying a program-run server before any line is planned, so the address fields are total here.
-fn render_line(indent: usize, entry: &McpEntry) -> String {
+fn render_line(spec: YamlSpec, indent: usize, entry: &McpEntry) -> String {
     let mut line = " ".repeat(indent);
     line.push_str(&entry.key);
     let (url, headers) = match &entry.target {
         super::McpTarget::Remote { url, headers } => (url.as_str(), headers.as_slice()),
         super::McpTarget::Local { .. } => ("", &[][..]),
     };
-    line.push_str(": {url: ");
+    line.push_str(": {");
+    // Goose reads an extension, not a server: it needs the switch that turns one on, the name it
+    // is filed under (which it also injects from the key, but writing it costs nothing and its
+    // own tool writes it), and the transport word spelled the way its config enum reads. The
+    // address key is `uri` there, `url` in Hermes.
+    if spec.dialect == McpDialect::GooseYaml {
+        line.push_str("enabled: true, name: ");
+        line.push_str(&entry.key);
+        line.push_str(", type: streamable_http, uri: ");
+    } else {
+        line.push_str("url: ");
+    }
     line.push_str(&quote(url));
     if !headers.is_empty() {
         line.push_str(", headers: {");
@@ -560,7 +646,9 @@ fn render_line(indent: usize, entry: &McpEntry) -> String {
         }
         line.push('}');
     }
-    if entry.auth == AuthHint::Oauth {
+    // `auth: oauth` is HERMES's opt-in. Goose has no such key: it runs its own OAuth on a 401,
+    // and a word its config enum does not know would make the whole entry unreadable to it.
+    if entry.auth == AuthHint::Oauth && spec.dialect == McpDialect::HermesYaml {
         line.push_str(", auth: oauth");
     }
     line.push_str("}  ");
@@ -570,31 +658,38 @@ fn render_line(indent: usize, entry: &McpEntry) -> String {
 }
 
 /// The fresh-file content: the key line + the managed lines, nothing else.
-fn creation_block(desired: &[McpEntry]) -> String {
-    let mut out = String::from("mcp_servers:\n");
+fn creation_block(spec: YamlSpec, desired: &[McpEntry]) -> String {
+    let mut out = format!("{}\n", spec.key);
     for entry in desired {
-        out.push_str(&render_line(DEFAULT_INDENT, entry));
+        out.push_str(&render_line(spec, DEFAULT_INDENT, entry));
     }
     out
 }
 
 /// Append the whole block at EOF (the key was absent), guaranteeing exactly one newline before
 /// it.
-fn append_block(text: &str, desired: &[McpEntry], inserts: &[usize]) -> String {
+fn append_block(spec: YamlSpec, text: &str, desired: &[McpEntry], inserts: &[usize]) -> String {
     let mut out = text.to_owned();
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str("mcp_servers:\n");
+    out.push_str(spec.key);
+    out.push('\n');
     for &i in inserts {
-        out.push_str(&render_line(DEFAULT_INDENT, &desired[i]));
+        out.push_str(&render_line(spec, DEFAULT_INDENT, &desired[i]));
     }
     out
 }
 
 /// The line-surgical splice: managed lines are removed/replaced in place; inserts land directly
 /// under the key line; every other line is re-emitted verbatim.
-fn splice(text: &str, region: &Region, desired: &[McpEntry], rec: &Reconcile) -> String {
+fn splice(
+    spec: YamlSpec,
+    text: &str,
+    region: &Region,
+    desired: &[McpEntry],
+    rec: &Reconcile,
+) -> String {
     let lines = split_lines(text);
     let line_of = |key: &str| -> Option<usize> {
         region
@@ -615,7 +710,7 @@ fn splice(text: &str, region: &Region, desired: &[McpEntry], rec: &Reconcile) ->
             continue;
         }
         if let Some(&d) = updated.get(&i) {
-            out.push_str(&render_line(region.child_indent, &desired[d]));
+            out.push_str(&render_line(spec, region.child_indent, &desired[d]));
             continue;
         }
         out.push_str(line);
@@ -626,7 +721,7 @@ fn splice(text: &str, region: &Region, desired: &[McpEntry], rec: &Reconcile) ->
                 out.push('\n');
             }
             for &d in &rec.inserts {
-                out.push_str(&render_line(region.child_indent, &desired[d]));
+                out.push_str(&render_line(spec, region.child_indent, &desired[d]));
             }
         }
     }
@@ -641,6 +736,7 @@ fn splice(text: &str, region: &Region, desired: &[McpEntry], rec: &Reconcile) ->
 /// sentinel lines must be byte-identical, in order, to the input minus sentinel lines (final
 /// newlines normalized), and the output must re-analyze with every planned entry landed.
 fn verify(
+    spec: YamlSpec,
     input: &str,
     output: &str,
     desired: &[McpEntry],
@@ -660,15 +756,15 @@ fn verify(
     let mut in_lines = non_sentinel(input);
     let out_lines = non_sentinel(output);
     if out_lines.len() == in_lines.len() + 1
-        && out_lines.last().map(String::as_str) == Some("mcp_servers:")
+        && out_lines.last().map(String::as_str) == Some(spec.key)
     {
-        in_lines.push("mcp_servers:".to_owned());
+        in_lines.push(spec.key.to_owned());
     }
     if in_lines != out_lines {
         return Err(surprise("a non-managed line changed"));
     }
     // Re-analyze: every planned entry landed at its desired value; every removed key is gone.
-    let Ok(Shape::Region(region)) = analyze(output) else {
+    let Ok(Shape::Region(region)) = analyze(spec, output) else {
         return Err(surprise("output does not re-analyze"));
     };
     let managed_fp = |key: &str| -> Option<String> {
@@ -712,6 +808,7 @@ mod tests {
     #[test]
     fn fresh_file_creation_golden_bytes() {
         let out = apply(
+            McpDialect::HermesYaml,
             None,
             &[
                 McpEntry {
@@ -741,6 +838,7 @@ mod tests {
 
         // Add: lands directly under the key line; every other line verbatim.
         let out = apply(
+            McpDialect::HermesYaml,
             Some(USER.as_bytes()),
             std::slice::from_ref(&v1),
             &BTreeMap::new(),
@@ -754,6 +852,7 @@ mod tests {
 
         // Idempotent re-apply.
         let again = apply(
+            McpDialect::HermesYaml,
             Some(after_add.as_bytes()),
             std::slice::from_ref(&v1),
             &ledger1,
@@ -766,6 +865,7 @@ mod tests {
 
         // Update in place.
         let out = apply(
+            McpDialect::HermesYaml,
             Some(after_add.as_bytes()),
             std::slice::from_ref(&v2),
             &ledger1,
@@ -779,7 +879,12 @@ mod tests {
         let ledger2: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
 
         // Remove: back to the user-only original, byte-for-byte.
-        let out = apply(Some(after_update.as_bytes()), &[], &ledger2);
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(after_update.as_bytes()),
+            &[],
+            &ledger2,
+        );
         assert_eq!(
             out.states,
             vec![("topos-x".to_owned(), EntryState::Removed)]
@@ -792,6 +897,7 @@ mod tests {
         // No trailing newline on the last line — the appended block still separates cleanly.
         const USER: &str = "model: gpt-9";
         let out = apply(
+            McpDialect::HermesYaml,
             Some(USER.as_bytes()),
             &[entry("topos-x", "https://x")],
             &BTreeMap::new(),
@@ -812,7 +918,12 @@ mod tests {
         // Hand-edited value → Drifted; removal skips it; ledger keeps the prior fingerprint.
         const DRIFTED: &str =
             "mcp_servers:\n  topos-x: {url: \"https://hand-edited\"}  # topos:mcp\n";
-        let out = apply(Some(DRIFTED.as_bytes()), &[], &prior);
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(DRIFTED.as_bytes()),
+            &[],
+            &prior,
+        );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
             out.states,
@@ -822,14 +933,24 @@ mod tests {
 
         // A sentinel line whose value no longer parses → Drifted, untouched, never removed.
         const MANGLED: &str = "mcp_servers:\n  topos-x: {url: [broken  # topos:mcp\n";
-        let out = apply(Some(MANGLED.as_bytes()), &[], &prior);
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(MANGLED.as_bytes()),
+            &[],
+            &prior,
+        );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
             out.states,
             vec![("topos-x".to_owned(), EntryState::Drifted)]
         );
         // Even when desired: never replaced, never duplicated.
-        let out = apply(Some(MANGLED.as_bytes()), &[placed], &prior);
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(MANGLED.as_bytes()),
+            &[placed],
+            &prior,
+        );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
             out.states,
@@ -843,6 +964,7 @@ mod tests {
         const SENTINEL_FOREIGN: &str =
             "mcp_servers:\n  topos-y: {url: \"https://theirs\"}  # topos:mcp\n";
         let out = apply(
+            McpDialect::HermesYaml,
             Some(SENTINEL_FOREIGN.as_bytes()),
             &[entry("topos-y", "https://ours")],
             &BTreeMap::new(),
@@ -857,6 +979,7 @@ mod tests {
         // duplicate YAML key → Foreign, no insert.
         const PLAIN: &str = "mcp_servers:\n  topos-z: {url: \"https://theirs\"}\n";
         let out = apply(
+            McpDialect::HermesYaml,
             Some(PLAIN.as_bytes()),
             &[entry("topos-z", "https://ours")],
             &BTreeMap::new(),
@@ -873,7 +996,7 @@ mod tests {
         let e = [entry("topos-a", "https://a")];
         let none = BTreeMap::new();
         let unprovable_on = |text: &str, needle: &str| {
-            let out = apply(Some(text.as_bytes()), &e, &none);
+            let out = apply(McpDialect::HermesYaml, Some(text.as_bytes()), &e, &none);
             let EditPlan::Unprovable(reason) = &out.plan else {
                 panic!("expected Unprovable for {text:?}");
             };
@@ -891,7 +1014,12 @@ mod tests {
         unprovable_on("\"mcp_servers\":\n", "spelled");
         unprovable_on("mcp_servers :\n", "spelled");
         // Deliberately NOT unprovable: a trailing comment on the key line.
-        let out = apply(Some(b"mcp_servers: # servers\n"), &e, &none);
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(b"mcp_servers: # servers\n"),
+            &e,
+            &none,
+        );
         assert!(matches!(out.plan, EditPlan::Write(_)));
     }
 
@@ -899,6 +1027,7 @@ mod tests {
     fn off_indent_sentinel_lines_fail_the_whole_block_closed() {
         let unprovable_zero_writes = |text: &str| {
             let out = apply(
+                McpDialect::HermesYaml,
                 Some(text.as_bytes()),
                 &[entry("topos-x", "https://ours")],
                 &BTreeMap::new(),
@@ -912,7 +1041,7 @@ mod tests {
             );
             assert!(out.states.is_empty() && out.fingerprints.is_empty());
             // And observe is honest about the same shape: unknowable, never a guess.
-            let o = observe(Some(text.as_bytes()));
+            let o = observe(McpDialect::HermesYaml, Some(text.as_bytes()));
             assert!(!o.parseable && o.entries.is_empty(), "{text:?}");
         };
         // THE REVIEWER'S REPRODUCTION: a pasted sentinel entry at indent 4 sits ABOVE ours at
@@ -943,20 +1072,36 @@ mod tests {
         // A wholly topos-created file (key line + sentinel entries) holds nothing unmanaged;
         // neither does the post-removal skeleton or an empty file.
         let ours = write_of(&apply(
+            McpDialect::HermesYaml,
             None,
             &[entry("topos-x", "https://x")],
             &BTreeMap::new(),
         ));
-        assert!(!holds_unmanaged(ours.as_bytes()));
-        assert!(!holds_unmanaged(b"mcp_servers:\n"));
-        assert!(!holds_unmanaged(b""));
+        assert!(!holds_unmanaged(McpDialect::HermesYaml, ours.as_bytes()));
+        assert!(!holds_unmanaged(McpDialect::HermesYaml, b"mcp_servers:\n"));
+        assert!(!holds_unmanaged(McpDialect::HermesYaml, b""));
         // User content answers true: a plain child entry, another top-level key, a comment, a
         // trailing comment on the key line, and every unprovable shape.
-        assert!(holds_unmanaged(b"mcp_servers:\n  their: {url: \"u\"}\n"));
-        assert!(holds_unmanaged(b"model: gpt-9\nmcp_servers:\n"));
-        assert!(holds_unmanaged(b"# my config\nmcp_servers:\n"));
-        assert!(holds_unmanaged(b"mcp_servers: # servers\n"));
-        assert!(holds_unmanaged("\u{feff}mcp_servers:\n".as_bytes()));
+        assert!(holds_unmanaged(
+            McpDialect::HermesYaml,
+            b"mcp_servers:\n  their: {url: \"u\"}\n"
+        ));
+        assert!(holds_unmanaged(
+            McpDialect::HermesYaml,
+            b"model: gpt-9\nmcp_servers:\n"
+        ));
+        assert!(holds_unmanaged(
+            McpDialect::HermesYaml,
+            b"# my config\nmcp_servers:\n"
+        ));
+        assert!(holds_unmanaged(
+            McpDialect::HermesYaml,
+            b"mcp_servers: # servers\n"
+        ));
+        assert!(holds_unmanaged(
+            McpDialect::HermesYaml,
+            "\u{feff}mcp_servers:\n".as_bytes()
+        ));
     }
 
     #[test]
@@ -970,7 +1115,12 @@ mod tests {
                 &[("X-Quote", "say \"hi\""), ("odd name", "v")],
             )
         };
-        let out = apply(None, std::slice::from_ref(&e), &BTreeMap::new());
+        let out = apply(
+            McpDialect::HermesYaml,
+            None,
+            std::slice::from_ref(&e),
+            &BTreeMap::new(),
+        );
         let text = write_of(&out);
         assert!(text.contains("\"odd name\": \"v\""), "{text}");
         assert!(text.contains("X-Quote: \"say \\\"hi\\\"\""), "{text}");
@@ -978,7 +1128,12 @@ mod tests {
 
         // The emitted line parses back to the exact desired fingerprint → a re-apply is Current.
         let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
-        let again = apply(Some(text.as_bytes()), std::slice::from_ref(&e), &ledger);
+        let again = apply(
+            McpDialect::HermesYaml,
+            Some(text.as_bytes()),
+            std::slice::from_ref(&e),
+            &ledger,
+        );
         assert_eq!(again.plan, EditPlan::Leave);
         assert_eq!(
             again.states,
@@ -988,18 +1143,22 @@ mod tests {
 
     #[test]
     fn observe_reads_without_writing() {
-        let o = observe(None);
+        let o = observe(McpDialect::HermesYaml, None);
         assert!(o.parseable && o.entries.is_empty());
         let placed = entry("topos-x", "https://x");
         let text = write_of(&apply(
+            McpDialect::HermesYaml,
             None,
             std::slice::from_ref(&placed),
             &BTreeMap::new(),
         ));
-        let o = observe(Some(text.as_bytes()));
+        let o = observe(McpDialect::HermesYaml, Some(text.as_bytes()));
         assert!(o.parseable);
         assert_eq!(o.entries.get("topos-x"), Some(&fp(&placed)));
-        let o = observe(Some("\u{feff}mcp_servers:\n".as_bytes()));
+        let o = observe(
+            McpDialect::HermesYaml,
+            Some("\u{feff}mcp_servers:\n".as_bytes()),
+        );
         assert!(!o.parseable && o.entries.is_empty());
     }
 }
