@@ -1411,11 +1411,28 @@ fn a_reader_that_leaves_ends_the_run_cleanly() {
 ///
 /// The address is a loopback port bound only long enough to learn its number and then closed: the
 /// dial is refused instantly, with no name lookup and no network.
+///
+/// **`$HOME` is the scratch dir, not the developer's.** A server bundle's `add` converges every
+/// MCP-capable agent this machine has — and the machine roots the placement engine detects against
+/// come from `$HOME`, not from `TOPOS_HOME`. Inheriting the real one would write a fixture entry
+/// into somebody's actual `~/.codex/config.toml`. Nothing detects inside an empty home, so the
+/// adopt here reaches exactly nothing, which is what this test wants anyway.
 #[test]
 fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
     use std::net::{Ipv4Addr, TcpListener};
 
     let home = scratch("verify-home");
+    let hermetic = |args: &[&str]| -> std::process::Output {
+        Command::new(bin())
+            .env("TOPOS_HOME", &home)
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+            .env_remove("TOPOS_DEBUG")
+            .current_dir(work_dir(&home))
+            .args(args)
+            .output()
+            .expect("spawn topos")
+    };
     let port = {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port");
         listener.local_addr().unwrap().port()
@@ -1432,20 +1449,21 @@ fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
     )
     .unwrap();
 
-    let (ok, _) = run(
-        &home,
-        &[
-            "--json",
-            "add",
-            "-g",
-            "--kind",
-            "mcp",
-            bundle.to_str().unwrap(),
-        ],
+    let out = hermetic(&[
+        "--json",
+        "add",
+        "-g",
+        "--kind",
+        "mcp",
+        bundle.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "the server bundle adopts: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
-    assert!(ok, "the server bundle adopts");
 
-    let out = run_raw(&home, &["--json", "verify", "weather"], false);
+    let out = hermetic(&["--json", "verify", "weather"]);
     assert_eq!(
         out.status.code(),
         Some(4),
@@ -1469,7 +1487,7 @@ fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
     );
 
     // A refusal is not a verdict: exit 1, `ok: false`, and no payload at all.
-    let out = run_raw(&home, &["--json", "verify", "no-such-bundle"], false);
+    let out = hermetic(&["--json", "verify", "no-such-bundle"]);
     assert_eq!(out.status.code(), Some(1));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("an error envelope");
     assert_eq!(v["ok"], false);
