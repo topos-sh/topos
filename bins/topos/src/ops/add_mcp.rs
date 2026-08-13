@@ -596,10 +596,42 @@ fn summarize(
         version: summary.version.clone(),
         url: summary.url.clone(),
         transport: summary.transport.to_owned(),
+        packages: summary
+            .packages
+            .iter()
+            .map(|p| topos_types::results::McpPackageSummary {
+                registry: p.registry.clone(),
+                identifier: p.identifier.clone(),
+                version: p.version.clone(),
+            })
+            .collect(),
         auth: summary.auth_hint.map(|a| a.as_str().to_owned()),
         headers: summary.headers.iter().map(|h| h.name.clone()).collect(),
         bundle: bundle_dir.map(|d| d.display().to_string()),
         agents,
+    }
+}
+
+/// The one line that says WHAT this server is. A bundle offers an address every machine dials, a
+/// package every machine runs, or both — and the sentence names the one an agent here will
+/// actually use, because that is the fact a person is checking. (Both, in full, ride the typed
+/// block beside it.)
+fn what_it_is(summary: &McpSummary) -> String {
+    if !summary.url.is_empty() {
+        return format!("{} over {}", summary.url, summary.transport);
+    }
+    match summary.packages.first() {
+        Some(package) if package.version.is_empty() => {
+            format!(
+                "the {} package {}, run on this machine",
+                package.registry, package.identifier
+            )
+        }
+        Some(package) => format!(
+            "the {} package {}@{}, run on this machine",
+            package.registry, package.identifier, package.version
+        ),
+        None => "nothing an agent here can run".to_owned(),
     }
 }
 
@@ -631,8 +663,10 @@ fn fold_receipt(
     medit::push_note(
         data,
         format!(
-            "MCP server {} v{} — {} over {}{auth}",
-            summary.name, summary.version, summary.url, summary.transport
+            "MCP server {} v{} — {}{auth}",
+            summary.name,
+            summary.version,
+            what_it_is(summary)
         ),
     );
     if converge.reached_nobody() {

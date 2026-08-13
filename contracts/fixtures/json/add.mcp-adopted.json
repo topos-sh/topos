@@ -16,6 +16,13 @@
       "headers": [
         "X-Region"
       ],
+      "packages": [
+        {
+          "identifier": "@acme/weather-mcp",
+          "registry": "npm",
+          "version": "1.4.0"
+        }
+      ],
       "server": "io.github.acme/weather",
       "transport": "streamable-http",
       "url": "https://weather.acme.example/mcp",

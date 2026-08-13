@@ -292,6 +292,55 @@ fn a_local_folder_applies_immediately_with_a_kind_row() {
     );
 }
 
+/// **A bundle can be a package instead of an address, and the receipt says which it is.** The
+/// typed block carries both halves; the sentence a person reads names the thing this machine will
+/// actually run, because "over streamable-http" printed against an empty URL was the shape the
+/// receipt used to promise.
+#[test]
+fn a_package_only_bundle_is_adopted_and_the_receipt_names_the_package() {
+    let rig = Rig::new("local-package");
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    write_bundle(
+        &dir,
+        r#"{"name":"io.github.acme/weather","description":"Conditions for a named place.",
+            "version":"1.4.0","packages":[{"registryType":"npm",
+            "identifier":"@acme/weather-mcp","version":"1.4.0","transport":{"type":"stdio"}}]}"#,
+    );
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default())
+        .unwrap()
+        .data;
+
+    let mcp = data.mcp.as_ref().expect("the typed block");
+    assert!(mcp.url.is_empty(), "no address is offered: {:?}", mcp.url);
+    assert!(mcp.transport.is_empty());
+    assert_eq!(mcp.packages.len(), 1);
+    assert_eq!(mcp.packages[0].registry, "npm");
+    assert_eq!(mcp.packages[0].identifier, "@acme/weather-mcp");
+    assert_eq!(mcp.packages[0].version, "1.4.0");
+    let note = data.note.clone().unwrap_or_default();
+    assert!(
+        note.contains(
+            "MCP server io.github.acme/weather v1.4.0 — the npm package @acme/weather-mcp@1.4.0, \
+             run on this machine"
+        ),
+        "{note}"
+    );
+    // An ADDRESS bundle still reads exactly as it did.
+    let other = rig.work.0.join("weather-remote");
+    write_bundle(&other, &good_server());
+    let data = ops::add_mcp(&ctx, other.to_str().unwrap(), true, &Default::default())
+        .unwrap()
+        .data;
+    assert!(
+        data.note
+            .unwrap_or_default()
+            .contains("— https://weather.acme.example/mcp over streamable-http"),
+    );
+    assert!(data.mcp.expect("typed block").packages.is_empty());
+}
+
 /// `add --kind mcp` and `remove` stay EXACT FILE INVERSES even when the row carries a kind: the whole
 /// row is dropped, and the file returns to the bytes it had.
 #[test]

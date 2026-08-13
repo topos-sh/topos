@@ -832,6 +832,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 version: "1.4.0".to_owned(),
                 url: "https://weather.acme.example/mcp".to_owned(),
                 transport: "streamable-http".to_owned(),
+                // This one is an address AND a package: the agents that cannot dial the address
+                // run the package instead, and the receipt shows both.
+                packages: vec![topos_types::results::McpPackageSummary {
+                    registry: "npm".to_owned(),
+                    identifier: "@acme/weather-mcp".to_owned(),
+                    version: "1.4.0".to_owned(),
+                }],
                 auth: Some("oauth".to_owned()),
                 // Only LITERAL headers reach a receipt — a credential-shaped one refuses the
                 // whole document instead.

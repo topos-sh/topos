@@ -197,13 +197,24 @@ impl McpAuthHint {
     }
 }
 
+/// One package the document offers, as a receipt names it: where it comes from, what it is called
+/// there, and the version every machine installs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpPackage {
+    pub registry: String,
+    pub identifier: String,
+    /// Empty where the registry type carries the version inside the identifier (an OCI digest).
+    pub version: String,
+}
+
 /// What a receipt shows and what a describe reports — DERIVED, never the document echoed whole.
 ///
-/// `url` and `transport` are EMPTY when the document offers only packages: a bundle is allowed to
-/// be a thing every machine installs rather than a thing every machine dials, so a caller that
-/// prints an address asks which it is holding first. (Empty rather than an `Option` deliberately —
-/// the receipt types this feeds spell both fields as plain strings, and a summary that changed
-/// shape would be a wire change dressed up as a validator change.)
+/// `url` and `transport` are EMPTY when the document offers only packages, and `packages` is empty
+/// when it offers only an address: a bundle is allowed to be a thing every machine installs rather
+/// than a thing every machine dials, and a caller that prints one of the two asks which it is
+/// holding first. (Empty rather than an `Option` deliberately — the receipt types this feeds spell
+/// both fields as plain strings, and a summary that changed shape would be a wire change dressed
+/// up as a validator change.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct McpSummary {
     pub name: String,
@@ -213,6 +224,8 @@ pub(crate) struct McpSummary {
     pub transport: &'static str,
     pub headers: Vec<McpHeader>,
     pub auth_hint: Option<McpAuthHint>,
+    /// Every package the document offers, in its own order.
+    pub packages: Vec<McpPackage>,
 }
 
 // =================================================================================================
@@ -1492,6 +1505,22 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
         url,
         headers,
         auth_hint,
+        packages: packages
+            .iter()
+            .map(|p| {
+                let field = |key: &str| {
+                    p.get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                McpPackage {
+                    registry: field("registryType"),
+                    identifier: field("identifier"),
+                    version: field("version"),
+                }
+            })
+            .collect(),
     })
 }
 

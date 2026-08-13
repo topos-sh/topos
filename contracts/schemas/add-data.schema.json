@@ -344,6 +344,28 @@
         "same_path"
       ]
     },
+    "McpPackageSummary": {
+      "description": "One package a `kind = \"mcp\"` bundle offers — what a machine that RUNS the server installs, as\nopposed to the address a machine dials. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "description": "The package's name in that registry.",
+          "type": "string"
+        },
+        "registry": {
+          "description": "The registry it comes from (`npm`, `pypi`, `oci`, …) — an open vocabulary: a bundle may\nname any registry the official server format expresses, and a given topos sets up the ones\nit has a runtime for.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The exact version every machine installs. Absent only where the registry type carries the\nversion inside the identifier (an OCI digest).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "registry",
+        "identifier"
+      ]
+    },
     "McpServerSummary": {
       "description": "What an MCP `server.json` says, after the gate accepted it — the facts an applied `add`\nreceipt carries beside the undo, whether the document was adopted from a folder here or\ndelivered by a workspace subscribe. DERIVED from the document; the document itself is never\nechoed whole.\n**INFERRED** (additive-only).",
       "type": "object",
@@ -380,16 +402,23 @@
             "type": "string"
           }
         },
+        "packages": {
+          "description": "The packages the bundle offers, for the machines that run the server instead of dialing it\n— and for the agents that cannot dial one at all. Empty when the bundle is an address and\nnothing else.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpPackageSummary"
+          }
+        },
         "server": {
           "description": "The registry name (`io.github.<owner>/<server>`) — the server's own identity.",
           "type": "string"
         },
         "transport": {
-          "description": "The transport, always `streamable-http` today: the one a shared bundle can promise, since\nthe same URL has to work from every machine.",
+          "description": "The transport of that endpoint, always `streamable-http` today: the one a shared bundle can\npromise, since the same URL has to work from every machine. Empty exactly when `url` is.",
           "type": "string"
         },
         "url": {
-          "description": "The endpoint an agent will call — always `https`, never a template.",
+          "description": "The endpoint an agent will call — always `https`, never a template. EMPTY when the bundle\noffers no address at all: a server may be a package every machine runs instead (see\n`packages`).",
           "type": "string"
         },
         "version": {
