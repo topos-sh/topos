@@ -21,13 +21,14 @@ use crate::error::ClientError;
 pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The oldest server this build can speak to. The floor sits at the last release that broke the
-/// wire in a way a client CANNOT DEGRADE THROUGH — this one: the client stopped tolerating omitted
-/// fields on the delivery, index, log, and proposal documents (`kind`, the staleness window, the
-/// session status, proposal ownership are required reads now), so an older server's omissions
-/// would surface as parse failures, not degraded lines. Refusing it here instead names the fix.
+/// wire in a way a client CANNOT DEGRADE THROUGH — this one: a machine reports one state per
+/// MCP-capable agent, and this build knows more agents than an older server's report door accepts,
+/// so a machine that runs many of them has its WHOLE applied snapshot refused (the report is
+/// atomic — there is no partial one), and the workspace's picture of that machine stays stale for
+/// as long as it holds a server bundle. Refusing the old server here names the fix instead.
 /// Removals a client rides out on its own do not move this floor; a break with no graceful
 /// degradation moves it in the same change.
-pub(crate) const MIN_SERVER_VERSION: &str = "0.1.36";
+pub(crate) const MIN_SERVER_VERSION: &str = "0.1.37";
 
 /// The oldest server that RECORDS MCP bundle kinds — the floor a `kind = "mcp"` publish checks
 /// before its op WAL, because an older server ignores the additive `kind` field and silently

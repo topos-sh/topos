@@ -2019,7 +2019,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             current_generation: None,
             context: serde_json::json!({
                 "message": "that server is too old for this topos — it runs 0.1.9, and this \
-                            build speaks to 0.1.36 and later; ask whoever runs the server to \
+                            build speaks to 0.1.37 and later; ask whoever runs the server to \
                             update it, or pin this machine back to the server's release"
             }),
             next_actions: server_too_old_actions,
