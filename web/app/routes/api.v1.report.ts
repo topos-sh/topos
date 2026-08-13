@@ -19,8 +19,12 @@ const SKILL_ID = /^[a-z0-9_-]{1,128}$/;
 // checked; a reader that meets an unknown state ignores it.
 const HARNESS_SLUG = /^[a-z0-9-]{1,64}$/;
 const HARNESS_STATE = /^[a-z-]{1,32}$/;
-/** More harnesses than any one installation runs — the shape cap on a client-asserted list. */
-const MAX_HARNESSES = 12;
+/**
+ * More harnesses than any one installation runs — the shape cap on a client-asserted list. The
+ * harness table itself grows (13 MCP-capable rows today), so the bound is sized to stay an abuse
+ * fence, never a ceiling a full fleet report can reach.
+ */
+const MAX_HARNESSES = 64;
 const MAX_NOTE = 200;
 
 /**
