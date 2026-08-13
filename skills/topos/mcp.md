@@ -23,11 +23,13 @@ immutable `topos-…` key, so never hand-edit those entries or rename them (a re
 agent's OAuth sign-in). An entry a human edited reads `drifted` and is left byte-identical forever.
 
 WHAT each agent gets is decided per agent: the address where the agent dials one, the address
-through `npx -y mcp-remote@<pinned>` where it cannot, else the pinned package (npm before PyPI). An
-empty environment slot is written as a REFERENCE to a variable of that name (`${VAR}`, or
-`{env:VAR}` for OpenCode) — the name travels, the value never does. What this machine cannot set up
-says so and retries on the next sweep: `not placed: needs node, which is not on this machine.` ·
-`not placed: this bundle is packaged as <type>, which this version of topos cannot set up yet.`
+through `npx -y mcp-remote@<pinned>` where it cannot, else the pinned package (npm before PyPI, and
+only one spoken to over stdio). An empty environment slot travels as a NAME, written in the form
+that agent reads (`${VAR}`, `{env:VAR}` for OpenCode, an `env_vars` list for Codex) — the name
+travels, the value never does. What this machine cannot set up says so and retries on the next
+sweep: `not placed: needs node, which is not on this machine.` ·
+`not placed: this bundle is packaged as <type>, which this version of topos cannot set up yet.` ·
+`not placed: this bundle's package serves over <transport>, which this version of topos cannot set up yet.`
 Relay those lines — installing the runtime is the whole fix.
 
 The gate is the same client-side and server-side, and refuses BEFORE anything is written:
