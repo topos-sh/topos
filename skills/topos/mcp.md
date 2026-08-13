@@ -32,6 +32,14 @@ sweep: `not placed: needs node, which is not on this machine.` ·
 `not placed: this bundle's package serves over <transport>, which this version of topos cannot set up yet.`
 Relay those lines — installing the runtime is the whole fix.
 
+When a server misbehaves, run `topos verify <name>`: topos dials the address (or runs the package)
+and asks the server for its tools, live, storing nothing. RELAY the one line it prints — it is the
+whole answer, and its exit code repeats it: `responding (N tools)` = 0 ·
+`sign-in required - healthy; your agent app completes sign-in on first use` = 3 (the RIGHT answer for
+an OAuth server — topos holds no credential) · `not reachable: <reason>` = 4 ·
+`reachable but not answering as an MCP server: <detail>` = 5. A refusal (no such bundle, a skill)
+exits 1.
+
 The gate is the same client-side and server-side, and refuses BEFORE anything is written:
 `MCP_PACKAGE_UNPINNED` (a package without one exact version), `MCP_NO_STREAMABLE_REMOTE`
 (neither a usable remote nor a package), `MCP_INSECURE_URL`,

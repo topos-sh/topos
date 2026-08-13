@@ -46,3 +46,14 @@ Grounding: the `server.json` schema revision this codebase mirrors, and the publ
 rules it applies (version pinning per registry type, the structured argument and environment-input
 shapes). Reimplemented in `bins/topos/src/mcp_validate.rs` and `web/app/lib/mcp/validate.server.ts`;
 no code copied.
+
+## Server verification rules
+
+**[modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk)**
+(the `@modelcontextprotocol/client` package) — MIT, Copyright (c) 2024 Anthropic, PBC.
+Grounding: the client-side rules a live server check classifies by — an authentication challenge
+outranks whatever the body says and is a healthy state rather than a failure; a rate-limit or
+server-error status is an outage and never evidence about the protocol; a redirect is not followed;
+and the era detection that reads an unrecognized JSON-RPC error as "this peer speaks the older,
+handshake-based revision" rather than keying the fallback to one error code. Reimplemented in Rust
+in `bins/topos/src/ops/verify/`; no code copied.
