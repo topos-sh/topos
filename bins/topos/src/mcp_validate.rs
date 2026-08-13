@@ -54,7 +54,13 @@ pub(crate) const MCP_ALLOWED_FILES: &[&str] = &["server.json", "README.md"];
 
 /// Header NAMES that carry a credential by definition — refused case-insensitively, independent
 /// of `isSecret`, value shape, or entropy. A literal `Authorization: Basic …` is somebody's
-/// credential whatever the flags say. Mirrors the web tier's list exactly.
+/// credential whatever the flags say.
+///
+/// FROM THE SHARED VECTORS (`tests/fixtures/mcp/secret-patterns.json`), like the shapes above: the
+/// two vocabularies were written out twice and drifted, and a word one gate had and the other did
+/// not is a bundle publication accepts and every client's update refuses — permanently unplaceable,
+/// with nothing on either side to say why. The drift gate below reads the JSON back and asserts
+/// this list is it, so the list cannot move here without moving there.
 const CREDENTIAL_HEADER_NAMES: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -75,7 +81,9 @@ const CREDENTIAL_HEADER_NAMES: &[&str] = &[
 /// named for a credential passes — with `isSecret` on it or not. What does not pass is such a slot
 /// arriving with the VALUE already in it: those bytes travel to every machine in the workspace.
 /// (Remote headers answer to their own, stricter rules: topos writes them into every agent's config
-/// verbatim, so a slot there is unplaceable rather than merely unwise.) Mirrors the web tier exactly.
+/// verbatim, so a slot there is unplaceable rather than merely unwise.)
+///
+/// FROM THE SHARED VECTORS, and drift-gated against them — see [`CREDENTIAL_HEADER_NAMES`].
 const CREDENTIAL_NAME_WORDS: &[&str] = &[
     "token",
     "secret",
@@ -1694,6 +1702,21 @@ mod tests {
                 < f64::EPSILON,
             "the entropy threshold drifted"
         );
+        // The two NAME vocabularies, the same way. These decided different things in the two gates
+        // until one of them grew a word the other did not have; the shared file is now the source
+        // and this is what holds both sides to it.
+        for (field, compiled) in [
+            ("credentialHeaderNames", CREDENTIAL_HEADER_NAMES),
+            ("credentialNameWords", CREDENTIAL_NAME_WORDS),
+        ] {
+            let listed: Vec<&str> = json[field]
+                .as_array()
+                .unwrap_or_else(|| panic!("{field} is an array"))
+                .iter()
+                .map(|v| v.as_str().expect("a string"))
+                .collect();
+            assert_eq!(listed, compiled, "{field} drifted from the shared vectors");
+        }
     }
 
     /// Every probe the equivalence test drives both engines over: hand-written boundary cases per

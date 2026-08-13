@@ -2,7 +2,12 @@ import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { SECRET_ENTROPY, SECRET_PATTERNS } from "@/lib/mcp/secret-patterns.generated";
+import {
+  CREDENTIAL_HEADER_NAMES,
+  CREDENTIAL_NAME_WORDS,
+  SECRET_ENTROPY,
+  SECRET_PATTERNS,
+} from "@/lib/mcp/secret-patterns.generated";
 import {
   findSecret,
   findSecretDeep,
@@ -258,9 +263,16 @@ describe("the credential scan", () => {
     const source = JSON.parse(readFileSync(join(FIXTURES, "secret-patterns.json"), "utf8")) as {
       patterns: { name: string; regex: string }[];
       entropy: { minLength: number; threshold: number };
+      credentialHeaderNames: string[];
+      credentialNameWords: string[];
     };
     expect(SECRET_PATTERNS.map((p) => ({ name: p.name, regex: p.regex }))).toEqual(source.patterns);
     expect({ ...SECRET_ENTROPY }).toEqual(source.entropy);
+    // The two NAME vocabularies, the same way. These were written out twice, in two languages,
+    // and drifted — the client's list grew `privatekey` and this one did not, so a slot called
+    // PRIVATE_KEY published here and was refused by every client's update.
+    expect([...CREDENTIAL_HEADER_NAMES]).toEqual(source.credentialHeaderNames);
+    expect([...CREDENTIAL_NAME_WORDS]).toEqual(source.credentialNameWords);
   });
 
   it.each([

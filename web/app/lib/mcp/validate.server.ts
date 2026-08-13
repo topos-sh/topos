@@ -1,4 +1,9 @@
-import { SECRET_ENTROPY, SECRET_PATTERNS } from "./secret-patterns.generated";
+import {
+  CREDENTIAL_HEADER_NAMES as CREDENTIAL_HEADER_NAME_LIST,
+  CREDENTIAL_NAME_WORDS,
+  SECRET_ENTROPY,
+  SECRET_PATTERNS,
+} from "./secret-patterns.generated";
 
 /**
  * THE MCP SERVER-DOCUMENT GATE — one function, used by every door that can put a `kind: 'mcp'`
@@ -55,43 +60,27 @@ export const MAX_SERVER_JSON_BYTES = 256 * 1024;
 export const MCP_ALLOWED_FILES = ["server.json", "README.md"] as const;
 
 /**
- * Header NAMES that carry a credential by definition — refused case-insensitively, independent
+ * THE TWO NAME VOCABULARIES, from the shared vectors — `tests/fixtures/mcp/secret-patterns.json`,
+ * the same file the client's gate compiles in. They were written out twice, in two languages, and
+ * drifted: one list grew `privatekey` and the other did not, so a package slot called
+ * `PRIVATE_KEY` arriving with a value passed publication here and was refused by every client's
+ * update — an authority-approved bundle, permanently unplaceable, with nothing on either side to
+ * say why. One source, generated into a module, drift-gated by `check:mcp-patterns`.
+ *
+ * Header names carry a credential BY DEFINITION — matched whole, case-insensitively, independent
  * of `isSecret`, value shape, or entropy. A literal `Authorization: Basic …` is somebody's
  * credential whatever the flags say.
- */
-const CREDENTIAL_HEADER_NAMES = new Set([
-  "authorization",
-  "proxy-authorization",
-  "cookie",
-  "set-cookie",
-  "x-api-key",
-  "api-key",
-  "x-auth-token",
-  "x-access-token",
-  "private-token",
-]);
-
-/**
- * The words that make a NAME say "a credential goes here" — read after folding the name to
- * letters and digits, so `GITHUB_TOKEN`, `github-token` and `githubToken` are one word to this.
  *
- * A package's environment variables and command-line flags are SLOTS: the machine that runs the
- * server fills them from its own keychain, which is exactly the arrangement this product wants.
- * So a slot named for a credential passes — with `isSecret` on it or not. What does not pass is a
- * slot named for a credential that arrives with the VALUE already in it: those bytes travel to
- * every machine in the workspace, and a credential that travels is a credential leaked. (Remote
- * headers answer to their own, stricter rules above: topos writes them into every agent's config
- * verbatim, so a slot there is unplaceable rather than merely unwise.)
+ * The name WORDS are read after folding a slot's name to letters and digits, so `GITHUB_TOKEN`,
+ * `github-token` and `githubToken` are one word to this. A package's environment variables and
+ * command-line flags are SLOTS: the machine that runs the server fills them from its own keychain,
+ * which is exactly the arrangement this product wants. So a slot named for a credential passes —
+ * with `isSecret` on it or not. What does not pass is such a slot arriving with the VALUE already
+ * in it: those bytes travel to every machine in the workspace, and a credential that travels is a
+ * credential leaked. (Remote headers answer to their own, stricter rules below: topos writes them
+ * into every agent's config verbatim, so a slot there is unplaceable rather than merely unwise.)
  */
-const CREDENTIAL_NAME_WORDS = [
-  "token",
-  "secret",
-  "password",
-  "passwd",
-  "apikey",
-  "credential",
-  "accesskey",
-];
+const CREDENTIAL_HEADER_NAMES = new Set<string>(CREDENTIAL_HEADER_NAME_LIST);
 
 /** Does this env-var / flag / package-header name say it holds a credential? */
 function looksLikeCredentialName(name: string): boolean {
