@@ -449,6 +449,158 @@ export function looksLikeVersionRange(version: string): boolean {
 /** The moving pointer the registry reserves — never a version anyone can pin to. */
 const RESERVED_VERSION = "latest";
 
+/**
+ * ONE EXACT VERSION, read POSITIVELY — the grammar the registry itself publishes under, not a list
+ * of the range spellings anyone thought of.
+ *
+ * A blacklist of ranges is the wrong shape for this rule and was: `*`, `x` and a dist-tag like
+ * `next` are none of the listed range spellings, so they passed as "exact" — and npm resolves each
+ * of them to whatever is current on the day a given machine installs, which is precisely the thing
+ * "the same bytes everywhere" forbids. For the two registries this build knows the version grammar
+ * of, the version must therefore MATCH that grammar and nothing else is accepted. Every other
+ * `registryType` stays open-world and keeps the range belt below — this build cannot claim to know
+ * a grammar it has never read.
+ *
+ * Hand-parsed rather than pattern-matched, character for character, because the client's gate
+ * carries no regex engine and the two have to answer identically over the shared vectors.
+ */
+
+/** A semver numeric identifier: digits, and no leading zero past a bare `0`. */
+function isNumericIdentifier(part: string): boolean {
+  if (part.length === 0 || !/^[0-9]+$/.test(part)) {
+    return false;
+  }
+  return part === "0" || !part.startsWith("0");
+}
+
+/** A dot-separated run of `[0-9A-Za-z-]` identifiers, each non-empty — a build metadata tail. */
+function isDotSeparatedIdentifiers(text: string, numericRule: boolean): boolean {
+  if (text.length === 0) {
+    return false;
+  }
+  return text.split(".").every((part) => {
+    if (part.length === 0 || !/^[0-9A-Za-z-]+$/.test(part)) {
+      return false;
+    }
+    // A pre-release identifier that is all digits is a NUMBER, and semver forbids leading zeros
+    // on one. Build metadata has no such rule — `+build.007` is legal.
+    return !numericRule || !/^[0-9]+$/.test(part) || isNumericIdentifier(part);
+  });
+}
+
+/** `X.Y.Z`, optionally `-prerelease` and `+build` — strict semver, exactly what npm publishes. */
+export function isExactSemver(version: string): boolean {
+  const plus = version.indexOf("+");
+  const beforeBuild = plus === -1 ? version : version.slice(0, plus);
+  if (plus !== -1 && !isDotSeparatedIdentifiers(version.slice(plus + 1), false)) {
+    return false;
+  }
+  const dash = beforeBuild.indexOf("-");
+  const core = dash === -1 ? beforeBuild : beforeBuild.slice(0, dash);
+  if (dash !== -1 && !isDotSeparatedIdentifiers(beforeBuild.slice(dash + 1), true)) {
+    return false;
+  }
+  const parts = core.split(".");
+  return parts.length === 3 && parts.every(isNumericIdentifier);
+}
+
+/** How many digits `text` carries from `at`. */
+function digitRun(text: string, at: number): number {
+  let n = 0;
+  while (at + n < text.length) {
+    const code = text.charCodeAt(at + n);
+    if (code < 48 || code > 57) {
+      break;
+    }
+    n += 1;
+  }
+  return n;
+}
+
+/** PEP 440's separator between a release and the segment that follows it. */
+function isPep440Separator(ch: string | undefined): boolean {
+  return ch === "-" || ch === "_" || ch === ".";
+}
+
+/** One optional `<sep?><label><sep?><digits?>` segment; returns the position after it, or `at`. */
+function readLabelled(text: string, at: number, labels: readonly string[]): number {
+  let p = at;
+  if (isPep440Separator(text[p])) {
+    p += 1;
+  }
+  for (const label of labels) {
+    if (!text.startsWith(label, p)) {
+      continue;
+    }
+    let q = p + label.length;
+    if (isPep440Separator(text[q])) {
+      q += 1;
+    }
+    return q + digitRun(text, q);
+  }
+  return at;
+}
+
+/**
+ * A PEP 440 public version, and only one: `[N!]N(.N)*[{a|b|rc}N][.postN][.devN][+local]`. No
+ * comparison operator, no `*`, no dist-tag — those are the spellings that name a SET.
+ */
+export function isExactPep440(version: string): boolean {
+  const text = version.toLowerCase();
+  let pos = 0;
+  if (text[pos] === "v") {
+    pos += 1;
+  }
+  // An epoch, when one is spelled: digits then `!`.
+  const epoch = digitRun(text, pos);
+  if (epoch > 0 && text[pos + epoch] === "!") {
+    pos += epoch + 1;
+  }
+  // The release segment: at least one number, then any run of `.N`.
+  const first = digitRun(text, pos);
+  if (first === 0) {
+    return false;
+  }
+  pos += first;
+  for (;;) {
+    if (text[pos] !== ".") {
+      break;
+    }
+    const next = digitRun(text, pos + 1);
+    if (next === 0) {
+      break;
+    }
+    pos += 1 + next;
+  }
+  pos = readLabelled(text, pos, ["preview", "pre", "alpha", "beta", "rc", "a", "b", "c"]);
+  // The implicit post-release spelling (`1.0-1`) comes before the labelled one.
+  const implicitPost = text[pos] === "-" ? digitRun(text, pos + 1) : 0;
+  pos =
+    implicitPost > 0 ? pos + 1 + implicitPost : readLabelled(text, pos, ["post", "rev", "r"]);
+  pos = readLabelled(text, pos, ["dev"]);
+  if (text[pos] === "+") {
+    const local = text.slice(pos + 1);
+    if (local.length === 0) {
+      return false;
+    }
+    return local
+      .split(/[-_.]/)
+      .every((segment) => segment.length > 0 && /^[a-z0-9]+$/.test(segment));
+  }
+  return pos === text.length;
+}
+
+/** Whether this registry's version grammar is one this build reads — and how. */
+function exactVersionOf(registryType: string): ((version: string) => boolean) | null {
+  if (registryType === "npm") {
+    return isExactSemver;
+  }
+  if (registryType === "pypi") {
+    return isExactPep440;
+  }
+  return null;
+}
+
 /** A sha-256 digest as the OCI reference spells it. */
 const OCI_DIGEST = /@sha256:[a-f0-9]{64}$/;
 
@@ -632,6 +784,7 @@ function checkPackage(entry: unknown): { ok: true; summary: McpPackage } | McpRe
   }
   const version = typeof rawVersion === "string" && rawVersion.length > 0 ? rawVersion : null;
   const type = registryType.toLowerCase();
+  const exact = exactVersionOf(type);
   if (type === "oci") {
     if (!ociReferenceIsPinned(identifier)) {
       return refuse(
@@ -647,13 +800,11 @@ function checkPackage(entry: unknown): { ok: true; summary: McpPackage } | McpRe
         "an MCPB package is identified by the sha-256 of its file (fileSha256) — without it nobody can tell which bytes arrived",
       );
     }
-  } else if (type === "npm" || type === "pypi") {
-    if (version === null) {
-      return refuse(
-        "MCP_PACKAGE_UNPINNED",
-        `a ${type} package names the exact version every machine installs`,
-      );
-    }
+  } else if (exact !== null && version === null) {
+    return refuse(
+      "MCP_PACKAGE_UNPINNED",
+      `a ${type} package names the exact version every machine installs`,
+    );
   }
   if (version !== null) {
     if (version === RESERVED_VERSION) {
@@ -662,10 +813,19 @@ function checkPackage(entry: unknown): { ok: true; summary: McpPackage } | McpRe
         `${RESERVED_VERSION} is not a version — it is whatever the registry serves today`,
       );
     }
-    if (looksLikeVersionRange(version)) {
+    if (exact === null) {
+      // An open-world registry type: this build has not read its version grammar, so the honest
+      // rule is the one that reads the same everywhere — a spelling that names a SET refuses.
+      if (looksLikeVersionRange(version)) {
+        return refuse(
+          "MCP_PACKAGE_UNPINNED",
+          `${version} is a range, not a version — a shared bundle installs the same bytes on every machine`,
+        );
+      }
+    } else if (!exact(version)) {
       return refuse(
         "MCP_PACKAGE_UNPINNED",
-        `${version} is a range, not a version — a shared bundle installs the same bytes on every machine`,
+        `${version} is not one exact version — a ${type} package names the one version every machine installs`,
       );
     }
     if (codePointLength(version) > VERSION_MAX) {

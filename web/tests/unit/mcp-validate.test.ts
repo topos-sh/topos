@@ -6,6 +6,8 @@ import { SECRET_ENTROPY, SECRET_PATTERNS } from "@/lib/mcp/secret-patterns.gener
 import {
   findSecret,
   findSecretDeep,
+  isExactPep440,
+  isExactSemver,
   MAX_SERVER_JSON_BYTES,
   MCP_ALLOWED_FILES,
   type McpValidation,
@@ -177,6 +179,77 @@ describe("the accepted summary", () => {
   it("suggests the tail segment of the registry name as the catalog name", () => {
     expect(suggestedNameFor("io.github.acme/weather")).toBe("weather");
     expect(suggestedNameFor("weather")).toBe("weather");
+  });
+});
+
+describe("the exact-version grammars", () => {
+  /**
+   * Probe for probe, the SAME table the client's suite drives. A grammar that answered differently
+   * on the two sides would publish a bundle no client could ever place — the failure the shared
+   * vectors exist to prevent, here at the level below them.
+   */
+  it("takes one version and nothing else, on both registries", () => {
+    for (const one of [
+      "1.2.3",
+      "0.0.0",
+      "10.20.30",
+      "1.2.3-beta.1",
+      "1.2.3-rc.1+build.5",
+      "1.2.3+build.5",
+      "1.0.0-alpha-1",
+    ]) {
+      expect(isExactSemver(one), `npm: ${one}`).toBe(true);
+    }
+    for (const many of [
+      "*",
+      "x",
+      "next",
+      "latest",
+      "1",
+      "1.2",
+      "v1.2.3",
+      "1.2.3.4",
+      "^1.2.3",
+      ">=1.0.0",
+      "1.x",
+      "01.2.3",
+      "1.2.3-",
+      "1.2.3+",
+      "1.2.3-01",
+      " 1.2.3",
+      "",
+    ]) {
+      expect(isExactSemver(many), `npm: ${many}`).toBe(false);
+    }
+    for (const one of [
+      "1.0",
+      "0.4.2",
+      "2.0.0rc1",
+      "1.0.dev1",
+      "1!2.0",
+      "1.0.post1",
+      "1.0b2.post345.dev456",
+      "1.0+ubuntu.1",
+      "v1.0",
+    ]) {
+      expect(isExactPep440(one), `pypi: ${one}`).toBe(true);
+    }
+    for (const many of [
+      "*",
+      "latest",
+      "next",
+      "1.*",
+      "1.0.*",
+      ">=1.0",
+      "==1.0",
+      "~=1.0",
+      "1.0+",
+      "abc",
+      "1.0 ",
+      "",
+    ]) {
+      expect(isExactPep440(many), `pypi: ${many}`).toBe(false);
+    }
   });
 });
 

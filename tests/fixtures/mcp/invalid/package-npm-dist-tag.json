@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/files",
+  "description": "A package pinned to a moving dist-tag.",
+  "version": "2.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-files",
+      "version": "next",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

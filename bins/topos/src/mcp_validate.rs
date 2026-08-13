@@ -837,6 +837,169 @@ fn looks_like_version_range(version: &str) -> bool {
         && (trimmed.contains('x') || trimmed.contains('X') || trimmed.contains('*'))
 }
 
+// ── One exact version, per registry ──────────────────────────────────────────────────────────
+//
+// ONE EXACT VERSION, read POSITIVELY — the grammar the registry itself publishes under, not a list
+// of the range spellings anyone thought of.
+//
+// A blacklist of ranges is the wrong shape for this rule and was: `*`, `x` and a dist-tag like
+// `next` are none of the listed range spellings, so they passed as "exact" — and npm resolves each
+// of them to whatever is current on the day a given machine installs, which is precisely the thing
+// "the same bytes everywhere" forbids. For the two registries this build knows the version grammar
+// of, the version must therefore MATCH that grammar and nothing else is accepted. Every other
+// `registryType` stays open-world and keeps the range belt above — this build cannot claim to know
+// a grammar it has never read.
+//
+// Hand-parsed rather than pattern-matched, character for character, because no regex engine ships
+// in this binary and the two tiers have to answer identically over the shared vectors.
+
+/// A semver numeric identifier: digits, and no leading zero past a bare `0`.
+fn is_numeric_identifier(part: &str) -> bool {
+    !part.is_empty()
+        && part.bytes().all(|b| b.is_ascii_digit())
+        && (part == "0" || !part.starts_with('0'))
+}
+
+/// A dot-separated run of `[0-9A-Za-z-]` identifiers, each non-empty. A pre-release identifier that
+/// is all digits is a NUMBER, and semver forbids leading zeros on one (`numeric_rule`); build
+/// metadata has no such rule — `+build.007` is legal.
+fn is_dot_separated_identifiers(text: &str, numeric_rule: bool) -> bool {
+    !text.is_empty()
+        && text.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && (!numeric_rule
+                    || !part.bytes().all(|b| b.is_ascii_digit())
+                    || is_numeric_identifier(part))
+        })
+}
+
+/// `X.Y.Z`, optionally `-prerelease` and `+build` — strict semver, exactly what npm publishes.
+fn is_exact_semver(version: &str) -> bool {
+    let (before_build, build) = match version.split_once('+') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (version, None),
+    };
+    if let Some(build) = build
+        && !is_dot_separated_identifiers(build, false)
+    {
+        return false;
+    }
+    let (core, pre) = match before_build.split_once('-') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (before_build, None),
+    };
+    if let Some(pre) = pre
+        && !is_dot_separated_identifiers(pre, true)
+    {
+        return false;
+    }
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|part| is_numeric_identifier(part))
+}
+
+/// How many digits `text` carries from `at` (ASCII, so every index stays on a char boundary).
+fn digit_run(text: &str, at: usize) -> usize {
+    text.as_bytes()[at.min(text.len())..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count()
+}
+
+/// The byte at `at`, or `None` past the end.
+fn byte_at(text: &str, at: usize) -> Option<u8> {
+    text.as_bytes().get(at).copied()
+}
+
+/// PEP 440's separator between a release and the segment that follows it.
+fn is_pep440_separator(byte: Option<u8>) -> bool {
+    matches!(byte, Some(b'-' | b'_' | b'.'))
+}
+
+/// One optional `<sep?><label><sep?><digits?>` segment; answers the position after it, or `at`.
+fn read_labelled(text: &str, at: usize, labels: &[&str]) -> usize {
+    let mut p = at;
+    if is_pep440_separator(byte_at(text, p)) {
+        p += 1;
+    }
+    for label in labels {
+        if !text[p.min(text.len())..].starts_with(label) {
+            continue;
+        }
+        let mut q = p + label.len();
+        if is_pep440_separator(byte_at(text, q)) {
+            q += 1;
+        }
+        return q + digit_run(text, q);
+    }
+    at
+}
+
+/// A PEP 440 public version, and only one: `[N!]N(.N)*[{a|b|rc}N][.postN][.devN][+local]`. No
+/// comparison operator, no `*`, no dist-tag — those are the spellings that name a SET.
+fn is_exact_pep440(version: &str) -> bool {
+    let text = version.to_ascii_lowercase();
+    let text = text.as_str();
+    let mut pos = 0usize;
+    if byte_at(text, pos) == Some(b'v') {
+        pos += 1;
+    }
+    // An epoch, when one is spelled: digits then `!`.
+    let epoch = digit_run(text, pos);
+    if epoch > 0 && byte_at(text, pos + epoch) == Some(b'!') {
+        pos += epoch + 1;
+    }
+    // The release segment: at least one number, then any run of `.N`.
+    let first = digit_run(text, pos);
+    if first == 0 {
+        return false;
+    }
+    pos += first;
+    while byte_at(text, pos) == Some(b'.') {
+        let next = digit_run(text, pos + 1);
+        if next == 0 {
+            break;
+        }
+        pos += 1 + next;
+    }
+    pos = read_labelled(
+        text,
+        pos,
+        &["preview", "pre", "alpha", "beta", "rc", "a", "b", "c"],
+    );
+    // The implicit post-release spelling (`1.0-1`) comes before the labelled one.
+    let implicit_post = if byte_at(text, pos) == Some(b'-') {
+        digit_run(text, pos + 1)
+    } else {
+        0
+    };
+    pos = if implicit_post > 0 {
+        pos + 1 + implicit_post
+    } else {
+        read_labelled(text, pos, &["post", "rev", "r"])
+    };
+    pos = read_labelled(text, pos, &["dev"]);
+    if byte_at(text, pos) == Some(b'+') {
+        let local = &text[pos + 1..];
+        return !local.is_empty()
+            && local.split(['-', '_', '.']).all(|segment| {
+                !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_alphanumeric())
+            });
+    }
+    pos == text.len()
+}
+
+/// Whether this registry's version grammar is one this build reads — and how.
+fn exact_version_of(registry_type: &str) -> Option<fn(&str) -> bool> {
+    match registry_type {
+        "npm" => Some(is_exact_semver),
+        "pypi" => Some(is_exact_pep440),
+        _ => None,
+    }
+}
+
 /// 64 lowercase hex — the schema's own `fileSha256` shape.
 fn is_file_sha256(value: &str) -> bool {
     value.len() == 64
@@ -1079,6 +1242,7 @@ fn check_package(entry: &Value) -> Result<(), McpRefusal> {
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty());
     let lowered = registry_type.to_ascii_lowercase();
+    let exact = exact_version_of(&lowered);
     match lowered.as_str() {
         "oci" => {
             if !oci_reference_is_pinned(identifier) {
@@ -1104,7 +1268,7 @@ fn check_package(entry: &Value) -> Result<(), McpRefusal> {
                 );
             }
         }
-        "npm" | "pypi" if version.is_none() => {
+        _ if exact.is_some() && version.is_none() => {
             return refuse(
                 McpRefusalCode::PackageUnpinned,
                 format!("a {lowered} package names the exact version every machine installs"),
@@ -1121,14 +1285,29 @@ fn check_package(entry: &Value) -> Result<(), McpRefusal> {
                 ),
             );
         }
-        if looks_like_version_range(version) {
-            return refuse(
-                McpRefusalCode::PackageUnpinned,
-                format!(
-                    "{version} is a range, not a version — a shared bundle installs the same bytes \
-                     on every machine"
-                ),
-            );
+        match exact {
+            // An open-world registry type: this build has not read its version grammar, so the
+            // honest rule is the one that reads the same everywhere — a spelling that names a SET
+            // refuses.
+            None if looks_like_version_range(version) => {
+                return refuse(
+                    McpRefusalCode::PackageUnpinned,
+                    format!(
+                        "{version} is a range, not a version — a shared bundle installs the same \
+                         bytes on every machine"
+                    ),
+                );
+            }
+            Some(is_exact) if !is_exact(version) => {
+                return refuse(
+                    McpRefusalCode::PackageUnpinned,
+                    format!(
+                        "{version} is not one exact version — a {lowered} package names the one \
+                         version every machine installs"
+                    ),
+                );
+            }
+            _ => {}
         }
         if version.chars().count() > VERSION_MAX {
             return refuse(
@@ -1886,6 +2065,49 @@ mod tests {
             ),
             Err(McpRefusalCode::PackageUnpinned)
         );
+    }
+
+    /// The two version grammars this build reads, probe for probe. The web tier's suite drives the
+    /// SAME table: a grammar that answered differently on the two sides would publish a bundle no
+    /// client could ever place, which is the whole failure the shared vectors exist to prevent.
+    #[test]
+    fn the_exact_version_grammars_take_one_version_and_nothing_else() {
+        for one in [
+            "1.2.3",
+            "0.0.0",
+            "10.20.30",
+            "1.2.3-beta.1",
+            "1.2.3-rc.1+build.5",
+            "1.2.3+build.5",
+            "1.0.0-alpha-1",
+        ] {
+            assert!(is_exact_semver(one), "npm: {one}");
+        }
+        for many in [
+            "*", "x", "next", "latest", "1", "1.2", "v1.2.3", "1.2.3.4", "^1.2.3", ">=1.0.0", "1.x",
+            "01.2.3", "1.2.3-", "1.2.3+", "1.2.3-01", " 1.2.3", "",
+        ] {
+            assert!(!is_exact_semver(many), "npm: {many}");
+        }
+        for one in [
+            "1.0",
+            "0.4.2",
+            "2.0.0rc1",
+            "1.0.dev1",
+            "1!2.0",
+            "1.0.post1",
+            "1.0b2.post345.dev456",
+            "1.0+ubuntu.1",
+            "v1.0",
+        ] {
+            assert!(is_exact_pep440(one), "pypi: {one}");
+        }
+        for many in [
+            "*", "latest", "next", "1.*", "1.0.*", ">=1.0", "==1.0", "~=1.0", "1.0+", "abc",
+            "1.0 ", "",
+        ] {
+            assert!(!is_exact_pep440(many), "pypi: {many}");
+        }
     }
 
     /// A package's environment variables and flags are SLOTS the running machine fills. Naming one

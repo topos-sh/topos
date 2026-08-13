@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/files",
+  "description": "A package whose version is a wildcard.",
+  "version": "2.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-files",
+      "version": "*",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
