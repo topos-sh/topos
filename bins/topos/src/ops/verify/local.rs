@@ -146,7 +146,7 @@ pub(crate) fn probe(command: &str, args: &[String], env: &[(String, EnvValue)]) 
         Ok(c) => c,
         Err(e) => {
             return Verdict::NotReachable {
-                reason: format!("{command} could not be started on this machine ({e})"),
+                reason: spawn_failure(command, &e),
             };
         }
     };
@@ -154,6 +154,17 @@ pub(crate) fn probe(command: &str, args: &[String], env: &[(String, EnvValue)]) 
     // Killed and reaped on the way out, whatever happened above.
     child.finish();
     verdict
+}
+
+/// Why the program never started, in plain words. The two kinds a person can act on say what to do
+/// about them; anything else names the operating system's own reason rather than inventing one.
+fn spawn_failure(command: &str, e: &std::io::Error) -> String {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::NotFound => format!("{command} is not on this machine"),
+        K::PermissionDenied => format!("{command} is on this machine but this user cannot run it"),
+        _ => format!("{command} could not be started on this machine ({e})"),
+    }
 }
 
 /// A spawned server and its drained streams.
@@ -510,11 +521,9 @@ mod tests {
     fn a_program_that_does_not_exist_is_not_reachable_and_says_so() {
         let v = probe("topos-no-such-program-anywhere", &[], &[]);
         assert_eq!(v.exit_code(), 4);
-        assert!(
-            v.line()
-                .starts_with("not reachable: topos-no-such-program-anywhere could not be started"),
-            "{}",
-            v.line()
+        assert_eq!(
+            v.line(),
+            "not reachable: topos-no-such-program-anywhere is not on this machine"
         );
     }
 }

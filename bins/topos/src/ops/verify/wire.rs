@@ -427,25 +427,23 @@ pub(crate) enum StatusRead {
 ///
 /// The order is the one a person would ask it in, and two rows are load-bearing:
 ///
-/// - **401/403 outranks everything.** A server demanding a sign-in is a HEALTHY server, and the
-///   body it sends with the refusal (an HTML login page, an OAuth problem document) is not
-///   evidence about the protocol. Note that the `WWW-Authenticate` challenge is recorded as
-///   EVIDENCE, not required as a gate: a bare 401 still means "it refuses without credentials",
-///   which is neither unreachable nor not-an-MCP-server, and demanding the header would push a
-///   real auth-gated server into the wrong verdict.
+/// - **401/403 outranks everything, and needs no challenge header.** A server demanding a sign-in
+///   is a HEALTHY server, and the body it sends with the refusal (an HTML login page, an OAuth
+///   problem document) is not evidence about the protocol. A `WWW-Authenticate` challenge is the
+///   textbook shape and most servers send one — but it is not required here, because a bare 401
+///   still means "it refuses without credentials", which is neither unreachable nor
+///   not-an-MCP-server. Gating on the header would push a real, healthy, auth-gated server into
+///   the wrong verdict for a header it merely forgot.
 /// - **429 and 5xx are never a protocol verdict.** The peer is up and having trouble; saying "not
 ///   an MCP server" about a server that is merely overloaded would be a lie a person acts on.
 ///
 /// A redirect is NOT followed: the bundle's address is what every machine dials, so an address that
 /// only works after a hop is an address that needs fixing in the bundle, and following it would
 /// hide that.
-pub(crate) fn classify_status(host: &str, status: u16, challenge: Option<&str>) -> StatusRead {
+pub(crate) fn classify_status(host: &str, status: u16) -> StatusRead {
     let settled = |v: Verdict| StatusRead::Settled(v);
     match status {
-        401 | 403 => {
-            let _ = challenge;
-            settled(Verdict::SignInRequired)
-        }
+        401 | 403 => settled(Verdict::SignInRequired),
         429 => settled(Verdict::NotReachable {
             reason: format!("{host} is rate-limiting this machine (HTTP 429)"),
         }),
@@ -656,27 +654,26 @@ mod tests {
     #[test]
     fn the_status_table_settles_every_row_the_contract_names() {
         let sign_in = StatusRead::Settled(Verdict::SignInRequired);
-        // Auth outranks the body, with or without a challenge header.
-        assert_eq!(classify_status("h", 401, Some("Bearer")), sign_in);
-        assert_eq!(classify_status("h", 401, None), sign_in);
-        assert_eq!(classify_status("h", 403, None), sign_in);
+        // Auth outranks the body, and the status alone carries it.
+        assert_eq!(classify_status("h", 401), sign_in);
+        assert_eq!(classify_status("h", 403), sign_in);
         // Load/outage is never a protocol verdict.
         for status in [429, 500, 502, 503, 599] {
-            let StatusRead::Settled(v) = classify_status("acme.test", status, None) else {
+            let StatusRead::Settled(v) = classify_status("acme.test", status) else {
                 panic!("{status} must settle");
             };
             assert_eq!(v.exit_code(), 4, "{status}");
         }
         // Redirects are not followed, and 404/405 are not MCP.
         for status in [301, 302, 307, 308, 404, 405, 418] {
-            let StatusRead::Settled(v) = classify_status("acme.test", status, None) else {
+            let StatusRead::Settled(v) = classify_status("acme.test", status) else {
                 panic!("{status} must settle");
             };
             assert_eq!(v.exit_code(), 5, "{status}");
         }
         // 200 and 400 both need the body: 400 is where the current revision puts its OWN errors.
-        assert_eq!(classify_status("h", 200, None), StatusRead::ReadBody);
-        assert_eq!(classify_status("h", 400, None), StatusRead::ReadBody);
+        assert_eq!(classify_status("h", 200), StatusRead::ReadBody);
+        assert_eq!(classify_status("h", 400), StatusRead::ReadBody);
     }
 
     // ---- the verdict copy --------------------------------------------------------------------

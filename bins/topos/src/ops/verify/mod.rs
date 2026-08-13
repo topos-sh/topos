@@ -32,7 +32,7 @@ mod local;
 mod remote;
 mod wire;
 
-use topos_harness::mcp::{EnvValue, McpTarget};
+use topos_harness::mcp::McpTarget;
 use topos_types::results::VerifyData;
 
 use super::StoreScope;
@@ -132,7 +132,7 @@ fn check(doc: &mcp_render::ServerDoc) -> Checked {
             Checked {
                 target: TARGET_PROGRAM,
                 address: None,
-                command: shown_command(&command, &args, &env),
+                command: shown_command(&command, &args),
                 verdict,
             }
         }
@@ -152,15 +152,15 @@ fn check(doc: &mcp_render::ServerDoc) -> Checked {
     }
 }
 
-/// The program as a payload SHOWS it: the command, its arguments, and the NAMES of the environment
-/// slots it runs with. A value never appears — a literal the bundle states is already public, but a
-/// slot resolved from this machine is not, and a receipt that printed one would leak exactly the
-/// thing the no-credentials rule exists to keep out of topos.
-fn shown_command(command: &str, args: &[String], env: &[(String, EnvValue)]) -> Vec<String> {
+/// The program as a payload SHOWS it: the command and its arguments, and NOTHING of the environment
+/// it ran with. The environment is where a machine-local value would be — a slot the bundle left
+/// open is filled from this machine, and a receipt that printed one would leak exactly the thing
+/// the no-credentials rule exists to keep out of topos. The slot NAMES are already in the bundle,
+/// so there is nothing here for them to add either.
+fn shown_command(command: &str, args: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len() + 1);
     out.push(command.to_owned());
     out.extend(args.iter().cloned());
-    let _ = env;
     out
 }
 
