@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/graph",
+  "description": "A container image named by a version-looking tag.",
+  "version": "3.0.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/acme/mcp-graph:3.0.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -18,7 +18,7 @@ import { SECRET_ENTROPY, SECRET_PATTERNS } from "./secret-patterns.generated";
  *  · `MCP_URL_TEMPLATE`         — the endpoint, or a header value, carries a `{placeholder}`
  *  · `MCP_SECRET_REFUSED`       — the document carries (or reserves a slot for) a credential
  *  · `MCP_PACKAGE_UNPINNED`     — a package names no single immutable thing (a version range,
- *                                 `latest`, an OCI reference with no tag or digest, an MCPB
+ *                                 `latest`, an OCI reference with no digest, an MCPB
  *                                 download with no hash)
  *
  * The shape rules mirror the official registry schema (2025-12-11): `name` is exactly one slash
@@ -454,21 +454,17 @@ const OCI_DIGEST = /@sha256:[a-f0-9]{64}$/;
 
 /**
  * Does this OCI reference name ONE image? The version lives inside the identifier for this type
- * (the registry's own rule: an OCI package carries no `version` field), so it is pinned by a
- * digest — or, at least, by a tag that is not the moving `latest`. The reference's registry host
- * may carry a port (`localhost:5000/x`), so the tag is looked for in the LAST path segment only.
+ * (the registry's own rule: an OCI package carries no `version` field), so the answer is a
+ * `@sha256:` DIGEST and nothing else.
+ *
+ * A TAG IS NOT A PIN. `ghcr.io/acme/mcp:1.0.0` reads like a version and is a movable label: the
+ * publisher can point it at other bytes tomorrow, and two machines installing this bundle a week
+ * apart would then run different code. `latest` is only the most obvious spelling of that; the
+ * problem is the tag, not the word. A digest IS the bytes, which is the same promise a version
+ * hash makes everywhere else in this product.
  */
 function ociReferenceIsPinned(identifier: string): boolean {
-  if (OCI_DIGEST.test(identifier)) {
-    return true;
-  }
-  const lastSegment = identifier.slice(identifier.lastIndexOf("/") + 1);
-  const colon = lastSegment.lastIndexOf(":");
-  if (colon <= 0) {
-    return false;
-  }
-  const tag = lastSegment.slice(colon + 1);
-  return tag.length > 0 && tag !== RESERVED_VERSION;
+  return OCI_DIGEST.test(identifier);
 }
 
 /** The transports a PACKAGE may declare (the schema's `LocalTransport`). */
@@ -553,7 +549,7 @@ function checkArguments(value: unknown, what: string): McpRefusal | null {
  * — ONE IMMUTABLE THING per entry.
  *
  * The pinning rule is per registry type because the formats pin differently: npm and pypi carry
- * a `version` field, an OCI reference carries its tag or digest inside the identifier, and an
+ * a `version` field, an OCI reference carries its digest inside the identifier, and an
  * MCPB download is identified by the hash of the file. A type this build has never heard of is
  * still publishable (the vocabulary is open-world) and is held to the one rule that reads the
  * same everywhere: a `version` it does state must name a single version.
@@ -640,7 +636,7 @@ function checkPackage(entry: unknown): { ok: true; summary: McpPackage } | McpRe
     if (!ociReferenceIsPinned(identifier)) {
       return refuse(
         "MCP_PACKAGE_UNPINNED",
-        `${identifier} names no one image — an OCI package pins itself with a digest or a tag that is not ${RESERVED_VERSION}`,
+        `${identifier} names no one image — an OCI package pins itself with an @sha256: digest, because a tag can be moved to other bytes`,
       );
     }
   } else if (type === "mcpb") {

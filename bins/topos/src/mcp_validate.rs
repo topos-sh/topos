@@ -117,7 +117,7 @@ pub(crate) enum McpRefusalCode {
     /// Not JSON, or the required registry fields are missing / malformed.
     Invalid,
     /// A package names no single immutable thing — a version range, `latest`, an OCI reference
-    /// with neither tag nor digest, an MCPB download with no hash.
+    /// with no digest, an MCPB download with no hash.
     PackageUnpinned,
     /// Nothing to deliver: no `streamable-http` remote AND no packages.
     NoStreamableRemote,
@@ -846,20 +846,18 @@ fn is_file_sha256(value: &str) -> bool {
 }
 
 /// Does this OCI reference name ONE image? The version lives inside the identifier for this type
-/// (the registry's own rule: an OCI package carries no `version` field), so it is pinned by a digest
-/// — or, at least, by a tag that is not the moving `latest`. The reference's registry host may carry
-/// a port (`localhost:5000/x`), so the tag is looked for in the LAST path segment only.
+/// (the registry's own rule: an OCI package carries no `version` field), so the answer is a
+/// `@sha256:` DIGEST and nothing else.
+///
+/// A TAG IS NOT A PIN. `ghcr.io/acme/mcp:1.0.0` reads like a version and is a movable label: the
+/// publisher can point it at other bytes tomorrow, and two machines installing this bundle a week
+/// apart would then run different code. `latest` is only the most obvious spelling of that; the
+/// problem is the tag, not the word. A digest IS the bytes, which is the same promise a version
+/// hash makes everywhere else in this product.
 fn oci_reference_is_pinned(identifier: &str) -> bool {
-    if let Some((_, digest)) = identifier.rsplit_once("@sha256:")
-        && is_file_sha256(digest)
-    {
-        return true;
-    }
-    let last = identifier.rsplit('/').next().unwrap_or(identifier);
-    match last.rsplit_once(':') {
-        Some((before, tag)) => !before.is_empty() && !tag.is_empty() && tag != RESERVED_VERSION,
-        None => false,
-    }
+    identifier
+        .rsplit_once("@sha256:")
+        .is_some_and(|(_, digest)| is_file_sha256(digest))
 }
 
 /// One `KeyValueInput` / `Argument` that arrives with its VALUE filled in — the shape the
@@ -969,7 +967,7 @@ fn check_arguments(value: Option<&Value>, what: &str) -> Result<(), McpRefusal> 
 /// IMMUTABLE THING per entry.
 ///
 /// The pinning rule is per registry type because the formats pin differently: npm and pypi carry a
-/// `version` field, an OCI reference carries its tag or digest inside the identifier, and an MCPB
+/// `version` field, an OCI reference carries its digest inside the identifier, and an MCPB
 /// download is identified by the hash of the file. A type this build has never heard of is still
 /// publishable (the vocabulary is open-world) and is held to the one rule that reads the same
 /// everywhere: a `version` it does state must name a single version.
@@ -1087,8 +1085,8 @@ fn check_package(entry: &Value) -> Result<(), McpRefusal> {
                 return refuse(
                     McpRefusalCode::PackageUnpinned,
                     format!(
-                        "{identifier} names no one image — an OCI package pins itself with a digest \
-                         or a tag that is not {RESERVED_VERSION}"
+                        "{identifier} names no one image — an OCI package pins itself with an \
+                         @sha256: digest, because a tag can be moved to other bytes"
                     ),
                 );
             }
@@ -1846,14 +1844,13 @@ mod tests {
             code(r#"{"registryType":"pypi","identifier":"a-b","transport":{"type":"stdio"}}"#),
             Err(McpRefusalCode::PackageUnpinned)
         );
-        // An OCI package pins inside its identifier — a tag is enough, `latest` is not, and a
-        // registry host's port is not a tag.
+        // An OCI package pins inside its identifier, and ONLY with a digest: every tag spelling —
+        // a version-looking one included — is a label the publisher can move to other bytes.
         let oci = |identifier: &str| {
             format!(
                 r#"{{"registryType":"oci","identifier":"{identifier}","transport":{{"type":"stdio"}}}}"#
             )
         };
-        assert_eq!(code(&oci("ghcr.io/a/x:1.2.3")), Ok(()));
         assert_eq!(
             code(&oci(&format!(
                 "ghcr.io/a/x@sha256:{}",
@@ -1861,18 +1858,20 @@ mod tests {
             ))),
             Ok(())
         );
-        assert_eq!(
-            code(&oci("ghcr.io/a/x:latest")),
-            Err(McpRefusalCode::PackageUnpinned)
-        );
-        assert_eq!(
-            code(&oci("ghcr.io/a/x")),
-            Err(McpRefusalCode::PackageUnpinned)
-        );
-        assert_eq!(
-            code(&oci("localhost:5000/a/x")),
-            Err(McpRefusalCode::PackageUnpinned)
-        );
+        for unpinned in [
+            "ghcr.io/a/x:1.2.3",
+            "ghcr.io/a/x:latest",
+            "ghcr.io/a/x",
+            "localhost:5000/a/x",
+            // A digest-looking tail that is not a whole digest pins nothing either.
+            "ghcr.io/a/x@sha256:0123456789abcdef",
+        ] {
+            assert_eq!(
+                code(&oci(unpinned)),
+                Err(McpRefusalCode::PackageUnpinned),
+                "{unpinned}"
+            );
+        }
         // A type this build never heard of publishes — the vocabulary is the format's, not ours.
         assert_eq!(
             code(
