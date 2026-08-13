@@ -388,6 +388,22 @@ impl Machine {
             wsl_dest: topos_harness::mcp::is_wsl_unc(&dest.display().to_string()),
         }
     }
+
+    /// **Whether a runtime probe here can answer for the machine that will run the command.**
+    ///
+    /// It cannot when the config being written lives inside a WSL distribution: this process reads
+    /// the Windows `PATH`, and the agent that will spawn the command runs Linux with a `PATH` of
+    /// its own. Either answer would be about the wrong environment — an `npx` installed only
+    /// inside WSL would be reported missing, and one installed only on Windows would be treated as
+    /// present for a Linux shell that cannot see it.
+    ///
+    /// So the probe is SKIPPED for that surface and the entry is written optimistically. It is the
+    /// honest choice of the two: a placement that turns out to need a runtime fails visibly in the
+    /// agent, where the person can see and fix it, while a withheld placement would name a machine
+    /// nobody here can see.
+    fn probe_answers_for_this_dest(self) -> bool {
+        !self.wsl_dest
+    }
 }
 
 /// Whether a program can be found and run on this machine — injected so a missing runtime is a
@@ -412,8 +428,30 @@ impl RuntimeProbe for PathRuntimes {
                 .map(|p| p.to_string_lossy().into_owned())
                 .as_deref(),
             cfg!(windows),
-            &|path: &Path| path.is_file(),
+            &is_runnable,
         )
+    }
+}
+
+/// Whether this path names something a shell would actually RUN — a regular file, and on POSIX one
+/// with an execute bit set for somebody.
+///
+/// The bit is the whole question there: a `PATH` directory holding a readable, non-executable file
+/// called `npx` is a file no harness can spawn, and a placement recorded on its account would look
+/// installed and start nothing. Windows decides by extension instead, which is what `PATHEXT`
+/// already answers.
+fn is_runnable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
     }
 }
 
@@ -621,7 +659,7 @@ fn bridged(
     runtimes: &dyn RuntimeProbe,
     machine: Machine,
 ) -> Result<McpTarget, Gap> {
-    if !runtimes.on_path(NPX) {
+    if machine.probe_answers_for_this_dest() && !runtimes.on_path(NPX) {
         return Err(Gap::MissingRuntime { tool: NODE });
     }
     let mut args = vec!["-y".to_owned(), bridge.spec(), remote.url.clone()];
@@ -697,7 +735,7 @@ fn packaged(
             });
         }
     };
-    if !runtimes.on_path(runner) {
+    if machine.probe_answers_for_this_dest() && !runtimes.on_path(runner) {
         return Err(Gap::MissingRuntime { tool });
     }
     let mut args: Vec<String> = Vec::new();
@@ -1200,6 +1238,100 @@ mod tests {
             env.is_empty(),
             "no credential, and nothing to stand in for one"
         );
+    }
+
+    /// **A config written into a WSL distribution is read by a Linux agent, so this machine's
+    /// `PATH` cannot answer for it.** The probe is skipped there — in both directions, because a
+    /// Windows-only `npx` would otherwise read as present for a shell that cannot see it and a
+    /// WSL-only one as missing.
+    #[test]
+    fn a_wsl_destination_is_placed_without_asking_this_machines_path() {
+        let inside_wsl = Machine {
+            windows: true,
+            wsl_dest: true,
+        };
+        let on_windows = Machine {
+            windows: true,
+            wsl_dest: false,
+        };
+        let packaged = doc(NPM_ONLY);
+        // Nothing on this PATH: withheld for a Windows destination…
+        assert_eq!(
+            select(&packaged, caps(false, true), None, &NOTHING, on_windows),
+            Err(Gap::MissingRuntime { tool: NODE })
+        );
+        // …and placed for the WSL one, unwrapped, because the answer would be about the wrong
+        // machine either way.
+        let (command, args, _) = local(
+            &select(&packaged, caps(false, true), None, &NOTHING, inside_wsl).expect("placed"),
+        );
+        assert_eq!(
+            (command.as_str(), args[1].as_str()),
+            (NPX, "@acme/server@2.1.0")
+        );
+        // The bridge asks the same question and answers it the same way.
+        assert_eq!(
+            select(
+                &doc(REMOTE_ONLY),
+                caps(false, true),
+                Some(&BRIDGE),
+                &NOTHING,
+                on_windows
+            ),
+            Err(Gap::MissingRuntime { tool: NODE })
+        );
+        assert!(
+            select(
+                &doc(REMOTE_ONLY),
+                caps(false, true),
+                Some(&BRIDGE),
+                &NOTHING,
+                inside_wsl
+            )
+            .is_ok()
+        );
+        // A runtime that IS here is still placed for both — the skip changes nothing else.
+        assert!(select(&packaged, caps(false, true), None, &EVERYTHING, on_windows).is_ok());
+    }
+
+    /// **A file on `PATH` that nobody can execute is not a runtime.** On POSIX the bit is the
+    /// whole question: a readable, non-executable `npx` would record a placement that starts
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_entry_without_its_execute_bit_is_not_a_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("topos-runtime-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let npx = dir.join("npx");
+        std::fs::write(&npx, "#!/bin/sh\n").expect("a file");
+
+        let probe = |mode: u32| {
+            std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(mode))
+                .expect("chmod the probe target");
+            found_on_path(
+                "npx",
+                Some(&dir.display().to_string()),
+                None,
+                false,
+                &is_runnable,
+            )
+        };
+        assert!(
+            !probe(0o644),
+            "readable but not executable is not a runtime"
+        );
+        assert!(probe(0o755), "and the same file, made executable, is one");
+        // A directory of that name is not one either.
+        assert!(!found_on_path(
+            "topos-runtime-probe-dir",
+            Some(&std::env::temp_dir().display().to_string()),
+            None,
+            false,
+            &is_runnable
+        ));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The two capability lines the brief spells, byte for byte, plus the two this build adds for
