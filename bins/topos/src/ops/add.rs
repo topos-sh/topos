@@ -2119,6 +2119,11 @@ pub(crate) fn extend_folder_dest(
     let Some(lock) = doc::read_doc::<Lock>(sctx.fs, &sctx.layout.published(&sid).lock)? else {
         return Ok(None);
     };
+    // Naming destinations for this folder is a re-demand exactly like naming the folder alone
+    // ([`unclaimed_record`]): a RETIRED record (released by the one-time orphan resolution) returns
+    // to every surface, so the row written below never stands over a record every store walker
+    // skips — a row asking for copies nothing would place, update, or ever take away again.
+    crate::sidecar::revive_record(sctx.fs, &sctx.layout, &sid);
     // WHAT the bundle is decides the vocabulary its destinations are spelled in. The row already
     // stands, so a folder that never placed anything is not a fail-closed case here: the same
     // classifier the row writers use, read as the ordinary skill when nothing answers.

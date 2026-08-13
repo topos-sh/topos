@@ -1451,6 +1451,11 @@ pub(crate) fn remove_global(
     if !selection.is_empty() {
         resolved = narrow_arms(ctx, &target, resolved, selection)?;
     }
+    // A row still claims these records, so a retirement marker on one is stale — lifted before the
+    // plan below reads the store, and before the eager rails walk it (see [`revive_rowed_records`]).
+    if yes {
+        revive_rowed_records(ctx, &target, &resolved);
+    }
     let eager = eager_plan(ctx, &target, &resolved);
     let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, selection, yes, true)?;
     // Row edits uninstall EAGERLY: with the row durably changed, the same machine-scope
@@ -1562,6 +1567,10 @@ pub(crate) fn remove_project(
     let mut resolved: Vec<Arm> = arms.into_iter().flatten().collect();
     if !selection.is_empty() {
         resolved = narrow_arms(ctx, &target, resolved, selection)?;
+    }
+    // The stale-marker lift — see [`remove_global`].
+    if yes {
+        revive_rowed_records(ctx, &target, &resolved);
     }
     let eager = eager_plan(ctx, &target, &resolved);
     let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, selection, yes, false)?;
@@ -3443,6 +3452,44 @@ struct EagerBundle {
     /// second spelling its reconcile rows can arrive under when no store record answers for the
     /// folder. `None` for every other shape.
     local: Option<String>,
+}
+
+/// THE ROW IS THE DEMAND, so a record one of these arms still names is not retired — whatever
+/// marker it carries. A retirement marker records ONE conclusion, reached by the sweep's one-time
+/// resolution: that NOTHING claimed the record. A row claiming it now is the standing proof that
+/// conclusion has lapsed, and a stale marker must never outrank a live row — every store walker
+/// skips a marked record, so the eager uninstall below would enumerate nothing and this removal's
+/// receipt would claim copies left that are still sitting on disk.
+///
+/// Only a LOCAL-PATH row revives, and only through its OWN FOLDER: the record is identified by the
+/// directory the row is keyed on, which nothing else can answer to. A name lookup would be the
+/// wrong instrument here — a retired record and a later fresh one can share a name, and reviving
+/// the wrong one would put settled history back on every surface for the next sweep to resolve a
+/// second time, with a second closing statement for one record. Best-effort, like every revive.
+///
+/// Read (and applied) BEFORE the apply consumes the arms, and only where the removal APPLIES: a
+/// describe changes nothing on disk, marker included.
+fn revive_rowed_records(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) {
+    let Some(sctx) = scope_store_ctx(ctx, target) else {
+        return;
+    };
+    for arm in arms {
+        let row = match arm {
+            Arm::RowDrop { row, .. } | Arm::DestNarrow { row: Some(row), .. } => row,
+            _ => continue,
+        };
+        let KeyShape::LocalPath { raw } = &row.shape else {
+            continue;
+        };
+        let dir = canonical_or(&row_dir(ctx, target, raw));
+        let Ok(Some(id)) = super::tracked_skill_at(&sctx, &dir) else {
+            continue;
+        };
+        let Ok(sid) = SkillId::parse(&id) else {
+            continue;
+        };
+        crate::sidecar::revive_record(sctx.fs, &sctx.layout, &sid);
+    }
 }
 
 fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {

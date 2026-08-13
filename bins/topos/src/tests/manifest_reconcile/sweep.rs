@@ -1279,3 +1279,130 @@ fn a_failed_member_install_leaves_the_row_and_the_next_update_converges() {
         out.warnings
     );
 }
+
+// =================================================================================================
+// The stale-marker self-heal.
+// =================================================================================================
+
+/// A retirement marker records ONE conclusion — that nothing demanded the record — and this pass
+/// owns whether that still holds. A machine already in the contradictory state (the marker under a
+/// row that names the bundle) heals on its very next update: the marker goes, silently, and every
+/// surface answers for the record again. Until it does, the row reads honestly never-applied — a
+/// listing states what it can prove, and a record no walker reads is not among those things.
+#[test]
+fn a_sweep_revives_a_retired_record_a_row_still_claims() {
+    let rig = Rig::new("stale-marker-heal");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global("[bundles]\n");
+    let src = rig.home.0.join("tools/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    let mut added = ops::adopt_path(&ctx, &scope, &src, ops::KindDeclared::No).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut added,
+        &scope.target,
+        &src,
+        &["~/dest-a".to_owned()],
+    )
+    .unwrap();
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(rig.home.0.join("dest-a/quaggamap/SKILL.md").exists());
+    let record = sid(added.skill_id.as_deref().expect("an adopt records its id"));
+    let version = added.version_id.clone().expect("the adopt minted one");
+
+    // The contradiction, written directly: the marker under a row that still asks for the bundle.
+    crate::sidecar::retire_record(&rig.fs, &rig.layout(), &record, rig_now(&rig)).unwrap();
+    let item = machine_item(&ctx, "quaggamap").expect("the manifest row is still a line");
+    assert!(
+        item.version.is_none() && item.placements.is_empty(),
+        "a record no walker reads answers for nothing: {item:?}"
+    );
+
+    // ONE ordinary update heals it, and says nothing: the retirement had its line, and a record
+    // returning to the surfaces its own row already names is no news.
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        !rig.layout().published(&record).retired.exists(),
+        "the live row lifted the stale marker"
+    );
+    assert!(
+        !out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "quaggamap" && s.action == PullAction::Released),
+        "a revival is silent — never a second closing statement: {:?}",
+        out.data.skills
+    );
+
+    // …and the record answers again: the version the row stands at, and the folders holding it.
+    let item = machine_item(&ctx, "quaggamap").expect("the row is still a line");
+    assert_eq!(item.version.as_deref(), Some(version.as_str()), "{item:?}");
+    assert!(
+        item.placements
+            .iter()
+            .any(|p| p.ends_with("dest-a/quaggamap")),
+        "the placement is on the surfaces again: {item:?}"
+    );
+}
+
+/// The inverse still holds: a record NOTHING claims stays retired through every later sweep — the
+/// self-heal reads the demand, never the marker's age.
+#[test]
+fn a_sweep_leaves_a_retired_record_no_row_claims_exactly_as_it_is() {
+    let rig = Rig::new("stale-marker-keep");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global("[bundles]\n");
+    let src = rig.home.0.join("tools/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let added = scoped_path_add(&ctx, &src, true).unwrap();
+    let record = sid(added.skill_id.as_deref().expect("an adopt records its id"));
+
+    // The row is dropped by hand, and the record retires on the next sweep — its ONE statement.
+    rig.write_global("[bundles]\n");
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let marker = rig.layout().published(&record).retired;
+    assert!(marker.exists(), "the one-time resolution ran");
+    let stamp = std::fs::read(&marker).unwrap();
+
+    // Two more sweeps say nothing and rewrite nothing.
+    for _ in 0..2 {
+        let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+        assert!(
+            !out.data.skills.iter().any(|s| s.skill == "quaggamap"),
+            "a retired record is never mentioned again: {:?}",
+            out.data.skills
+        );
+    }
+    assert!(marker.exists(), "…and it is still retired");
+    assert_eq!(std::fs::read(&marker).unwrap(), stamp, "byte-identical");
+}
+
+/// `topos list <name> -g` — the deep answer, which is where a row's applied version and the
+/// folders holding it are printed.
+fn machine_item(ctx: &crate::ctx::Ctx<'_>, name: &str) -> Option<topos_types::results::ListDetail> {
+    crate::ops::list_with(
+        ctx,
+        &ops::ListRequest {
+            view: ops::ScopeView::Machine,
+            name: Some(name.to_owned()),
+            ..Default::default()
+        },
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap()
+    .data
+    .detail
+}

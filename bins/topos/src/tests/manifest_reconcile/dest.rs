@@ -1253,3 +1253,149 @@ fn a_local_adopt_with_dest_places_a_copy_at_the_selected_folder() {
         out.data.skills
     );
 }
+
+// =================================================================================================
+// A retirement marker never outlives the row that claims the record.
+// =================================================================================================
+
+/// `topos remove -g <name> --yes` — the machine row drop, applied.
+fn remove_g(
+    ctx: &crate::ctx::Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    name: &str,
+) -> topos_types::results::RemoveData {
+    match ops::remove_global(
+        ctx,
+        &connect(plane, dir),
+        &[name.to_owned()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("--yes applies: {other:?}"),
+    }
+}
+
+/// THE RE-DEMAND, end to end. A folder adopted in place, then removed, then RETIRED by the sweep's
+/// one-time resolution, comes back through `add <path> --dest <folder>` — the destination-only door
+/// — and the marker goes with the row that claims it. Without that lift the row stood over a record
+/// every store walker skips: the copies landed, and the NEXT remove uninstalled nothing at all
+/// while its receipt said the row was gone — the person's dirs left holding files topos had
+/// stopped managing, with no line saying so.
+#[test]
+fn a_dest_re_add_revives_the_retired_record_so_the_next_remove_uninstalls_its_copies() {
+    let rig = Rig::new("dest-revive");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global("[bundles]\n");
+    let src = rig.home.0.join("tools/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let added = scoped_path_add(&ctx, &src, true).unwrap();
+    let record = sid(added.skill_id.as_deref().expect("an adopt records its id"));
+    let marker = rig.layout().published(&record).retired;
+
+    // The row goes; the sweep that follows resolves the leftover once and retires the record.
+    remove_g(&ctx, &plane, &dir, "quaggamap");
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        marker.exists(),
+        "the one-time resolution retired the record"
+    );
+
+    // THE DOOR: naming the same folder with a destination re-binds THAT record, and the claim
+    // lifts the marker then and there — before any sweep gets a turn.
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    let data = ops::extend_folder_dest(&ctx, &scope, &src, &sel(&[], &["~/dest-a"]))
+        .unwrap()
+        .expect("the folder is still tracked here");
+    assert_eq!(
+        data.skill_id.as_deref(),
+        Some(record.as_str()),
+        "the re-add binds the record that is already there"
+    );
+    assert!(
+        !marker.exists(),
+        "a live row outranks a stale marker: the record is back on every surface"
+    );
+
+    // The copy lands where the row asks…
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let copy = rig.home.0.join("dest-a/quaggamap");
+    assert!(copy.join("SKILL.md").exists(), "the row's copy landed");
+
+    // …and the removal that follows really uninstalls it, naming the folder it emptied.
+    let data = remove_g(&ctx, &plane, &dir, "quaggamap");
+    assert!(!copy.exists(), "the managed copy left: {data:?}");
+    assert!(
+        data.uninstalled
+            .iter()
+            .any(|u| u.destinations.iter().any(|d| d.ends_with("quaggamap"))),
+        "the receipt names what it took away: {:?}",
+        data.uninstalled
+    );
+    assert!(
+        src.join("SKILL.md").exists(),
+        "the adopted source is the person's own — never deleted"
+    );
+}
+
+/// THE REMOVE DOOR alone, from the contradictory state and with NO sweep in between: a machine
+/// already carrying a marker under a live row (the state older builds could reach) still uninstalls
+/// what that row placed. The row is the demand — resolving the record through the marker instead
+/// would leave the copy on disk behind a receipt that says the row is gone.
+#[test]
+fn a_remove_uninstalls_the_copies_of_a_rowed_record_that_still_carries_the_marker() {
+    let rig = Rig::new("dest-revive-remove");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global("[bundles]\n");
+    let src = rig.home.0.join("tools/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    let mut added = ops::adopt_path(&ctx, &scope, &src, ops::KindDeclared::No).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut added,
+        &scope.target,
+        &src,
+        &["~/dest-a".to_owned()],
+    )
+    .unwrap();
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let copy = rig.home.0.join("dest-a/quaggamap");
+    assert!(copy.join("SKILL.md").exists());
+
+    // The contradiction, written directly: the marker under a row that still asks for the bundle.
+    let record = sid(added.skill_id.as_deref().expect("an adopt records its id"));
+    crate::sidecar::retire_record(&rig.fs, &rig.layout(), &record, rig_now(&rig)).unwrap();
+
+    let data = remove_g(&ctx, &plane, &dir, "quaggamap");
+    assert!(
+        !copy.exists(),
+        "the row's copy left with the row: {:?}",
+        data.uninstalled
+    );
+    assert!(
+        data.uninstalled
+            .iter()
+            .any(|u| u.destinations.iter().any(|d| d.ends_with("quaggamap"))),
+        "…and the receipt names it: {:?}",
+        data.uninstalled
+    );
+    assert!(
+        src.join("SKILL.md").exists(),
+        "the adopted source is the person's own — never deleted"
+    );
+}

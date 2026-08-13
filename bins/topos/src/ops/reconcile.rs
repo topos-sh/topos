@@ -5762,6 +5762,37 @@ fn revive_reclaimed(
     }
 }
 
+/// Whether anything this run CLAIMS a record — the demand half of [`resolve_orphans`]'s question,
+/// asked on its own so a record that ALREADY carries the retirement marker can be measured against
+/// it. The four claims, in the order they cost: the scope reconciled this identity, a workspace's
+/// fresh snapshot still delivers it, a manifest row of the scope mentions its name, or it earned a
+/// receipt row this run. Reading the lock is what turns an id into a name, so it comes last, and an
+/// unreadable one claims nothing (the marked record then simply stays as it is — nothing is
+/// deleted either way).
+fn record_claimed(
+    env: &Env<'_>,
+    layout: &sidecar::Layout,
+    sid: &SkillId,
+    mentioned: &HashSet<String>,
+    synced: &HashSet<String>,
+    reported: &HashSet<String>,
+) -> bool {
+    if synced.contains(sid.as_str()) {
+        return true;
+    }
+    if env.runs.iter().any(|r| {
+        r.snapshot
+            .as_ref()
+            .is_some_and(|s| s.skills.iter().any(|d| d.skill_id == sid.as_str()))
+    }) {
+        return true;
+    }
+    doc::read_doc::<Lock>(env.ctx.fs, &layout.published(sid).lock)
+        .ok()
+        .flatten()
+        .is_some_and(|lock| mentioned.contains(&lock.name) || reported.contains(&lock.name))
+}
+
 /// The ONE-TIME ORPHAN RESOLUTION — records may describe rows, never create them, so a store
 /// record that is claimed by NO row and delivered by NOTHING gets one closing statement on this
 /// receipt and then RETIRES: the marker written first (a crash between marker and line loses the
@@ -5778,6 +5809,13 @@ fn revive_reclaimed(
 /// resolves. Failed channel expansions and unexpanded project sets freeze theirs; an MCP record
 /// with live custody entries waits for the converge to conclude; a record that already earned a
 /// receipt row this run (the cleaner's removed/withdrawn) is fresh news, not a standing orphan.
+///
+/// AND THE INVERSE, in the same pass: a record ALREADY carrying the marker that this run finds
+/// demanded again is REVIVED — silently, and never a second statement. The marker is one
+/// conclusion about demand, this pass is where demand is read, and a claim outranks a conclusion
+/// drawn before it. Without it a machine that once reached the contradictory state (a live row over
+/// a marked record) would stay there forever: every walker skips the record, so the row's copies
+/// are never updated and never taken away, and nothing on any surface says why.
 fn resolve_orphans(
     env: &Env<'_>,
     driven: &Driven,
@@ -5827,12 +5865,26 @@ fn resolve_orphans(
             let Ok(sid) = SkillId::parse(id) else {
                 continue;
             };
-            if super::builtin::is_builtin(id)
-                || sidecar::record_retired(ctx.fs, &layout, &sid)
-                // A record still carrying config entries is placed, not orphaned — its own
-                // document says so.
-                || !crate::config_custody::entries_of(ctx.fs, &layout, id).is_empty()
-            {
+            if super::builtin::is_builtin(id) {
+                continue;
+            }
+            // A RETIRED record is settled history: it earns no second statement here and never
+            // retires twice. But the marker records ONE conclusion — that nothing demanded the
+            // record — and this pass owns the question of whether that still holds. So a marked
+            // record is measured against the same demand ([`record_claimed`]), and a live claim
+            // REVIVES it: the row is the demand, and a stale marker must never outrank one, or
+            // the machine keeps a record every walker skips while a row asks for its bytes.
+            // Silent, like everything else the sweep heals — the retirement had its one line, and
+            // a record returning to the surfaces its own row already names says nothing new.
+            if sidecar::record_retired(ctx.fs, &layout, &sid) {
+                if record_claimed(env, &layout, &sid, &mentioned, &synced, &reported) {
+                    sidecar::revive_record(ctx.fs, &layout, &sid);
+                }
+                continue;
+            }
+            // A record still carrying config entries is placed, not orphaned — its own document
+            // says so.
+            if !crate::config_custody::entries_of(ctx.fs, &layout, id).is_empty() {
                 continue;
             }
             let sp = layout.published(&sid);

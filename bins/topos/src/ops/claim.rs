@@ -88,6 +88,11 @@ pub(crate) fn claim(
     let (state, twin, repaired, stamped) = {
         let sp = scope.layout.published(&target.id);
         let _guard = crate::sidecar::lock_skill(sctx.fs, &scope.layout, &target.id)?;
+        // A claim is a re-demand of the bundle it names: a RETIRED record (one the one-time
+        // orphan resolution released when nothing claimed it) returns to every surface as this
+        // folder joins its places, or the placement below would land in a record no walker reads.
+        // Best-effort, like every revive — a courtesy of the claim, never its gate.
+        crate::sidecar::revive_record(sctx.fs, &scope.layout, &target.id);
         let Some(mut map) = doc::read_map(sctx.fs, &sp.map)? else {
             return Err(ClientError::Corrupt(format!(
                 "'{}' has no placement map to record a copy in",
