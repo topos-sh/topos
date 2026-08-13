@@ -94,7 +94,6 @@ pub(crate) fn agent_with(connect: u64, recv: u64, global: u64) -> ureq::Agent {
 struct Answer {
     status: u16,
     content_type: String,
-    challenge: Option<String>,
     session: Option<String>,
     body: String,
 }
@@ -120,7 +119,7 @@ pub(crate) fn probe(agent: &ureq::Agent, url: &str, headers: &[(String, String)]
         Err(reason) => return Verdict::NotReachable { reason },
     };
     let status = answer.status;
-    match wire::classify_status(&host, status, answer.challenge.as_deref()) {
+    match wire::classify_status(&host, status) {
         StatusRead::Settled(v) => return v,
         StatusRead::ReadBody => {}
     }
@@ -185,7 +184,7 @@ fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &s
         Ok(a) => a,
         Err(reason) => return Verdict::NotReachable { reason },
     };
-    match wire::classify_status(host, answer.status, answer.challenge.as_deref()) {
+    match wire::classify_status(host, answer.status) {
         StatusRead::Settled(v) => return v,
         StatusRead::ReadBody => {}
     }
@@ -206,7 +205,7 @@ fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &s
         Err(reason) => return Verdict::NotReachable { reason },
     };
     if !matches!(answer.status, 200 | 202 | 204) {
-        return match wire::classify_status(host, answer.status, answer.challenge.as_deref()) {
+        return match wire::classify_status(host, answer.status) {
             StatusRead::Settled(v) => v,
             // A `400` here refused the handshake's second step; there is nothing further to read.
             StatusRead::ReadBody => Verdict::NotMcp {
@@ -229,7 +228,7 @@ fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &s
         Ok(a) => a,
         Err(reason) => return Verdict::NotReachable { reason },
     };
-    match wire::classify_status(host, answer.status, answer.challenge.as_deref()) {
+    match wire::classify_status(host, answer.status) {
         StatusRead::Settled(v) => return v,
         StatusRead::ReadBody => {}
     }
@@ -285,7 +284,6 @@ fn post(
             .map(ToOwned::to_owned)
     };
     let content_type = header("content-type").unwrap_or_default();
-    let challenge = header("www-authenticate");
     let session = header(SESSION_HEADER).filter(|s| !s.trim().is_empty());
     // Bounded by BOTH the byte cap here and the call deadline on the agent.
     let bytes = response
@@ -297,7 +295,6 @@ fn post(
     Ok(Answer {
         status,
         content_type,
-        challenge,
         session,
         body: String::from_utf8_lossy(&bytes).into_owned(),
     })
