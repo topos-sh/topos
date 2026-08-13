@@ -69,7 +69,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// `remote` / `stdio` / `env_ref` beside the fenced `[mcp_bridge]` pin (a build that cannot read
 /// THOSE would dial an address into a harness that cannot dial, or run nothing at all where a
 /// bridge was meant to). Both are exactly the refusal `min_engine_version` exists for.
-pub const REGISTRY_ENGINE_VERSION: u32 = 2;
+///
+/// 3 — the `appSupport` root ([`Root::AppSupport`], the platform's own application-config dir) and
+/// the MCP dialects spoken by the agents that keep their servers there. A build that knows neither
+/// would refuse the file one row at a time with a puzzle of a message; the version says the same
+/// thing once, quietly, and the bundled table answers instead.
+pub const REGISTRY_ENGINE_VERSION: u32 = 3;
 
 /// The widest registry file anything here will read, fetch, or accept from disk. The real table is
 /// a few tens of kilobytes; this is the "no surprises" ceiling on a lane that runs unattended.
@@ -819,6 +824,15 @@ const fn dialect_word(dialect: McpDialect) -> &'static str {
         McpDialect::OpenclawJson => "openclaw-json",
         McpDialect::CodexToml => "codex-toml",
         McpDialect::HermesYaml => "hermes-yaml",
+        McpDialect::VscodeJson => "vscode-json",
+        McpDialect::CopilotCliJson => "copilot-cli-json",
+        McpDialect::LmStudioJson => "lm-studio-json",
+        McpDialect::ClaudeDesktopJson => "claude-desktop-json",
+        McpDialect::GeminiJson => "gemini-json",
+        McpDialect::WindsurfJson => "windsurf-json",
+        McpDialect::ClineJson => "cline-json",
+        McpDialect::RooJson => "roo-json",
+        McpDialect::ZedJson => "zed-json",
     }
 }
 
@@ -831,6 +845,15 @@ const DIALECTS: &[McpDialect] = &[
     McpDialect::OpenclawJson,
     McpDialect::CodexToml,
     McpDialect::HermesYaml,
+    McpDialect::VscodeJson,
+    McpDialect::CopilotCliJson,
+    McpDialect::LmStudioJson,
+    McpDialect::ClaudeDesktopJson,
+    McpDialect::GeminiJson,
+    McpDialect::WindsurfJson,
+    McpDialect::ClineJson,
+    McpDialect::RooJson,
+    McpDialect::ZedJson,
 ];
 
 fn known_dialects() -> String {
