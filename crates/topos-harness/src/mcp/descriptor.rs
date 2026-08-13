@@ -377,7 +377,10 @@ mod tests {
             detect("roo")
         );
         assert_eq!(detect("vscode"), vec!["appSupport/Code/User".to_owned()]);
-        assert_eq!(detect("claude-desktop"), vec!["appSupport/Claude".to_owned()]);
+        assert_eq!(
+            detect("claude-desktop"),
+            vec!["appSupport/Claude".to_owned()]
+        );
     }
 
     /// The capability columns as the bundled table states them: every one of the six dials an
