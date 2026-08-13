@@ -5436,6 +5436,7 @@ mod tests {
             version: "1.0.0".to_owned(),
             url: "https://wx.example/mcp".to_owned(),
             transport: "streamable-http".to_owned(),
+            packages: Vec::new(),
             auth: None,
             headers: Vec::new(),
             bundle: None,

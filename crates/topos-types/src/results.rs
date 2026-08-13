@@ -1283,11 +1283,18 @@ pub struct McpServerSummary {
     pub description: String,
     /// The version the document declares.
     pub version: String,
-    /// The endpoint an agent will call — always `https`, never a template.
+    /// The endpoint an agent will call — always `https`, never a template. EMPTY when the bundle
+    /// offers no address at all: a server may be a package every machine runs instead (see
+    /// `packages`).
     pub url: String,
-    /// The transport, always `streamable-http` today: the one a shared bundle can promise, since
-    /// the same URL has to work from every machine.
+    /// The transport of that endpoint, always `streamable-http` today: the one a shared bundle can
+    /// promise, since the same URL has to work from every machine. Empty exactly when `url` is.
     pub transport: String,
+    /// The packages the bundle offers, for the machines that run the server instead of dialing it
+    /// — and for the agents that cannot dial one at all. Empty when the bundle is an address and
+    /// nothing else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<McpPackageSummary>,
     /// The publisher's `_meta` auth word (`oauth` / `none`) when the document declared one.
     /// Absent means it said nothing — which is NOT a claim that no credential is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1305,6 +1312,23 @@ pub struct McpServerSummary {
     /// breadth line, so nobody has to reverse-engineer which config files changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
+}
+
+/// One package a `kind = "mcp"` bundle offers — what a machine that RUNS the server installs, as
+/// opposed to the address a machine dials. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct McpPackageSummary {
+    /// The registry it comes from (`npm`, `pypi`, `oci`, …) — an open vocabulary: a bundle may
+    /// name any registry the official server format expresses, and a given topos sets up the ones
+    /// it has a runtime for.
+    pub registry: String,
+    /// The package's name in that registry.
+    pub identifier: String,
+    /// The exact version every machine installs. Absent only where the registry type carries the
+    /// version inside the identifier (an OCI digest).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 /// `fmt [-g]` — rewrite a manifest into the normal form. **INFERRED** (additive-only).
