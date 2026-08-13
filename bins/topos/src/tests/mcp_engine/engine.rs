@@ -32,6 +32,7 @@ fn a_surface_symlinked_out_between_plan_and_write_is_refused_with_zero_writes() 
     let layout = Layout::new(&project.0.join(".topos"));
     let io = ScopeIo {
         fs: &fs,
+        runtimes: &EVERY_RUNTIME,
         layout: &layout,
         home: project.0.clone(),
         project_root: Some(project.0.clone()),
@@ -390,8 +391,10 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
     // engine adds custody, never a dialect of its own.
     let entry = McpEntry {
         key: "topos-eng-linear".into(),
-        url: "https://mcp.example/linear".into(),
-        headers: vec![("X-Team".into(), "eng".into())],
+        target: mcp::McpTarget::Remote {
+            url: "https://mcp.example/linear".into(),
+            headers: vec![("X-Team".into(), "eng".into())],
+        },
         auth: AuthHint::Unknown,
     };
     for (suffix, dialect) in [
@@ -935,6 +938,290 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
 /// The one line a collision earns, as a person reads it.
 fn warning_lines(out: &mcp_engine::ConvergeOutcome) -> Vec<String> {
     crate::message::legacy_lines(&out.warnings)
+}
+
+// =================================================================================================
+// A bundle that is a PROGRAM this machine runs, end to end.
+// =================================================================================================
+
+/// A package-only document: no address anywhere in it.
+fn package_server_json(registry: &str, identifier: &str, version: &str) -> String {
+    format!(
+        "{{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\
+         \"packages\":[{{\"registryType\":\"{registry}\",\"identifier\":\"{identifier}\",\
+         \"version\":\"{version}\",\"transport\":{{\"type\":\"stdio\"}},\
+         \"environmentVariables\":[{{\"name\":\"ACME_TOKEN\",\"isSecret\":true}}]}}]}}"
+    )
+}
+
+/// **The bundle that publishes and could not be delivered.** A document offering only a package
+/// passes the shared gate and, until this increment, was refused by the placement parse — so a
+/// workspace could share a server no machine ever received. Both halves are asserted here, in one
+/// test, because the bug was exactly the gap between them: the gate ACCEPTS the document, and the
+/// converge WRITES the entry every dialect spells.
+#[test]
+fn a_package_only_bundle_passes_the_gate_and_lands_as_the_program_each_agent_runs() {
+    let document = package_server_json("npm", "@acme/server", "2.1.0");
+    crate::mcp_validate::validate_server_json(document.as_bytes())
+        .expect("the shared gate publishes a package-only document");
+
+    let home = Scratch::new("package-npm");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![demand("s_a", "acme", Some("eng"), &document)]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+
+    // Cursor and Codex: the command triple, with the pinned version and the environment slot
+    // rendered as a REFERENCE — the name travels, the token never does.
+    let cursor = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).expect("cursor");
+    assert!(cursor.contains("\"command\": \"npx\""), "{cursor}");
+    assert!(cursor.contains("\"@acme/server@2.1.0\""), "{cursor}");
+    assert!(
+        cursor.contains("\"ACME_TOKEN\": \"${ACME_TOKEN}\""),
+        "{cursor}"
+    );
+    let codex = std::fs::read_to_string(home.0.join(".codex/config.toml")).expect("codex");
+    assert!(codex.contains("command = \"npx\""), "{codex}");
+    assert!(
+        codex.contains("args = [\"-y\", \"@acme/server@2.1.0\"]"),
+        "{codex}"
+    );
+
+    // OpenCode: ONE command array, `environment`, and its OWN reference spelling.
+    let oc = std::fs::read_to_string(home.0.join(".opencode/opencode.json")).expect("opencode");
+    assert!(
+        oc.contains("\"command\": [\n        \"npx\",\n        \"-y\",\n        \"@acme/server@2.1.0\"\n      ]"),
+        "{oc}"
+    );
+    assert!(oc.contains("\"type\": \"local\""), "{oc}");
+    assert!(
+        oc.contains("\"ACME_TOKEN\": \"{env:ACME_TOKEN}\""),
+        "opencode's own spelling, from the table: {oc}"
+    );
+
+    // Hermes has no evidenced grammar for a program, so it is WITHHELD — said plainly, and
+    // nothing is written there.
+    assert_eq!(
+        state_of(&out, "s_a", "hermes-agent").state,
+        TargetOutcome::Withheld
+    );
+    assert!(
+        warning_lines(&out).iter().any(|l| l
+            == "MCP_KIND_UNSUPPORTED not placed in hermes-agent: this server runs as a program on \
+                this machine, and this version of topos cannot set that up in hermes-agent."),
+        "{:?}",
+        warning_lines(&out)
+    );
+    assert!(!home.0.join(".hermes/config.yaml").exists());
+    // The bundle IS installed — it reached five agents — so it is not a failure.
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
+
+    // The custody round trip: the entry is topos's, a hand edit is drift, and dropping the demand
+    // takes it back out.
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Created
+    );
+    let again = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![demand("s_a", "acme", Some("eng"), &document)]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert_eq!(
+        state_of(&again, "s_a", "cursor").state,
+        TargetOutcome::Current,
+        "a second sweep writes nothing"
+    );
+    let edited = cursor.replace("@acme/server@2.1.0", "@acme/server@9.9.9");
+    std::fs::write(home.0.join(".cursor/mcp.json"), &edited).unwrap();
+    let drifted = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![demand("s_a", "acme", Some("eng"), &document)]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert_eq!(
+        state_of(&drifted, "s_a", "cursor").state,
+        TargetOutcome::Drifted
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.0.join(".cursor/mcp.json")).unwrap(),
+        edited,
+        "a hand-edited program entry is left byte-identical"
+    );
+    // …and the OTHER agents' entries leave when the demand does.
+    let removed = mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
+    assert!(removed.removed.iter().any(|r| r.bundle_id == "s_a"));
+    let codex_after =
+        std::fs::read_to_string(home.0.join(".codex/config.toml")).unwrap_or_default();
+    assert!(!codex_after.contains("topos-eng-acme"), "{codex_after}");
+}
+
+/// The pypi arm, and the two facts that make it a different arm: `uvx` runs it, and the version is
+/// pinned with `==`.
+#[test]
+fn a_pypi_bundle_is_run_by_uvx_at_the_version_the_document_pins() {
+    let document = package_server_json("pypi", "acme-server", "3.0.1");
+    crate::mcp_validate::validate_server_json(document.as_bytes()).expect("gate");
+    let home = Scratch::new("package-pypi");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    mcp_engine::converge(
+        &io,
+        &plan(&io, vec![demand("s_a", "acme", Some("eng"), &document)]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    let cursor = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).expect("cursor");
+    assert!(cursor.contains("\"command\": \"uvx\""), "{cursor}");
+    assert!(cursor.contains("\"acme-server==3.0.1\""), "{cursor}");
+}
+
+/// **A runtime that is not on this machine is a capability, not a failure of the bundle.** The
+/// line names the one thing a person can do about it, nothing is written, and the bundle counts as
+/// undelivered — a summary saying "up to date" over a machine holding nothing is the incoherence
+/// this guards.
+#[test]
+fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
+    let home = Scratch::new("no-node");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = ScopeIo {
+        fs: &fs,
+        runtimes: &NO_RUNTIME,
+        layout: &layout,
+        home: home.0.clone(),
+        project_root: None,
+    };
+    let document = package_server_json("npm", "@acme/server", "2.1.0");
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![demand("s_a", "acme", Some("eng"), &document)]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(
+        warning_lines(&out).iter().any(|l| l
+            == "MCP_RUNTIME_MISSING not placed: needs node, which is not on this machine. Install \
+                node, then run 'topos update'."),
+        "{:?}",
+        warning_lines(&out)
+    );
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Withheld
+    );
+    assert!(!home.0.join(".cursor/mcp.json").exists());
+    assert_eq!(
+        out.failed_bundles,
+        vec!["s_a".to_owned()],
+        "nothing of it is installed anywhere, so the summary says so"
+    );
+
+    // A package from a registry this build has no arm for says which registry, by name.
+    let oci = "{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\
+               \"packages\":[{\"registryType\":\"oci\",\
+               \"identifier\":\"ghcr.io/acme/server@sha256:\
+               aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\
+               \"transport\":{\"type\":\"stdio\"}}]}";
+    crate::mcp_validate::validate_server_json(oci.as_bytes()).expect("an oci bundle publishes");
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![demand("s_b", "beta", Some("eng"), oci)]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(
+        warning_lines(&out).iter().any(|l| l
+            == "MCP_KIND_UNSUPPORTED not placed: this bundle is packaged as oci, which this \
+                version of topos cannot set up yet."),
+        "{:?}",
+        warning_lines(&out)
+    );
+}
+
+/// **An agent that cannot dial an address still gets the server** — through the bridge, pinned in
+/// the table, with headers carried the one way that survives Windows and Cursor.
+#[test]
+fn an_agent_that_dials_nothing_is_given_the_bridge_to_the_same_address() {
+    static BRIDGED: &[KnownHarness] = &[registry::home_rooted_mcp_row_with_caps(
+        "cursor",
+        "Cursor",
+        ".cursor/mcp.json",
+        McpDialect::CursorJson,
+        None,
+        "restart cursor",
+        false, // dials nothing itself
+        true,  // …but runs programs
+        topos_harness::mcp::descriptor::EnvRef::DollarBrace,
+    )];
+    let table: Vec<&'static KnownHarness> = BRIDGED.iter().collect();
+    let slugs: BTreeSet<String> = table.iter().map(|h| h.slug.to_owned()).collect();
+
+    let home = Scratch::new("bridge");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let document = server_json("https://mcp.example/linear");
+    let demands: Vec<mcp_engine::McpDemand> =
+        vec![demand("s_a", "linear", Some("eng"), &document).planned(&io, &table, &slugs)];
+    let out = mcp_engine::converge(&io, &demands, &table, &slugs, &no_hold(), true);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    let bridge = topos_harness::registry::mcp_bridge().expect("this build pins a bridge");
+    let written = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).expect("cursor");
+    assert!(written.contains("\"command\": \"npx\""), "{written}");
+    assert!(written.contains(&bridge.spec()), "{written}");
+    assert!(
+        written.contains("\"https://mcp.example/linear\""),
+        "{written}"
+    );
+    assert!(
+        written.contains("\"X-Team:${TOPOS_HEADER_X_TEAM}\""),
+        "the header argument carries no space: {written}"
+    );
+    assert!(
+        written.contains("\"TOPOS_HEADER_X_TEAM\": \"eng\""),
+        "…and the value travels in the environment: {written}"
+    );
+    // The bridged entry names the SAME server as an address entry would — which is what keeps a
+    // second bundle for it from being placed beside it.
+    let entry = McpEntry {
+        key: "topos-eng-linear".into(),
+        target: mcp::McpTarget::Remote {
+            url: "https://mcp.example/linear".into(),
+            headers: Vec::new(),
+        },
+        auth: AuthHint::Unknown,
+    };
+    let seen = mcp::observe_entries(McpDialect::CursorJson, Some(written.as_bytes()), None)
+        .expect("readable");
+    assert_eq!(
+        seen.iter()
+            .find(|e| e.name == "topos-eng-linear")
+            .unwrap()
+            .address,
+        entry.address()
+    );
 }
 
 /// **A server the agent already has, under a name topos would never recognize, is not placed
@@ -1511,6 +1798,7 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
         let layout = Layout::new(&home_path.join(".topos"));
         let io = ScopeIo {
             fs: &fs,
+            runtimes: &EVERY_RUNTIME,
             layout: &layout,
             home: home_path.clone(),
             project_root: None,
@@ -2048,6 +2336,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
         let fault = FaultFs::new(0);
         let io = ScopeIo {
             fs: &fault,
+            runtimes: &EVERY_RUNTIME,
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -2079,6 +2368,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
             let fault = FaultFs::new(fail_at);
             let io = ScopeIo {
                 fs: &fault,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2113,6 +2403,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
         {
             let io = ScopeIo {
                 fs: &fs,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2188,6 +2479,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
         let fault = FaultFs::new(0);
         let io = ScopeIo {
             fs: &fault,
+            runtimes: &EVERY_RUNTIME,
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -2226,6 +2518,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
         {
             let io = ScopeIo {
                 fs: &fs,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2278,6 +2571,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
             let fault = FaultFs::new(fail_at);
             let io = ScopeIo {
                 fs: &fault,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2295,6 +2589,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
         {
             let io = ScopeIo {
                 fs: &fs,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2331,6 +2626,7 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
 
     let io = ScopeIo {
         fs: &fs,
+        runtimes: &EVERY_RUNTIME,
         layout: &layout,
         home: home.0.clone(),
         project_root: None,
@@ -2379,6 +2675,7 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
         let fault = FaultFs::new(1);
         let faulted = ScopeIo {
             fs: &fault,
+            runtimes: &EVERY_RUNTIME,
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -2466,6 +2763,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
         let fault = FaultFs::new(0);
         let io = ScopeIo {
             fs: &fault,
+            runtimes: &EVERY_RUNTIME,
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -2505,6 +2803,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
             let fault = FaultFs::new(fail_at);
             let io = ScopeIo {
                 fs: &fault,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2540,6 +2839,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
         {
             let io = ScopeIo {
                 fs: &fs,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2582,6 +2882,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         let fault = FaultFs::new(0);
         let io = ScopeIo {
             fs: &fault,
+            runtimes: &EVERY_RUNTIME,
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -2618,6 +2919,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             let fault = FaultFs::new(fail_at);
             let io = ScopeIo {
                 fs: &fault,
+                runtimes: &EVERY_RUNTIME,
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,

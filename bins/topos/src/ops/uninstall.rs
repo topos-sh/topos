@@ -255,6 +255,7 @@ fn mcp_io<'a>(ctx: &'a Ctx<'a>) -> Option<crate::mcp_engine::ScopeIo<'a>> {
     let roots = ctx.roots.as_ref()?;
     Some(crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
+        runtimes: &crate::mcp_render::PathRuntimes,
         layout: &ctx.layout,
         home: roots.home.clone(),
         project_root: None,

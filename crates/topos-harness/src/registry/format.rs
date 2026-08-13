@@ -50,9 +50,9 @@ use std::sync::OnceLock;
 
 use toml_edit::{DocumentMut, Item, TableLike};
 
-use super::{DirSpec, KnownHarness, McpConflictPath, McpSurface, McpSurfaces, Root};
+use super::{DirSpec, KnownHarness, McpBridge, McpConflictPath, McpSurface, McpSurfaces, Root};
 use crate::coverage::SharedDirSupport;
-use crate::mcp::descriptor::McpDialect;
+use crate::mcp::descriptor::{EnvRef, McpDialect};
 
 /// The GRAMMAR version this build reads. A file naming any other number is refused whole — the
 /// shape of the rows is what changed, and guessing at a shape is how a table starts writing to the
@@ -63,10 +63,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// `min_engine_version`. A file that needs more is refused (and the level below it answers) — it is
 /// saying, honestly, that it carries semantics this binary does not implement.
 ///
-/// 2 — the `[[harness.mcp.conflict_paths]]` sub-table: a row may name files a harness READS
-/// servers from that topos never writes. A build that cannot read the column would place entries
-/// on top of servers the agent already has and never say so, which is exactly the refusal
-/// `min_engine_version` exists for.
+/// 2 — the `[[harness.mcp.conflict_paths]]` sub-table (a row may name files a harness READS
+/// servers from that topos never writes: a build that cannot read the column would place entries
+/// on top of servers the agent already has and never say so) AND the MCP capability columns
+/// `remote` / `stdio` / `env_ref` beside the fenced `[mcp_bridge]` pin (a build that cannot read
+/// THOSE would dial an address into a harness that cannot dial, or run nothing at all where a
+/// bridge was meant to). Both are exactly the refusal `min_engine_version` exists for.
 pub const REGISTRY_ENGINE_VERSION: u32 = 2;
 
 /// The widest registry file anything here will read, fetch, or accept from disk. The real table is
@@ -270,6 +272,7 @@ pub struct ParsedRegistry {
     version: RegistryVersion,
     rows: Vec<HarnessRow>,
     warnings: Vec<String>,
+    bridge: Option<OwnedBridge>,
 }
 
 impl ParsedRegistry {
@@ -334,6 +337,16 @@ struct OwnedMcp {
     project: Option<(String, McpDialect)>,
     reload_note: String,
     conflict_paths: Vec<OwnedConflictPath>,
+    remote: bool,
+    stdio: bool,
+    env_ref: EnvRef,
+}
+
+/// The file's bridge pin before it is leaked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedBridge {
+    package: String,
+    version: String,
 }
 
 /// One read-only conflict file before it is leaked.
@@ -427,6 +440,7 @@ pub fn parse_registry(text: &str, origin: Origin) -> Result<ParsedRegistry, Regi
         version,
         rows,
         warnings,
+        bridge: mcp_bridge_at(root, origin)?,
     })
 }
 
@@ -634,12 +648,114 @@ fn mcp_at(table: &dyn TableLike, origin: Origin) -> Result<Option<OwnedMcp>, Reg
         }
     };
     let conflict_paths = conflict_paths_at(mcp, origin)?;
+    // The CAPABILITY columns. Both default to the six rows' original behaviour — a harness that
+    // dials addresses itself and runs local programs — so a row states only what makes it unusual.
+    let flag = |key: &str, default: bool| -> Result<bool, RegistryError> {
+        match mcp.get(key) {
+            None => Ok(default),
+            Some(v) => v
+                .as_bool()
+                .ok_or_else(|| RegistryError(format!("mcp.{key}: expected true or false"))),
+        }
+    };
+    let remote = flag("remote", true)?;
+    let stdio = flag("stdio", true)?;
+    let env_ref = match mcp.get("env_ref") {
+        None => EnvRef::default(),
+        Some(v) => {
+            let word = v
+                .as_str()
+                .ok_or_else(|| RegistryError("mcp.env_ref: expected a string".into()))?;
+            parse_env_ref(word).map_err(|e| RegistryError(format!("mcp.{e}")))?
+        }
+    };
     Ok(Some(OwnedMcp {
         user,
         project,
         reload_note,
         conflict_paths,
+        remote,
+        stdio,
+        env_ref,
     }))
+}
+
+/// The word an [`EnvRef`] is spelled with in the file — named for the SHAPE rather than for the
+/// harness that uses it, because the same shape serves several.
+const fn env_ref_word(env_ref: EnvRef) -> &'static str {
+    match env_ref {
+        EnvRef::DollarBrace => "dollar-brace",
+        EnvRef::BraceEnv => "brace-env",
+        EnvRef::DollarBraceEnv => "dollar-brace-env",
+    }
+}
+
+fn parse_env_ref(word: &str) -> Result<EnvRef, String> {
+    const KNOWN: [EnvRef; 3] = [
+        EnvRef::DollarBrace,
+        EnvRef::BraceEnv,
+        EnvRef::DollarBraceEnv,
+    ];
+    KNOWN
+        .into_iter()
+        .find(|e| env_ref_word(*e) == word)
+        .ok_or_else(|| {
+            format!(
+                "env_ref {word:?}: expected one of {}",
+                KNOWN
+                    .iter()
+                    .map(|e| env_ref_word(*e))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+/// The file's `[mcp_bridge]` table (absent ⇒ this table names no bridge, and a harness that
+/// cannot dial an address simply does not get one).
+///
+/// **FENCED like an absolute path, and for the same reason.** A downloaded or override table may
+/// say WHICH harnesses need bridging; it may never change WHICH PROGRAM runs on the machine. So a
+/// fenced file's bridge must be exactly the bundled one — which the SERVED copy is, byte for byte
+/// — and anything else refuses the whole file.
+fn mcp_bridge_at(
+    root: &dyn TableLike,
+    origin: Origin,
+) -> Result<Option<OwnedBridge>, RegistryError> {
+    let parsed = match root.get("mcp_bridge") {
+        None => None,
+        Some(found) => {
+            let table = found
+                .as_table_like()
+                .ok_or_else(|| RegistryError("mcp_bridge: expected a [mcp_bridge] table".into()))?;
+            let package = str_at(table, "package")
+                .map_err(|e| RegistryError(format!("mcp_bridge.{}", e.message())))?;
+            let version = str_at(table, "version")
+                .map_err(|e| RegistryError(format!("mcp_bridge.{}", e.message())))?;
+            if package.trim().is_empty() || version.trim().is_empty() {
+                return refuse(
+                    "mcp_bridge: the package and its version are both named, or neither",
+                );
+            }
+            Some(OwnedBridge {
+                package: package.to_owned(),
+                version: version.to_owned(),
+            })
+        }
+    };
+    // A fenced file that names NO bridge changes nothing (the pin is read from the bundled table
+    // either way); one that names a DIFFERENT bridge is trying to choose the program this machine
+    // runs, and is refused whole rather than quietly ignored.
+    if origin.fenced()
+        && let Some(named) = &parsed
+        && bundled_bridge().is_none_or(|b| b.package != named.package || b.version != named.version)
+    {
+        return refuse(
+            "mcp_bridge: a downloaded harness registry may say which agents need the bridge, and \
+             never which program runs — this one names a different bridge than the topos reading it",
+        );
+    }
+    Ok(parsed)
 }
 
 /// A row's `[[harness.mcp.conflict_paths]]` entries (absent ⇒ none, which is every row whose
@@ -805,6 +921,32 @@ pub fn bundled_harnesses() -> &'static [KnownHarness] {
     TABLE.get_or_init(|| leak(bundled().rows.clone()))
 }
 
+/// **The bridge this BUILD runs** — the `mcp-remote` package and the exact version pinned in the
+/// bundled table, or `None` when this build's table names none.
+///
+/// It is deliberately read from the bundled table and nowhere else. The fence in
+/// [`mcp_bridge_at`] already refuses a downloaded table that names a different bridge, so the two
+/// answers are always the same; reading the bundled one makes that a property of the code rather
+/// than of a check having run.
+#[must_use]
+pub fn mcp_bridge() -> Option<&'static McpBridge> {
+    bundled_bridge()
+}
+
+/// [`mcp_bridge`]'s leaked value — separate so the fence can call it during a parse without
+/// recursing into a resolution.
+fn bundled_bridge() -> Option<&'static McpBridge> {
+    static BRIDGE: OnceLock<Option<McpBridge>> = OnceLock::new();
+    BRIDGE
+        .get_or_init(|| {
+            bundled().bridge.as_ref().map(|b| McpBridge {
+                package: leak_str(b.package.clone()),
+                version: leak_str(b.version.clone()),
+            })
+        })
+        .as_ref()
+}
+
 /// The slugs the BUNDLED table defines — the known-ids fence every fenced level is measured
 /// against. A downloaded row naming anything else never becomes a write target.
 fn bundled_slugs() -> &'static BTreeSet<String> {
@@ -965,6 +1107,9 @@ fn leak(rows: Vec<HarnessRow>) -> &'static [KnownHarness] {
                         })
                         .collect::<Vec<_>>(),
                 ),
+                remote: mcp.remote,
+                stdio: mcp.stdio,
+                env_ref: mcp.env_ref,
             }),
             shared_dir: row.shared_dir,
         })
@@ -1044,6 +1189,15 @@ pub(super) fn render_row(row: &KnownHarness) -> String {
     if let Some(mcp) = &row.mcp {
         out.push_str("\n[harness.mcp]\n");
         let _ = writeln!(out, "reload_note = {}", quote(mcp.reload_note));
+        if !mcp.remote {
+            let _ = writeln!(out, "remote = false");
+        }
+        if !mcp.stdio {
+            let _ = writeln!(out, "stdio = false");
+        }
+        if mcp.env_ref != EnvRef::default() {
+            let _ = writeln!(out, "env_ref = {}", quote(env_ref_word(mcp.env_ref)));
+        }
         if let Some(user) = mcp.user {
             let _ = writeln!(
                 out,
@@ -1252,6 +1406,111 @@ mod tests {
             "every bundled row survives the fences"
         );
         assert!(parsed.warnings().is_empty(), "{:?}", parsed.warnings());
+    }
+
+    /// The MCP capability columns: stated only where a row is unusual, defaulting to the six
+    /// original rows' behaviour, and refusing a word this build cannot act on rather than
+    /// guessing at one.
+    #[test]
+    fn the_mcp_capability_columns_default_to_dialing_and_running() {
+        let with = |extra: &str| {
+            format!(
+                "schema_version = 1\nversion = \"9.0.0\"\nmin_engine_version = 2\n\n\
+                 [[harness]]\nslug = \"cursor\"\ndisplay_name = \"X\"\nproject_dir = \
+                 \".x/skills\"\nuser_dirs = [\"home/.x/skills\"]\ndetect_dirs = [\"home/.x\"]\n\n\
+                 [harness.mcp]\nreload_note = \"x\"\nuser = {{ dir = \"home/.x/mcp.json\", \
+                 dialect = \"cursor-json\" }}\n{extra}"
+            )
+        };
+        let mcp = |text: &str| {
+            parse_registry(text, Origin::Downloaded)
+                .expect("parses")
+                .rows[0]
+                .mcp
+                .clone()
+                .expect("an mcp block")
+        };
+        let plain = mcp(&with(""));
+        assert!(plain.remote, "an agent dials addresses unless it says not");
+        assert!(plain.stdio, "an agent runs programs unless it says not");
+        assert_eq!(plain.env_ref, EnvRef::DollarBrace);
+
+        let stated = mcp(&with(
+            "remote = false\nstdio = false\nenv_ref = \"brace-env\"\n",
+        ));
+        assert!(!stated.remote);
+        assert!(!stated.stdio);
+        assert_eq!(stated.env_ref, EnvRef::BraceEnv);
+        assert_eq!(
+            mcp(&with("env_ref = \"dollar-brace-env\"\n")).env_ref,
+            EnvRef::DollarBraceEnv
+        );
+
+        for (bad, says) in [
+            ("remote = \"yes\"\n", "expected true or false"),
+            ("stdio = 1\n", "expected true or false"),
+            ("env_ref = \"shell\"\n", "expected one of"),
+            ("env_ref = 7\n", "expected a string"),
+        ] {
+            let e = parse_registry(&with(bad), Origin::Downloaded).expect_err(bad);
+            assert!(e.message().contains(says), "{bad}: {e}");
+        }
+
+        // The three shapes render what a person would recognize.
+        assert_eq!(EnvRef::DollarBrace.render("ACME_TOKEN"), "${ACME_TOKEN}");
+        assert_eq!(EnvRef::BraceEnv.render("ACME_TOKEN"), "{env:ACME_TOKEN}");
+        assert_eq!(
+            EnvRef::DollarBraceEnv.render("ACME_TOKEN"),
+            "${env:ACME_TOKEN}"
+        );
+    }
+
+    /// The bridge is DATA, and the one datum a downloaded table may never move: it names the
+    /// program topos runs on the machine. A copy that names a different one is refused whole; the
+    /// served copy (these same bytes) lands, as the landability gate above requires.
+    #[test]
+    fn a_downloaded_table_may_not_change_which_bridge_program_runs() {
+        let bundled = mcp_bridge().expect("the bundled table pins a bridge");
+        assert_eq!(bundled.package, crate::mcp::BRIDGE_PACKAGE);
+        assert_eq!(bundled.spec(), format!("mcp-remote@{}", bundled.version));
+
+        let naming = |package: &str, version: &str| {
+            format!(
+                "schema_version = 1\nversion = \"9.0.0\"\nmin_engine_version = 2\n\n\
+                 [mcp_bridge]\npackage = {package:?}\nversion = {version:?}\n\n\
+                 [[harness]]\nslug = \"cursor\"\ndisplay_name = \"X\"\nproject_dir = \
+                 \".x/skills\"\nuser_dirs = [\"home/.x/skills\"]\ndetect_dirs = [\"home/.x\"]\n"
+            )
+        };
+        // The bundled pin, restated: ordinary.
+        assert!(
+            parse_registry(
+                &naming(bundled.package, bundled.version),
+                Origin::Downloaded
+            )
+            .is_ok()
+        );
+        // A different program, or a different version of it: refused whole.
+        for (package, version) in [
+            ("mcp-remote", "9.9.9"),
+            ("mcp-remote-evil", bundled.version),
+        ] {
+            let e = parse_registry(&naming(package, version), Origin::Downloaded)
+                .expect_err("{package}@{version}");
+            assert!(e.message().contains("never which program runs"), "{e}");
+        }
+        // A table naming NO bridge is ordinary — the pin is this build's either way — and half a
+        // bridge is a malformed file, not a lean one.
+        let rows = "\n[[harness]]\nslug = \"cursor\"\ndisplay_name = \"X\"\nproject_dir = \
+                    \".x/skills\"\nuser_dirs = [\"home/.x/skills\"]\ndetect_dirs = [\"home/.x\"]\n";
+        let header = "schema_version = 1\nversion = \"9.0.0\"\nmin_engine_version = 2\n";
+        assert!(parse_registry(&format!("{header}{rows}"), Origin::Downloaded).is_ok());
+        let e = parse_registry(
+            &format!("{header}\n[mcp_bridge]\npackage = \"mcp-remote\"\n{rows}"),
+            Origin::Downloaded,
+        )
+        .expect_err("half a bridge");
+        assert!(e.message().contains("mcp_bridge.version"), "{e}");
     }
 
     /// Review follow-up: the bare home dir is the one root a fenced row may never name — a skills

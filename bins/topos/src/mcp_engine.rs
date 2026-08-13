@@ -61,8 +61,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-use topos_harness::mcp::{self, AuthHint, EditPlan, EntryState, McpDialect, McpEntry, plugin_dir};
+use topos_harness::mcp::{self, EditPlan, EntryState, McpDialect, McpEntry, plugin_dir};
 use topos_harness::registry::KnownHarness;
 use topos_types::Message;
 use topos_types::results::{McpAgentState, TargetOutcome};
@@ -71,6 +70,7 @@ use crate::config_custody::EntryPlacement;
 use crate::config_custody::{self, PendingIntent, ScopeEntries, placement_key};
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
+use crate::mcp_render::ServerDoc;
 use crate::placement::PlacementPlan;
 use crate::sidecar::Layout;
 
@@ -149,9 +149,14 @@ pub(crate) struct McpDemand {
 }
 
 /// The scope's I/O: the fs seam, the scope store (where the custody document and every bundle's own
-/// record live), and the machine roots the surfaces resolve against.
+/// record live), the machine roots the surfaces resolve against, and the probe that answers whether
+/// a runtime a placement needs is on this machine.
 pub(crate) struct ScopeIo<'a> {
     pub fs: &'a dyn FsOps,
+    /// Whether the runtime a program-run server would need (`npx`, `uvx`) can be found here. On
+    /// the seam because "not placed: needs node" must be a TESTED outcome and not a property of
+    /// the machine running the suite.
+    pub runtimes: &'a dyn crate::mcp_render::RuntimeProbe,
     /// The scope's store layout — where `state/config_custody.json` and the per-bundle records live.
     pub layout: &'a Layout,
     /// The machine home (user surfaces resolve under it).
@@ -216,100 +221,8 @@ pub(crate) struct ConvergeOutcome {
 }
 
 // =================================================================================================
-// server.json parsing — the fail-closed re-check of the publish gate.
+// The refusal a gated document earns.
 // =================================================================================================
-
-/// What one `server.json` resolves to for placement.
-struct ParsedServer {
-    url: String,
-    headers: Vec<(String, String)>,
-    auth: AuthHint,
-}
-
-/// Parse a bundle's `server.json`: the FIRST `remotes[]` entry with `type == "streamable-http"`,
-/// its url, its LITERAL headers, and the `_meta["sh.topos/auth"]` hint. Anything the publish gate
-/// should have refused — a secret / templated / variable / value-less header — fails the WHOLE
-/// demand closed (never place a suspect entry).
-fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
-    let root: Value = serde_json::from_slice(bytes)
-        .map_err(|e| format!("its server.json is not valid JSON ({e})"))?;
-    // A non-empty `packages[]` is a LOCALLY-RUN server — out of scope for a shared bundle, and
-    // something the publish gate refuses outright; a stored copy carrying one is suspect.
-    if root
-        .get("packages")
-        .and_then(Value::as_array)
-        .is_some_and(|p| !p.is_empty())
-    {
-        return Err(
-            "its server.json lists local packages — that is not a shareable remote server".into(),
-        );
-    }
-    let remotes = root
-        .get("remotes")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "its server.json lists no remotes".to_owned())?;
-    // The FIRST remote with `type == "streamable-http"` AND a url — ONE predicate, the same
-    // pick the gate makes (`crate::mcp_validate`), so the engine can never resolve a different
-    // remote than the one the gate approved.
-    let remote = remotes
-        .iter()
-        .find(|r| {
-            r.get("type").and_then(Value::as_str) == Some("streamable-http")
-                && r.get("url").and_then(Value::as_str).is_some()
-        })
-        .ok_or_else(|| "its server.json has no streamable-http remote with a url".to_owned())?;
-    let url = remote
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|u| !u.trim().is_empty())
-        .ok_or_else(|| "its streamable-http remote has no url".to_owned())?
-        .to_owned();
-    let mut headers = Vec::new();
-    if let Some(list) = remote.get("headers").and_then(Value::as_array) {
-        for h in list {
-            let name = h
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| "one of its headers has no name".to_owned())?;
-            // The publish gate refused secret / variable / value-less headers. RE-CHECK here,
-            // fail-closed: a suspect header fails the whole demand rather than placing a header
-            // whose value the gate never validated as a shareable literal. (`isRequired` with a
-            // plain literal value is fine — the value satisfies the requirement; the gate's
-            // valid vectors carry exactly that shape.)
-            //
-            // DISCIPLINE: this block is a MATCHING RE-CHECK of the shared validation gate
-            // (`crate::mcp_validate`), rule for rule. Every refusal the engine could make
-            // BEYOND the gate either moves into the gate (with shared vectors, both tiers) or
-            // is deleted — the engine never grows a private rule, because a bundle the gate
-            // publishes must never be permanently unplaceable here.
-            if h.get("isSecret").and_then(Value::as_bool) == Some(true) {
-                return Err(format!("its {name} header is marked secret"));
-            }
-            if h.get("variables").is_some_and(|v| !v.is_null()) {
-                return Err(format!("its {name} header carries variable substitutions"));
-            }
-            let value = h
-                .get("value")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("its {name} header carries no literal value"))?;
-            if value.contains('{') && value.contains('}') {
-                return Err(format!("its {name} header carries a templated value"));
-            }
-            headers.push((name.to_owned(), value.to_owned()));
-        }
-    }
-    let auth = match root
-        .get("_meta")
-        .and_then(|m| m.get("sh.topos/auth"))
-        .and_then(Value::as_str)
-    {
-        Some("oauth") => AuthHint::Oauth,
-        Some("none") => AuthHint::None,
-        _ => AuthHint::Unknown,
-    };
-    Ok(ParsedServer { url, headers, auth })
-}
 
 /// The ONE refusal line a gated server document earns. `{code}` is the GATE's own code (WHY the
 /// document was refused), and the remedy names the audience that can actually act: a local folder
@@ -408,7 +321,7 @@ pub(crate) fn converge(
     // check — content-addressed workspace bytes were gated at publish, but the re-check is one
     // call. A refusal HOLDS the bundle (its standing entries must not read as undemanded,
     // nothing new is placed) and the warning names the typed refusal code.
-    let mut parsed: Vec<(usize, ParsedServer)> = Vec::new();
+    let mut parsed: Vec<(usize, ServerDoc)> = Vec::new();
     let mut failed: BTreeMap<usize, String> = BTreeMap::new();
     for (i, d) in demands.iter().enumerate() {
         // ONE code per line. The gate's own code used to be pasted in front of its sentence and
@@ -420,7 +333,8 @@ pub(crate) fn converge(
         let gated = crate::mcp_validate::validate_server_json(&d.server_json)
             .map_err(|r| (r.code.as_str().to_owned(), r.message))
             .and_then(|_| {
-                parse_server_json(&d.server_json).map_err(|m| ("MCP_UNPLACEABLE".to_owned(), m))
+                crate::mcp_render::parse_server_json(&d.server_json)
+                    .map_err(|m| ("MCP_UNPLACEABLE".to_owned(), m))
             });
         match gated {
             Ok(p) => parsed.push((i, p)),
@@ -464,9 +378,12 @@ pub(crate) fn converge(
     // Mint keys for the placeable demands (durable with the first write below).
     let minted: BTreeMap<usize, String> = parsed
         .iter()
-        .map(|(i, p)| {
+        .map(|(i, doc)| {
             let d = &demands[*i];
-            let address = mcp::canonical_address(&p.url);
+            // The server this DOCUMENT names — the address it offers, else the package it pins.
+            // A document-level fact deliberately: the same bundle mints the same key whichever
+            // form each agent here ends up running.
+            let address = doc.canonical_identity();
             let key = custody.mint_key(
                 &d.bundle_id,
                 &d.name,
@@ -484,6 +401,11 @@ pub(crate) fn converge(
     let mut states: BTreeMap<usize, Vec<McpAgentState>> = BTreeMap::new();
     // The demands whose config entries this run WROTE somewhere — see [`BundleStates::wrote`].
     let mut wrote: BTreeSet<usize> = BTreeSet::new();
+    // The demands SOME engaged agent could not be given anything for (a capability this machine or
+    // this build does not have). Tracked apart from the states, because `Withheld` also names the
+    // ordinary structural narrowings — a scope with no surface, a `dest` that excludes an agent —
+    // and those are not a bundle failing to arrive.
+    let mut capability_gaps: BTreeSet<usize> = BTreeSet::new();
 
     for h in descriptors {
         // WHAT THE PLANS WITHHELD from this surface — one line per placeable demand that asked for
@@ -541,19 +463,54 @@ pub(crate) fn converge(
 
         // The desired set for this harness: the placeable demands whose PLAN puts an entries
         // target here. Nothing is re-narrowed — the plan already answered.
+        //
+        // WHAT each of them becomes is decided per harness, here and nowhere else
+        // ([`crate::mcp_render::select`]): the address this agent dials, the bridge that gets the
+        // address to an agent that dials nothing, or the package it runs. A bundle this MACHINE
+        // cannot set up for this agent — a registry with no runtime arm, a runtime that is not
+        // installed, a value only a person can fill in — is WITHHELD with the reason said in
+        // plain words, and re-decided from scratch on the next sweep.
+        let caps = h.mcp().map(|m| crate::mcp_render::HarnessCaps {
+            remote: m.remote,
+            stdio: m.stdio,
+            env_ref: m.env_ref,
+        });
+        let machine = crate::mcp_render::Machine::at(&file);
         let mut desired: Vec<McpEntry> = Vec::new();
         let mut desired_bundles: BTreeMap<String, usize> = BTreeMap::new();
-        for (i, p) in &parsed {
+        for (i, doc) in &parsed {
             if demands[*i].plan.entries_for(h.slug).is_none() {
                 continue;
             }
+            let Some(caps) = caps else { continue };
+            let target = match crate::mcp_render::select(
+                doc,
+                caps,
+                topos_harness::registry::mcp_bridge(),
+                io.runtimes,
+                machine,
+            ) {
+                Ok(target) => target,
+                Err(gap) => {
+                    push_state(
+                        &mut states,
+                        *i,
+                        agent_state(h.slug, TargetOutcome::Withheld, Some(&gap.note()), None),
+                    );
+                    let line = crate::message::failure(gap.code(), gap.message(h.slug));
+                    if !out.warnings.contains(&line) {
+                        out.warnings.push(line);
+                    }
+                    capability_gaps.insert(*i);
+                    continue;
+                }
+            };
             let key = minted[i].clone();
             desired_bundles.insert(key.clone(), *i);
             desired.push(McpEntry {
                 key,
-                url: p.url.clone(),
-                headers: p.headers.clone(),
-                auth: p.auth,
+                target,
+                auth: doc.auth,
             });
         }
         // THE COLLISION PRE-FLIGHT — asked before the drivers, because the drivers can only see
@@ -665,11 +622,13 @@ pub(crate) fn converge(
     // and the exit status describe the same run — a line alone left "1 already up to date"
     // printed over a machine holding nothing. A bundle blocked on ONE surface and placed on
     // another is not this: it is installed, and its receipt row carries the collision beside the
-    // placements.
+    // placements. A CAPABILITY gap counts the same way, and for the same reason: a machine with
+    // no node holds nothing of an npm bundle, whatever the store says.
     for (i, d) in demands.iter().enumerate() {
-        let blocked = states
-            .get(&i)
-            .is_some_and(|s| s.iter().any(|st| st.state == TargetOutcome::Conflicting));
+        let blocked = capability_gaps.contains(&i)
+            || states
+                .get(&i)
+                .is_some_and(|s| s.iter().any(|st| st.state == TargetOutcome::Conflicting));
         if blocked
             && !wrote.contains(&i)
             && !custody.has_entries_for(&d.bundle_id)
@@ -908,7 +867,7 @@ fn collisions(
     let wanted: Vec<(&str, Option<String>)> = desired
         .iter()
         .filter(|e| !ours_here.contains(&e.key))
-        .map(|e| (e.key.as_str(), mcp::canonical_address(&e.url)))
+        .map(|e| (e.key.as_str(), e.address()))
         .collect();
     if wanted.is_empty() {
         return out; // every desired entry is already topos's here
@@ -1896,6 +1855,7 @@ pub(crate) fn converge_bundle_now(
             .collect();
     let io = ScopeIo {
         fs: ctx.fs,
+        runtimes: &crate::mcp_render::PathRuntimes,
         layout: &ctx.layout,
         home: roots.home.clone(),
         project_root,

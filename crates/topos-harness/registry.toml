@@ -20,10 +20,25 @@
 #
 # `schema_version` is the GRAMMAR (a reader that does not know it refuses the file whole);
 # `min_engine_version` is what a reader must PROVIDE to be allowed to read this file.
+#
+# A `[harness.mcp]` block carries three CAPABILITY columns, each stated only where the row is
+# unusual: `remote` (the agent dials an https MCP address itself — true unless stated), `stdio`
+# (the agent runs a local program as a server — true unless stated), and `env_ref` (how the agent
+# spells a reference to an environment variable inside an entry: `dollar-brace` = `${VAR}`,
+# `brace-env` = `{env:VAR}`, `dollar-brace-env` = `${env:VAR}`; `dollar-brace` unless stated).
 
 schema_version = 1
-version = "2026.8.13.2"
+version = "2026.8.13.3"
 min_engine_version = 2
+
+# The remote-to-stdio BRIDGE: the program topos runs so an agent that cannot dial an MCP address
+# reaches one anyway. Pinned to one exact version, because every machine in a workspace runs the
+# same bytes. FENCED: a downloaded table may say which agents need the bridge (the per-row `remote`
+# column) and may never change which program runs — a copy naming a different bridge is refused
+# whole, and the served copy is these bytes, so it lands.
+[mcp_bridge]
+package = "mcp-remote"
+version = "0.1.38"
 
 [[harness]]
 slug = "aider-desk"
@@ -331,6 +346,10 @@ detect_dirs = ["hermesHome"]
 
 [harness.mcp]
 reload_note = "/reload-mcp in a session, or next session"
+# The one-line entry grammar this file's entries are written in is evidenced for an ADDRESS and
+# nothing else, so a server topos would RUN is withheld here rather than written in a shape nobody
+# confirmed. Flip this the day the program spelling is confirmed against a real Hermes build.
+stdio = false
 user = { dir = "hermesHome/config.yaml", dialect = "hermes-yaml" }
 
 [[harness]]
@@ -463,6 +482,8 @@ shared_dir = { level = "probed", covered = true }
 
 [harness.mcp]
 reload_note = "restart opencode"
+# OpenCode spells an environment-variable reference its own way.
+env_ref = "brace-env"
 user = { dir = "configHome/opencode/opencode.json", dialect = "opencode-json" }
 project = { path = "opencode.json", dialect = "opencode-json" }
 

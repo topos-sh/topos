@@ -43,8 +43,16 @@
 //! ## The per-dialect wire shapes (exact — a wrong key can brick a harness)
 //!
 //! Rendering lives in [`entry_value`]; the per-driver module docs carry the placement mechanics.
-//! Empty `headers` are omitted in every dialect (an empty map carries no information and strict
-//! validators are the risk surface).
+//! Empty `headers` (and an empty `env`) are omitted in every dialect (an empty map carries no
+//! information and strict validators are the risk surface).
+//!
+//! An entry has one of TWO targets ([`McpTarget`]): an ADDRESS the harness dials, or a PROGRAM it
+//! runs on this machine. Both are ordinary managed entries — same key contract, same fingerprint
+//! ledger, same drift rules — and the CALLER decides which one a given harness gets, rendering
+//! every machine-local spelling (the bridge argv, the Windows `cmd /c` wrapper, an env-var
+//! reference) before it builds the entry. [`entry_value`] answers `None` for the one pair no
+//! vendor evidence covers — a program in Hermes's YAML — and every driver turns that into a
+//! refusal rather than a guess.
 
 pub mod descriptor;
 pub mod jsonc_edit;
@@ -59,18 +67,65 @@ use sha2::{Digest, Sha256};
 
 pub use descriptor::McpDialect;
 
-/// One desired managed entry (harness-neutral).
+/// One desired managed entry — harness-neutral in its OWNERSHIP half (the key), already
+/// harness-DECIDED in its target: the caller picks between the two shapes per harness (an address
+/// the harness dials itself, or the program this machine runs), and renders any per-harness
+/// spelling — the bridge argv, a Windows wrapper, an env-var reference — before building one.
 #[derive(Debug, Clone)]
 pub struct McpEntry {
     /// The immutable config key, e.g. `topos-acme-linear`. Charset `[a-z0-9-]` and the `topos-`
     /// prefix are caller-guaranteed — and re-verified by every driver (fail-closed), because the
     /// prefix is what later runs key managed-LOOKING recognition on.
     pub key: String,
-    pub url: String,
-    /// Literal, non-secret header pairs (already gate-validated by the caller). Emitted sorted
-    /// by name in every dialect so output bytes are deterministic.
-    pub headers: Vec<(String, String)>,
+    /// What the entry points the harness at.
+    pub target: McpTarget,
     pub auth: AuthHint,
+}
+
+/// The two shapes an MCP entry can have. A bundle's `server.json` may offer an ADDRESS every
+/// machine dials, a PACKAGE every machine runs, or both; which of the two a given harness gets is
+/// the caller's decision, and this is where it is recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTarget {
+    /// An endpoint the harness connects to over https.
+    Remote {
+        url: String,
+        /// Literal, non-secret header pairs (already gate-validated by the caller). Emitted
+        /// sorted by name in every dialect so output bytes are deterministic.
+        headers: Vec<(String, String)>,
+    },
+    /// A program the harness RUNS on this machine, talking MCP over stdio. `command` and `args`
+    /// are exactly what gets spawned (any Windows `cmd /c` wrapper is already applied); `env`
+    /// values are literals or the harness's own env-var reference spelling — never a credential.
+    Local {
+        command: String,
+        args: Vec<String>,
+        /// Environment pairs, emitted sorted by name so output bytes are deterministic.
+        env: Vec<(String, String)>,
+    },
+}
+
+impl McpEntry {
+    /// The endpoint this entry dials, when it dials one at all.
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        match &self.target {
+            McpTarget::Remote { url, .. } => Some(url.as_str()),
+            McpTarget::Local { .. } => None,
+        }
+    }
+
+    /// The ONE spelling of the server this entry names — [`canonical_address`] for a remote,
+    /// [`local_address`] for a program (which unwraps a bridged remote back to its URL). It is
+    /// what a collision question compares, and it is answered the same way for an entry topos
+    /// would write and an entry it merely found.
+    #[must_use]
+    pub fn address(&self) -> Option<String> {
+        match &self.target {
+            McpTarget::Remote { url, .. } => canonical_address(url),
+            McpTarget::Local { command, args, .. } => local_address(command, args),
+        }
+    }
 }
 
 /// What the caller knows about the server's auth story. Two dialects render it — Hermes and
@@ -203,6 +258,152 @@ pub fn canonical_address(raw: &str) -> Option<String> {
     Some(format!("{scheme}://{userinfo}{host}{port}{tail}"))
 }
 
+// ---------------------------------------------------------------------------------------------
+// Machine-local rendering facts: the Windows wrapper, the bridge argv, and the local address.
+// ---------------------------------------------------------------------------------------------
+
+/// The package name of the remote-to-stdio bridge, for RECOGNITION — which argv is really a remote
+/// server in disguise. The version topos itself runs is registry DATA (fenced to the bundled
+/// table); recognition is version-blind on purpose, because a foreign entry may bridge the same
+/// server through any version of it, or through none at all.
+pub const BRIDGE_PACKAGE: &str = "mcp-remote";
+
+/// The commands that are BATCH FILES on Windows (`npx.cmd`, `node.exe`'s shims, …) and therefore
+/// cannot be spawned directly: Windows needs `cmd /c` in front of them. Ported from cc-switch
+/// (MIT, see THIRD-PARTY-NOTICES.md), whose list is the one Claude Code's own doctor asks for.
+pub const WINDOWS_WRAPPED_COMMANDS: &[&str] =
+    &["npx", "npm", "yarn", "pnpm", "node", "bun", "deno"];
+
+/// The Windows `cmd /c` wrapper: `npx -y x` → `cmd` `["/c", "npx", "-y", "x"]`.
+///
+/// Applied ONLY on Windows, only to [`WINDOWS_WRAPPED_COMMANDS`] (matched on the file stem, so a
+/// `C:\…\npx.cmd` spelling wraps too), and never twice — a command that is already `cmd` is left
+/// alone. `wsl` says the config file being written lives inside a WSL distribution
+/// (`\\wsl$\…`, `\\wsl.localhost\…`): the harness reading it runs Linux, where the wrapper would
+/// be nonsense. Argument VALUES are never quoted here — every dialect writes argv as a list, and
+/// the quoting rule for a list is that there is none: a value with spaces stays one element.
+#[must_use]
+pub fn windows_wrap(
+    command: &str,
+    args: &[String],
+    windows: bool,
+    wsl: bool,
+) -> (String, Vec<String>) {
+    if !windows || wsl || !needs_windows_wrap(command) {
+        return (command.to_owned(), args.to_vec());
+    }
+    let mut wrapped = Vec::with_capacity(args.len() + 2);
+    wrapped.push("/c".to_owned());
+    wrapped.push(command.to_owned());
+    wrapped.extend_from_slice(args);
+    ("cmd".to_owned(), wrapped)
+}
+
+/// Whether `command` is one of the shim commands Windows cannot spawn directly. The comparison is
+/// on the file STEM (`npx`, `npx.cmd`, `C:\Program Files\nodejs\npx.cmd` all match) and
+/// case-insensitive, as Windows paths are.
+#[must_use]
+pub fn needs_windows_wrap(command: &str) -> bool {
+    if command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe") {
+        return false; // already the wrapper
+    }
+    let base = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .split('.')
+        .next()
+        .unwrap_or(command);
+    WINDOWS_WRAPPED_COMMANDS
+        .iter()
+        .any(|c| base.eq_ignore_ascii_case(c))
+}
+
+/// Whether `path` is a WSL UNC path — the one place a Windows topos must NOT write the `cmd /c`
+/// wrapper, because the harness reading that file runs Linux. Only a direct UNC spelling is
+/// detectable; a mapped drive letter pointing into WSL is not, and is documented as such by the
+/// source this rule is ported from (cc-switch, MIT).
+#[must_use]
+pub fn is_wsl_unc(path: &str) -> bool {
+    let Some(rest) = path
+        .strip_prefix(r"\\")
+        .or_else(|| path.strip_prefix(r"//"))
+    else {
+        return false;
+    };
+    let server = rest.split(['\\', '/']).next().unwrap_or_default();
+    server.eq_ignore_ascii_case("wsl$") || server.eq_ignore_ascii_case("wsl.localhost")
+}
+
+/// `command` + `args` with any Windows `cmd /c` wrapper removed — the spelling two machines can be
+/// compared on, since one may have written the wrapper and the other not.
+#[must_use]
+fn unwrapped<'a>(command: &'a str, args: &'a [String]) -> (&'a str, &'a [String]) {
+    let is_cmd = command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe");
+    if is_cmd
+        && let [flag, inner, rest @ ..] = args
+        && flag.eq_ignore_ascii_case("/c")
+    {
+        return (inner.as_str(), rest);
+    }
+    (command, args)
+}
+
+/// **The ONE spelling of a program-run server's address** — the twin of [`canonical_address`] for
+/// an entry that runs something instead of dialing something:
+///
+/// - a BRIDGED remote (`npx -y mcp-remote@x https://…`) answers with the URL it bridges,
+///   canonicalized, because the server it reaches is the server that URL names — an entry that
+///   bridges it and an entry that dials it are the same server twice;
+/// - anything else answers with the command and its arguments, after the Windows `cmd /c` wrapper
+///   is stripped, rendered as one JSON array so no argument can be confused with a boundary.
+///
+/// `None` for an empty command: nothing comparable never matches, including another one just like
+/// it.
+#[must_use]
+pub fn local_address(command: &str, args: &[String]) -> Option<String> {
+    let (command, args) = unwrapped(command, args);
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    if let Some(url) = bridged_url(command, args) {
+        return canonical_address(&url);
+    }
+    let mut parts: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    parts.push(command);
+    parts.extend(args.iter().map(String::as_str));
+    Some(format!("run:{}", Value::from(parts)))
+}
+
+/// The URL a bridge invocation carries, if this argv IS one: a node runner, the
+/// [`BRIDGE_PACKAGE`] (bare or `@`-versioned) among its arguments, and an absolute URL after it.
+/// Deliberately loose about the version and the flags around it — recognizing somebody else's
+/// bridge entry is the whole point.
+fn bridged_url(command: &str, args: &[String]) -> Option<String> {
+    let runner = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .split('.')
+        .next()
+        .unwrap_or(command);
+    if !runner.eq_ignore_ascii_case("npx") {
+        return None;
+    }
+    let at = args.iter().position(|a| {
+        let name = a.rsplit_once('@').map_or(a.as_str(), |(name, _)| {
+            // A scoped package's leading `@` is part of the name, not a version separator.
+            if name.is_empty() { a.as_str() } else { name }
+        });
+        name == BRIDGE_PACKAGE
+    })?;
+    args[at + 1..]
+        .iter()
+        .find(|a| a.contains("://"))
+        .map(ToString::to_string)
+}
+
 /// **Every entry a surface holds, foreign ones included** — the observation the ownership ledger
 /// cannot make on its own ([`observe`] answers only for managed-LOOKING keys, so an entry under
 /// somebody else's name pointing at the same server is invisible to it).
@@ -234,12 +435,36 @@ pub fn observe_entries(
 /// The address inside one entry's parsed value, canonicalized. The key is whichever address
 /// spelling the entry carries — harnesses disagree about the name (`url` here, `serverUrl` or
 /// `httpUrl` or `uri` elsewhere), and an entry a foreign tool wrote uses ITS spelling, not ours.
+///
+/// An entry that RUNS something instead of dialing something answers with its
+/// [`local_address`] — including the two spellings of a command line the dialects disagree
+/// about: `command` + `args` nearly everywhere, and OpenCode's single `command` array.
 pub(crate) fn entry_address(value: &Value) -> Option<String> {
     let obj = value.as_object()?;
-    ["url", "serverUrl", "httpUrl", "uri"]
+    let dialed = ["url", "serverUrl", "httpUrl", "uri"]
         .iter()
         .find_map(|k| obj.get(*k).and_then(Value::as_str))
-        .and_then(canonical_address)
+        .and_then(canonical_address);
+    if dialed.is_some() {
+        return dialed;
+    }
+    let strings = |v: Option<&Value>| -> Vec<String> {
+        v.and_then(Value::as_array).map_or_else(Vec::new, |a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+    };
+    match obj.get("command") {
+        Some(Value::String(command)) => local_address(command, &strings(obj.get("args"))),
+        Some(Value::Array(_)) => {
+            let argv = strings(obj.get("command"));
+            let (command, args) = argv.split_first()?;
+            local_address(command, args)
+        }
+        _ => None,
+    }
 }
 
 /// Compute MCP placements for one config surface (routes to the driver). For
@@ -397,28 +622,36 @@ fn write_canonical(value: &Value, out: &mut String) {
 
 /// The entry's value in `dialect`'s wire shape, as a [`Value`]. Keys are inserted in sorted
 /// order so serialization is deterministic under either serde_json map backend. Empty `headers`
-/// are omitted in every dialect.
+/// (and an empty `env`) are omitted in every dialect.
+///
+/// `None` means the dialect CANNOT EXPRESS that target — today exactly one pair: a program-run
+/// server in Hermes's YAML, whose entry grammar this build has vendor evidence only for in its
+/// address form. It is not an error and never a guess: the caller withholds the placement and
+/// says so, and every driver refuses the whole edit rather than writing a shape it invented.
 #[must_use]
-pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Value {
+pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
     let mut m = Map::new();
-    match dialect {
+    match (dialect, &entry.target) {
         // `type` is MANDATORY here — Claude Code refuses a typeless remote entry.
-        McpDialect::ClaudePluginDir | McpDialect::ClaudeProjectJson => {
-            insert_headers(&mut m, entry);
+        (
+            McpDialect::ClaudePluginDir | McpDialect::ClaudeProjectJson,
+            McpTarget::Remote { url, headers },
+        ) => {
+            insert_pairs(&mut m, "headers", headers);
             m.insert("type".to_owned(), Value::String("http".to_owned()));
-            m.insert("url".to_owned(), Value::String(entry.url.clone()));
+            m.insert("url".to_owned(), Value::String(url.clone()));
         }
         // NEVER a `type` key: a `type: "streamable-http"` makes cursor-agent silently drop the
         // ENTIRE file.
-        McpDialect::CursorJson => {
-            insert_headers(&mut m, entry);
-            m.insert("url".to_owned(), Value::String(entry.url.clone()));
+        (McpDialect::CursorJson, McpTarget::Remote { url, headers }) => {
+            insert_pairs(&mut m, "headers", headers);
+            m.insert("url".to_owned(), Value::String(url.clone()));
         }
-        McpDialect::OpencodeJson => {
+        (McpDialect::OpencodeJson, McpTarget::Remote { url, headers }) => {
             m.insert("enabled".to_owned(), Value::Bool(true));
-            insert_headers(&mut m, entry);
+            insert_pairs(&mut m, "headers", headers);
             m.insert("type".to_owned(), Value::String("remote".to_owned()));
-            m.insert("url".to_owned(), Value::String(entry.url.clone()));
+            m.insert("url".to_owned(), Value::String(url.clone()));
         }
         // `transport` EXPLICIT (OpenClaw's silent default is sse), and `auth: oauth` on the
         // explicit hint alone — OpenClaw's per-server options are open-world, `auth` is one of
@@ -426,61 +659,103 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Value {
         // gated on that key: without it an oauth-hinted server can never be signed in to.
         // Nothing else is emitted — a key OpenClaw retired is refused, and a refused config
         // bricks its gateway startup.
-        McpDialect::OpenclawJson => {
+        (McpDialect::OpenclawJson, McpTarget::Remote { url, headers }) => {
             if entry.auth == AuthHint::Oauth {
                 m.insert("auth".to_owned(), Value::String("oauth".to_owned()));
             }
-            insert_headers(&mut m, entry);
+            insert_pairs(&mut m, "headers", headers);
             m.insert(
                 "transport".to_owned(),
                 Value::String("streamable-http".to_owned()),
             );
-            m.insert("url".to_owned(), Value::String(entry.url.clone()));
+            m.insert("url".to_owned(), Value::String(url.clone()));
         }
         // ONLY `url` and (when headers exist) `http_headers` — a wrong key hard-fails Codex's
         // whole config load. This is the FINGERPRINT shape; the TOML emission mirrors it.
-        McpDialect::CodexToml => {
-            if let Some(h) = headers_object(entry) {
-                m.insert("http_headers".to_owned(), h);
-            }
-            m.insert("url".to_owned(), Value::String(entry.url.clone()));
+        (McpDialect::CodexToml, McpTarget::Remote { url, headers }) => {
+            insert_pairs(&mut m, "http_headers", headers);
+            m.insert("url".to_owned(), Value::String(url.clone()));
         }
         // The parsed shape of the one-line flow mapping `yaml_splice` emits. `auth: oauth` only
         // on the explicit hint — Unknown/None omit it.
-        McpDialect::HermesYaml => {
+        (McpDialect::HermesYaml, McpTarget::Remote { url, headers }) => {
             if entry.auth == AuthHint::Oauth {
                 m.insert("auth".to_owned(), Value::String("oauth".to_owned()));
             }
-            insert_headers(&mut m, entry);
-            m.insert("url".to_owned(), Value::String(entry.url.clone()));
+            insert_pairs(&mut m, "headers", headers);
+            m.insert("url".to_owned(), Value::String(url.clone()));
         }
+        // The stdio shape three of the four JSON families share verbatim (`command`/`args`/`env`),
+        // and Codex's TOML spells identically. `type: "stdio"` where the harness declares the key
+        // (Claude Code, OpenClaw); never for Cursor, which drops a whole file over a `type` it
+        // dislikes and infers stdio from the command anyway. `auth` belongs to an address, so a
+        // program-run entry never carries it — a bridged remote signs itself in.
+        (
+            McpDialect::ClaudePluginDir
+            | McpDialect::ClaudeProjectJson
+            | McpDialect::CursorJson
+            | McpDialect::OpenclawJson
+            | McpDialect::CodexToml,
+            McpTarget::Local { command, args, env },
+        ) => {
+            m.insert(
+                "args".to_owned(),
+                Value::Array(args.iter().map(|a| Value::String(a.clone())).collect()),
+            );
+            m.insert("command".to_owned(), Value::String(command.clone()));
+            insert_pairs(&mut m, "env", env);
+            match dialect {
+                McpDialect::ClaudePluginDir | McpDialect::ClaudeProjectJson => {
+                    m.insert("type".to_owned(), Value::String("stdio".to_owned()));
+                }
+                McpDialect::OpenclawJson => {
+                    m.insert("transport".to_owned(), Value::String("stdio".to_owned()));
+                }
+                _ => {}
+            }
+        }
+        // OpenCode is the outlier twice over: the program and its arguments are ONE `command`
+        // array, and the environment is spelled `environment`.
+        (McpDialect::OpencodeJson, McpTarget::Local { command, args, env }) => {
+            let mut argv = Vec::with_capacity(args.len() + 1);
+            argv.push(Value::String(command.clone()));
+            argv.extend(args.iter().map(|a| Value::String(a.clone())));
+            m.insert("command".to_owned(), Value::Array(argv));
+            m.insert("enabled".to_owned(), Value::Bool(true));
+            insert_pairs(&mut m, "environment", env);
+            m.insert("type".to_owned(), Value::String("local".to_owned()));
+        }
+        (McpDialect::HermesYaml, McpTarget::Local { .. }) => return None,
     }
-    Value::Object(m)
+    Some(Value::Object(m))
 }
 
-fn insert_headers(m: &mut Map<String, Value>, entry: &McpEntry) {
-    if let Some(h) = headers_object(entry) {
-        m.insert("headers".to_owned(), h);
-    }
+/// Whether `dialect` can express `target` at all — [`entry_value`]'s question, asked before a
+/// placement is planned rather than after it fails.
+#[must_use]
+pub fn dialect_expresses(dialect: McpDialect, target: &McpTarget) -> bool {
+    !matches!(
+        (dialect, target),
+        (McpDialect::HermesYaml, McpTarget::Local { .. })
+    )
 }
 
-/// The headers as a name-sorted JSON object, or `None` when there are none (empty headers are
-/// omitted in every dialect). A duplicated name is last-wins, matching what any JSON/TOML/YAML
-/// mapping would resolve to anyway.
-fn headers_object(entry: &McpEntry) -> Option<Value> {
-    if entry.headers.is_empty() {
-        return None;
+/// Insert `pairs` under `key` as a name-sorted JSON object, or nothing at all when there are none
+/// (an empty map carries no information and strict validators are the risk surface). A duplicated
+/// name is last-wins, matching what any JSON/TOML/YAML mapping would resolve to anyway.
+fn insert_pairs(m: &mut Map<String, Value>, key: &str, pairs: &[(String, String)]) {
+    if pairs.is_empty() {
+        return;
     }
-    let sorted: BTreeMap<&str, &str> = entry
-        .headers
+    let sorted: BTreeMap<&str, &str> = pairs
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let mut m = Map::new();
+    let mut out = Map::new();
     for (k, v) in sorted {
-        m.insert(k.to_owned(), Value::String(v.to_owned()));
+        out.insert(k.to_owned(), Value::String(v.to_owned()));
     }
-    Some(Value::Object(m))
+    m.insert(key.to_owned(), Value::Object(out));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -512,6 +787,27 @@ pub(crate) fn validate_desired(desired: &[McpEntry]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The dialect fingerprint of every desired entry, in order — or the ONE honest reason a driver
+/// refuses the whole edit: a target this dialect has no grammar for. Computing them together is
+/// what makes "cannot express" a precondition of the edit rather than something discovered
+/// halfway through it.
+pub(crate) fn desired_fingerprints(
+    dialect: McpDialect,
+    desired: &[McpEntry],
+) -> Result<Vec<String>, String> {
+    desired
+        .iter()
+        .map(|e| {
+            entry_value(dialect, e)
+                .map(|v| fingerprint_value(&v))
+                .ok_or_else(|| {
+                    "this agent's MCP config cannot describe a server topos runs on this machine"
+                        .to_owned()
+                })
+        })
+        .collect()
 }
 
 /// One managed-looking entry as found in the file.
@@ -651,25 +947,51 @@ pub(crate) fn effectively_absent(current: Option<&[u8]>) -> bool {
 /// Shared fixture constructors for the driver test modules.
 #[cfg(test)]
 pub(crate) mod testutil {
-    use super::{AuthHint, McpEntry};
+    use super::{AuthHint, McpEntry, McpTarget};
 
     pub(crate) fn entry(key: &str, url: &str) -> McpEntry {
         McpEntry {
             key: key.to_owned(),
-            url: url.to_owned(),
-            headers: Vec::new(),
+            target: McpTarget::Remote {
+                url: url.to_owned(),
+                headers: Vec::new(),
+            },
             auth: AuthHint::Unknown,
         }
     }
 
     pub(crate) fn entry_with_headers(key: &str, url: &str, headers: &[(&str, &str)]) -> McpEntry {
         McpEntry {
-            headers: headers
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect(),
+            target: McpTarget::Remote {
+                url: url.to_owned(),
+                headers: pairs(headers),
+            },
             ..entry(key, url)
         }
+    }
+
+    /// A program-run entry: the command, its arguments, and its environment.
+    pub(crate) fn local_entry(
+        key: &str,
+        command: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> McpEntry {
+        McpEntry {
+            key: key.to_owned(),
+            target: McpTarget::Local {
+                command: command.to_owned(),
+                args: args.iter().map(|a| (*a).to_owned()).collect(),
+                env: pairs(env),
+            },
+            auth: AuthHint::Unknown,
+        }
+    }
+
+    fn pairs(from: &[(&str, &str)]) -> Vec<(String, String)> {
+        from.iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
     }
 }
 
@@ -697,11 +1019,18 @@ mod tests {
         assert_eq!(fingerprint_value(&e), fingerprint_value(&f));
     }
 
+    /// One entry's rendering in a dialect that HAS one — the test spelling of [`entry_value`],
+    /// which answers `None` only for the pair `hermes_refuses_a_program_it_has_no_grammar_for`
+    /// covers.
+    fn rendered(dialect: McpDialect, e: &McpEntry) -> Value {
+        entry_value(dialect, e).unwrap_or_else(|| panic!("{dialect:?} renders this target"))
+    }
+
     #[test]
     fn entry_values_carry_exactly_the_dialect_keys() {
         let plain = entry("topos-x", "https://mcp.example/x");
         let keys = |d: McpDialect, e: &McpEntry| -> Vec<String> {
-            entry_value(d, e)
+            rendered(d, e)
                 .as_object()
                 .unwrap()
                 .keys()
@@ -735,17 +1064,11 @@ mod tests {
             "hermes: Unknown auth omits the opt-in"
         );
         assert_eq!(
-            entry_value(McpDialect::OpenclawJson, &plain)["transport"],
+            rendered(McpDialect::OpenclawJson, &plain)["transport"],
             "streamable-http"
         );
-        assert_eq!(
-            entry_value(McpDialect::OpencodeJson, &plain)["type"],
-            "remote"
-        );
-        assert_eq!(
-            entry_value(McpDialect::OpencodeJson, &plain)["enabled"],
-            true
-        );
+        assert_eq!(rendered(McpDialect::OpencodeJson, &plain)["type"], "remote");
+        assert_eq!(rendered(McpDialect::OpencodeJson, &plain)["enabled"], true);
 
         // Headers ride every dialect (codex spells them http_headers), name-sorted.
         let with = entry_with_headers("topos-x", "https://u", &[("Z", "9"), ("A", "1")]);
@@ -757,11 +1080,11 @@ mod tests {
             McpDialect::OpenclawJson,
             McpDialect::HermesYaml,
         ] {
-            let v = entry_value(d, &with);
+            let v = rendered(d, &with);
             let h = v["headers"].as_object().unwrap();
             assert_eq!(h.keys().collect::<Vec<_>>(), ["A", "Z"], "{d:?}");
         }
-        let codex = entry_value(McpDialect::CodexToml, &with);
+        let codex = rendered(McpDialect::CodexToml, &with);
         assert!(codex.get("headers").is_none());
         assert_eq!(codex["http_headers"]["A"], "1");
     }
@@ -781,7 +1104,7 @@ mod tests {
                 ..entry("topos-x", "https://u")
             };
             for dialect in [McpDialect::HermesYaml, McpDialect::OpenclawJson] {
-                let v = entry_value(dialect, &e);
+                let v = rendered(dialect, &e);
                 assert_eq!(v.get("auth").is_some(), expect_auth, "{dialect:?} {hint:?}");
                 if expect_auth {
                     assert_eq!(v["auth"], "oauth", "{dialect:?}");
@@ -795,7 +1118,7 @@ mod tests {
                 McpDialect::CodexToml,
             ] {
                 assert!(
-                    entry_value(dialect, &e).get("auth").is_none(),
+                    rendered(dialect, &e).get("auth").is_none(),
                     "{dialect:?}: no auth key in this dialect"
                 );
             }
@@ -806,11 +1129,269 @@ mod tests {
             auth: AuthHint::Oauth,
             ..entry_with_headers("topos-x", "https://u", &[("A", "1")])
         };
-        let v = entry_value(McpDialect::OpenclawJson, &oauth);
+        let v = rendered(McpDialect::OpenclawJson, &oauth);
         assert_eq!(
             v.as_object().unwrap().keys().collect::<Vec<_>>(),
             ["auth", "headers", "transport", "url"]
         );
+        // A PROGRAM is not an address: nothing carries `auth` for one, in any dialect. A bridged
+        // remote signs itself in, and a package server has nobody to sign in to.
+        let program = McpEntry {
+            auth: AuthHint::Oauth,
+            ..testutil::local_entry("topos-x", "npx", &["-y", "pkg@1.0.0"], &[])
+        };
+        for dialect in [
+            McpDialect::ClaudePluginDir,
+            McpDialect::ClaudeProjectJson,
+            McpDialect::CursorJson,
+            McpDialect::OpencodeJson,
+            McpDialect::OpenclawJson,
+            McpDialect::CodexToml,
+        ] {
+            assert!(
+                rendered(dialect, &program).get("auth").is_none(),
+                "{dialect:?}: a program never carries auth"
+            );
+        }
+    }
+
+    /// The stdio shapes, per dialect, from the vendor evidence recorded in the module docs: the
+    /// `command`/`args`/`env` triple almost everywhere, OpenCode's single `command` array with
+    /// `environment` beside it, `type`/`transport` exactly where the harness declares the key.
+    #[test]
+    fn a_program_renders_in_each_dialects_own_stdio_shape() {
+        let program = testutil::local_entry(
+            "topos-x",
+            "npx",
+            &["-y", "@acme/server@1.2.3"],
+            &[("ACME_REGION", "eu"), ("ACME_TOKEN", "${ACME_TOKEN}")],
+        );
+        let v = rendered(McpDialect::ClaudeProjectJson, &program);
+        assert_eq!(
+            v.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["args", "command", "env", "type"]
+        );
+        assert_eq!(v["command"], "npx");
+        assert_eq!(v["args"], serde_json::json!(["-y", "@acme/server@1.2.3"]));
+        assert_eq!(v["env"]["ACME_TOKEN"], "${ACME_TOKEN}");
+        assert_eq!(v["type"], "stdio");
+        assert_eq!(
+            rendered(McpDialect::ClaudePluginDir, &program),
+            v,
+            "the plugin dir's .mcp.json is the same Claude shape"
+        );
+
+        let cursor = rendered(McpDialect::CursorJson, &program);
+        assert_eq!(
+            cursor.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["args", "command", "env"],
+            "cursor: NEVER a type key, on either target"
+        );
+
+        let claw = rendered(McpDialect::OpenclawJson, &program);
+        assert_eq!(
+            claw.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["args", "command", "env", "transport"]
+        );
+        assert_eq!(claw["transport"], "stdio");
+
+        let codex = rendered(McpDialect::CodexToml, &program);
+        assert_eq!(
+            codex.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["args", "command", "env"]
+        );
+
+        // OpenCode: the program and its arguments are ONE array, and the environment is
+        // `environment`.
+        let oc = rendered(McpDialect::OpencodeJson, &program);
+        assert_eq!(
+            oc.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["command", "enabled", "environment", "type"]
+        );
+        assert_eq!(
+            oc["command"],
+            serde_json::json!(["npx", "-y", "@acme/server@1.2.3"])
+        );
+        assert_eq!(oc["environment"]["ACME_REGION"], "eu");
+        assert_eq!(oc["type"], "local");
+        assert!(oc.get("args").is_none());
+
+        // An empty environment is omitted everywhere, exactly as empty headers are.
+        let bare = testutil::local_entry("topos-x", "uvx", &["pkg==1.0.0"], &[]);
+        for dialect in [
+            McpDialect::ClaudePluginDir,
+            McpDialect::ClaudeProjectJson,
+            McpDialect::CursorJson,
+            McpDialect::OpenclawJson,
+            McpDialect::CodexToml,
+        ] {
+            assert!(rendered(dialect, &bare).get("env").is_none(), "{dialect:?}");
+        }
+        assert!(
+            rendered(McpDialect::OpencodeJson, &bare)
+                .get("environment")
+                .is_none()
+        );
+    }
+
+    /// Hermes's one-line YAML grammar is evidenced for an ADDRESS and nothing else, so a
+    /// program-run server has no spelling there — and the driver refuses the whole edit instead of
+    /// inventing one.
+    #[test]
+    fn hermes_refuses_a_program_it_has_no_grammar_for() {
+        let program = testutil::local_entry("topos-x", "npx", &["-y", "pkg@1.0.0"], &[]);
+        assert_eq!(entry_value(McpDialect::HermesYaml, &program), None);
+        assert!(!dialect_expresses(McpDialect::HermesYaml, &program.target));
+        let out = apply(McpDialect::HermesYaml, None, &[program], &BTreeMap::new());
+        let EditPlan::Unprovable(reason) = &out.plan else {
+            panic!("a program in hermes must refuse: {:?}", out.plan);
+        };
+        assert!(
+            reason.contains("cannot describe a server topos runs"),
+            "{reason}"
+        );
+        assert!(out.states.is_empty() && out.fingerprints.is_empty());
+        // Every other dialect expresses both targets.
+        for dialect in [
+            McpDialect::ClaudePluginDir,
+            McpDialect::ClaudeProjectJson,
+            McpDialect::CursorJson,
+            McpDialect::OpencodeJson,
+            McpDialect::OpenclawJson,
+            McpDialect::CodexToml,
+        ] {
+            assert!(
+                dialect_expresses(
+                    dialect,
+                    &McpTarget::Local {
+                        command: "npx".to_owned(),
+                        args: Vec::new(),
+                        env: Vec::new()
+                    }
+                ),
+                "{dialect:?}"
+            );
+        }
+    }
+
+    /// A program-run server has ONE address too — the command line after any Windows wrapper is
+    /// stripped, and the URL itself when the program is only a bridge to one.
+    #[test]
+    fn a_program_run_server_has_one_address_and_a_bridge_answers_with_its_url() {
+        let argv =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|a| (*a).to_owned()).collect() };
+        // The same invocation, wrapped and unwrapped, is one server.
+        let plain = local_address("npx", &argv(&["-y", "pkg@1.0.0"]));
+        assert_eq!(
+            plain,
+            local_address("cmd", &argv(&["/c", "npx", "-y", "pkg@1.0.0"]))
+        );
+        assert_eq!(
+            plain,
+            local_address("CMD.EXE", &argv(&["/C", "npx", "-y", "pkg@1.0.0"]))
+        );
+        assert_eq!(plain.as_deref(), Some(r#"run:["npx","-y","pkg@1.0.0"]"#));
+        // Different arguments are a different server; an empty command is no address at all.
+        assert_ne!(plain, local_address("npx", &argv(&["-y", "pkg@1.0.1"])));
+        assert_eq!(local_address("", &[]), None);
+        assert_eq!(local_address("   ", &[]), None);
+
+        // A BRIDGE answers with the address it bridges — whatever version it pins, and through
+        // the wrapper too, so an entry that bridges a server and an entry that dials it are one.
+        let dialed = canonical_address("https://mcp.example/x");
+        assert_eq!(
+            local_address(
+                "npx",
+                &argv(&["-y", "mcp-remote@0.1.38", "https://mcp.example/x"])
+            ),
+            dialed
+        );
+        assert_eq!(
+            local_address("npx", &argv(&["mcp-remote", "HTTPS://MCP.Example/x"])),
+            dialed
+        );
+        assert_eq!(
+            local_address(
+                "cmd",
+                &argv(&[
+                    "/c",
+                    "npx",
+                    "-y",
+                    "mcp-remote@0.1.38",
+                    "https://mcp.example/x"
+                ])
+            ),
+            dialed
+        );
+        // …and a bridge with no URL after it is just a command line.
+        assert!(
+            local_address("npx", &argv(&["-y", "mcp-remote"]))
+                .is_some_and(|a| a.starts_with("run:"))
+        );
+        // A package that merely LOOKS like the bridge is not one.
+        assert!(
+            local_address("npx", &argv(&["-y", "mcp-remote-proxy", "https://x/y"]))
+                .is_some_and(|a| a.starts_with("run:"))
+        );
+        // The entry model answers the same question for either target.
+        let bridged = testutil::local_entry(
+            "topos-x",
+            "npx",
+            &["-y", "mcp-remote@0.1.38", "https://mcp.example/x"],
+            &[],
+        );
+        assert_eq!(bridged.address(), dialed);
+        assert_eq!(bridged.url(), None);
+        assert_eq!(entry("topos-x", "https://mcp.example/x").address(), dialed);
+    }
+
+    /// The Windows wrapper: applied only on Windows, only to the shim commands, never twice, and
+    /// never inside WSL — where the harness reading the file runs Linux.
+    #[test]
+    fn the_windows_wrapper_is_applied_exactly_where_it_belongs() {
+        let args = vec!["-y".to_owned(), "a b".to_owned()];
+        // Not Windows: nothing is wrapped.
+        assert_eq!(
+            windows_wrap("npx", &args, false, false),
+            ("npx".to_owned(), args.clone())
+        );
+        // Windows: the shim commands are wrapped, argument VALUES untouched (a value with a
+        // space stays ONE argument — the list is the quoting).
+        let (command, wrapped) = windows_wrap("npx", &args, true, false);
+        assert_eq!(command, "cmd");
+        assert_eq!(wrapped, ["/c", "npx", "-y", "a b"]);
+        for shim in WINDOWS_WRAPPED_COMMANDS {
+            assert!(needs_windows_wrap(shim), "{shim}");
+        }
+        assert!(needs_windows_wrap("npx.cmd"));
+        assert!(needs_windows_wrap(r"C:\Program Files\nodejs\npx.cmd"));
+        assert!(needs_windows_wrap("/usr/local/bin/npx"));
+        // Never twice, and never something that is not a shim.
+        assert!(!needs_windows_wrap("cmd"));
+        assert!(!needs_windows_wrap("cmd.exe"));
+        assert!(!needs_windows_wrap("uvx"));
+        assert!(!needs_windows_wrap("python3"));
+        let (command, unwrapped) = windows_wrap("uvx", &args, true, false);
+        assert_eq!((command.as_str(), unwrapped.as_slice()), ("uvx", &args[..]));
+        // WSL: the config belongs to a Linux harness, so the wrapper would be nonsense.
+        assert_eq!(
+            windows_wrap("npx", &args, true, true),
+            ("npx".to_owned(), args.clone())
+        );
+        for wsl in [
+            r"\\wsl$\Ubuntu\home\me\.cursor\mcp.json",
+            r"\\WSL.LOCALHOST\Debian\home\me\.codex\config.toml",
+            r"//wsl$/Ubuntu/home/me/.mcp.json",
+        ] {
+            assert!(is_wsl_unc(wsl), "{wsl}");
+        }
+        for local in [
+            r"C:\Users\me\.cursor\mcp.json",
+            r"\\server\share\mcp.json",
+            "/home/me/.cursor/mcp.json",
+        ] {
+            assert!(!is_wsl_unc(local), "{local}");
+        }
     }
 
     #[test]
@@ -888,17 +1469,37 @@ mod tests {
                 .clone()
         };
 
-        let cursor = b"{\n  \"mcpServers\": {\n    \"theirs\": { \"url\": \"HTTPS://MCP.Example/x/\" },\n    \"topos-eng-x\": { \"url\": \"https://mcp.example/x\" },\n    \"local\": { \"command\": \"npx\" }\n  }\n}\n";
+        let cursor = b"{\n  \"mcpServers\": {\n    \"theirs\": { \"url\": \"HTTPS://MCP.Example/x/\" },\n    \"topos-eng-x\": { \"url\": \"https://mcp.example/x\" },\n    \"local\": { \"command\": \"npx\", \"args\": [\"-y\", \"pkg@1.0.0\"] },\n    \"opaque\": { \"note\": \"nothing here names a server\" }\n  }\n}\n";
         let seen = observe_entries(McpDialect::CursorJson, Some(cursor), None).expect("readable");
-        assert_eq!(names(&seen), ["local", "theirs", "topos-eng-x"]);
+        assert_eq!(names(&seen), ["local", "opaque", "theirs", "topos-eng-x"]);
         assert_eq!(
             address(&seen, "theirs").as_deref(),
             Some("https://mcp.example/x/")
         );
         assert_eq!(
-            address(&seen, "local"),
+            address(&seen, "local").as_deref(),
+            Some(r#"run:["npx","-y","pkg@1.0.0"]"#),
+            "a command-run server is compared on the command it runs"
+        );
+        assert_eq!(
+            address(&seen, "opaque"),
             None,
-            "a command-run server has no address to compare"
+            "a shape that names no server has no address to compare"
+        );
+
+        // A foreign BRIDGE entry is seen as the address it bridges, and OpenCode's single
+        // `command` array reads as the same command line as everyone else's `command` + `args`.
+        let bridge = br#"{"mcpServers":{"a":{"command":"npx","args":["-y","mcp-remote","https://mcp.example/x"]}}}"#;
+        let seen = observe_entries(McpDialect::CursorJson, Some(bridge), None).expect("readable");
+        assert_eq!(
+            address(&seen, "a"),
+            canonical_address("https://mcp.example/x")
+        );
+        let oc = br#"{"mcp":{"a":{"type":"local","command":["npx","-y","pkg@1.0.0"]}}}"#;
+        let seen = observe_entries(McpDialect::OpencodeJson, Some(oc), None).expect("readable");
+        assert_eq!(
+            address(&seen, "a").as_deref(),
+            Some(r#"run:["npx","-y","pkg@1.0.0"]"#)
         );
 
         // The other spellings a foreign entry may use for the same fact.
@@ -1052,9 +1653,9 @@ mod tests {
         ];
         let fps: Vec<String> = desired
             .iter()
-            .map(|e| fingerprint_value(&entry_value(McpDialect::CursorJson, e)))
+            .map(|e| fingerprint_value(&rendered(McpDialect::CursorJson, e)))
             .collect();
-        let fp_a1 = fingerprint_value(&entry_value(
+        let fp_a1 = fingerprint_value(&rendered(
             McpDialect::CursorJson,
             &entry("topos-a", "https://a1"),
         ));
@@ -1224,7 +1825,7 @@ mod tests {
         let current_crlf = "[mcp_servers.topos-x]\r\nurl = \"https://u\"\r\n".to_owned();
         let prior: BTreeMap<String, String> = [(
             "topos-x".to_owned(),
-            fingerprint_value(&entry_value(McpDialect::CodexToml, &placed)),
+            fingerprint_value(&rendered(McpDialect::CodexToml, &placed)),
         )]
         .into_iter()
         .collect();

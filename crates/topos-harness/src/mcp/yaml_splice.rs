@@ -35,10 +35,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
+#[cfg(test)]
+use super::entry_value;
 use super::{
     ApplyOutcome, AuthHint, EditPlan, EntryState, FoundEntry, MANAGED_KEY_PREFIX, McpDialect,
-    McpEntry, Observed, Reconcile, effectively_absent, entry_value, fingerprint_value, outcome,
-    reconcile, unprovable, validate_desired,
+    McpEntry, Observed, Reconcile, effectively_absent, fingerprint_value, outcome, reconcile,
+    unprovable, validate_desired,
 };
 
 /// The line-ownership sentinel (a YAML comment outside the flow mapping).
@@ -60,10 +62,13 @@ pub fn apply(
     if let Err(reason) = validate_desired(desired) {
         return unprovable(reason);
     }
-    let desired_fps: Vec<String> = desired
-        .iter()
-        .map(|e| fingerprint_value(&entry_value(McpDialect::HermesYaml, e)))
-        .collect();
+    // A PROGRAM-run server has no proven spelling in this file (see the module doc), so the whole
+    // edit refuses before a line is planned rather than inventing one.
+    let desired_fps: Vec<String> =
+        match super::desired_fingerprints(McpDialect::HermesYaml, desired) {
+            Ok(fps) => fps,
+            Err(reason) => return unprovable(reason),
+        };
 
     if current.is_none() {
         if desired.is_empty() {
@@ -526,16 +531,20 @@ fn header_name(name: &str) -> String {
     }
 }
 
-/// The one-line managed entry at `indent`.
+/// The one-line managed entry at `indent`. ADDRESS entries only — `apply` refuses a desired set
+/// carrying a program-run server before any line is planned, so the address fields are total here.
 fn render_line(indent: usize, entry: &McpEntry) -> String {
     let mut line = " ".repeat(indent);
     line.push_str(&entry.key);
+    let (url, headers) = match &entry.target {
+        super::McpTarget::Remote { url, headers } => (url.as_str(), headers.as_slice()),
+        super::McpTarget::Local { .. } => ("", &[][..]),
+    };
     line.push_str(": {url: ");
-    line.push_str(&quote(&entry.url));
-    if !entry.headers.is_empty() {
+    line.push_str(&quote(url));
+    if !headers.is_empty() {
         line.push_str(", headers: {");
-        let sorted: BTreeMap<&str, &str> = entry
-            .headers
+        let sorted: BTreeMap<&str, &str> = headers
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
@@ -688,7 +697,9 @@ mod tests {
     use super::*;
 
     fn fp(e: &McpEntry) -> String {
-        fingerprint_value(&entry_value(McpDialect::HermesYaml, e))
+        fingerprint_value(
+            &entry_value(McpDialect::HermesYaml, e).expect("this dialect renders an address"),
+        )
     }
 
     fn write_of(out: &ApplyOutcome) -> String {
