@@ -1,0 +1,21 @@
+{
+  "name": "io.github.acme/signer",
+  "description": "A signing key slot arriving with something in it.",
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-signer",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PRIVATE_KEY",
+          "value": "changeme"
+        }
+      ]
+    }
+  ]
+}

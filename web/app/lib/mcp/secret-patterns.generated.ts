@@ -27,3 +27,34 @@ export const SECRET_ENTROPY = {
   minLength: 24,
   threshold: 4.2,
 } as const;
+
+/**
+ * Header NAMES that carry a credential by definition — matched case-insensitively and whole,
+ * independent of `isSecret`, value shape, or entropy.
+ */
+export const CREDENTIAL_HEADER_NAMES: readonly string[] = [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key",
+  "x-auth-token",
+  "x-access-token",
+  "private-token",
+];
+
+/**
+ * The words that make a slot's NAME say "a credential goes here" — read after folding the name to
+ * letters and digits, so `GITHUB_TOKEN`, `github-token` and `githubToken` are one word.
+ */
+export const CREDENTIAL_NAME_WORDS: readonly string[] = [
+  "token",
+  "secret",
+  "password",
+  "passwd",
+  "apikey",
+  "credential",
+  "privatekey",
+  "accesskey",
+];

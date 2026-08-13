@@ -95,6 +95,11 @@
     "note": "A slot NAMED for a credential is fine; the same slot with the value already in it is somebody's credential travelling to every machine."
   },
   {
+    "file": "invalid/package-env-private-key-value.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A low-entropy value in a slot named for a signing key: only the NAME vocabulary catches this one, which is why both gates now read that vocabulary from this same directory."
+  },
+  {
     "file": "invalid/package-env-declared-secret-value.json",
     "verdict": "MCP_SECRET_REFUSED",
     "note": "The name says nothing and the entropy belt sees an ordinary word, but the document itself says the slot is secret — and it arrives filled in. The publisher's own word outranks every heuristic."
