@@ -113,35 +113,61 @@ adopted in place, never duplicated.
 
 ## MCP servers
 
-A skill is files; an [MCP server](/docs/mcp) is an address. Six agents have an MCP config surface,
-and for those Topos writes **one entry per agent** — under a stable `topos-`-prefixed key — instead
-of placing a directory. Everything else here still applies: Topos writes only its own entries, an
-agent it can't detect gets nothing, and a file whose shape can't be proven safe is left alone.
+A skill is files; an [MCP server](/docs/mcp) is an address. Sixteen agents have an MCP config
+surface, and for those Topos writes **one entry per agent** — under a stable `topos-`-prefixed key
+— instead of placing a directory. Everything else here still applies: Topos writes only its own
+entries, an agent it can't detect gets nothing, and a file whose shape can't be proven safe is left
+alone.
 
 | Agent | User-scope config | Project-scope config | Picked up | Sign-in |
 |---|---|---|---|---|
 | Claude Code | `~/.claude/skills/topos-mcp/` † (a Topos-owned plugin directory) | `.mcp.json` | next session; `/reload-plugins` reloads live | `/mcp` |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` ◊ | — (none) | quit completely and reopen | in the app, on first use |
+| Cline | `~/.cline/data/settings/cline_mcp_settings.json` | — (none) | automatically; Cline watches the file | Cline's own, on first use |
 | Codex | `~/.codex/config.toml` † | `.codex/config.toml` ‡ | restart `codex` | `codex mcp login <name>` |
 | Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | restart Cursor | Cursor's own, on first use |
+| Gemini CLI | `~/.gemini/settings.json` | `.gemini/settings.json` | restart `gemini` | Gemini's own, on first use |
+| GitHub Copilot CLI | `~/.copilot/mcp-config.json` | — (none) | next `copilot` run; `/mcp` lists them | Copilot's own, on first use |
+| Goose | `~/.config/goose/config.yaml` † | — (none) | restart your goose session | Goose's own, on first use |
+| Hermes Agent | `~/.hermes/config.yaml` † | — (none) | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
+| LM Studio | `~/.lmstudio/mcp.json` | — (none) | automatically, when the file is saved | LM Studio's own, on first use |
 | OpenCode | `~/.config/opencode/opencode.json` † | `opencode.json` (repo root) | restart `opencode` | automatic on the first `401` |
 | OpenClaw | `~/.openclaw/openclaw.json` | — (none) | automatically | `openclaw mcp login <name>` |
-| Hermes Agent | `~/.hermes/config.yaml` † | — (none) | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
+| Roo Code | VS Code's storage for the Roo extension ◊ | `.roo/mcp.json` | automatically; Roo watches the file | Roo's own, on first use |
+| VS Code | `~/Library/Application Support/Code/User/mcp.json` ◊ | `.vscode/mcp.json` | restart the server from the MCP view | VS Code's own, on first use |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | — (none) | press refresh in Cascade's MCP panel | Windsurf's own, on first use |
+| Zed | `~/.config/zed/settings.json` † | — (none) | automatically | Zed's own, on first use |
 
 † `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`, and `$XDG_CONFIG_HOME` move these roots,
 exactly as they move the skills directories above.
 
 ‡ Codex reads a project config only once you have trusted that repository inside Codex.
 
-Each file is written in its own dialect and nothing else in it is disturbed: JSON stays JSON,
-OpenClaw's JSONC keeps its comments and trailing commas, Codex gets a `[mcp_servers.…]` table,
-Hermes gets a one-line entry under `mcp_servers:`. The Claude Code user surface is a directory
-Topos creates and owns, and its `.mcp.json` is patched entry by entry like every other JSON config
-— put something of your own in that directory and Topos stops writing there at all rather than
-write over it.
+◊ These three keep their files where each platform keeps application settings, so the path shown is
+the macOS one. On Linux it is under `~/.config` (`~/.config/Code/User/mcp.json`), on Windows under
+`%APPDATA%`. Because that path has no single spelling, `-a vscode`, `-a roo` and `-a claude-desktop`
+cannot name it at machine scope — write the path out with `--dest` instead.
 
-OpenClaw and Hermes Agent have **no project-level MCP config**, so a project row reports
-`not placed — no project-level config` for them rather than falling back to your home config. Those
-two receive the same server through your machine-wide scope.
+Each file is written in its own dialect and nothing else in it is disturbed: JSON stays JSON,
+VS Code's and Zed's and OpenClaw's keep their comments and trailing commas, Codex gets a
+`[mcp_servers.…]` table, Hermes and Goose get a one-line entry under their own key. The Claude Code
+user surface is a directory Topos creates and owns, and its `.mcp.json` is patched entry by entry
+like every other JSON config — put something of your own in that directory and Topos stops writing
+there at all rather than write over it.
+
+The entry's exact shape is each agent's own, down to details that decide whether it works at all:
+VS Code keeps servers under `servers` rather than `mcpServers`, Windsurf spells the address
+`serverUrl`, Goose calls it `uri`, and Cline and Roo need the transport named — `streamableHttp`
+and `streamable-http` respectively — because leaving it out means the old SSE transport, silently.
+
+Most of these agents have **no project-level MCP config**, so a project row reports
+`not placed — no project-level config` for them rather than falling back to your home config. They
+receive the same server through your machine-wide scope.
+
+Two of them reach a server exactly one way. **Claude Desktop** adds remote servers in the app, not
+in this file, so a shared address reaches it as a local bridge process instead. **LM Studio** and
+**Goose** are the mirror image: Topos can give them an address, and a bundle that ships only a
+package reports `not placed` there rather than being written in a shape nobody has verified.
 
 <Note>
   Signing in is the agent's own act, on your own machine. A shared MCP bundle carries no credential
@@ -245,6 +271,9 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Universal | `universal` | `~/.config/agents/skills` † | `.agents/skills` | the shared dir itself |
 | Eve | `eve` | — (project-only) | `agent/skills` | discover + add |
 | PromptScript | `promptscript` | — (project-only) | `.agents/skills` | discover + add |
+| VS Code | `vscode` | — (no skills folder) | — | MCP servers only |
+| LM Studio | `lm-studio` | — (no skills folder) | — | MCP servers only |
+| Claude Desktop | `claude-desktop` | — (no skills folder) | — | MCP servers only |
 
 † The directory's root is overridable by environment variable (the default shown applies
 when it is unset): `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Agent),
@@ -252,6 +281,9 @@ when it is unset): `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Ag
 `$GROK_HOME` (Grok Build), and `$XDG_CONFIG_HOME` for the `~/.config`-based agents.
 
 \* Trigger installed, but the agent requires its own one-time approval before running it.
+
+The last three rows read no skills folder at all. They are here for one reason — they run MCP
+servers — and their config files are in [MCP servers](#mcp-servers) above.
 
 <Note>
   Don't see yours? Skills are plain directories, so any agent that reads a skills folder
