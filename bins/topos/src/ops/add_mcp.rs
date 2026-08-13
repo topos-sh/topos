@@ -616,11 +616,19 @@ fn summarize(
 /// package every machine runs, or both — and the sentence names the one an agent here will
 /// actually use, because that is the fact a person is checking. (Both, in full, ride the typed
 /// block beside it.)
+///
+/// Which PACKAGE it names is the placement's own choice, not the document's order
+/// ([`crate::mcp_render::preferred_package`]): the selection prefers npm over pypi and passes over
+/// a package no entry could express, so a receipt reading off the first listed one would name a
+/// package no agent was given. A document offering nothing this build can run falls back to the
+/// first — there is no chosen one to name, and the per-agent lines beside this say why.
 fn what_it_is(summary: &McpSummary) -> String {
     if !summary.url.is_empty() {
         return format!("{} over {}", summary.url, summary.transport);
     }
-    match summary.packages.first() {
+    match crate::mcp_render::preferred_package(&summary.packages)
+        .or_else(|| summary.packages.first())
+    {
         Some(package) if package.version.is_empty() => {
             format!(
                 "the {} package {}, run on this machine",
@@ -703,6 +711,68 @@ mod tests {
     }
     fn everything_exists(_: &Path) -> bool {
         true
+    }
+
+    /// **The receipt names the package the placement takes, not the first one listed.** The
+    /// selection prefers npm over pypi and passes over a package no entry can express; a line
+    /// reading off the document's order would name a package no agent here was given.
+    #[test]
+    fn the_receipt_names_the_package_the_placement_would_take() {
+        let package =
+            |registry: &str, identifier: &str, transport: &str| crate::mcp_validate::McpPackage {
+                registry: registry.to_owned(),
+                identifier: identifier.to_owned(),
+                version: "1.2.3".to_owned(),
+                transport: transport.to_owned(),
+            };
+        let summary = |packages: Vec<crate::mcp_validate::McpPackage>| McpSummary {
+            name: "io.github.acme/x".to_owned(),
+            description: "d".to_owned(),
+            version: "1.0.0".to_owned(),
+            url: String::new(),
+            transport: "",
+            headers: Vec::new(),
+            auth_hint: None,
+            packages,
+        };
+
+        // pypi listed first, npm second: the placement takes npm, so the line says npm.
+        assert_eq!(
+            what_it_is(&summary(vec![
+                package("pypi", "acme-x", "stdio"),
+                package("npm", "@acme/x", "stdio"),
+            ])),
+            "the npm package @acme/x@1.2.3, run on this machine"
+        );
+        // A registry with no arm listed first is passed over the same way.
+        assert_eq!(
+            what_it_is(&summary(vec![
+                package("nuget", "Acme.X", "stdio"),
+                package("pypi", "acme-x", "stdio"),
+            ])),
+            "the pypi package acme-x@1.2.3, run on this machine"
+        );
+        // …and so is an npm package served over http, which no entry can express.
+        assert_eq!(
+            what_it_is(&summary(vec![
+                package("npm", "@acme/served", "streamable-http"),
+                package("pypi", "acme-x", "stdio"),
+            ])),
+            "the pypi package acme-x@1.2.3, run on this machine"
+        );
+        // Nothing this build can run: the first one, since there is no chosen one to name.
+        assert_eq!(
+            what_it_is(&summary(vec![package("nuget", "Acme.X", "stdio")])),
+            "the nuget package Acme.X@1.2.3, run on this machine"
+        );
+        // An address outranks every package — it is what the agent will actually use.
+        let mut dialed = summary(vec![package("npm", "@acme/x", "stdio")]);
+        dialed.url = "https://mcp.example/x".to_owned();
+        dialed.transport = "streamable-http";
+        assert_eq!(
+            what_it_is(&dialed),
+            "https://mcp.example/x over streamable-http"
+        );
     }
 
     /// ONLY a path spelling opens the door. A bare token never silently adopts a folder, and a

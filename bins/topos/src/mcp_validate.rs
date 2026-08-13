@@ -205,6 +205,20 @@ pub(crate) struct McpPackage {
     pub identifier: String,
     /// Empty where the registry type carries the version inside the identifier (an OCI digest).
     pub version: String,
+    /// How the installed program is spoken to (`stdio`, `streamable-http`, `sse`). Carried so a
+    /// receipt can name the package a PLACEMENT would take rather than the first one listed —
+    /// the two rules are one ([`crate::mcp_render::preferred_package`]).
+    pub transport: String,
+}
+
+impl crate::mcp_render::PackageChoice for McpPackage {
+    fn registry(&self) -> &str {
+        &self.registry
+    }
+
+    fn serves_over_stdio(&self) -> bool {
+        self.transport.is_empty() || self.transport == "stdio"
+    }
 }
 
 /// What a receipt shows and what a describe reports — DERIVED, never the document echoed whole.
@@ -1523,6 +1537,13 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
                     registry: field("registryType"),
                     identifier: field("identifier"),
                     version: field("version"),
+                    transport: p
+                        .get("transport")
+                        .filter(|t| t.is_object())
+                        .and_then(|t| t.get("type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
                 }
             })
             .collect(),
