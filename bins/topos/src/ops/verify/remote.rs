@@ -65,6 +65,30 @@ const SESSION_HEADER: &str = "mcp-session-id";
 const PROTOCOL_HEADER: &str = "mcp-protocol-version";
 const METHOD_HEADER: &str = "mcp-method";
 
+/// **The headers this arm speaks for itself** — the protocol half of the conversation.
+///
+/// A bundle states the headers its server needs, and they ride every request. Not these: an HTTP
+/// header may legally appear twice, and the transport APPENDS rather than replaces, so a document
+/// naming `Accept` or `MCP-Protocol-Version` would put BOTH values on the wire and a server reading
+/// the first — or the joined value — would answer a different question than the one this verb
+/// asked. The bundle's spelling of one is therefore dropped, not merged: what a verification
+/// negotiates is the verifier's to say.
+const RESERVED_HEADERS: [&str; 5] = [
+    "accept",
+    "content-type",
+    PROTOCOL_HEADER,
+    METHOD_HEADER,
+    SESSION_HEADER,
+];
+
+/// Whether a bundle-declared header name is one of [`RESERVED_HEADERS`]. Header names are
+/// case-insensitive on the wire, so the comparison is too — `accept` and `Accept` are one header.
+fn is_reserved(name: &str) -> bool {
+    RESERVED_HEADERS
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
 /// The agent one verification dials with: redirects DISABLED (the redirect response itself is the
 /// evidence), statuses returned rather than raised, and the deadlines above.
 pub(crate) fn agent() -> ureq::Agent {
@@ -238,8 +262,9 @@ fn negotiated_version(result: &Value) -> String {
         .to_owned()
 }
 
-/// One POST, read bounded. The bundle's own headers go on FIRST so a protocol header can never be
-/// shadowed by one a document happened to name.
+/// One POST, read bounded. The bundle's own headers go on first, minus the [`RESERVED_HEADERS`]
+/// this arm speaks for itself — so exactly ONE of each protocol header reaches the server, and it
+/// is the verifier's.
 ///
 /// # Errors
 /// The plain phrase [`crate::plane_http::transport_reason`] gives a dial that never produced a
@@ -252,7 +277,7 @@ fn post(
     extra: &[(&str, String)],
 ) -> Result<Answer, String> {
     let mut request = agent.post(url);
-    for (name, value) in headers {
+    for (name, value) in headers.iter().filter(|(name, _)| !is_reserved(name)) {
         request = request.header(name, value);
     }
     request = request
