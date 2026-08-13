@@ -20,7 +20,7 @@ const HARNESS_SLUG = /^[a-z0-9-]{1,64}$/;
 const HARNESS_STATE = /^[a-z-]{1,32}$/;
 /**
  * More harnesses than any one installation runs — the shape cap on a client-asserted list. The
- * harness table itself grows (13 MCP-capable rows today), so the bound is sized to stay an abuse
+ * harness table itself grows (16 MCP-capable rows today), so the bound is sized to stay an abuse
  * fence, never a ceiling a full fleet report can reach.
  */
 const MAX_HARNESSES = 64;
@@ -44,7 +44,7 @@ const FULL_BREADTH_ROWS = 128;
  * It is sized this way because a report lands ATOMICALLY — there is no partial one — so a cap a
  * legal report can reach is a fleet page that goes stale exactly when something is wrong with the
  * machine, and for as long as the condition persists. A real report is two orders of magnitude
- * under this (19 MCP-capable harness rows, most of them carrying no note at all). The fence is for
+ * under this (16 MCP-capable harness rows, most of them carrying no note at all). The fence is for
  * abuse, and it costs nothing to hold high: `readCappedBody` abandons the read mid-stream, so
  * nothing past the cap is ever buffered.
  */

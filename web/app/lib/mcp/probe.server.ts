@@ -205,6 +205,12 @@ export type ProbeTransport = (vetted: VettedUrl) => Promise<Response>;
 const httpsProbe: ProbeTransport = async (vetted) =>
   await guardedRequest(vetted, {
     method: "POST",
+    // These three are the whole of what is sent: the bundle's own literal `headers` are
+    // deliberately NOT among them. `topos verify` does send them, because it speaks as the machine
+    // that will really call the server; this request speaks for the plane and for nobody's bundle.
+    // What a document carries is how a CLIENT identifies itself once it connects — its business,
+    // on its own machine — and the question asked here is only whether something MCP-shaped is
+    // alive at that address.
     headers: {
       "content-type": "application/json",
       // Both framings are legal answers to one initialize, so both are asked for.
