@@ -12,9 +12,10 @@
 //!   topos-acme-linear: {url: "https://…", headers: {X-T: "v"}, auth: oauth}  # topos:mcp
 //! ```
 //!
-//! TWO harnesses share it and differ in everything a [`YamlSpec`] holds: the top-level key
-//! (`mcp_servers` / `extensions`), the display name a refusal carries, and the entry grammar
-//! [`render_line`] emits. Goose is the harder of the two, because the block topos writes into is
+//! TWO harnesses share it and differ in exactly three things, all of them held in one internal
+//! spec: the top-level key (`mcp_servers` / `extensions`), the display name a refusal carries, and
+//! the entry grammar the line renderer emits. Goose is the harder of the two, because the block
+//! topos writes into is
 //! the one goose's OWN bundled extensions live in — each of them a block mapping several lines
 //! deep. They are read (a name, and no address this parser claims to have read) and never
 //! touched; the sentinel is what separates them from topos's, and a name that merely LOOKS like
