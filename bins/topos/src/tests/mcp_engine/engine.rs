@@ -634,61 +634,12 @@ fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
         "the user's server survives: {kept}"
     );
     assert!(!kept.contains("topos-eng-alpha"), "ours is gone: {kept}");
-    // The custody: no entries, and — because nothing is left ANYWHERE under that key — the name
-    // itself is back in the pool. A reservation exists to stop a new bundle inheriting a standing
-    // entry (and the sign-in a harness filed under its name); with the entry gone there is
-    // nothing to inherit, and holding the name would only push the next mint onto a `-2`.
+    // The custody: no entries, and the name RESERVED — a key names an OAuth trust surface, and a
+    // harness keeps its sign-in in a keychain no config file can be read to rule out. The name
+    // goes back only to a mint that proves it is for the same server, which is what the next
+    // assertion is: nothing standing anywhere, and the same address the retired key pointed at.
     let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert_eq!(custody.row_count(), 0);
-    assert!(
-        custody.doc.retired.is_empty(),
-        "nothing stands under the key: {:?}",
-        custody.doc.retired
-    );
-    assert_eq!(
-        custody.mint_key("s_other", "alpha", Some("eng")),
-        "topos-eng-alpha"
-    );
-}
-
-/// **A reservation is held by a SURVIVING entry, and by nothing else.** Both branches, one story:
-/// a key someone else's entry still occupies stays reserved (a new bundle minted onto it would
-/// inherit that entry, and whatever sign-in the harness filed under the name); the moment that
-/// entry is gone the name goes back to the pool. topos never touches the survivor either way —
-/// it has no record of writing it.
-#[test]
-fn a_retired_name_is_reserved_while_something_stands_under_it_and_released_when_nothing_does() {
-    let home = Scratch::new("retire-release");
-    let fs = RealFs;
-    let layout = Layout::new(&home.0.join(".topos"));
-    let mut d = demand(
-        "s_a",
-        "alpha",
-        Some("eng"),
-        &server_json("https://mcp.example/a"),
-    );
-    d.reach = Some(vec!["cursor".into()]);
-    let io = person_io(&fs, &layout, &home.0);
-    mcp_engine::converge(
-        &io,
-        &plan(&io, vec![d]),
-        &synthetic(),
-        &all_slugs(),
-        &no_hold(),
-        true,
-    );
-
-    // A SECOND entry under the same key, in a file topos holds no row for — a hand-copied entry,
-    // or one an older topos left behind. Nothing about it is topos's to remove.
-    let codex = home.0.join(".codex/config.toml");
-    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
-    let leftover = "[mcp_servers.topos-eng-alpha]\nurl = \"https://mcp.example/old\"\n";
-    std::fs::write(&codex, leftover).unwrap();
-
-    // The bundle stops being demanded: its own entry leaves, the key retires — and the
-    // reservation STANDS, because the leftover still does.
-    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
-    let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert_eq!(
         custody
             .doc
@@ -696,34 +647,176 @@ fn a_retired_name_is_reserved_while_something_stands_under_it_and_released_when_
             .get("topos-eng-alpha")
             .map(String::as_str),
         Some("s_a"),
-        "an entry still stands under the key: {:?}",
+        "the reservation stands until a mint proves it may have it: {:?}",
         custody.doc.retired
     );
+    let nothing_standing = std::collections::BTreeSet::new();
     assert_eq!(
-        custody.mint_key("s_other", "alpha", Some("eng")),
-        "topos-eng-alpha-2",
-        "a new bundle never lands on an occupied name"
+        custody.mint_key(
+            "s_other",
+            "alpha",
+            Some("eng"),
+            &config_custody::KeyMint {
+                address: mcp::canonical_address("https://mcp.example/a").as_deref(),
+                standing: Some(&nothing_standing),
+            }
+        ),
+        "topos-eng-alpha"
     );
-    assert_eq!(
-        std::fs::read_to_string(&codex).unwrap(),
-        leftover,
+}
+
+/// **A retired name goes back only to the SAME SERVER, and only with nothing left under it.**
+///
+/// A key names an OAuth trust surface: a harness files its sign-in under the server NAME, in a
+/// keychain that outlives every config entry. So "no entry stands under the key anywhere" is not
+/// enough to hand the name on — removing a config entry does not remove the grant behind it, and a
+/// different bundle minted onto that name could arrive already trusted. What does settle it is
+/// WHICH SERVER the new entry points at: the same address is the same server, and inheriting a
+/// sign-in for the server you are about to talk to is what a sign-in is for.
+///
+/// Five branches, over the real converge: the relocation that gets its plain name back, the
+/// different server that does not, a survivor in a surface topos writes, a survivor in a file topos
+/// only READS (the harness reads servers from it too, so a name standing there is exactly as
+/// inheritable), and that same file unreadable — where absence is unprovable and nothing goes back.
+#[test]
+fn a_retired_name_goes_back_only_to_the_same_server_with_nothing_standing_under_it() {
+    static WITH_CONFLICTS: &[KnownHarness] = &[
+        registry::home_rooted_mcp_row_with_conflicts(
+            "claude-code",
+            "Claude Code",
+            ".claude/skills/topos-mcp",
+            McpDialect::ClaudePluginDir,
+            None,
+            "reload claude",
+            &[registry::home_rooted_conflict_path(
+                ".claude.json",
+                McpDialect::ClaudeProjectJson,
+                "projects.*.mcpServers",
+            )],
+        ),
+        registry::home_rooted_mcp_row(
+            "cursor",
+            "Cursor",
+            ".cursor/mcp.json",
+            McpDialect::CursorJson,
+            None,
+            "restart cursor",
+        ),
+    ];
+    let table: Vec<&'static KnownHarness> = WITH_CONFLICTS.iter().collect();
+    let slugs: BTreeSet<String> = table.iter().map(|h| h.slug.to_owned()).collect();
+    const A: &str = "https://mcp.example/a";
+    const B: &str = "https://mcp.example/b";
+
+    // One scope with `alpha` placed at A and then dropped: its key retires, and the reservation
+    // stands whatever else is true. The caller then arranges what is left under the name.
+    let retired_scope = |tag: &str| -> (Scratch, Layout) {
+        let home = Scratch::new(tag);
+        let layout = Layout::new(&home.0.join(".topos"));
+        let fs = RealFs;
+        let io = person_io(&fs, &layout, &home.0);
+        let mut d = demand("s_a", "alpha", Some("eng"), &server_json(A));
+        d.reach = Some(vec!["cursor".into()]);
+        mcp_engine::converge(
+            &io,
+            &[d.planned(&io, &table, &slugs)],
+            &table,
+            &slugs,
+            &no_hold(),
+            true,
+        );
+        mcp_engine::converge(&io, &[], &table, &slugs, &no_hold(), true);
+        let custody = ScopeEntries::load(&fs, &layout).unwrap();
+        assert_eq!(
+            custody
+                .doc
+                .retired
+                .get("topos-eng-alpha")
+                .map(String::as_str),
+            Some("s_a"),
+            "{tag}: the key retires reserved: {:?}",
+            custody.doc.retired
+        );
+        (home, layout)
+    };
+    // A NEW bundle asks for that name, pointing at `address`. Answers the key it actually got.
+    let ask = |home: &Scratch, layout: &Layout, address: &str| -> String {
+        let fs = RealFs;
+        let io = person_io(&fs, layout, &home.0);
+        let mut d = demand("s_b", "alpha", Some("eng"), &server_json(address));
+        d.reach = Some(vec!["cursor".into()]);
+        mcp_engine::converge(
+            &io,
+            &[d.planned(&io, &table, &slugs)],
+            &table,
+            &slugs,
+            &no_hold(),
+            true,
+        );
+        let custody = ScopeEntries::load(&fs, layout).unwrap();
+        custody.key_of("s_b").expect("s_b holds a key").to_owned()
+    };
+
+    // 1. THE RELOCATION: the same server arriving as a new bundle, nothing left under the name.
+    let (home, layout) = retired_scope("retire-same");
+    assert_eq!(ask(&home, &layout, A), "topos-eng-alpha");
+    assert!(
+        ScopeEntries::load(&RealFs, &layout)
+            .unwrap()
+            .doc
+            .retired
+            .is_empty(),
+        "the reservation went back with the name"
+    );
+
+    // 2. A DIFFERENT SERVER at the same natural name: the reservation stands and the mint suffixes.
+    let (home, layout) = retired_scope("retire-other");
+    assert_eq!(ask(&home, &layout, B), "topos-eng-alpha-2");
+    assert!(
+        ScopeEntries::load(&RealFs, &layout)
+            .unwrap()
+            .doc
+            .retired
+            .contains_key("topos-eng-alpha"),
+        "another server may not have the name a sign-in may still be filed under"
+    );
+
+    // 3. AN ENTRY STANDING IN A SURFACE TOPOS WRITES, under the retired name and with no row
+    //    behind it — a hand-copied entry, or one an older topos left. Same server or not, the name
+    //    stays reserved while something is there to inherit.
+    let (home, layout) = retired_scope("retire-survivor");
+    let cursor = home.0.join(".cursor/mcp.json");
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    let leftover = "{\n  \"mcpServers\": { \"topos-eng-alpha\": { \"url\": \"https://mcp.example/old\" } }\n}\n";
+    std::fs::write(&cursor, leftover).unwrap();
+    assert_eq!(ask(&home, &layout, A), "topos-eng-alpha-2");
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("https://mcp.example/old"),
         "topos never edited the entry it does not own"
     );
 
-    // The person deletes it. The next sweep proves nothing is left under the key and gives the
-    // name back.
-    std::fs::remove_file(&codex).unwrap();
-    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
-    let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
-    assert!(
-        custody.doc.retired.is_empty(),
-        "the reservation is released: {:?}",
-        custody.doc.retired
-    );
+    // 4. AN ENTRY STANDING IN A FILE TOPOS ONLY READS. Claude Code reads servers from
+    //    `~/.claude.json` as well as from the dir topos owns, so a name standing there is exactly
+    //    as inheritable as one in a surface topos writes — and counting only the writable surfaces
+    //    handed the name back over an entry that was still there.
+    let (home, layout) = retired_scope("retire-conflict-path");
+    let claude_json = home.0.join(".claude.json");
+    let survivor = "{\n  \"projects\": {\n    \"/work/api\": { \"mcpServers\": { \"topos-eng-alpha\": { \"url\": \"https://mcp.example/a\" } } }\n  }\n}\n";
+    std::fs::write(&claude_json, survivor).unwrap();
+    assert_eq!(ask(&home, &layout, A), "topos-eng-alpha-2");
     assert_eq!(
-        custody.mint_key("s_new", "alpha", Some("eng")),
-        "topos-eng-alpha"
+        std::fs::read_to_string(&claude_json).unwrap(),
+        survivor,
+        "topos never edited the entry it does not own"
     );
+
+    // 5. THAT SAME FILE UNREADABLE. Absence is then unprovable, and a reservation dropped on a file
+    //    nobody could read is a name handed over an entry that may still be standing under it.
+    let (home, layout) = retired_scope("retire-unparseable");
+    std::fs::write(home.0.join(".claude.json"), "{").unwrap();
+    assert_eq!(ask(&home, &layout, A), "topos-eng-alpha-2");
 }
 
 #[test]
@@ -1581,8 +1674,8 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
         "the bundle keeps no live key: {custody:?}"
     );
     assert!(
-        custody.doc.retired.is_empty(),
-        "and reserves no name it has nothing standing under: {custody:?}"
+        custody.doc.retired.values().any(|b| b == "s_a"),
+        "and the name it minted stays reserved for the server it named: {custody:?}"
     );
 }
 
@@ -2351,8 +2444,9 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
         "and only now does the key leave the bundle: {doc:?}"
     );
     assert!(
-        doc.retired.is_empty(),
-        "with the entry finally gone there is nothing left to reserve the name against: {doc:?}"
+        doc.retired.values().any(|b| b == "s_a"),
+        "and the name it minted stays reserved — a sign-in filed under it outlives the entry: \
+         {doc:?}"
     );
 }
 

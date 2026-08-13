@@ -204,10 +204,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   resolution, remove's describe) read both files lock-free. Only two things outlive or span a
   bundle, and they live in
   the per-scope `state/config_custody.json`: the minted immutable config keys with their
-  retirement reservations (a key names an OAuth trust surface — retired, never re-minted for
-  another bundle WHILE ANYTHING STANDS UNDER IT: after a removal the scope's config files are read
-  and every reservation with no entry left under it is given back, with an unreadable surface
-  keeping the lot, because absence is what has to be proven), and the intent journal every config write rides (one write covers many
+  retirement reservations (a key names an OAuth trust surface — retired, and given back ONLY AT A
+  LATER MINT FOR THE SAME SERVER: the address the key pointed at is recorded at every mint and kept
+  through retirement, and a reservation goes back only when the mint's canonical address matches it
+  AND no entry stands under the key in any file this scope's harnesses read servers from — the
+  writable surfaces and the table's read-only `conflict_paths` alike, with an unreadable or
+  unparseable one keeping the lot, because absence is what has to be proven. A different address
+  keeps the reservation and takes a `-2`, because harness auth state outlives config entries and no
+  config file can rule a sign-in out), and the intent journal every config write rides (one write covers many
   bundles' entries; crash recovery promotes or drops per bundle record by OBSERVING the file, and
   an unreadable file keeps the standing row). `ScopeEntries` is the read-modify-write view that
   joins the scope document onto every bundle's rows as the one index the converge asks its

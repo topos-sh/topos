@@ -451,15 +451,32 @@ pub(crate) fn converge(
                 .any(|(i, d)| d.bundle_id == bundle_id && failed.contains_key(&i))
     };
 
+    // What a reservation is measured against, read ONCE and only when one stands: which keys this
+    // scope's harnesses are observed to hold, right now, before this run writes anything. A
+    // retired name goes back only to a mint for the same server with nothing left under the key
+    // (see `ConfigCustody::mint_key`), so the evidence is gathered before the first mint and not
+    // after the last removal.
+    let standing = if custody.doc.retired.is_empty() {
+        None
+    } else {
+        standing_keys(io, descriptors)
+    };
     // Mint keys for the placeable demands (durable with the first write below).
     let minted: BTreeMap<usize, String> = parsed
         .iter()
-        .map(|(i, _)| {
+        .map(|(i, p)| {
             let d = &demands[*i];
-            (
-                *i,
-                custody.mint_key(&d.bundle_id, &d.name, d.workspace_slug.as_deref()),
-            )
+            let address = mcp::canonical_address(&p.url);
+            let key = custody.mint_key(
+                &d.bundle_id,
+                &d.name,
+                d.workspace_slug.as_deref(),
+                &config_custody::KeyMint {
+                    address: address.as_deref(),
+                    standing: standing.as_ref(),
+                },
+            );
+            (*i, key)
         })
         .collect();
 
@@ -663,8 +680,8 @@ pub(crate) fn converge(
     }
 
     // Retirement: a bundle with no remaining entries anywhere, not demanded and not held, gives
-    // its key back to the reserve — and the reserve gives back every name nothing stands under
-    // any more (this run's and any earlier run's).
+    // its key back to the reserve. It STAYS reserved from here — a name goes back only to a mint
+    // that proves it is for the same server, which is a question only a later mint can ask.
     let retire: Vec<String> = custody
         .keyed_bundles()
         .into_iter()
@@ -673,10 +690,6 @@ pub(crate) fn converge(
     if allow_removals {
         for bundle in retire {
             custody.retire_key(&bundle);
-        }
-        if !custody.doc.retired.is_empty() {
-            let standing = standing_keys(io, descriptors);
-            custody.release_retired(standing.as_ref());
         }
     }
 
@@ -802,10 +815,6 @@ pub(crate) fn remove_bundle(
 
     if !custody.has_entries_for(bundle_id) {
         custody.retire_key(bundle_id);
-    }
-    if !custody.doc.retired.is_empty() {
-        let standing = standing_keys(io, descriptors);
-        custody.release_retired(standing.as_ref());
     }
     out.warnings.extend(custody.flush(io.fs, io.layout));
     out
@@ -946,12 +955,17 @@ fn collisions(
     out
 }
 
-/// **Every managed-looking entry key this scope's config files are OBSERVED to hold** — the
-/// evidence a name reservation is measured against ([`ScopeEntries::release_retired`]). It reads
-/// the same surfaces the converge does, through the same dialect observation, and answers `None`
-/// the moment ONE of them cannot be read or parsed: absence is then unprovable, and a reservation
-/// dropped on an unreadable file is a name handed to a new bundle over an entry that may still be
-/// standing under it.
+/// **Every entry key this scope's harnesses are OBSERVED to hold** — half the evidence a name
+/// reservation is measured against ([`config_custody::ConfigCustody::mint_key`]; the other half is
+/// the server address). It reads EVERY file a harness reads servers from: the surface topos writes
+/// AND the read-only [`KnownHarness::mcp_conflict_paths`] the collision pre-flight already asks. A
+/// key still standing in one of those is exactly as inheritable as one in the writable surface —
+/// leaving them out let a reservation go back while an entry stood under it in Claude's own
+/// `~/.claude.json`.
+///
+/// It answers `None` the moment ONE of those files cannot be read or parsed: absence is then
+/// unprovable, and a reservation dropped on an unreadable file is a name handed to a new bundle
+/// over an entry that may still be standing under it.
 ///
 /// It sees keys, not ownership: a drifted entry, an unrecorded one, a foreign one and a leftover
 /// all count, because all four are what a re-minted name would inherit.
@@ -961,22 +975,33 @@ fn standing_keys(
 ) -> Option<BTreeSet<String>> {
     let mut keys = BTreeSet::new();
     for h in descriptors {
-        let crate::placement::ConfigSurface::Ready { file, dialect, .. } =
+        if let crate::placement::ConfigSurface::Ready { file, dialect, .. } =
             crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
-        else {
-            continue;
-        };
-        let Ok(current) = io.fs.read_opt(&file) else {
-            return None; // unreadable: nothing about this scope's names is provable
-        };
-        if current.is_none() {
-            continue; // no file, no entries — the one honest absence
+        {
+            let Ok(current) = io.fs.read_opt(&file) else {
+                return None; // unreadable: nothing about this scope's names is provable
+            };
+            // No file, no entries — the one honest absence.
+            if let Some(bytes) = current {
+                let observed = mcp::observe(dialect, Some(&bytes));
+                if !observed.parseable {
+                    return None;
+                }
+                keys.extend(observed.entries.into_keys());
+            }
         }
-        let observed = mcp::observe(dialect, current.as_deref());
-        if !observed.parseable {
-            return None;
+        for (path, dialect, selector) in h.mcp_conflict_paths(&io.home) {
+            let Ok(current) = io.fs.read_opt(&path) else {
+                return None;
+            };
+            let Some(bytes) = current else {
+                continue;
+            };
+            let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), selector) else {
+                return None; // unparseable: the same unprovable absence
+            };
+            keys.extend(seen.into_iter().map(|e| e.name));
         }
-        keys.extend(observed.entries.into_keys());
     }
     Some(keys)
 }

@@ -1219,7 +1219,7 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
     assert!(!custody.has_entries_for("s_a"));
     assert_eq!(custody.key_of("s_a"), None, "the key is given up");
     assert!(
-        custody.doc.retired.is_empty(),
-        "and the name is not reserved against an entry that is gone: {custody:?}"
+        custody.doc.retired.values().any(|b| b == "s_a"),
+        "and the name it minted stays reserved until a mint for the same server asks: {custody:?}"
     );
 }
