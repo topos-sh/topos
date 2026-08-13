@@ -209,25 +209,38 @@ different bytes on different machines is the thing sharing is supposed to preven
 
 ### When each agent picks it up
 
-Six agents have an MCP config surface. Topos writes into the ones it detects on the machine (and
-into a config file that already exists, so removals still reach it), and says nothing about how you
-sign in — that stays the agent's own business:
+Sixteen agents have an MCP config surface. Topos writes into the ones it detects on the machine
+(and into a config file that already exists, so removals still reach it), and says nothing about
+how you sign in — that stays the agent's own business:
 
 | Agent | Picking up the change | Signing in |
 |---|---|---|
 | Claude Code | loads next session; `/reload-plugins` reloads live | `/mcp` |
+| Claude Desktop | quit completely and reopen | in the app, on first use |
+| Cline | picked up automatically | Cline's own, on first use |
 | Codex | restart `codex` | `codex mcp login <name>` |
 | Cursor | restart Cursor | Cursor's own, on first use |
+| Gemini CLI | restart `gemini` | Gemini's own, on first use |
+| GitHub Copilot CLI | next `copilot` run | Copilot's own, on first use |
+| Goose | restart your goose session | Goose's own, on first use |
+| Hermes Agent | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
+| LM Studio | automatically, when the file is saved | LM Studio's own, on first use |
 | OpenCode | restart `opencode` | automatic on the first `401` |
 | OpenClaw | picked up automatically | `openclaw mcp login <name>` |
-| Hermes Agent | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
+| Roo Code | picked up automatically | Roo's own, on first use |
+| VS Code | restart the server from the MCP view | VS Code's own, on first use |
+| Windsurf | press refresh in Cascade's MCP panel | Windsurf's own, on first use |
+| Zed | picked up automatically | Zed's own, on first use |
 
 Each agent's exact config file — and the environment variables that move it — is in
 [Supported agents](/docs/harnesses#mcp-servers).
 
-All six dial an address. Five of them also run a local program; Hermes Agent's entry grammar is
-confirmed for an address only, so a package bundle reports `not placed` there rather than being
-written in a shape nobody has verified.
+Most of them dial an address and also run a local program. Three are narrower, and Topos says so
+rather than guessing: **Claude Desktop** adds remote servers in the app rather than in this file,
+so a shared address reaches it as a local bridge process instead; **LM Studio** and **Goose** have
+a confirmed entry grammar for an address only, so a package bundle reports `not placed` there
+rather than being written in a shape nobody has verified. **Hermes Agent** is in the same position
+as those last two.
 
 By default the entry reaches every one of those agents this machine has. On `topos add`,
 `-a <agent>` (a slug like `cursor`, repeatable) or `--dest <file>` (a config file from that same
@@ -236,6 +249,32 @@ up later changes nothing until the line does. The same two flags on `topos remov
 file at a time: that entry leaves, the row survives with the rest, and subtracting the last file
 removes the row. A file outside the known set refuses, because its format has to be known to edit
 it.
+
+## Checking that a server actually works
+
+```bash
+topos verify weather
+```
+
+Delivery says what your machine *has*. `topos verify` says what the server *does* — right now, from
+here. Topos dials the address the bundle names (or runs its package), asks the server for its tools,
+and prints one line. Nothing is stored and nothing is installed: it is a live check, run when a
+server misbehaves and you want to know whether the problem is the server, the network, or the entry.
+
+There are four answers, and each is also the command's exit code, so a script can branch on it
+without reading a word:
+
+| What it prints | Exit code | What it means |
+|---|---|---|
+| `responding (12 tools)` | `0` | The server answered and listed its tools. |
+| `sign-in required - healthy; your agent app completes sign-in on first use` | `3` | The server wants a sign-in — which is the *right* answer. Topos holds no credential and never sends one; your agent app signs in the first time it uses the server. |
+| `not reachable: ...` | `4` | Nothing answered, or the server is having trouble right now. The rest of the line says which. |
+| `reachable but not answering as an MCP server: ...` | `5` | Something answered at that address, but not as an MCP server — usually a wrong URL, or a redirect that was not followed. |
+
+A refusal — no such bundle, an ambiguous name, a bundle that is a skill — exits `1` like every other
+command, because nothing was checked. `-g` checks the server your machine-wide scope holds, even
+from inside a project. `--json` adds the address dialed (or the program run), the protocol revision
+the server answered on, and the same exit code inside the document.
 
 ## Updating a server
 
