@@ -67,11 +67,14 @@ impl Drop for Scratch {
 // The stub HTTP server
 // =================================================================================================
 
-/// One request the stub saw, as far as an assertion needs it.
+/// One request the stub saw, as far as an assertion needs it. `headers` is the joined view (one
+/// value per name, the last one seen) and `header_lines` is EVERY line in order — a header may
+/// legally appear twice, and "exactly one of these arrived" is a thing this suite asserts.
 #[derive(Debug, Clone)]
 struct Seen {
     method: String,
     headers: BTreeMap<String, String>,
+    header_lines: Vec<(String, String)>,
     body: String,
 }
 
@@ -80,6 +83,16 @@ impl Seen {
         self.headers
             .get(&name.to_ascii_lowercase())
             .map(String::as_str)
+    }
+
+    /// Every value sent under `name`, in wire order.
+    fn header_values(&self, name: &str) -> Vec<&str> {
+        let name = name.to_ascii_lowercase();
+        self.header_lines
+            .iter()
+            .filter(|(seen, _)| *seen == name)
+            .map(|(_, value)| value.as_str())
+            .collect()
     }
 }
 
@@ -169,6 +182,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Seen> {
         .unwrap_or_default()
         .to_owned();
     let mut headers = BTreeMap::new();
+    let mut header_lines = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).ok()? == 0 {
@@ -179,7 +193,9 @@ fn read_request(stream: &mut TcpStream) -> Option<Seen> {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+            let (name, value) = (name.trim().to_ascii_lowercase(), value.trim().to_owned());
+            headers.insert(name.clone(), value.clone());
+            header_lines.push((name, value));
         }
     }
     let length: usize = headers
@@ -193,6 +209,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Seen> {
     Some(Seen {
         method,
         headers,
+        header_lines,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
 }
@@ -625,6 +642,49 @@ fn the_bundles_literal_headers_travel_on_every_request() {
     for request in stub.requests() {
         assert_eq!(request.header("x-region"), Some("eu-west-1"));
     }
+}
+
+/// A bundle's headers may not SHADOW the ones this verb speaks for itself. The transport appends a
+/// header rather than replacing one, so a document naming `Accept` or `MCP-Protocol-Version` would
+/// put two of each on the wire and a server reading the first — or the joined value — would answer
+/// a different question than the one asked. Exactly one of each arrives, and it is the verifier's;
+/// everything else the bundle states still travels.
+#[test]
+fn a_bundle_header_never_shadows_the_verifiers_own() {
+    let stub = Stub::always(
+        200,
+        ct(JSON),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"one"}]}}"#,
+    );
+    let headers = vec![
+        ("accept".to_owned(), "text/html".to_owned()),
+        ("MCP-Protocol-Version".to_owned(), "1999-01-01".to_owned()),
+        ("Content-Type".to_owned(), "text/plain".to_owned()),
+        ("Mcp-Method".to_owned(), "tools/call".to_owned()),
+        ("Mcp-Session-Id".to_owned(), "not-this-clients".to_owned()),
+        ("X-Region".to_owned(), "eu-west-1".to_owned()),
+    ];
+    let v = ops::probe_remote(&ops::remote_agent(), &stub.url, &headers);
+    assert_eq!(v.line(), "responding (1 tools)");
+
+    let seen = stub.requests();
+    let request = &seen[0];
+    assert_eq!(
+        request.header_values("accept"),
+        ["application/json, text/event-stream"],
+        "the bundle's `text/html` would refuse both answer framings"
+    );
+    assert_eq!(
+        request.header_values("mcp-protocol-version"),
+        ["2026-07-28"],
+        "the version is negotiated by the verifier, never by the document"
+    );
+    assert_eq!(request.header_values("content-type"), ["application/json"]);
+    assert_eq!(request.header_values("mcp-method"), ["tools/list"]);
+    // A session is the SERVER's to issue; a bundle naming one names nothing this conversation has.
+    assert_eq!(request.header_values("mcp-session-id"), Vec::<&str>::new());
+    // Everything that is not the protocol's still rides, exactly as stated.
+    assert_eq!(request.header_values("x-region"), ["eu-west-1"]);
 }
 
 // =================================================================================================
