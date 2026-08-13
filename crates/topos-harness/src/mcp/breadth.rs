@@ -410,6 +410,133 @@ fn claude_desktop_converges_on_the_program_the_bridge_renders() {
     assert_eq!(written(&out), before, "the file comes back byte for byte");
 }
 
+/// Goose's converge, over a config.yaml shaped the way goose's own tool writes one: its bundled
+/// extensions are BLOCK mappings several lines deep, and they are the thing that must not move.
+#[test]
+fn goose_converges_among_its_own_bundled_extensions() {
+    let before = "\
+GOOSE_PROVIDER: anthropic
+GOOSE_MODEL: claude-opus-4
+extensions:
+  developer:
+    bundled: true
+    display_name: Developer
+    enabled: true
+    name: developer
+    timeout: 300
+    type: builtin
+  memory:
+    bundled: true
+    enabled: true
+    name: memory
+    type: builtin
+";
+    let want = entry(KEY, URL);
+    let out = apply(
+        McpDialect::GooseYaml,
+        Some(before.as_bytes()),
+        std::slice::from_ref(&want),
+        &BTreeMap::new(),
+    );
+    let added = written(&out);
+    assert_eq!(state(&out, KEY), EntryState::PlacedNew);
+    // Goose reads an EXTENSION: all four of the fields its config enum requires, and the sentinel
+    // that is the only thing making this line topos's rather than a person's.
+    assert!(
+        added.contains(&format!(
+            "  {KEY}: {{enabled: true, name: {KEY}, type: streamable_http, uri: \"{URL}\"}}  # topos:mcp\n"
+        )),
+        "{added}"
+    );
+    // NOTHING of goose's own moved — every line of both builtins is still there, in order.
+    for line in before.lines() {
+        assert!(added.contains(line), "lost {line:?} from:\n{added}");
+    }
+    assert!(
+        added.contains("    type: builtin\n"),
+        "a builtin is never rewritten:\n{added}"
+    );
+
+    // Idempotent, then removed — and the file comes back byte for byte.
+    let prior: BTreeMap<String, String> = ledger(&out);
+    let again = apply(
+        McpDialect::GooseYaml,
+        Some(added.as_bytes()),
+        std::slice::from_ref(&want),
+        &prior,
+    );
+    assert_eq!(again.plan, EditPlan::Leave);
+    assert_eq!(state(&again, KEY), EntryState::Current);
+
+    let out = apply(McpDialect::GooseYaml, Some(added.as_bytes()), &[], &prior);
+    assert_eq!(state(&out, KEY), EntryState::Removed);
+    assert_eq!(written(&out), before, "goose's own file, back as it was");
+}
+
+/// A builtin whose NAME topos would never mint is not topos's — and one written in the flow style
+/// topos writes is still not topos's without the sentinel. Both are read, neither is touched.
+#[test]
+fn a_goose_extension_without_the_sentinel_is_never_read_as_topos_s() {
+    let before = "\
+extensions:
+  topos-lookalike: {enabled: true, name: topos-lookalike, type: streamable_http, uri: \"https://x/mcp\"}
+  developer: {bundled: true, enabled: true, name: developer, type: builtin}
+";
+    let want = entry(KEY, URL);
+    let out = apply(
+        McpDialect::GooseYaml,
+        Some(before.as_bytes()),
+        std::slice::from_ref(&want),
+        &BTreeMap::new(),
+    );
+    let added = written(&out);
+    // The lookalike is managed-LOOKING, so it is REPORTED — as somebody else's, and left alone.
+    assert_eq!(state(&out, "topos-lookalike"), EntryState::Foreign);
+    assert!(
+        !out.fingerprints.iter().any(|(k, _)| k == "topos-lookalike"),
+        "a foreign entry never enters the ledger"
+    );
+    for line in before.lines() {
+        assert!(added.contains(line), "lost {line:?} from:\n{added}");
+    }
+    // And both of them are SEEN, with the address each names.
+    let seen = super::observe_entries(McpDialect::GooseYaml, Some(before.as_bytes()), None)
+        .expect("readable");
+    assert_eq!(
+        seen.iter()
+            .find(|e| e.name == "topos-lookalike")
+            .and_then(|e| e.address.clone()),
+        Some("https://x/mcp".to_owned()),
+        "goose spells an address `uri`, and it is read as one"
+    );
+    assert!(seen.iter().any(|e| e.name == "developer"));
+}
+
+/// A boolean read back off the line topos wrote is a BOOLEAN. Were it read as the text "true",
+/// every goose entry would fingerprint differently from the value it was rendered from and read
+/// as drifted forever, on the first sweep after it was placed.
+#[test]
+fn goose_entry_round_trips_to_the_value_it_was_rendered_from() {
+    let want = entry(KEY, URL);
+    let out = apply(
+        McpDialect::GooseYaml,
+        None,
+        std::slice::from_ref(&want),
+        &BTreeMap::new(),
+    );
+    assert!(out.created_file);
+    let text = written(&out);
+    let observed = super::observe(McpDialect::GooseYaml, Some(text.as_bytes()));
+    assert!(observed.parseable);
+    assert_eq!(
+        observed.entries.get(KEY),
+        Some(&super::fingerprint_value(
+            &entry_value(McpDialect::GooseYaml, &want).expect("renders")
+        )),
+        "what was written reads back as what it was written from"
+    );
+}
+
 /// The pairs no vendor evidence covers answer `None` — and every OTHER new dialect answers with a
 /// shape, so a `None` is a statement about evidence and not a hole in the table.
 #[test]
@@ -423,6 +550,8 @@ fn a_dialect_says_nothing_where_its_agent_documents_nothing() {
         EnvRef::DollarBraceEnv,
     );
     assert!(entry_value(McpDialect::LmStudioJson, &program).is_none());
+    assert!(entry_value(McpDialect::GooseYaml, &program).is_none());
+    assert!(entry_value(McpDialect::GooseYaml, &address).is_some());
     assert!(entry_value(McpDialect::ClaudeDesktopJson, &address).is_none());
     // Everything else this increment added answers for BOTH shapes.
     for dialect in [

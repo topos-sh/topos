@@ -30,6 +30,10 @@ pub enum McpDialect {
     CodexToml,
     /// Hermes's `config.yaml` (one-line flow-mapping entries under `mcp_servers:`).
     HermesYaml,
+    /// Goose's `config.yaml` (one-line flow-mapping entries under `extensions:`, the same slot its
+    /// own bundled extensions live in — which is why nothing there without topos's sentinel is
+    /// ever read as topos's).
+    GooseYaml,
     /// VS Code's `mcp.json` — the one surface whose entries do NOT sit under `mcpServers`: the
     /// top-level key is `servers`, and beside it stand `inputs` and `sandbox`, which the edit
     /// leaves alone. JSONC, because the editor that owns this file reads its own JSON with
@@ -172,6 +176,7 @@ mod tests {
                 "cursor",
                 "gemini-cli",
                 "github-copilot",
+                "goose",
                 "hermes-agent",
                 "opencode",
                 "roo",
@@ -192,7 +197,7 @@ mod tests {
         }
         // A harness whose MCP surface this build has no grounded shape for has no row at all —
         // `continue` and `kilo` are today's, and both are ordinary skills rows.
-        for slug in ["continue", "kilo", "goose"] {
+        for slug in ["continue", "kilo"] {
             assert!(
                 registry::bundled_harnesses()
                     .iter()
@@ -348,6 +353,12 @@ mod tests {
             user_of("zed"),
             (Root::Config, "zed/settings.json", McpDialect::ZedJson)
         );
+        // Goose is XDG on macOS too, like Zed — and its servers sit among its extensions.
+        assert_eq!(
+            user_of("goose"),
+            (Root::Config, "goose/config.yaml", McpDialect::GooseYaml)
+        );
+        assert_eq!(get("goose").project, None);
         assert_eq!(
             user_of("lm-studio"),
             (Root::Home, ".lmstudio/mcp.json", McpDialect::LmStudioJson)
@@ -426,6 +437,10 @@ mod tests {
         // app, so a shared address reaches it through the bridge or not at all.
         assert!(!get("claude-desktop").remote);
         assert!(get("claude-desktop").stdio);
+        // Goose is LM Studio's case in YAML: an address it can be given, and a program grammar
+        // whose sequence shapes this splicer cannot prove it hands back.
+        assert!(get("goose").remote);
+        assert!(!get("goose").stdio);
 
         for slug in ["vscode", "cline", "roo", "windsurf"] {
             assert_eq!(get(slug).env_ref, EnvRef::DollarBraceEnv, "{slug}");

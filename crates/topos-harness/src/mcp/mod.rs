@@ -559,7 +559,9 @@ pub fn observe_entries(
         | McpDialect::RooJson
         | McpDialect::ZedJson => jsonc_edit::observe_entries(dialect, current, selector),
         McpDialect::CodexToml => toml_patch::observe_entries(current, selector),
-        McpDialect::HermesYaml => yaml_splice::observe_entries(current, selector),
+        McpDialect::HermesYaml | McpDialect::GooseYaml => {
+            yaml_splice::observe_entries(dialect, current, selector)
+        }
     }
 }
 
@@ -632,7 +634,9 @@ pub fn apply(
         | McpDialect::RooJson
         | McpDialect::ZedJson => jsonc_edit::apply(dialect, current, desired, prior),
         McpDialect::CodexToml => toml_patch::apply(current, desired, prior),
-        McpDialect::HermesYaml => yaml_splice::apply(current, desired, prior),
+        McpDialect::HermesYaml | McpDialect::GooseYaml => {
+            yaml_splice::apply(dialect, current, desired, prior)
+        }
     };
     // A `Write` over EXISTING content must be provably lossless outside the edit. A creation
     // (absent or whitespace-only input) has nothing to preserve.
@@ -670,10 +674,10 @@ fn input_round_trips(dialect: McpDialect, bytes: &[u8]) -> bool {
         | McpDialect::RooJson
         | McpDialect::ZedJson => jsonc_edit::round_trips(dialect, text),
         McpDialect::CodexToml => toml_patch::round_trips(text),
-        // The Hermes splicer is line-surgical: its "parse" IS the input lines, untouched lines
+        // The YAML splicer is line-surgical: its "parse" IS the input lines, untouched lines
         // are carried verbatim by construction, and its own verification asserts the output
         // minus sentinel lines is byte-identical, in order, to the input minus sentinel lines.
-        McpDialect::HermesYaml => true,
+        McpDialect::HermesYaml | McpDialect::GooseYaml => true,
     }
 }
 
@@ -697,7 +701,7 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
         | McpDialect::RooJson
         | McpDialect::ZedJson => jsonc_edit::observe(dialect, current),
         McpDialect::CodexToml => toml_patch::observe(current),
-        McpDialect::HermesYaml => yaml_splice::observe(current),
+        McpDialect::HermesYaml | McpDialect::GooseYaml => yaml_splice::observe(dialect, current),
     }
 }
 
@@ -733,7 +737,9 @@ pub fn holds_unmanaged_content(dialect: McpDialect, current: Option<&[u8]>) -> b
         | McpDialect::RooJson
         | McpDialect::ZedJson => jsonc_edit::holds_unmanaged(dialect, bytes),
         McpDialect::CodexToml => toml_patch::holds_unmanaged(bytes),
-        McpDialect::HermesYaml => yaml_splice::holds_unmanaged(bytes),
+        McpDialect::HermesYaml | McpDialect::GooseYaml => {
+            yaml_splice::holds_unmanaged(dialect, bytes)
+        }
     }
 }
 
@@ -861,6 +867,21 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
             m.insert("type".to_owned(), Value::String("remote".to_owned()));
             m.insert("url".to_owned(), Value::String(url.clone()));
         }
+        // Goose reads an EXTENSION, and its config enum is tagged on `type` with no untagged
+        // fallback — an entry missing a required field is skipped with nothing but an info log,
+        // so all four of the required ones are stated: the switch, the name it is filed under, the
+        // transport word its enum spells `streamable_http`, and the address, which it calls `uri`.
+        // This is the FINGERPRINT shape; `yaml_splice` emits the same mapping as one line.
+        (McpDialect::GooseYaml, McpTarget::Remote { url, headers }) => {
+            m.insert("enabled".to_owned(), Value::Bool(true));
+            insert_pairs(&mut m, "headers", headers);
+            m.insert("name".to_owned(), Value::String(entry.key.clone()));
+            m.insert(
+                "type".to_owned(),
+                Value::String("streamable_http".to_owned()),
+            );
+            m.insert("uri".to_owned(), Value::String(url.clone()));
+        }
         // `transport` EXPLICIT (OpenClaw's silent default is sse), and `auth: oauth` on the
         // explicit hint alone — OpenClaw's per-server options are open-world, `auth` is one of
         // its own declared keys, and its whole OAuth path (including `openclaw mcp login`) is
@@ -985,7 +1006,10 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
         // address; Claude Desktop documents a program and only a program — its remote servers are
         // added in the app, through a flow no config file takes part in, so the bridge is how a
         // shared address reaches it and there is no URL key to invent beside that.
-        (McpDialect::HermesYaml | McpDialect::LmStudioJson, McpTarget::Local { .. })
+        (
+            McpDialect::HermesYaml | McpDialect::GooseYaml | McpDialect::LmStudioJson,
+            McpTarget::Local { .. },
+        )
         | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. }) => return None,
     }
     Some(Value::Object(m))
@@ -1006,7 +1030,7 @@ pub fn dialect_expresses(dialect: McpDialect, target: &McpTarget) -> bool {
     !matches!(
         (dialect, target),
         (
-            McpDialect::HermesYaml | McpDialect::LmStudioJson,
+            McpDialect::HermesYaml | McpDialect::GooseYaml | McpDialect::LmStudioJson,
             McpTarget::Local { .. }
         ) | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. })
     )
