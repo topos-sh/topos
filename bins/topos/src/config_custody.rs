@@ -10,15 +10,22 @@
 //! Two things genuinely do NOT belong to any one bundle, and they live in ONE small per-scope
 //! document, `state/config_custody.json`:
 //!
-//! - **The minted-key registry** ([`ConfigCustody::keys`] / [`ConfigCustody::retired`]). A key names
-//!   an OAuth trust surface: several harnesses file a sign-in token under the server name, so a key
-//!   is IMMUTABLE once minted, and a RETIRED key is never minted for a different bundle — the token
-//!   it may still index must never come to point at someone else's server. That reservation must
-//!   outlive the bundle's record, so it cannot live inside it. It does NOT outlive the entry: a
-//!   reservation is held while something still STANDS under that key in one of this scope's config
-//!   files (drifted, unrecorded, foreign — anything a new bundle taking the name would inherit),
-//!   and is released once nothing is left to inherit ([`ScopeEntries::release_retired`]). Absence
-//!   has to be PROVEN: a surface that would not read keeps every reservation.
+//! - **The minted-key registry** ([`ConfigCustody::keys`] / [`ConfigCustody::retired`] /
+//!   [`ConfigCustody::key_addresses`]). A key names an OAuth trust surface: several harnesses file
+//!   a sign-in token under the server name, so a key is IMMUTABLE once minted, and a RETIRED key is
+//!   never minted for a different bundle — the token it may still index must never come to point at
+//!   someone else's server. That reservation must outlive the bundle's record, so it cannot live
+//!   inside it.
+//!
+//!   **A reservation is given back only at a MINT, and only to the same server.** Config files
+//!   cannot answer this question on their own: harness auth state lives in a keychain that outlives
+//!   every config entry, so "no entry stands under the key anywhere" proves nothing about whether a
+//!   sign-in is still filed under the name. What does settle it is WHICH SERVER the new entry would
+//!   point at — the address is recorded at every mint and kept through retirement. Same address,
+//!   and nothing standing under the key anywhere this scope's harnesses read from: the reservation
+//!   goes back (the relocation case, where a bundle that moved between workspaces gets its plain
+//!   name back). Different address, an unproven absence, or no recorded address at all: the
+//!   reservation stands and the next mint takes a `-2`.
 //! - **The pending-intent journal** ([`ConfigCustody::pending`]). ONE config write covers MANY
 //!   bundles' entries, so the intent that guards it spans bundles by construction. It is written
 //!   durably BEFORE every config write and cleared after; a crash in between is healed at the next
@@ -106,11 +113,22 @@ pub(crate) struct ConfigCustody {
     /// Bundle identity → the minted, immutable config key.
     #[serde(default)]
     pub keys: BTreeMap<String, String>,
-    /// Retired key → the bundle it belonged to. A key here is NEVER minted for a different bundle;
-    /// re-demanding the same bundle takes its key back out. A reservation lives exactly as long as
-    /// something stands under the key ([`ScopeEntries::release_retired`]).
+    /// Retired key → the bundle it belonged to. A key here is NEVER minted for a different bundle
+    /// UNLESS that bundle is the same server (see [`ConfigCustody::mint_key`]); re-demanding the
+    /// same bundle takes its key back out.
     #[serde(default)]
     pub retired: BTreeMap<String, String>,
+    /// Config key → the CANONICAL SERVER ADDRESS the entry under it named, recorded at every mint
+    /// and kept through retirement. It is what makes a reservation releasable: a key names an
+    /// OAuth trust surface, so handing it to a bundle pointing at a DIFFERENT server would hand
+    /// over whatever the harness filed under the name. The same address is the same server, and
+    /// inheriting a sign-in for the server you are about to talk to is what a sign-in is for.
+    ///
+    /// A key with NO address here (a package-only bundle names none; a row written before this
+    /// field existed has none) can never be proven to be the same server, so its reservation is
+    /// simply never released — the conservative direction, and the one that costs only a `-2`.
+    #[serde(default)]
+    pub key_addresses: BTreeMap<String, String>,
     /// The intent journal: written BEFORE a config write, cleared after (see the module doc).
     #[serde(default)]
     pub pending: BTreeMap<String, PendingIntent>,
@@ -141,6 +159,19 @@ pub(crate) struct PendingIntent {
     pub owns_file: bool,
 }
 
+/// WHAT A MINT KNOWS — the two facts a reservation is measured against, handed in together so a
+/// caller cannot supply one and forget the other.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct KeyMint<'a> {
+    /// The canonical address of the server this key will point at (the ONE spelling, from
+    /// `topos_harness::mcp::canonical_address`), or `None` when the document names none.
+    pub address: Option<&'a str>,
+    /// Every managed-looking entry key this scope's config surfaces were OBSERVED to hold, or
+    /// `None` when that could not be established (a surface that would not read, a file that would
+    /// not parse). Absence has to be PROVEN: an unknown answer releases nothing.
+    pub standing: Option<&'a BTreeSet<String>>,
+}
+
 impl ConfigCustody {
     /// The bundle a config key belongs to — live first, then retired.
     pub(crate) fn bundle_of_key(&self, key: &str) -> Option<&str> {
@@ -151,27 +182,83 @@ impl ConfigCustody {
             .or_else(|| self.retired.get(key).map(String::as_str))
     }
 
+    /// **May the reservation on `key` be given back to the mint asking for it?** BOTH halves, or
+    /// no:
+    ///
+    /// - **Nothing stands under the key**, anywhere this scope's harnesses read servers from — the
+    ///   surfaces topos writes AND the read-only files a harness also reads. An entry left under
+    ///   the name is exactly what a new bundle taking it would inherit. Absence must be proven; an
+    ///   unprovable answer releases nothing.
+    /// - **The mint is for the SAME SERVER** the retired key pointed at. This is the half that
+    ///   config files cannot answer: a harness files its OAuth grant under the server NAME, in a
+    ///   keychain that outlives every config entry, so "no entry stands anywhere" says nothing
+    ///   about whether a sign-in is still filed. Same address = same server, and inheriting a
+    ///   sign-in for the server you are about to talk to is what a sign-in is for — that is the
+    ///   relocation case, where a bundle that moved between workspaces gets its plain name back.
+    ///   A different address is a different server, and the reservation stands.
+    fn reservation_releasable(&self, key: &str, mint: &KeyMint<'_>) -> bool {
+        let Some(standing) = mint.standing else {
+            return false;
+        };
+        if standing.contains(key) {
+            return false;
+        }
+        match (self.key_addresses.get(key), mint.address) {
+            (Some(recorded), Some(wanted)) => recorded == wanted,
+            _ => false,
+        }
+    }
+
     /// Mint (or recall) the immutable config key for `bundle_id`. A key already minted — live or
-    /// retired — is returned verbatim (a retired one is revived); otherwise a fresh key is built
-    /// from the naming rule (`topos-<workspace_slug>-<name>` / `topos-local-<name>`, sanitized,
-    /// ≤ 64 ASCII) and suffixed `-2`, `-3`… past any key bound to ANOTHER bundle.
+    /// retired — is returned verbatim (a retired one is revived by its OWN bundle, unconditionally);
+    /// otherwise a fresh key is built from the naming rule (`topos-<workspace_slug>-<name>` /
+    /// `topos-local-<name>`, sanitized, ≤ 64 ASCII) and suffixed `-2`, `-3`… past any key bound to
+    /// ANOTHER bundle — including a RETIRED one, unless [`Self::reservation_releasable`] proves
+    /// this mint may have it.
+    ///
+    /// Whatever key comes out, the address this mint is for is recorded against it: that is what a
+    /// later mint's release decision reads.
     pub(crate) fn mint_key(
         &mut self,
         bundle_id: &str,
         name: &str,
         workspace_slug: Option<&str>,
+        mint: &KeyMint<'_>,
+    ) -> String {
+        let key = self.resolve_key(bundle_id, name, workspace_slug, mint);
+        match mint.address {
+            Some(address) => {
+                self.key_addresses.insert(key.clone(), address.to_owned());
+            }
+            // A document that names no address (a package-only bundle) leaves nothing to compare:
+            // any stale address must go, or a later mint could inherit on a claim nothing backs.
+            None => {
+                self.key_addresses.remove(&key);
+            }
+        }
+        key
+    }
+
+    /// The key half of [`Self::mint_key`] — which key this bundle gets, and the reservation
+    /// bookkeeping that goes with it.
+    fn resolve_key(
+        &mut self,
+        bundle_id: &str,
+        name: &str,
+        workspace_slug: Option<&str>,
+        mint: &KeyMint<'_>,
     ) -> String {
         if let Some(key) = self.keys.get(bundle_id) {
             return key.clone();
         }
-        if let Some((key, _)) = self
+        if let Some(key) = self
             .retired
             .iter()
             .find(|(_, b)| b.as_str() == bundle_id)
-            .map(|(k, b)| (k.clone(), b.clone()))
+            .map(|(k, _)| k.clone())
         {
             // Revive: the bundle is being placed again, and its old key is the one an OAuth
-            // token may still be filed under.
+            // token may still be filed under. Its own key, its own sign-in — no question to ask.
             self.retired.remove(&key);
             self.keys.insert(bundle_id.to_owned(), key.clone());
             return key;
@@ -181,10 +268,18 @@ impl ConfigCustody {
             None => sanitize_key(&format!("topos-local-{name}")),
         };
         let taken = |candidate: &str| -> bool {
-            self.keys
+            if self
+                .keys
                 .iter()
                 .any(|(b, k)| k == candidate && b != bundle_id)
-                || self.retired.get(candidate).is_some_and(|b| b != bundle_id)
+            {
+                return true;
+            }
+            match self.retired.get(candidate) {
+                None => false,
+                Some(b) if b == bundle_id => false,
+                Some(_) => !self.reservation_releasable(candidate, mint),
+            }
         };
         let mut key = base.clone();
         let mut n = 1u32;
@@ -196,12 +291,15 @@ impl ConfigCustody {
             let stem = stem.trim_end_matches('-').to_owned();
             key = format!("{stem}{suffix}");
         }
+        // The loop settled here, so any reservation on this key was PROVEN releasable above.
+        self.retired.remove(&key);
         self.keys.insert(bundle_id.to_owned(), key.clone());
         key
     }
 
     /// Retire `bundle_id`'s key — the last placement of the bundle left this scope. The key stays
-    /// reserved forever (see the module doc). No-op when the bundle holds no live key.
+    /// reserved, with the address it pointed at, until a mint for that same server proves it may
+    /// have it back (see the module doc). No-op when the bundle holds no live key.
     pub(crate) fn retire_key(&mut self, bundle_id: &str) {
         if let Some(key) = self.keys.remove(bundle_id) {
             self.retired.insert(key, bundle_id.to_owned());
@@ -540,16 +638,32 @@ impl<'a> ScopeEntries<'a> {
         moved
     }
 
-    /// Mint (or recall) the immutable key for `bundle_id`.
+    /// Mint (or recall) the immutable key for `bundle_id` — see [`ConfigCustody::mint_key`]. The
+    /// document is marked dirty whenever the mint moved anything: a key minted, a reservation given
+    /// back, or the address recorded against the key changed.
     pub(crate) fn mint_key(
         &mut self,
         bundle_id: &str,
         name: &str,
         workspace_slug: Option<&str>,
+        mint: &KeyMint<'_>,
     ) -> String {
-        let before = self.doc.keys.len();
-        let key = self.doc.mint_key(bundle_id, name, workspace_slug);
-        if self.doc.keys.len() != before {
+        // Every path but one moves a map's LENGTH: a fresh mint and a revive both insert into
+        // `keys`, a release removes from `retired`, an address arriving or leaving moves
+        // `key_addresses`. The one that does not is an address REWRITTEN in place for a key this
+        // bundle already holds — a bundle whose document moved to another endpoint — and that key
+        // is known before the call.
+        let sizes =
+            |doc: &ConfigCustody| (doc.keys.len(), doc.retired.len(), doc.key_addresses.len());
+        let before_sizes = sizes(&self.doc);
+        let live = self.doc.keys.get(bundle_id).cloned();
+        let before_address = live
+            .as_ref()
+            .and_then(|k| self.doc.key_addresses.get(k).cloned());
+        let key = self.doc.mint_key(bundle_id, name, workspace_slug, mint);
+        let rewritten = live.is_some()
+            && before_address.as_deref() != self.doc.key_addresses.get(&key).map(String::as_str);
+        if sizes(&self.doc) != before_sizes || rewritten {
             self.doc_dirty = true;
         }
         key
@@ -561,38 +675,11 @@ impl<'a> ScopeEntries<'a> {
     }
 
     /// Retire `bundle_id`'s key (see [`ConfigCustody::retire_key`]). The reservation it takes is
-    /// given back by [`Self::release_retired`] when nothing stands under the key — ONE rule, run
-    /// over every reservation rather than only over the one just made.
+    /// given back only at a later MINT, and only to one this custody can prove is the same server
+    /// (see [`ConfigCustody::reservation_releasable`]).
     pub(crate) fn retire_key(&mut self, bundle_id: &str) {
         if self.doc.keys.contains_key(bundle_id) {
             self.doc.retire_key(bundle_id);
-            self.doc_dirty = true;
-        }
-    }
-
-    /// **Give back every reserved name with nothing left under it.** A retired key is held so a
-    /// DIFFERENT bundle can never inherit what the old one left behind: an entry still standing in
-    /// some config file, and with it whatever sign-in the harness filed under that name. Once no
-    /// entry under the key remains anywhere in this scope there is nothing to inherit — and a
-    /// reservation kept past that only pushes every later mint of the same natural name onto a
-    /// `-2`, `-3` spelling nobody asked for.
-    ///
-    /// `standing` is every managed-looking key this scope's config files were OBSERVED to hold,
-    /// or `None` when that could not be established (a surface that would not read). Absence must
-    /// be proven: an unknown answer releases nothing.
-    pub(crate) fn release_retired(&mut self, standing: Option<&BTreeSet<String>>) {
-        let Some(standing) = standing else {
-            return;
-        };
-        let released: Vec<String> = self
-            .doc
-            .retired
-            .keys()
-            .filter(|k| !standing.contains(*k))
-            .cloned()
-            .collect();
-        for key in released {
-            self.doc.retired.remove(&key);
             self.doc_dirty = true;
         }
     }
@@ -961,48 +1048,171 @@ mod tests {
         Layout::new(&dir)
     }
 
+    /// A mint that knows nothing about the scope — the shape most of these tests want, and the one
+    /// that can never release a reservation.
+    fn blind() -> KeyMint<'static> {
+        KeyMint::default()
+    }
+
     #[test]
     fn keys_mint_sanitized_collide_with_suffixes_and_never_reuse_retired() {
         let mut l = ConfigCustody::default();
         // The workspace form, sanitized (uppercase + illegal runs collapse).
         assert_eq!(
-            l.mint_key("s_1", "Linear MCP!", Some("acme")),
+            l.mint_key("s_1", "Linear MCP!", Some("acme"), &blind()),
             "topos-acme-linear-mcp"
         );
         // Minted once — the same bundle always answers the same key.
         assert_eq!(
-            l.mint_key("s_1", "renamed", Some("other")),
+            l.mint_key("s_1", "renamed", Some("other"), &blind()),
             "topos-acme-linear-mcp"
         );
         // A DIFFERENT bundle colliding on the natural spelling suffixes.
         assert_eq!(
-            l.mint_key("s_2", "linear-mcp", Some("acme")),
+            l.mint_key("s_2", "linear-mcp", Some("acme"), &blind()),
             "topos-acme-linear-mcp-2"
         );
         assert_eq!(
-            l.mint_key("s_3", "linear mcp", Some("acme")),
+            l.mint_key("s_3", "linear mcp", Some("acme"), &blind()),
             "topos-acme-linear-mcp-3"
         );
         // The local form.
-        assert_eq!(l.mint_key("local:x", "x", None), "topos-local-x");
+        assert_eq!(l.mint_key("local:x", "x", None, &blind()), "topos-local-x");
         // Retire s_1; its key is reserved — a NEW bundle can never take it…
         l.retire_key("s_1");
         assert_eq!(
-            l.mint_key("s_9", "linear-mcp", Some("acme")),
+            l.mint_key("s_9", "linear-mcp", Some("acme"), &blind()),
             "topos-acme-linear-mcp-4"
         );
         // …but the SAME bundle revives it.
         assert_eq!(
-            l.mint_key("s_1", "whatever", Some("acme")),
+            l.mint_key("s_1", "whatever", Some("acme"), &blind()),
             "topos-acme-linear-mcp"
         );
         assert!(!l.retired.contains_key("topos-acme-linear-mcp"));
         // Length cap: 64 ASCII, suffix included.
         let long = "x".repeat(100);
-        let k = l.mint_key("s_long", &long, Some("acme"));
+        let k = l.mint_key("s_long", &long, Some("acme"), &blind());
         assert!(k.len() <= 64, "{k}");
-        let k2 = l.mint_key("s_long2", &long, Some("acme"));
+        let k2 = l.mint_key("s_long2", &long, Some("acme"), &blind());
         assert!(k2.len() <= 64 && k2.ends_with("-2"), "{k2}");
+    }
+
+    /// **A retired name goes back to the SAME SERVER and to nothing else.** Both halves of the
+    /// rule, and the reason for the second: harness auth state lives in a keychain that outlives
+    /// every config entry, so "no entry stands under the key anywhere" cannot prove a sign-in is
+    /// not still filed under the name. Which server the new entry points at can.
+    #[test]
+    fn a_reservation_goes_back_only_to_a_mint_for_the_same_server() {
+        let empty = BTreeSet::new();
+        let same = |address: &'static str| KeyMint {
+            address: Some(address),
+            standing: Some(&empty),
+        };
+        let key = "topos-acme-linear";
+
+        // A DIFFERENT server at the same natural name never inherits the reservation.
+        let mut moved = ConfigCustody::default();
+        moved.mint_key(
+            "s_1",
+            "linear",
+            Some("acme"),
+            &same("https://a.example/mcp"),
+        );
+        moved.retire_key("s_1");
+        assert_eq!(
+            moved.mint_key(
+                "s_2",
+                "linear",
+                Some("acme"),
+                &same("https://b.example/mcp")
+            ),
+            "topos-acme-linear-2",
+            "another server may not have the name a sign-in may still be filed under"
+        );
+        assert!(moved.retired.contains_key(key), "{:?}", moved.retired);
+
+        // The relocation case: the same server, arriving as a new bundle (a workspace moved, a
+        // local row republished), gets its plain name back — inheriting a sign-in for the server
+        // you are about to talk to is what a sign-in is for.
+        let mut relocated = ConfigCustody::default();
+        relocated.mint_key(
+            "s_1",
+            "linear",
+            Some("acme"),
+            &same("https://a.example/mcp"),
+        );
+        relocated.retire_key("s_1");
+        assert_eq!(
+            relocated.mint_key(
+                "s_2",
+                "linear",
+                Some("acme"),
+                &same("https://a.example/mcp")
+            ),
+            key
+        );
+        assert!(relocated.retired.is_empty(), "{:?}", relocated.retired);
+
+        // An entry still standing under the key blocks it whatever the address says.
+        let mut occupied = ConfigCustody::default();
+        occupied.mint_key(
+            "s_1",
+            "linear",
+            Some("acme"),
+            &same("https://a.example/mcp"),
+        );
+        occupied.retire_key("s_1");
+        let standing: BTreeSet<String> = std::iter::once(key.to_owned()).collect();
+        assert_eq!(
+            occupied.mint_key(
+                "s_2",
+                "linear",
+                Some("acme"),
+                &KeyMint {
+                    address: Some("https://a.example/mcp"),
+                    standing: Some(&standing),
+                }
+            ),
+            "topos-acme-linear-2"
+        );
+
+        // An UNPROVABLE absence releases nothing, same address or not.
+        let mut unprovable = ConfigCustody::default();
+        unprovable.mint_key(
+            "s_1",
+            "linear",
+            Some("acme"),
+            &same("https://a.example/mcp"),
+        );
+        unprovable.retire_key("s_1");
+        assert_eq!(
+            unprovable.mint_key(
+                "s_2",
+                "linear",
+                Some("acme"),
+                &KeyMint {
+                    address: Some("https://a.example/mcp"),
+                    standing: None,
+                }
+            ),
+            "topos-acme-linear-2"
+        );
+
+        // A reservation with NO recorded address — a package-only bundle, or a row written before
+        // this field existed — can never be proven to be the same server, so it never goes back.
+        let mut addressless = ConfigCustody::default();
+        addressless.mint_key("s_1", "linear", Some("acme"), &blind());
+        addressless.retire_key("s_1");
+        assert_eq!(
+            addressless.mint_key(
+                "s_2",
+                "linear",
+                Some("acme"),
+                &same("https://a.example/mcp")
+            ),
+            "topos-acme-linear-2"
+        );
     }
 
     #[test]
@@ -1010,9 +1220,12 @@ mod tests {
         // A local row minted `topos-local-*`; the SAME bundle later demanded as a workspace row
         // (a landed publish keeps the skill id) keeps the key — OAuth tokens key to the name.
         let mut l = ConfigCustody::default();
-        assert_eq!(l.mint_key("s_x", "notion", None), "topos-local-notion");
         assert_eq!(
-            l.mint_key("s_x", "notion", Some("acme")),
+            l.mint_key("s_x", "notion", None, &blind()),
+            "topos-local-notion"
+        );
+        assert_eq!(
+            l.mint_key("s_x", "notion", Some("acme"), &blind()),
             "topos-local-notion"
         );
     }
@@ -1022,7 +1235,7 @@ mod tests {
         let fs = RealFs;
         let layout = scratch("doc");
         let mut l = ConfigCustody::default();
-        l.mint_key("s_1", "a", Some("ws"));
+        l.mint_key("s_1", "a", Some("ws"), &blind());
         write(&fs, &layout, &l).unwrap();
         let back = read(&fs, &layout).unwrap();
         assert_eq!(back.keys, l.keys);
@@ -1046,7 +1259,7 @@ mod tests {
         let fs = RealFs;
         let layout = scratch("unrecorded");
         let mut doc = ConfigCustody::default();
-        doc.mint_key("local:weather", "weather", None);
+        doc.mint_key("local:weather", "weather", None, &blind());
         write(&fs, &layout, &doc).unwrap();
 
         let mut scope = ScopeEntries::load(&fs, &layout).unwrap();

@@ -672,9 +672,7 @@ fn check_endpoint_url(url: &str) -> Result<(), McpRefusal> {
             "its endpoint carries credentials (user:password@) — a shared bundle never holds one",
         ),
         EndpointUrl::Scheme(scheme) if scheme == "https" => Ok(()),
-        EndpointUrl::Scheme(_) => {
-            refuse(McpRefusalCode::InsecureUrl, "its endpoint must be https")
-        }
+        EndpointUrl::Scheme(_) => refuse(McpRefusalCode::InsecureUrl, "its endpoint must be https"),
     }
 }
 
@@ -882,9 +880,7 @@ fn is_dot_separated_identifiers(text: &str, numeric_rule: bool) -> bool {
     !text.is_empty()
         && text.split('.').all(|part| {
             !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
                 && (!numeric_rule
                     || !part.bytes().all(|b| b.is_ascii_digit())
                     || is_numeric_identifier(part))
@@ -2116,8 +2112,8 @@ mod tests {
             assert!(is_exact_semver(one), "npm: {one}");
         }
         for many in [
-            "*", "x", "next", "latest", "1", "1.2", "v1.2.3", "1.2.3.4", "^1.2.3", ">=1.0.0", "1.x",
-            "01.2.3", "1.2.3-", "1.2.3+", "1.2.3-01", " 1.2.3", "",
+            "*", "x", "next", "latest", "1", "1.2", "v1.2.3", "1.2.3.4", "^1.2.3", ">=1.0.0",
+            "1.x", "01.2.3", "1.2.3-", "1.2.3+", "1.2.3-01", " 1.2.3", "",
         ] {
             assert!(!is_exact_semver(many), "npm: {many}");
         }
