@@ -15,7 +15,7 @@ config.
 One file, `server.json`, in the format the
 [official MCP registry](https://registry.modelcontextprotocol.io) serves — the same document that
 registry hands out, unchanged. (A `README.md` may sit beside it; nothing else may — any other file
-refuses at publish, and both files' bytes run the same credential scan.) Two constraints decide
+refuses at publish, and both files' bytes run the same credential scan.) Three constraints decide
 everything else on this page:
 
 - **Something to run.** The document offers a `streamable-http` endpoint over `https`, or one or
@@ -165,7 +165,7 @@ teammate's machine — meeting the bundle for the first time through the workspa
 
 A document that offers packages instead of (or as well as) an address lands as the **program the
 agent runs**, in that agent's own spelling — `npx -y @acme/weather-mcp@1.4.0` for npm,
-`uvx acme-weather==1.4.0` for PyPI, always at the version the document pins:
+`uvx acme-weather@1.4.0` for PyPI, always at the version the document pins:
 
 ```json title="~/.cursor/mcp.json — a package bundle"
 {
@@ -235,12 +235,11 @@ how you sign in — that stays the agent's own business:
 Each agent's exact config file — and the environment variables that move it — is in
 [Supported agents](/docs/harnesses#mcp-servers).
 
-Most of them dial an address and also run a local program. Three are narrower, and Topos says so
+Twelve of them dial an address and also run a local program. Four are narrower, and Topos says so
 rather than guessing: **Claude Desktop** adds remote servers in the app rather than in this file,
-so a shared address reaches it as a local bridge process instead; **LM Studio** and **Goose** have
-a confirmed entry grammar for an address only, so a package bundle reports `not placed` there
-rather than being written in a shape nobody has verified. **Hermes Agent** is in the same position
-as those last two.
+so a shared address reaches it as a local bridge process instead; **Goose**, **Hermes Agent** and
+**LM Studio** have a confirmed entry grammar for an address only, so a package bundle reports
+`not placed` there rather than being written in a shape nobody has verified.
 
 By default the entry reaches every one of those agents this machine has. On `topos add`,
 `-a <agent>` (a slug like `cursor`, repeatable) or `--dest <file>` (a config file from that same
@@ -305,21 +304,25 @@ registry name — and importing the new document.
 The two scopes work as they do for skills: your own `~/.topos/topos.toml` (or, with no such file,
 what your workspaces give you) follows you, and a repo's committed `topos.toml` governs that
 checkout. An MCP row in a project file lands **only in project-level config** — `.mcp.json`,
-`.cursor/mcp.json`, `.codex/config.toml`, `opencode.json` — and never falls back to your home
-config, so a committed file can't quietly reconfigure a contributor's machine.
+`.codex/config.toml`, `.cursor/mcp.json`, `.gemini/settings.json`, `.roo/mcp.json`,
+`.vscode/mcp.json`, `opencode.json` — and never falls back to your home config, so a committed file
+can't quietly reconfigure a contributor's machine.
 
-Two agents have no project-level MCP config at all, and the receipt that places a project row says
-so instead of pretending:
+Those seven files are the whole of it: nine of the sixteen agents have no project-level MCP config
+at all — the table in [Supported agents](/docs/harnesses#mcp-servers) marks each of them
+`— (none)` — and the receipt that places a project row says so for every one it finds on the
+machine, instead of pretending:
 
 ```
 openclaw: not placed — no project-level config
 hermes-agent: not placed — no project-level config
 ```
 
-Those two receive the same server through your machine-wide scope, and `topos list <name>` shows
-the same per-agent state any time. An `update` that changes nothing folds the row into its summary
-count rather than repeating these standing facts. A project config path that resolves outside the
-checkout is refused and named, never redirected.
+Those agents receive the same server through your machine-wide scope. `topos list <name>` names
+every agent config that currently holds an entry for the bundle, and an `update` re-decides the
+standing facts above from the files each time it runs — so a line stops appearing the moment the
+condition behind it does. A project config path that resolves outside the checkout is refused and
+named, never redirected.
 
 <Note>
   Codex reads a project `.codex/config.toml` only once you have trusted that repo inside Codex.

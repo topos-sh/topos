@@ -230,8 +230,12 @@ impl ConfigCustody {
             Some(address) => {
                 self.key_addresses.insert(key.clone(), address.to_owned());
             }
-            // A document that names no address (a package-only bundle) leaves nothing to compare:
-            // any stale address must go, or a later mint could inherit on a claim nothing backs.
+            // A document that names NOTHING topos can identify the server by leaves nothing to
+            // compare, so any stale address must go or a later mint could inherit on a claim
+            // nothing backs. A package-only bundle is not that case and never was: it identifies
+            // itself as `<registry>:<identifier>` (`ServerDoc::canonical_identity`), which is
+            // recorded here exactly like an address and compared exactly like one. What reaches
+            // this arm is a document with no remote AND no package at all.
             None => {
                 self.key_addresses.remove(&key);
             }
@@ -1199,8 +1203,10 @@ mod tests {
             "topos-acme-linear-2"
         );
 
-        // A reservation with NO recorded address — a package-only bundle, or a row written before
-        // this field existed — can never be proven to be the same server, so it never goes back.
+        // A reservation with NO recorded address — a document naming neither a remote nor a
+        // package, or a row written before this field existed — can never be proven to be the same
+        // server, so it never goes back. (A package-only bundle DOES record one: its identity is
+        // `<registry>:<identifier>`.)
         let mut addressless = ConfigCustody::default();
         addressless.mint_key("s_1", "linear", Some("acme"), &blind());
         addressless.retire_key("s_1");

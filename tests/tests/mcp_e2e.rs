@@ -34,8 +34,10 @@ const KEY: &str = "topos-acme-team-weather";
 /// A url a hand-edit puts in place of [`SERVER_URL`] (the drift phase).
 const DRIFTED_URL: &str = "https://hand-edited.example/mcp";
 
-/// The six MCP-capable harnesses, in the harness table's row order (the order every surface reports
-/// them in — there is one table).
+/// The six MCP-capable harnesses THIS end-to-end drives — one per editing driver and per entry
+/// shape, in the harness table's row order (the order every surface reports them in — there is one
+/// table). The table itself carries sixteen; the rest are covered by the converge round-trips in
+/// the client's own suite, and this one proves the whole chain against the real binary.
 const SIX: [&str; 6] = [
     "claude-code",
     "openclaw",

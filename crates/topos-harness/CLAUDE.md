@@ -84,7 +84,7 @@ never learns which machinery served which harness.
 - **`coverage`** — whether a harness reads the shared `~/.agents/skills` dir, with PROVENANCE
   (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed): the claim is a registry-row
   column, over an automatic derivation for a row carrying none.
-- **`mcp`** — pure MCP-server config placement for six harnesses; bytes in → an `EditPlan` out,
+- **`mcp`** — pure MCP-server config placement for sixteen harnesses; bytes in → an `EditPlan` out,
   the CLI owns ALL file I/O. An entry names one of TWO targets (`McpTarget`): an ADDRESS the
   harness dials, or a PROGRAM it runs on this machine (command + argv + env). Both are ordinary
   managed entries — same key contract, same fingerprint ledger, same drift rules — and the CALLER
@@ -96,8 +96,10 @@ never learns which machinery served which harness.
   bridge argv. An environment slot the MACHINE fills travels as a name (`EnvValue::Inherited`)
   and is spelled by the renderer, because the form is not just syntax: most harnesses read a
   reference inside the value (`EnvRef`), Codex names inherited variables in its own `env_vars`
-  list and would hand a `${VAR}` in `env` straight to the server. `entry_value` answers `None` for the one pair no vendor evidence covers — a
-  program in Hermes's YAML — and every driver turns that into a refusal, never a guess. The
+  list and would hand a `${VAR}` in `env` straight to the server. `entry_value` answers `None` for
+  the four pairs no vendor evidence covers — a program in Hermes's, Goose's and LM Studio's
+  configs, and an ADDRESS in Claude Desktop's — and every driver turns that into a refusal, never a
+  guess. The
   surfaces (user/project + dialect + reload copy + the read-only `conflict_paths` a harness ALSO
   reads servers from) and the CAPABILITY columns (does it dial an address, does it run a program,
   which env-reference syntax) are registry-row

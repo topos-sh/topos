@@ -1,4 +1,4 @@
-//! `mcp` — pure MCP-server config placement for six harnesses. Bytes in → an [`EditPlan`] out;
+//! `mcp` — pure MCP-server config placement for sixteen harnesses. Bytes in → an [`EditPlan`] out;
 //! the CLI owns ALL file I/O (read, crash-safe write, dir materialization) exactly as it does for
 //! the trigger adapters. Nothing here touches a filesystem, a clock, or the environment (the one
 //! exception: resolving a harness's user surface reads the per-harness home-override env vars,
@@ -502,6 +502,10 @@ pub fn local_address(command: &str, args: &[String]) -> Option<String> {
 /// [`BRIDGE_PACKAGE`] (bare or `@`-versioned) among its arguments, and an absolute URL after it.
 /// Deliberately loose about the version and the flags around it — recognizing somebody else's
 /// bridge entry is the whole point.
+///
+/// The runner it recognizes is `npx` and ONLY `npx` — the one spelling topos itself writes — so a
+/// bridge launched any other way (`bunx`, `pnpm dlx`, a wrapper script of somebody's own) reads
+/// here as an ordinary program rather than as the address behind it.
 fn bridged_url(command: &str, args: &[String]) -> Option<String> {
     let runner = command
         .rsplit(['/', '\\'])
@@ -797,10 +801,11 @@ fn write_canonical(value: &Value, out: &mut String) {
 /// order so serialization is deterministic under either serde_json map backend. Empty `headers`
 /// (and an empty `env`) are omitted in every dialect.
 ///
-/// `None` means the dialect CANNOT EXPRESS that target — the pairs no vendor evidence covers: a
-/// program-run server in Hermes's YAML and in LM Studio's `mcp.json` (both documented only in
-/// their address form), and an ADDRESS in Claude Desktop's config, which reaches a remote server
-/// through the bridge and through no key of its own. It is not an error and never a guess: the
+/// `None` means the dialect CANNOT EXPRESS that target — the four pairs no vendor evidence
+/// covers: a program-run server in Hermes's YAML, in Goose's `config.yaml` and in LM Studio's
+/// `mcp.json` (all three documented only in their address form), and an ADDRESS in Claude
+/// Desktop's config, which reaches a remote server through the bridge and through no key of its
+/// own. It is not an error and never a guess: the
 /// caller withholds the placement and says so, and every driver refuses the whole edit rather than
 /// writing a shape it invented. The answer is on the SHAPE alone, never the contents — which is
 /// what lets a caller ask it once, of an empty target, before it has anything to place.
@@ -1640,7 +1645,7 @@ mod tests {
         assert!(oc.get("args").is_none());
 
         // An empty environment is omitted everywhere, exactly as empty headers are.
-        let bare = testutil::local_entry("topos-x", "uvx", &["pkg==1.0.0"], &[]);
+        let bare = testutil::local_entry("topos-x", "uvx", &["pkg@1.0.0"], &[]);
         for dialect in [
             McpDialect::ClaudePluginDir,
             McpDialect::ClaudeProjectJson,
