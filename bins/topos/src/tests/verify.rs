@@ -935,6 +935,62 @@ fn the_pure_environment_policy_omits_what_this_machine_cannot_fill() {
     );
 }
 
+/// **The way out kills the TREE, not just the program topos named.** What a package bundle spawns
+/// is a runner (`npx`, `uvx`); the real server is the runner's own child, and killing the runner
+/// alone leaves that server running — holding the inherited pipes — once per verification. The
+/// stub here has exactly that shape: it forks a long `sleep` and records its pid BEFORE it answers
+/// a word, so by the time a verdict exists the grandchild is a fact. After the verdict, nothing of
+/// it is left.
+#[cfg(unix)]
+#[test]
+fn the_kill_on_the_way_out_reaches_what_the_runner_forked() {
+    let dir = Scratch::new("stdio-tree");
+    let pidfile = dir.0.join("grandchild.pid");
+    let program = script(
+        &dir.0,
+        "runner.sh",
+        &format!(
+            r#"#!/bin/sh
+sleep 300 &
+echo $! > "{pid}"
+while IFS= read -r line; do
+  case "$line" in
+    *server/discover*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{{}}}}}}' ;;
+    *tools/list*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"only"}}]}}}}' ;;
+  esac
+done
+"#,
+            pid = pidfile.display()
+        ),
+    );
+    let v = ops::probe_local(&program, &[], &[]);
+    assert_eq!(v.line(), "responding (1 tools)");
+
+    let raw = std::fs::read_to_string(&pidfile).expect("the runner records what it forked");
+    let raw: i32 = raw.trim().parse().expect("a pid");
+    let pid = rustix::process::Pid::from_raw(raw).expect("a live pid is never 0");
+    // The signal lands asynchronously and the reparented grandchild is reaped by init, so the
+    // honest question is asked repeatedly for a moment rather than once.
+    let mut gone = false;
+    for _ in 0..100 {
+        if rustix::process::test_kill_process(pid).is_err() {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if !gone {
+        // Do not leave the suite's own mess behind on the way to the failure.
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    assert!(
+        gone,
+        "the server the runner forked ({raw}) outlived the verification"
+    );
+}
+
 // =================================================================================================
 // The verb, end to end
 // =================================================================================================

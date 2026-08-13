@@ -30,12 +30,20 @@
 //!   writes a large log to stderr cannot fill a pipe and deadlock the conversation on stdout.
 //!   `stderr` is not evidence of failure (the binding says so explicitly) — a bounded tail of it is
 //!   kept only to make "it never started" say WHY.
-//! - **A hard deadline, then kill and reap.** Every read is bounded; on the way out the child is
-//!   killed and waited for, so no verification can leave a process behind. The reader threads are
-//!   deliberately NOT joined: a server that handed its pipes to a grandchild would never reach EOF,
-//!   and a join there would hang the verb the deadline exists to protect. (On Windows the same
-//!   grandchild survives the kill — terminating a whole process tree needs a Job Object, which this
-//!   build does not create; the note stands where the fix would go.)
+//! - **A hard deadline, then kill and reap — the whole TREE.** Every read is bounded; on the way
+//!   out the child is killed and waited for, so no verification can leave a process behind. What
+//!   topos spawns is usually a package RUNNER (`npx`, `uvx`) and the real server is the runner's own
+//!   child, so killing the child alone would leave that server running — holding the inherited
+//!   pipes — once per verification. On Unix the child is therefore spawned in its OWN process group
+//!   and the group is what gets the signal; the direct child is then waited for, which is what
+//!   keeps a zombie from being the cure. The reader threads are deliberately NOT joined: a server
+//!   that handed its pipes to a grandchild would never reach EOF, and a join there would hang the
+//!   verb the deadline exists to protect.
+//!
+//!   **On Windows the grandchild still survives**: terminating a tree there needs a Job Object with
+//!   `KILL_ON_JOB_CLOSE`, which is a raw `CreateJobObject`/`AssignProcessToJobObject` pair this
+//!   build has no dependency for and will not hand-roll behind `unsafe`. The limitation is real and
+//!   stated rather than papered over; the note stands where the fix would go.
 
 use std::io::{BufRead, BufReader, Read as _, Write};
 use std::process::{Command, Stdio};
@@ -176,10 +184,15 @@ struct Running {
 }
 
 impl Running {
-    /// Close stdin (the binding's own graceful-shutdown signal), then kill and reap. `wait` is what
-    /// keeps a verification from leaving a zombie; `kill` on an already-exited child is harmless.
+    /// Close stdin (the binding's own graceful-shutdown signal), then kill the whole tree and reap.
+    ///
+    /// The order matters: the GROUP is signalled first (that is what reaches a server the runner
+    /// forked), then the child itself for the platforms and the corner cases where the group kill
+    /// did not apply, and only then `wait` — which is what keeps a verification from leaving a
+    /// zombie. `kill` on an already-exited child is harmless.
     fn finish(&mut self) {
         drop(self.stdin.take());
+        kill_process_tree(&self.child);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -191,7 +204,42 @@ impl Running {
     }
 }
 
-/// Spawn the server with the minimal environment, both output streams piped.
+/// **Put the child in its own process group**, so that what the verification kills on the way out
+/// is the whole tree and not just the program it named.
+///
+/// `0` means "the child's own pid becomes the group id", and `Command::process_group` is the SAFE
+/// spelling of it — no `pre_exec` closure, so no `unsafe` block enters this crate for it.
+#[cfg(unix)]
+fn own_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    cmd.process_group(0);
+}
+
+/// The Windows half of [`own_process_group`]: nothing. A tree there is a Job Object, which this
+/// build does not create (see the module docs).
+#[cfg(not(unix))]
+fn own_process_group(_cmd: &mut Command) {}
+
+/// **Kill everything the verification started.** On Unix the group id IS the child's pid (see
+/// [`own_process_group`]), so one `SIGKILL` at the group reaches the runner and whatever it forked.
+/// Best-effort: a child that already exited leaves a group with nothing in it, and that is a
+/// success, not a failure.
+#[cfg(unix)]
+fn kill_process_tree(child: &std::process::Child) {
+    if let Ok(raw) = i32::try_from(child.id())
+        && let Some(pid) = rustix::process::Pid::from_raw(raw)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+/// The Windows half of [`kill_process_tree`]: the direct child only, which [`Running::finish`]
+/// kills anyway. A server a package runner forked survives it — stated in the module docs.
+#[cfg(not(unix))]
+fn kill_process_tree(_child: &std::process::Child) {}
+
+/// Spawn the server with the minimal environment, in its own process group, both output streams
+/// piped.
 fn spawn(command: &str, args: &[String], env: &[(String, EnvValue)]) -> std::io::Result<Running> {
     let mut cmd = Command::new(command);
     cmd.args(args)
@@ -199,6 +247,7 @@ fn spawn(command: &str, args: &[String], env: &[(String, EnvValue)]) -> std::io:
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    own_process_group(&mut cmd);
     for (name, value) in spawn_env(env, &machine_env, cfg!(windows)) {
         cmd.env(name, value);
     }
