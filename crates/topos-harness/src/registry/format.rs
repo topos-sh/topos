@@ -924,10 +924,10 @@ pub fn bundled_harnesses() -> &'static [KnownHarness] {
 /// **The bridge this BUILD runs** — the `mcp-remote` package and the exact version pinned in the
 /// bundled table, or `None` when this build's table names none.
 ///
-/// It is deliberately read from the bundled table and nowhere else. The fence in
-/// [`mcp_bridge_at`] already refuses a downloaded table that names a different bridge, so the two
-/// answers are always the same; reading the bundled one makes that a property of the code rather
-/// than of a check having run.
+/// It is deliberately read from the bundled table and nowhere else. This module's own fence
+/// already refuses a downloaded table that names a different bridge, so the two answers are always
+/// the same; reading the bundled one makes that a property of the code rather than of a check
+/// having run.
 #[must_use]
 pub fn mcp_bridge() -> Option<&'static McpBridge> {
     bundled_bridge()
