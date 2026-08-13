@@ -298,8 +298,8 @@ pub fn canonical_address(raw: &str) -> Option<String> {
 pub const BRIDGE_PACKAGE: &str = "mcp-remote";
 
 /// The commands that are BATCH FILES on Windows (`npx.cmd`, `node.exe`'s shims, …) and therefore
-/// cannot be spawned directly: Windows needs `cmd /c` in front of them. Ported from cc-switch
-/// (MIT, see THIRD-PARTY-NOTICES.md), whose list is the one Claude Code's own doctor asks for.
+/// cannot be spawned directly: Windows needs `cmd /c` in front of them. It is the list Claude
+/// Code's own doctor asks for.
 pub const WINDOWS_WRAPPED_COMMANDS: &[&str] =
     &["npx", "npm", "yarn", "pnpm", "node", "bun", "deno"];
 
@@ -435,8 +435,7 @@ pub fn needs_windows_wrap(command: &str) -> bool {
 
 /// Whether `path` is a WSL UNC path — the one place a Windows topos must NOT write the `cmd /c`
 /// wrapper, because the harness reading that file runs Linux. Only a direct UNC spelling is
-/// detectable; a mapped drive letter pointing into WSL is not, and is documented as such by the
-/// source this rule is ported from (cc-switch, MIT).
+/// detectable; a mapped drive letter pointing into WSL is not, and nothing in the path says so.
 #[must_use]
 pub fn is_wsl_unc(path: &str) -> bool {
     let Some(rest) = path
