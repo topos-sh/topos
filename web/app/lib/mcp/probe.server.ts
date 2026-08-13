@@ -1,13 +1,18 @@
 import type { PublishActor } from "@/lib/db/queries.custody.server";
 import { recordMcpProbe } from "@/lib/db/queries.mcp.server";
 import {
+  type AddressLookup,
   assertPublicHttpsUrl,
   guardedRequest,
   McpFetchError,
   readAtMost,
   type VettedUrl,
 } from "@/lib/mcp/fetch.server";
-import type { McpProbeOutcome } from "@/lib/mcp/probe-state";
+import {
+  type McpProbeOutcome,
+  PROBE_DETAIL_PRIVATE,
+  PROBE_DETAIL_UNRESOLVED,
+} from "@/lib/mcp/probe-state";
 
 /**
  * THE ADVISORY PROBE — one question, asked once, after a publish has already landed.
@@ -29,8 +34,10 @@ import type { McpProbeOutcome } from "@/lib/mcp/probe-state";
  *     connection reuse (app/lib/mcp/fetch.server.ts).
  *  3. **It never records a verdict it did not earn.** An address this plane cannot reach or vet is
  *     `not_verifiable` — a NEUTRAL state, because an internal server is a first-class thing to
- *     share and "we could not reach it from the cloud" is a fact about the cloud. Anything that
- *     goes wrong on OUR side records nothing at all, and the version reads "not checked yet".
+ *     share and "we could not reach it from the cloud" is a fact about the cloud. WHICH fact it is
+ *     rides in the detail (a private network, or a name that does not resolve here), because those
+ *     two point a reader at different things. Anything that goes wrong on OUR side records nothing
+ *     at all, and the version reads "not checked yet".
  *
  * THE CLASSIFICATION RULES, and why each one is what it is (reimplemented from the MIT-licensed
  * TypeScript MCP SDK's client behaviour — the rules, not its code):
@@ -215,16 +222,29 @@ const httpsProbe: ProbeTransport = async (vetted) =>
 export async function probeEndpoint(
   url: string,
   transport: ProbeTransport = httpsProbe,
+  /** The guard's resolver — production asks DNS; a test hands back addresses, or throws. */
+  resolve?: AddressLookup,
 ): Promise<ProbeVerdict | null> {
   let vetted: VettedUrl;
   try {
-    vetted = await assertPublicHttpsUrl(url);
+    vetted = await assertPublicHttpsUrl(url, resolve);
   } catch (error) {
     if (error instanceof McpFetchError) {
-      // The guard's whole answer is "this plane cannot reach or vet that address" — a private
-      // network, a name that does not resolve. A neutral state, deliberately: an internal server
-      // is a first-class thing for a team to share.
-      return { outcome: "not_verifiable", detail: "the cloud cannot reach this address" };
+      // The guard's answer is "this plane cannot reach or vet that address" — a NEUTRAL state,
+      // deliberately: an internal server is a first-class thing for a team to share. But WHICH of
+      // the two it is decides what the reader does next, so the reason is carried through rather
+      // than folded into one word: a private network is somebody's own network working as
+      // intended, and a name that does not resolve here is a typo or a name that lives inside
+      // one. A refusal with no reason is about the URL's shape, and says neither.
+      return {
+        outcome: "not_verifiable",
+        detail:
+          error.reason === "private"
+            ? PROBE_DETAIL_PRIVATE
+            : error.reason === "unresolved"
+              ? PROBE_DETAIL_UNRESOLVED
+              : null,
+      };
     }
     return null;
   }

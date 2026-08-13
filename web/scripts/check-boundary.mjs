@@ -24,7 +24,9 @@
  *     subtle — fails there too. A FOURTH, narrower one: app/lib/mcp/validate.server.ts may spell
  *     the published digest SPELLINGS it recognizes in somebody else's server document
  *     (`"sha256:"`, `"sha256"`, `@sha256:`) — reading a digest, never computing one; every
- *     crypto identifier still fails there.
+ *     crypto identifier still fails there. A FIFTH, narrower still: the generated MCP
+ *     credential-shape module may list the signing-key WORD once, as a deny-list entry naming
+ *     what a slot must not arrive holding.
  *  2. The (node:)crypto module specifier and `randomBytes` are allowed ONLY in
  *     app/lib/db/identity.server.ts and app/lib/auth/recovery.server.ts — the two mints of
  *     random SECRETS/ids (randomness is this tier's; hashing stays in Postgres/better-auth) —
@@ -153,6 +155,15 @@ const SANCTIONED_DIGEST_IMPORT = 'import { createHash } from "node:crypto";';
  */
 const MCP_DIGEST_ALLOWED = new Set([join("app", "lib", "mcp", "validate.server.ts")]);
 const MCP_DIGEST_SPELLINGS = ['"sha256:"', '"sha256"', "@sha256:", "`sha256:`", "`sha256`"];
+/**
+ * A FIFTH carve-out, narrower still: the MCP gate's credential-NAME vocabulary, generated from the
+ * shared vectors, lists the WORDS that make a slot name say "a credential goes here" — and one of
+ * them names a signing key. It is a DENY-LIST entry, the opposite of holding one, and it is data
+ * rather than code. Only the exact quoted spelling is stripped, once, so any other use of the
+ * identifier in that module still fails exactly as it does everywhere else.
+ */
+const MCP_NAME_WORD_ALLOWED = new Set([join("app", "lib", "mcp", "secret-patterns.generated.ts")]);
+const MCP_NAME_WORD_SPELLING = '"privatekey",';
 for (const { rel, text } of files) {
   // The carve-outs, stripped before scanning:
   //  - bundle_digest/bundleDigest DISPLAY the vault's recorded consent value;
@@ -178,6 +189,9 @@ for (const { rel, text } of files) {
     for (const spelling of MCP_DIGEST_SPELLINGS) {
       carved = carved.replaceAll(spelling, "");
     }
+  }
+  if (MCP_NAME_WORD_ALLOWED.has(rel)) {
+    carved = carved.replace(MCP_NAME_WORD_SPELLING, "");
   }
   for (const [regex, name] of HARD_ZERO) {
     if (regex.test(carved)) {
