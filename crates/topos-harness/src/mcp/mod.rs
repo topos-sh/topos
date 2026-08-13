@@ -49,10 +49,12 @@
 //! An entry has one of TWO targets ([`McpTarget`]): an ADDRESS the harness dials, or a PROGRAM it
 //! runs on this machine. Both are ordinary managed entries — same key contract, same fingerprint
 //! ledger, same drift rules — and the CALLER decides which one a given harness gets, rendering
-//! every machine-local spelling (the bridge argv, the Windows `cmd /c` wrapper, an env-var
-//! reference) before it builds the entry. [`entry_value`] answers `None` for the one pair no
-//! vendor evidence covers — a program in Hermes's YAML — and every driver turns that into a
-//! refusal rather than a guess.
+//! every machine-local spelling (the bridge argv, the Windows `cmd /c` wrapper) before it builds
+//! the entry. What it does NOT resolve is an environment slot the machine fills: that arrives as a
+//! name ([`EnvValue::Inherited`]) and is spelled HERE, because the form differs by more than
+//! syntax — most harnesses read a reference inside the value, Codex names inherited variables in a
+//! list of its own. [`entry_value`] answers `None` for the one pair no vendor evidence covers — a
+//! program in Hermes's YAML — and every driver turns that into a refusal rather than a guess.
 
 pub mod descriptor;
 pub mod jsonc_edit;
@@ -96,13 +98,38 @@ pub enum McpTarget {
     },
     /// A program the harness RUNS on this machine, talking MCP over stdio. `command` and `args`
     /// are exactly what gets spawned (any Windows `cmd /c` wrapper is already applied); `env`
-    /// values are literals or the harness's own env-var reference spelling — never a credential.
+    /// carries a literal or a NAME to inherit — never a credential.
     Local {
         command: String,
         args: Vec<String>,
-        /// Environment pairs, emitted sorted by name so output bytes are deterministic.
-        env: Vec<(String, String)>,
+        /// Environment slots, emitted sorted by name so output bytes are deterministic.
+        env: Vec<(String, EnvValue)>,
+        /// How THIS harness spells a reference to a variable of the machine's own environment,
+        /// for the dialects that spell one in the value at all. It travels with the entry because
+        /// it is a fact about the harness, not about the dialect: two harnesses can share a
+        /// dialect and read different spellings.
+        env_ref: descriptor::EnvRef,
     },
+}
+
+/// **What one environment slot holds** — the distinction a config file has to keep, because the
+/// two are not the same word to every harness.
+///
+/// A LITERAL is a value the bundle states and every machine gets. An INHERITED slot is a name and
+/// nothing else: the value is whatever this machine's own environment holds under it, which is how
+/// a shared bundle names a credential slot without ever carrying a credential.
+///
+/// Most harnesses spell inheritance IN the value — `${VAR}`, `{env:VAR}` — and for them the
+/// difference is a rendering. Codex does not: its `env` map is literal text passed to the child
+/// verbatim, and inheritance is a separate `env_vars` list of names it forwards from its own
+/// environment. Writing `${VAR}` into its `env` would hand the server those six characters. So the
+/// distinction is carried to the renderer rather than resolved before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvValue {
+    /// The value the bundle states, verbatim.
+    Literal(String),
+    /// This machine's own value for the slot's name.
+    Inherited,
 }
 
 impl McpEntry {
@@ -789,14 +816,34 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
             | McpDialect::CursorJson
             | McpDialect::OpenclawJson
             | McpDialect::CodexToml,
-            McpTarget::Local { command, args, env },
+            McpTarget::Local {
+                command,
+                args,
+                env,
+                env_ref,
+            },
         ) => {
             m.insert(
                 "args".to_owned(),
                 Value::Array(args.iter().map(|a| Value::String(a.clone())).collect()),
             );
             m.insert("command".to_owned(), Value::String(command.clone()));
-            insert_pairs(&mut m, "env", env);
+            // CODEX IS THE ONE THAT DOES NOT SPELL INHERITANCE IN THE VALUE. Its `env` map is
+            // literal text handed to the child as it stands, and the names it forwards from its
+            // own environment are a separate `env_vars` list — so a `${VAR}` written into `env`
+            // would reach the server as those six characters and nothing else.
+            if dialect == McpDialect::CodexToml {
+                insert_pairs(&mut m, "env", &literals(env));
+                let inherited: Vec<Value> = inherited_names(env)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect();
+                if !inherited.is_empty() {
+                    m.insert("env_vars".to_owned(), Value::Array(inherited));
+                }
+            } else {
+                insert_pairs(&mut m, "env", &rendered(env, *env_ref));
+            }
             match dialect {
                 McpDialect::ClaudePluginDir | McpDialect::ClaudeProjectJson => {
                     m.insert("type".to_owned(), Value::String("stdio".to_owned()));
@@ -809,13 +856,21 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
         }
         // OpenCode is the outlier twice over: the program and its arguments are ONE `command`
         // array, and the environment is spelled `environment`.
-        (McpDialect::OpencodeJson, McpTarget::Local { command, args, env }) => {
+        (
+            McpDialect::OpencodeJson,
+            McpTarget::Local {
+                command,
+                args,
+                env,
+                env_ref,
+            },
+        ) => {
             let mut argv = Vec::with_capacity(args.len() + 1);
             argv.push(Value::String(command.clone()));
             argv.extend(args.iter().map(|a| Value::String(a.clone())));
             m.insert("command".to_owned(), Value::Array(argv));
             m.insert("enabled".to_owned(), Value::Bool(true));
-            insert_pairs(&mut m, "environment", env);
+            insert_pairs(&mut m, "environment", &rendered(env, *env_ref));
             m.insert("type".to_owned(), Value::String("local".to_owned()));
         }
         (McpDialect::HermesYaml, McpTarget::Local { .. }) => return None,
@@ -831,6 +886,42 @@ pub fn dialect_expresses(dialect: McpDialect, target: &McpTarget) -> bool {
         (dialect, target),
         (McpDialect::HermesYaml, McpTarget::Local { .. })
     )
+}
+
+/// Every slot as the value a config file carries: a literal as itself, an inherited one as this
+/// harness's own reference spelling — the form every dialect but Codex's reads.
+fn rendered(env: &[(String, EnvValue)], env_ref: descriptor::EnvRef) -> Vec<(String, String)> {
+    env.iter()
+        .map(|(name, value)| {
+            let text = match value {
+                EnvValue::Literal(literal) => literal.clone(),
+                EnvValue::Inherited => env_ref.render(name),
+            };
+            (name.clone(), text)
+        })
+        .collect()
+}
+
+/// Only the slots that carry a stated value — Codex's `env` map, which is literal text.
+fn literals(env: &[(String, EnvValue)]) -> Vec<(String, String)> {
+    env.iter()
+        .filter_map(|(name, value)| match value {
+            EnvValue::Literal(literal) => Some((name.clone(), literal.clone())),
+            EnvValue::Inherited => None,
+        })
+        .collect()
+}
+
+/// Only the NAMES to inherit, sorted, so the emitted list is deterministic — Codex's `env_vars`.
+fn inherited_names(env: &[(String, EnvValue)]) -> Vec<String> {
+    let mut names: Vec<String> = env
+        .iter()
+        .filter(|(_, value)| *value == EnvValue::Inherited)
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Insert `pairs` under `key` as a name-sorted JSON object, or nothing at all when there are none
@@ -1040,7 +1131,7 @@ pub(crate) fn effectively_absent(current: Option<&[u8]>) -> bool {
 /// Shared fixture constructors for the driver test modules.
 #[cfg(test)]
 pub(crate) mod testutil {
-    use super::{AuthHint, McpEntry, McpTarget};
+    use super::{AuthHint, EnvValue, McpEntry, McpTarget, descriptor};
 
     pub(crate) fn entry(key: &str, url: &str) -> McpEntry {
         McpEntry {
@@ -1063,19 +1154,36 @@ pub(crate) mod testutil {
         }
     }
 
-    /// A program-run entry: the command, its arguments, and its environment.
+    /// A program-run entry whose environment slots all carry stated values.
     pub(crate) fn local_entry(
         key: &str,
         command: &str,
         args: &[&str],
         env: &[(&str, &str)],
     ) -> McpEntry {
+        let env: Vec<(String, EnvValue)> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), EnvValue::Literal((*v).to_owned())))
+            .collect();
+        local_entry_with(key, command, args, env, descriptor::EnvRef::DollarBrace)
+    }
+
+    /// The same, for the two facts a literal-only entry never exercises: a slot INHERITED from
+    /// the machine, and the spelling this harness reads one in.
+    pub(crate) fn local_entry_with(
+        key: &str,
+        command: &str,
+        args: &[&str],
+        env: Vec<(String, EnvValue)>,
+        env_ref: descriptor::EnvRef,
+    ) -> McpEntry {
         McpEntry {
             key: key.to_owned(),
             target: McpTarget::Local {
                 command: command.to_owned(),
                 args: args.iter().map(|a| (*a).to_owned()).collect(),
-                env: pairs(env),
+                env,
+                env_ref,
             },
             auth: AuthHint::Unknown,
         }
@@ -1248,6 +1356,80 @@ mod tests {
         }
     }
 
+    /// **An inherited slot is a NAME, and each harness is told about it in the form that harness
+    /// actually resolves.** Most spell the reference inside the value; Codex's `env` map is
+    /// literal text handed to the child as it stands, and the variables it forwards from its own
+    /// environment are a separate `env_vars` list — so a `${VAR}` written into its `env` would
+    /// reach the server as those six characters. (Grounded in Codex's source, cited in the PR.)
+    #[test]
+    fn an_inherited_slot_reaches_each_harness_in_the_form_that_harness_resolves() {
+        let entry = |env_ref| {
+            testutil::local_entry_with(
+                "topos-x",
+                "npx",
+                &["-y", "@acme/server@1.2.3"],
+                vec![
+                    ("ACME_REGION".to_owned(), EnvValue::Literal("eu".to_owned())),
+                    ("ACME_TOKEN".to_owned(), EnvValue::Inherited),
+                ],
+                env_ref,
+            )
+        };
+
+        // Codex: the literal in `env`, the inherited NAME in `env_vars`.
+        let codex = rendered(
+            McpDialect::CodexToml,
+            &entry(descriptor::EnvRef::DollarBrace),
+        );
+        assert_eq!(
+            codex.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["args", "command", "env", "env_vars"]
+        );
+        assert_eq!(codex["env"], serde_json::json!({"ACME_REGION": "eu"}));
+        assert_eq!(codex["env_vars"], serde_json::json!(["ACME_TOKEN"]));
+
+        // Everywhere else: the harness's own reference spelling, inside the value.
+        let claude = rendered(
+            McpDialect::ClaudeProjectJson,
+            &entry(descriptor::EnvRef::DollarBrace),
+        );
+        assert_eq!(claude["env"]["ACME_TOKEN"], "${ACME_TOKEN}");
+        assert!(claude.get("env_vars").is_none());
+        let opencode = rendered(
+            McpDialect::OpencodeJson,
+            &entry(descriptor::EnvRef::BraceEnv),
+        );
+        assert_eq!(opencode["environment"]["ACME_TOKEN"], "{env:ACME_TOKEN}");
+        assert_eq!(opencode["environment"]["ACME_REGION"], "eu");
+
+        // A Codex entry with nothing to inherit carries no list at all — an empty one is as
+        // uninformative as an empty map, and strict validators are the risk surface.
+        let literal_only = testutil::local_entry("topos-x", "npx", &[], &[("ACME_REGION", "eu")]);
+        assert!(
+            rendered(McpDialect::CodexToml, &literal_only)
+                .get("env_vars")
+                .is_none()
+        );
+        // …and one with nothing BUT inherited slots carries the list and no map.
+        let inherited_only = testutil::local_entry_with(
+            "topos-x",
+            "npx",
+            &[],
+            vec![
+                ("B_TOKEN".to_owned(), EnvValue::Inherited),
+                ("A_TOKEN".to_owned(), EnvValue::Inherited),
+            ],
+            descriptor::EnvRef::DollarBrace,
+        );
+        let codex = rendered(McpDialect::CodexToml, &inherited_only);
+        assert!(codex.get("env").is_none());
+        assert_eq!(
+            codex["env_vars"],
+            serde_json::json!(["A_TOKEN", "B_TOKEN"]),
+            "sorted, so the bytes are deterministic"
+        );
+    }
+
     /// The stdio shapes, per dialect, from the vendor evidence recorded in the module docs: the
     /// `command`/`args`/`env` triple almost everywhere, OpenCode's single `command` array with
     /// `environment` beside it, `type`/`transport` exactly where the harness declares the key.
@@ -1359,7 +1541,8 @@ mod tests {
                     &McpTarget::Local {
                         command: "npx".to_owned(),
                         args: Vec::new(),
-                        env: Vec::new()
+                        env: Vec::new(),
+                        env_ref: descriptor::EnvRef::DollarBrace,
                     }
                 ),
                 "{dialect:?}"

@@ -510,6 +510,53 @@ mod tests {
         );
     }
 
+    /// **Codex is told about an inherited slot the way Codex resolves one** — a name in
+    /// `env_vars`, never a `${VAR}` in `env`, which it would hand to the server verbatim. The
+    /// whole round trip is asserted here, because the list is a shape the fingerprint has to read
+    /// back off disk as well as write: an entry that re-read as something else would be rewritten
+    /// on every sweep.
+    #[test]
+    fn an_inherited_slot_is_written_and_read_back_as_codexs_own_env_vars_list() {
+        let program = super::super::testutil::local_entry_with(
+            "topos-p",
+            "npx",
+            &["-y", "@acme/server@1.2.3"],
+            vec![
+                (
+                    "ACME_REGION".to_owned(),
+                    crate::mcp::EnvValue::Literal("eu".to_owned()),
+                ),
+                ("ACME_TOKEN".to_owned(), crate::mcp::EnvValue::Inherited),
+            ],
+            crate::mcp::descriptor::EnvRef::DollarBrace,
+        );
+        let out = apply(None, std::slice::from_ref(&program), &BTreeMap::new());
+        let written = write_of(&out);
+        assert_eq!(
+            written,
+            "[mcp_servers.topos-p]\nargs = [\"-y\", \"@acme/server@1.2.3\"]\n\
+             command = \"npx\"\nenv = { ACME_REGION = \"eu\" }\nenv_vars = [\"ACME_TOKEN\"]\n"
+        );
+        assert!(
+            !written.contains("${ACME_TOKEN}"),
+            "a reference spelling in env would reach the server as those characters: {written}"
+        );
+
+        // Read back: the same fingerprint, so a second sweep leaves the file alone.
+        let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
+        assert_eq!(ledger["topos-p"], fp(&program));
+        let again = apply(
+            Some(written.as_bytes()),
+            std::slice::from_ref(&program),
+            &ledger,
+        );
+        assert_eq!(again.plan, EditPlan::Leave);
+        assert_eq!(
+            again.states,
+            vec![("topos-p".to_owned(), EntryState::Current)]
+        );
+    }
+
     #[test]
     fn user_config_with_comments_round_trips_outside_our_tables() {
         const USER: &str = "# my codex config\nmodel = \"o5\"\n\n[mcp_servers.mine]\nurl = \"https://user.example\"\n\n[profiles.fast]\nmodel = \"o5-mini\"\n";

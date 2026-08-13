@@ -1050,6 +1050,7 @@ static EMPTY_PROGRAM: mcp::McpTarget = mcp::McpTarget::Local {
     command: String::new(),
     args: Vec::new(),
     env: Vec::new(),
+    env_ref: topos_harness::mcp::descriptor::EnvRef::DollarBrace,
 };
 
 fn agent_state(

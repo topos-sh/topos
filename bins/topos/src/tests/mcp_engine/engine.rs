@@ -978,8 +978,8 @@ fn a_package_only_bundle_passes_the_gate_and_lands_as_the_program_each_agent_run
         true,
     );
 
-    // Cursor and Codex: the command triple, with the pinned version and the environment slot
-    // rendered as a REFERENCE — the name travels, the token never does.
+    // Cursor: the command triple, with the pinned version and the environment slot rendered as a
+    // REFERENCE — the name travels, the token never does.
     let cursor = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).expect("cursor");
     assert!(cursor.contains("\"command\": \"npx\""), "{cursor}");
     assert!(cursor.contains("\"@acme/server@2.1.0\""), "{cursor}");
@@ -987,12 +987,17 @@ fn a_package_only_bundle_passes_the_gate_and_lands_as_the_program_each_agent_run
         cursor.contains("\"ACME_TOKEN\": \"${ACME_TOKEN}\""),
         "{cursor}"
     );
+    // Codex names the variables it forwards from its own environment in a LIST; its `env` map is
+    // literal text it hands the server unchanged, so a reference spelling in there would arrive
+    // as those six characters.
     let codex = std::fs::read_to_string(home.0.join(".codex/config.toml")).expect("codex");
     assert!(codex.contains("command = \"npx\""), "{codex}");
     assert!(
         codex.contains("args = [\"-y\", \"@acme/server@2.1.0\"]"),
         "{codex}"
     );
+    assert!(codex.contains("env_vars = [\"ACME_TOKEN\"]"), "{codex}");
+    assert!(!codex.contains("${ACME_TOKEN}"), "{codex}");
 
     // OpenCode: ONE command array, `environment`, and its OWN reference spelling.
     let oc = std::fs::read_to_string(home.0.join(".opencode/opencode.json")).expect("opencode");

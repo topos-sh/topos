@@ -93,7 +93,10 @@ never learns which machinery served which harness.
   for a WSL UNC destination — and escaping every wrapped element for the EXTRA parse that wrapper
   costs, since `cmd` reads the tail again after the spawn API has encoded it and would otherwise
   split a bridged URL at its `&`; `cmd_unescape` is the inverse the address comparison runs), the
-  bridge argv, and an env-var reference in the harness's own syntax (`EnvRef`). `entry_value` answers `None` for the one pair no vendor evidence covers — a
+  bridge argv. An environment slot the MACHINE fills travels as a name (`EnvValue::Inherited`)
+  and is spelled by the renderer, because the form is not just syntax: most harnesses read a
+  reference inside the value (`EnvRef`), Codex names inherited variables in its own `env_vars`
+  list and would hand a `${VAR}` in `env` straight to the server. `entry_value` answers `None` for the one pair no vendor evidence covers — a
   program in Hermes's YAML — and every driver turns that into a refusal, never a guess. The
   surfaces (user/project + dialect + reload copy + the read-only `conflict_paths` a harness ALSO
   reads servers from) and the CAPABILITY columns (does it dial an address, does it run a program,
