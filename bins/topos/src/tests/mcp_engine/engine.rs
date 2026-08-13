@@ -1159,6 +1159,52 @@ fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
     );
 }
 
+/// **A package the document says is spoken to over http is withheld, not run as a program.** The
+/// gate publishes it (the format expresses it, and some other client may know how to bring it up);
+/// this build has no entry shape for a server that becomes an address only once it is running, and
+/// writing a `command` for one would hand an agent a pipe nothing answers on.
+#[test]
+fn a_package_served_over_http_is_withheld_and_nothing_is_written() {
+    let document = "{\"name\":\"io.test/x\",\"description\":\"A test server.\",\
+                    \"version\":\"1.0.0\",\"packages\":[{\"registryType\":\"npm\",\
+                    \"identifier\":\"@acme/server\",\"version\":\"2.1.0\",\
+                    \"transport\":{\"type\":\"streamable-http\",\
+                    \"url\":\"https://127.0.0.1:9000/mcp\"}}]}";
+    crate::mcp_validate::validate_server_json(document.as_bytes())
+        .expect("the shared gate publishes an http-served package");
+
+    let home = Scratch::new("package-http");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![demand("s_a", "acme", Some("eng"), document)]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(
+        warning_lines(&out).iter().any(|l| l
+            == "MCP_KIND_UNSUPPORTED not placed: this bundle's package serves over \
+                streamable-http, which this version of topos cannot set up yet."),
+        "{:?}",
+        warning_lines(&out)
+    );
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Withheld
+    );
+    assert!(!home.0.join(".cursor/mcp.json").exists());
+    assert!(!home.0.join(".codex/config.toml").exists());
+    assert_eq!(
+        out.failed_bundles,
+        vec!["s_a".to_owned()],
+        "nothing of it is installed anywhere, so the summary says so"
+    );
+}
+
 /// **A row that promises more than its dialect can spell costs ONE placement, not a whole file.**
 /// The capability columns and the dialect are separate columns, and a table can set them at odds
 /// (a downloaded one, an override). If the mismatch reached the driver it would refuse the surface
