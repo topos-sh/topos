@@ -180,16 +180,19 @@ agent runs**, in that agent's own spelling — `npx -y @acme/weather-mcp@1.4.0` 
 ```
 
 An environment slot the document leaves empty is written as a **reference** to a variable of that
-name, in the syntax that agent reads (`${VAR}` for most, `{env:VAR}` for OpenCode). The name
-travels in the bundle; the value stays on your machine, in your own environment, and Topos never
-sees it.
+name, in the form that agent reads: `${VAR}` for most, `{env:VAR}` for OpenCode, and for Codex a
+`env_vars = ["VAR"]` list beside the entry (its `env` map is literal text it hands the server
+unchanged). The name travels in the bundle; the value stays on your machine, in your own
+environment, and Topos never sees it.
 
 Which of the two forms an agent gets is decided per agent, in this order:
 
 1. the document offers an address and the agent dials addresses itself → **the address**;
 2. the agent does **not** dial one → **the address through a bridge**: `npx -y mcp-remote@<pinned>
    <url>`, so a stdio-only agent still reaches the same server (its sign-in runs there too);
-3. otherwise → the first package Topos can set up, **npm** before **PyPI**.
+3. otherwise → the first package Topos can set up, **npm** before **PyPI**, and only a package the
+   agent talks to over its pipes (the format also lets a package listen on an http address once it
+   is running, which is neither an address every machine dials nor a program an agent can speak to).
 
 Anything a given machine cannot set up is said in plain words on the receipt and re-decided on the
 next update — nothing is half-written:
@@ -197,6 +200,7 @@ next update — nothing is half-written:
 ```
 not placed: needs node, which is not on this machine. Install node, then run 'topos update'.
 not placed: this bundle is packaged as oci, which this version of topos cannot set up yet.
+not placed: this bundle's package serves over streamable-http, which this version of topos cannot set up yet.
 ```
 
 The choice never depends on what a laptop happens to have installed: a missing runtime is a "not
