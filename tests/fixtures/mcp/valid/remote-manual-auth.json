@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/rota",
+  "description": "Read and edit the on-call rota.",
+  "version": "2.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://rota.acme.example/mcp"
+    }
+  ],
+  "_meta": {
+    "sh.topos/auth": "manual"
+  }
+}

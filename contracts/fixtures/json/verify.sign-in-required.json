@@ -7,6 +7,7 @@
     "exit_code": 3,
     "line": "sign-in required - healthy; your agent app completes sign-in on first use",
     "name": "weather",
+    "sign_in": "self_service",
     "state": "sign_in_required",
     "target": "address"
   },

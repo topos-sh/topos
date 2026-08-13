@@ -22,7 +22,7 @@
 //! current revision defines prove the peer is modern and must be answered, not fallen back from.
 
 use serde_json::{Value, json};
-use topos_types::results::VerifyState;
+use topos_types::results::{SignInPath, VerifyState};
 
 /// The protocol revision this build speaks first — the CURRENT one.
 pub(crate) const MODERN_REVISION: &str = "2026-07-28";
@@ -344,8 +344,11 @@ pub(crate) enum Verdict {
     /// on the handshake era is the server's choice, not the one this client asked for, so the
     /// reported version is the one actually spoken.
     Responding { tools: usize, protocol: String },
-    /// It refused without a sign-in. A HEALTHY server: the agent app holds the credential.
-    SignInRequired,
+    /// It refused without a sign-in. A HEALTHY server: the agent app holds the credential. `sign_in`
+    /// is WHO can complete that sign-in, when the server's discovery documents said
+    /// ([`super::discovery`]); `None` is the honest silence of a chain that could not be read, and
+    /// prints exactly what this verdict has always printed.
+    SignInRequired { sign_in: Option<SignInPath> },
     /// Nothing answered, or the peer is having trouble right now.
     NotReachable { reason: String },
     /// Something answered, but not as an MCP server.
@@ -359,7 +362,7 @@ impl Verdict {
     pub(crate) const fn exit_code(&self) -> u8 {
         match self {
             Self::Responding { .. } => 0,
-            Self::SignInRequired => 3,
+            Self::SignInRequired { .. } => 3,
             Self::NotReachable { .. } => 4,
             Self::NotMcp { .. } => 5,
         }
@@ -369,9 +372,18 @@ impl Verdict {
     pub(crate) const fn state(&self) -> VerifyState {
         match self {
             Self::Responding { .. } => VerifyState::Responding,
-            Self::SignInRequired => VerifyState::SignInRequired,
+            Self::SignInRequired { .. } => VerifyState::SignInRequired,
             Self::NotReachable { .. } => VerifyState::NotReachable,
             Self::NotMcp { .. } => VerifyState::NotAnMcpServer,
+        }
+    }
+
+    /// Who can complete the sign-in, for the `--json` payload — a value ONLY where a sign-in is
+    /// what was concluded, and only where the server's own documents settled it.
+    pub(crate) const fn sign_in(&self) -> Option<SignInPath> {
+        match self {
+            Self::SignInRequired { sign_in } => *sign_in,
+            _ => None,
         }
     }
 
@@ -384,7 +396,17 @@ impl Verdict {
                     if *tools == 1 { "" } else { "s" }
                 )
             }
-            Self::SignInRequired => {
+            // The MANUAL sentence is said only where the server's own documents proved it. Silence
+            // reads as the first sentence, which claims nothing a person cannot check: a chain this
+            // machine could not fetch is not evidence against the server.
+            Self::SignInRequired {
+                sign_in: Some(SignInPath::Manual),
+            } => {
+                "sign-in required - this server accepts only pre-registered clients or tokens; an \
+                  agent cannot complete sign-in by itself"
+                    .to_owned()
+            }
+            Self::SignInRequired { .. } => {
                 "sign-in required - healthy; your agent app completes sign-in on first use"
                     .to_owned()
             }
@@ -399,7 +421,7 @@ impl Verdict {
     /// second half.
     pub(crate) fn detail(&self) -> Option<String> {
         match self {
-            Self::Responding { .. } | Self::SignInRequired => None,
+            Self::Responding { .. } | Self::SignInRequired { .. } => None,
             Self::NotReachable { reason } => Some(reason.clone()),
             Self::NotMcp { detail } => Some(detail.clone()),
         }
@@ -438,7 +460,9 @@ pub(crate) enum StatusRead {
 ///   textbook shape and most servers send one — but it is not required here, because a bare 401
 ///   still means "it refuses without credentials", which is neither unreachable nor
 ///   not-an-MCP-server. Gating on the header would push a real, healthy, auth-gated server into
-///   the wrong verdict for a header it merely forgot.
+///   the wrong verdict for a header it merely forgot. WHICH sign-in it is stays open here: the
+///   status cannot say, so the verdict is minted with no answer and the arm fills it in from the
+///   server's discovery documents ([`super::discovery`]) before anything is printed.
 /// - **429 and 5xx are never a protocol verdict.** The peer is up and having trouble; saying "not
 ///   an MCP server" about a server that is merely overloaded would be a lie a person acts on.
 ///
@@ -448,7 +472,7 @@ pub(crate) enum StatusRead {
 pub(crate) fn classify_status(host: &str, status: u16) -> StatusRead {
     let settled = |v: Verdict| StatusRead::Settled(v);
     match status {
-        401 | 403 => settled(Verdict::SignInRequired),
+        401 | 403 => settled(Verdict::SignInRequired { sign_in: None }),
         429 => settled(Verdict::NotReachable {
             reason: format!("{host} is rate-limiting this machine (HTTP 429)"),
         }),
@@ -689,7 +713,7 @@ mod tests {
 
     #[test]
     fn the_status_table_settles_every_row_the_contract_names() {
-        let sign_in = StatusRead::Settled(Verdict::SignInRequired);
+        let sign_in = StatusRead::Settled(Verdict::SignInRequired { sign_in: None });
         // Auth outranks the body, and the status alone carries it.
         assert_eq!(classify_status("h", 401), sign_in);
         assert_eq!(classify_status("h", 403), sign_in);
@@ -743,11 +767,32 @@ mod tests {
             "responding (0 tools)"
         );
 
+        // The two sign-in worlds print two sentences on ONE state and ONE exit code — and an
+        // unread chain prints the sentence that claims the least.
+        for sign_in in [None, Some(SignInPath::SelfService)] {
+            let verdict = Verdict::SignInRequired { sign_in };
+            assert_eq!(
+                verdict.line(),
+                "sign-in required - healthy; your agent app completes sign-in on first use",
+                "{sign_in:?}"
+            );
+            assert_eq!(verdict.exit_code(), 3);
+            assert_eq!(verdict.state(), VerifyState::SignInRequired);
+            assert_eq!(verdict.sign_in(), sign_in);
+        }
+        let manual = Verdict::SignInRequired {
+            sign_in: Some(SignInPath::Manual),
+        };
         assert_eq!(
-            Verdict::SignInRequired.line(),
-            "sign-in required - healthy; your agent app completes sign-in on first use"
+            manual.line(),
+            "sign-in required - this server accepts only pre-registered clients or tokens; an \
+             agent cannot complete sign-in by itself"
         );
-        assert_eq!(Verdict::SignInRequired.exit_code(), 3);
+        assert_eq!(manual.exit_code(), 3);
+        assert_eq!(manual.state(), VerifyState::SignInRequired);
+        assert_eq!(manual.sign_in(), Some(SignInPath::Manual));
+        // Nothing else carries the field, whatever it concluded.
+        assert_eq!(responding.sign_in(), None);
 
         let unreachable = Verdict::NotReachable {
             reason: "could not resolve host weather.acme.example — check your network".to_owned(),

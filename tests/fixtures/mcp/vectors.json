@@ -15,6 +15,11 @@
     "note": "The publisher extension point declares OAuth; the summary reports it as a hint, and no secret rides the document."
   },
   {
+    "file": "valid/remote-manual-auth.json",
+    "verdict": "ok",
+    "note": "The same extension point declares the OTHER sign-in world: getting in costs a person a one-time step on each machine, so the hint travels as a caution and never as a quieter oauth."
+  },
+  {
     "file": "valid/remote-sse-and-streamable.json",
     "verdict": "ok",
     "note": "Two remotes offered; the first streamable-http one is picked and the event-stream sibling is ignored."

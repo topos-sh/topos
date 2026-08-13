@@ -341,6 +341,54 @@ fn a_package_only_bundle_is_adopted_and_the_receipt_names_the_package() {
     assert!(data.mcp.expect("typed block").packages.is_empty());
 }
 
+/// **The auth word that is a TASK gets a line of its own.** `oauth` and `none` describe something
+/// that happens by itself and ride the summary line as a clause; `manual` describes something a
+/// person has to go and do, and the entry stands here doing nothing until they do — so the receipt
+/// says it in words, once, where the row is reported.
+#[test]
+fn a_manual_sign_in_says_what_the_person_has_to_do() {
+    let rig = Rig::new("manual-auth");
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    const SETUP: &str = "Signing in to this server is a one-time manual step on this machine — a \
+                         token you create, or an app an administrator registers; no agent can \
+                         complete it";
+
+    let manual = rig.work.0.join("rota");
+    write_bundle(
+        &manual,
+        r#"{"name":"io.github.acme/rota","description":"Read and edit the on-call rota.",
+            "version":"2.1.0","remotes":[{"type":"streamable-http",
+            "url":"https://rota.acme.example/mcp"}],"_meta":{"sh.topos/auth":"manual"}}"#,
+    );
+    let data = ops::add_mcp(&ctx, manual.to_str().unwrap(), true, &Default::default())
+        .unwrap()
+        .data;
+    // The word travels typed, too — an agent reading `--json` gets it without parsing prose.
+    assert_eq!(
+        data.mcp.as_ref().expect("typed block").auth.as_deref(),
+        Some("manual")
+    );
+    let note = data.note.clone().unwrap_or_default();
+    assert!(note.contains(", auth manual"), "{note}");
+    assert!(note.contains(SETUP), "{note}");
+
+    // An OAUTH bundle is unchanged: the clause, and no second line — nobody has to do anything.
+    let oauth = rig.work.0.join("tickets");
+    write_bundle(
+        &oauth,
+        r#"{"name":"io.github.acme/tickets","description":"Search and comment on tickets.",
+            "version":"0.9.0","remotes":[{"type":"streamable-http",
+            "url":"https://tickets.acme.example/mcp"}],"_meta":{"sh.topos/auth":"oauth"}}"#,
+    );
+    let data = ops::add_mcp(&ctx, oauth.to_str().unwrap(), true, &Default::default())
+        .unwrap()
+        .data;
+    let note = data.note.clone().unwrap_or_default();
+    assert!(note.contains(", auth oauth"), "{note}");
+    assert!(!note.contains(SETUP), "{note}");
+}
+
 /// `add --kind mcp` and `remove` stay EXACT FILE INVERSES even when the row carries a kind: the whole
 /// row is dropped, and the file returns to the bytes it had.
 #[test]

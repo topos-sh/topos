@@ -397,10 +397,11 @@ fn render_md(table: &[&'static KnownHarness]) -> String {
          `error` object says which and how to fix it). `2` — the command line itself was invalid.\n\n\
          `topos verify` reports what it found through its exit code as well, so a script can branch \
          without parsing anything: `0` — the server is responding. `3` — the server asks for a \
-         sign-in, which is healthy (your agent app signs in on first use). `4` — the server is not \
-         reachable from this machine. `5` — something answered, but not as an MCP server. It still \
-         uses `1` for a refusal (no such bundle, the name is ambiguous, the bundle is a skill) and \
-         `2` for a bad command line.\n\n",
+         sign-in, which is healthy; the line (and, under `--json`, `sign_in`) says whether your \
+         agent app can complete that sign-in on first use or somebody has to register a client or \
+         a token by hand first. `4` — the server is not reachable from this machine. `5` — \
+         something answered, but not as an MCP server. It still uses `1` for a refusal (no such \
+         bundle, the name is ambiguous, the bundle is a skill) and `2` for a bad command line.\n\n",
     );
 
     // The JSON contract — the envelope's shape and where the full schemas live. Rendered here so

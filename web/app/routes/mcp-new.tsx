@@ -408,13 +408,20 @@ function matches(server: CuratedMcpRow, query: string): boolean {
 /**
  * The auth chip — the one thing about a server worth knowing before choosing it. ONE component
  * for both doors: a picked row and a previewed document say how a person gets in with the same
- * two words, because they are answering the same question about the same field
+ * words, because they are answering the same question about the same field
  * (`_meta["sh.topos/auth"]`). A document that DECLARES nothing gets no chip: silence is the
  * honest answer there, not "no sign-in".
+ *
+ * THREE WORDS, TWO WORLDS. `oauth` and `no sign-in` are both "nothing to prepare"; `manual setup`
+ * is the one that costs somebody an errand, so it takes the amber tone the rest of the app spends
+ * on a state waiting on a person rather than the accent that reads as a feature.
  */
-export function AuthChip({ auth }: { auth: "oauth" | "none" | null }) {
+export function AuthChip({ auth }: { auth: "oauth" | "none" | "manual" | null }) {
   if (auth === null) {
     return null;
+  }
+  if (auth === "manual") {
+    return <Chip tone="pending">manual setup</Chip>;
   }
   return auth === "oauth" ? (
     <Chip tone="accent">oauth</Chip>
@@ -486,6 +493,18 @@ function ServerPicker({
               <span className="w-full truncate font-mono text-[11px] text-faint">
                 {server.host}
               </span>
+              {/* THE ERRAND, ON THE CARD. The one line that costs this row its self-service
+                  standing wraps instead of truncating — half a sentence about a token someone
+                  has to mint is worse than none, and the card growing is the honest price of
+                  saying it before the click rather than after the agent fails to sign in. */}
+              {server.auth === "manual" && (
+                <span
+                  data-testid="mcp-picker-auth-note"
+                  className="w-full text-[11px] text-dim leading-snug"
+                >
+                  {server.authNote}
+                </span>
+              )}
             </span>
           </button>
         ))}
@@ -566,6 +585,14 @@ function AddServerDialog({
           <p className="text-faint text-xs leading-relaxed">
             The publisher says an agent signs in on first use — that sign-in happens on each
             person&apos;s own machine, never here, and no credential rides in these bytes.
+          </p>
+        )}
+        {/* The same sentence the card carried, repeated where the decision is actually made: the
+            dialog covers the row that raised it, so a caveat only the card knew would be a
+            caveat nobody reads at the moment of publishing. */}
+        {server.auth === "manual" && (
+          <p className="text-faint text-xs leading-relaxed" data-testid="mcp-dialog-auth-note">
+            {server.authNote}
           </p>
         )}
         <details>
@@ -855,6 +882,16 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
             <>
               {" · "}the publisher says an agent signs in on first use — that sign-in happens on the
               machine, never here
+            </>
+          )}
+          {/* The other declared world. A pasted document says `manual` and nothing more — there is
+              no note to print, because the note is the built-in list's own editorial line and not
+              something a publisher hands over — so the card says the shape of the work and leaves
+              the particulars to the vendor's own setup page. */}
+          {summary.authHint === "manual" && (
+            <>
+              {" · "}the publisher says sign-in needs a one-time manual step on each machine — a
+              token or a registered app
             </>
           )}
         </p>

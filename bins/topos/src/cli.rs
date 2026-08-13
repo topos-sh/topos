@@ -377,8 +377,10 @@ pub(crate) enum Command {
     /// the address the bundle names (or runs its package) and asks the server for its tools, then
     /// prints what happened. Nothing is stored and nothing is installed — it is a live check, not
     /// a delivery state. A server that asks for a sign-in is healthy: topos holds no credential,
-    /// and your agent app signs in on first use. Exit codes: `0` responding, `3` sign-in required,
-    /// `4` not reachable, `5` reachable but not answering as an MCP server.
+    /// and your agent app signs in on first use — unless the server takes only clients or tokens
+    /// registered in advance, which the line says instead, because no agent can complete that
+    /// sign-in by itself. Exit codes: `0` responding, `3` sign-in required, `4` not reachable,
+    /// `5` reachable but not answering as an MCP server.
     Verify {
         /// The MCP server bundle's name.
         name: String,

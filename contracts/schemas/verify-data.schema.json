@@ -47,6 +47,17 @@
         "null"
       ]
     },
+    "sign_in": {
+      "description": "WHICH of the two sign-in worlds the server lives in, on `sign_in_required` alone. Absent\nwherever the check could not read the server's own OAuth discovery documents end to end —\na chain nobody could read is never reported as the worse of the two, and it is absent on\nevery other state because they demand no sign-in at all.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SignInPath"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "state": {
       "description": "The verdict.",
       "$ref": "#/$defs/VerifyState"
@@ -73,6 +84,21 @@
     "line"
   ],
   "$defs": {
+    "SignInPath": {
+      "description": "Who can complete the sign-in a server demands — the distinction the same `401` hides.\n**INFERRED value set** (additive-only).",
+      "oneOf": [
+        {
+          "description": "Its authorization server registers clients on demand, so the agent app signs in on first\nuse with nothing arranged beforehand.",
+          "type": "string",
+          "const": "self_service"
+        },
+        {
+          "description": "It accepts only clients or tokens registered in advance — a personal token, or an app an\nadministrator created. A person does that once, per machine or per organization; an agent\ncannot do it for them.",
+          "type": "string",
+          "const": "manual"
+        }
+      ]
+    },
     "VerifyState": {
       "description": "The four things a live check can conclude. **INFERRED value set** (additive-only).",
       "oneOf": [
@@ -82,7 +108,7 @@
           "const": "responding"
         },
         {
-          "description": "It refused without a sign-in — a HEALTHY server. The agent app completes the sign-in on\nfirst use; topos holds no credential and never will.",
+          "description": "It refused without a sign-in — a HEALTHY server; topos holds no credential and never will.\nWHO can complete that sign-in is a second question, and [`VerifyData::sign_in`] is where it\nis answered.",
           "type": "string",
           "const": "sign_in_required"
         },

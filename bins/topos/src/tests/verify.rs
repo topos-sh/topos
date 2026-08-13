@@ -19,6 +19,10 @@
 //! - a redirect that is NOT followed (the server sees exactly one request);
 //! - the honesty rails: `429`/`5xx` never becomes a protocol verdict, `401` never becomes anything
 //!   but healthy, an uncorrelated id is never accepted;
+//! - the SIGN-IN WALK behind a refusal: the three things it can conclude (a server that registers
+//!   clients on demand, a server that takes only pre-registered ones, and a chain that could not be
+//!   read — which claims nothing), each metadata location it tries, and the budget it stays inside.
+//!   Its documents are served by the same loopback stub, so no test here leaves the machine;
 //! - the minimal spawn environment, proven by a child that reports what it was given;
 //! - the whole verb over a real adopted bundle, so the resolution, the kind gate and the payload
 //!   are exercised together.
@@ -31,7 +35,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use topos_harness::mcp::EnvValue;
-use topos_types::results::VerifyState;
+use topos_types::results::{SignInPath, VerifyState};
 
 use crate::ctx::Ctx;
 use crate::fs_seam::RealFs;
@@ -73,6 +77,9 @@ impl Drop for Scratch {
 #[derive(Debug, Clone)]
 struct Seen {
     method: String,
+    /// The request target — the path the walk asked for, which is the whole question in the
+    /// discovery tests (WHICH well-known spelling did it try, and in what order).
+    target: String,
     headers: BTreeMap<String, String>,
     header_lines: Vec<(String, String)>,
     body: String,
@@ -176,11 +183,9 @@ fn read_request(stream: &mut TcpStream) -> Option<Seen> {
     if reader.read_line(&mut start).ok()? == 0 {
         return None;
     }
-    let method = start
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    let mut start_line = start.split_whitespace();
+    let method = start_line.next().unwrap_or_default().to_owned();
+    let target = start_line.next().unwrap_or_default().to_owned();
     let mut headers = BTreeMap::new();
     let mut header_lines = Vec::new();
     loop {
@@ -208,6 +213,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Seen> {
     }
     Some(Seen {
         method,
+        target,
         headers,
         header_lines,
         body: String::from_utf8_lossy(&body).into_owned(),
@@ -290,33 +296,302 @@ fn an_sse_framed_answer_is_read_past_its_comments_and_notifications() {
 // The address arm — sign-in required
 // =================================================================================================
 
+/// The self-service sentence: today's line, unchanged, and what a server whose chain nobody could
+/// read still says.
+const SELF_SERVICE_LINE: &str =
+    "sign-in required - healthy; your agent app completes sign-in on first use";
+/// The other world's sentence, on the same state and the same exit code.
+const MANUAL_LINE: &str = "sign-in required - this server accepts only pre-registered clients or \
+                           tokens; an agent cannot complete sign-in by itself";
+
+/// A server that refuses the MCP conversation with `401` and then answers an OAuth discovery walk
+/// on its own paths — no TLS, no network beyond loopback, and every document served by the code
+/// under test's own client.
+///
+/// `challenge` is a PATH the `WWW-Authenticate` header points `resource_metadata` at (`None` = a
+/// bare refusal, which is what leaves the conventional spellings in charge). `chain(base, target)`
+/// answers a document for the paths this particular server publishes at and `None` — a `404` —
+/// everywhere else, which is what makes "which spelling did it find?" a real question.
+fn oauth_stub(
+    challenge: Option<&'static str>,
+    chain: impl Fn(&str, &str) -> Option<String> + Send + 'static,
+) -> Stub {
+    let port: Arc<std::sync::OnceLock<u16>> = Arc::new(std::sync::OnceLock::new());
+    let stub = {
+        let port = Arc::clone(&port);
+        Stub::serve(move |_, request| {
+            // The listener's port is set before anything dials it, so this only runs after.
+            let base = format!("http://127.0.0.1:{}", port.get().expect("a bound port"));
+            if request.method == "GET" {
+                return match chain(&base, &request.target) {
+                    Some(body) => (200, ct(JSON), body),
+                    None => (404, ct(JSON), r#"{"error":"not_found"}"#.to_owned()),
+                };
+            }
+            let mut headers = ct(JSON);
+            if let Some(path) = challenge {
+                headers.push((
+                    "WWW-Authenticate",
+                    format!(r#"Bearer error="invalid_token", resource_metadata="{base}{path}""#),
+                ));
+            }
+            (401, headers, r#"{"error":"unauthorized"}"#.to_owned())
+        })
+    };
+    port.set(stub.port).expect("the port is set once");
+    stub
+}
+
+/// The protected-resource document, naming one authorization server.
+fn resource_doc(issuer: &str) -> String {
+    format!(r#"{{"resource":"{issuer}/mcp","authorization_servers":["{issuer}"]}}"#)
+}
+
+/// An authorization server's metadata, with or without the door an agent registers itself through.
+/// The client-id-metadata-document flag rides along on the door-less one: it must not rescue it.
+fn as_doc(issuer: &str, registers: bool) -> String {
+    let registration = if registers {
+        format!(r#","registration_endpoint":"{issuer}/register""#)
+    } else {
+        r#","client_id_metadata_document_supported":true"#.to_owned()
+    };
+    format!(
+        r#"{{"issuer":"{issuer}","authorization_endpoint":"{issuer}/authorize",
+            "token_endpoint":"{issuer}/token"{registration}}}"#
+    )
+}
+
+/// What a host answering EVERY unknown path serves at these ones: valid JSON, and no metadata.
+const CATCH_ALL: &str = r#"{"error":"not_found","message":"no route here","status":404}"#;
+
+/// Every path the stub was asked for with a GET, in order — the walk's own itinerary.
+fn walked(stub: &Stub) -> Vec<String> {
+    stub.requests()
+        .into_iter()
+        .filter(|r| r.method == "GET")
+        .map(|r| r.target)
+        .collect()
+}
+
 /// EXIT 3, byte-exact. The challenge header is evidence, not a gate: a bare `401` and a `403` say
 /// the same true thing, and all three are HEALTHY.
 #[test]
 fn every_auth_refusal_is_the_healthy_sign_in_verdict() {
-    const LINE: &str = "sign-in required - healthy; your agent app completes sign-in on first use";
-    let with_challenge = Stub::always(
-        401,
-        vec![
-            ("Content-Type", "text/html".to_owned()),
-            (
-                "WWW-Authenticate",
-                r#"Bearer resource_metadata="https://a.test/.well-known""#.to_owned(),
-            ),
-        ],
-        "<html>please log in</html>",
-    );
+    // A challenge that points at a document the server does not actually serve: the pointer is
+    // followed, answers nothing, and the verdict says what it has always said.
+    let with_challenge = oauth_stub(Some("/oauth/resource"), |_, _| None);
     let v = dial(&with_challenge);
-    assert_eq!(v.line(), LINE);
+    assert_eq!(v.line(), SELF_SERVICE_LINE);
     assert_eq!(v.exit_code(), 3);
     assert_eq!(v.state(), VerifyState::SignInRequired);
+    assert_eq!(walked(&with_challenge), ["/oauth/resource"]);
 
     // No challenge header, and an HTML body that would otherwise read as "not an MCP server":
     // the status outranks the body.
     let bare = Stub::always(401, ct("text/html"), "<html>nope</html>");
     assert_eq!(dial(&bare).exit_code(), 3);
     let forbidden = Stub::always(403, ct(JSON), r#"{"error":"forbidden"}"#);
-    assert_eq!(dial(&forbidden).line(), LINE);
+    assert_eq!(dial(&forbidden).line(), SELF_SERVICE_LINE);
+}
+
+// =================================================================================================
+// The address arm — WHICH sign-in
+// =================================================================================================
+
+/// **The reassuring sentence, earned.** The server publishes a protected-resource document, that
+/// document names an authorization server, and the authorization server registers clients on
+/// demand — so an agent app really does complete this sign-in on first use. The conventional
+/// spelling with the resource's own path INSERTED is tried first, and it is the one that answers.
+#[test]
+fn a_server_that_registers_clients_on_demand_keeps_the_first_use_line() {
+    let stub = oauth_stub(None, |base, target| match target {
+        "/.well-known/oauth-protected-resource/mcp" => Some(resource_doc(base)),
+        "/.well-known/oauth-authorization-server" => Some(as_doc(base, true)),
+        _ => None,
+    });
+    let v = dial(&stub);
+    assert_eq!(v.line(), SELF_SERVICE_LINE);
+    assert_eq!(v.exit_code(), 3);
+    assert_eq!(v.state(), VerifyState::SignInRequired);
+    assert_eq!(
+        walked(&stub),
+        [
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server",
+        ]
+    );
+}
+
+/// **The honest sentence.** The same chain, complete, with no `registration_endpoint` at the end of
+/// it: nothing an agent does by itself gets in. The verdict, the state and the exit code are the
+/// ones a healthy server has always earned — what changes is the sentence a person acts on.
+#[test]
+fn a_server_that_takes_only_pre_registered_clients_says_so() {
+    let stub = oauth_stub(None, |base, target| match target {
+        "/.well-known/oauth-protected-resource/mcp" => Some(resource_doc(base)),
+        "/.well-known/oauth-authorization-server" => Some(as_doc(base, false)),
+        _ => None,
+    });
+    let v = dial(&stub);
+    assert_eq!(v.line(), MANUAL_LINE);
+    assert_eq!(v.exit_code(), 3);
+    assert_eq!(v.state(), VerifyState::SignInRequired);
+}
+
+/// **A chain nobody could read is not evidence.** Three ways for it to break — no document at all,
+/// a document naming no authorization server, and an authorization server whose metadata is
+/// nowhere — and all three print exactly what this verdict printed before the walk existed. The
+/// walk stays inside its budget while proving it.
+#[test]
+fn an_unreadable_chain_keeps_todays_line_and_stays_bounded() {
+    // 1. Nothing published at all.
+    let silent = oauth_stub(None, |_, _| None);
+    assert_eq!(dial(&silent).line(), SELF_SERVICE_LINE);
+    assert_eq!(
+        walked(&silent),
+        [
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-protected-resource",
+        ],
+        "both conventional spellings, and then it stops"
+    );
+
+    // 2. A protected-resource document that names no authorization server: the chain ends there.
+    let nameless = oauth_stub(None, |_, target| {
+        (target == "/.well-known/oauth-protected-resource/mcp")
+            .then(|| r#"{"resource":"https://acme.test/mcp"}"#.to_owned())
+    });
+    assert_eq!(dial(&nameless).line(), SELF_SERVICE_LINE);
+
+    // 3. The authorization server is named and then answers nothing: four spellings tried, no
+    //    answer, no claim — and the whole walk cost no more than its budget.
+    let mute_issuer = oauth_stub(None, |base, target| {
+        (target == "/.well-known/oauth-protected-resource/mcp")
+            .then(|| resource_doc(&format!("{base}/tenant-7")))
+    });
+    assert_eq!(dial(&mute_issuer).line(), SELF_SERVICE_LINE);
+    let itinerary = walked(&mute_issuer);
+    assert!(itinerary.len() <= 6, "{itinerary:?}");
+    assert_eq!(
+        itinerary,
+        [
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server/tenant-7",
+            "/tenant-7/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration/tenant-7",
+            "/tenant-7/.well-known/openid-configuration",
+        ]
+    );
+}
+
+/// **A `200` is not a document.** A host that answers every unknown path with a catch-all body puts
+/// valid JSON at the first spellings the walk tries; believing one would produce the definite
+/// "registers nobody" verdict out of a page that answered no question at all. The walk passes over
+/// anything without the metadata's own minimum shape and keeps going — and where a real document
+/// sits at a later spelling, it is the one that answers.
+#[test]
+fn a_catch_all_json_body_is_passed_over_for_the_real_document() {
+    let stub = oauth_stub(None, |base, target| {
+        let issuer = format!("{base}/tenant-7");
+        match target {
+            "/.well-known/oauth-protected-resource/mcp" => Some(resource_doc(&issuer)),
+            // The two RFC 8414 spellings answer, and neither is metadata.
+            "/.well-known/oauth-authorization-server/tenant-7"
+            | "/tenant-7/.well-known/oauth-authorization-server" => Some(CATCH_ALL.to_owned()),
+            // The OpenID one is where this server really publishes — and it registers clients.
+            "/.well-known/openid-configuration/tenant-7" => Some(as_doc(&issuer, true)),
+            _ => None,
+        }
+    });
+    let v = dial(&stub);
+    assert_eq!(v.line(), SELF_SERVICE_LINE);
+    assert_eq!(v.exit_code(), 3);
+    assert_eq!(v.sign_in(), Some(SignInPath::SelfService));
+    assert_eq!(
+        walked(&stub).len(),
+        4,
+        "both catch-alls were passed over, not believed: {:?}",
+        walked(&stub)
+    );
+}
+
+/// The same catch-all with NO real document behind it anywhere: nothing was read, so nothing is
+/// claimed — today's line, and no `sign_in` field. Silence is the only safe answer here, because
+/// the alternative is a pessimistic verdict a person would act on.
+#[test]
+fn a_catch_all_with_no_real_document_behind_it_concludes_nothing() {
+    let stub = oauth_stub(None, |base, target| match target {
+        "/.well-known/oauth-protected-resource/mcp" => Some(resource_doc(base)),
+        // EVERY authorization-server spelling answers 200 with the same non-document.
+        path if path.starts_with("/.well-known/") => Some(CATCH_ALL.to_owned()),
+        _ => None,
+    });
+    let v = dial(&stub);
+    assert_eq!(v.line(), SELF_SERVICE_LINE);
+    assert_eq!(v.exit_code(), 3);
+    assert_eq!(v.state(), VerifyState::SignInRequired);
+    assert_eq!(v.sign_in(), None, "nothing was read, so nothing is claimed");
+    assert!(walked(&stub).len() <= 6, "{:?}", walked(&stub));
+}
+
+/// **All four authorization-server metadata locations are reached** — each proven by a server that
+/// publishes at that one spelling and nowhere else. The path-INSERTED forms are the ones a probe
+/// that only appends never finds, and the issuer here has a path of its own so the four spellings
+/// are four different URLs.
+#[test]
+fn every_authorization_server_spelling_is_found() {
+    for spelling in [
+        "/.well-known/oauth-authorization-server/tenant-7",
+        "/tenant-7/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration/tenant-7",
+        "/tenant-7/.well-known/openid-configuration",
+    ] {
+        let stub = oauth_stub(None, move |base, target| {
+            let issuer = format!("{base}/tenant-7");
+            match target {
+                "/.well-known/oauth-protected-resource/mcp" => Some(resource_doc(&issuer)),
+                found if found == spelling => Some(as_doc(&issuer, false)),
+                _ => None,
+            }
+        });
+        assert_eq!(dial(&stub).line(), MANUAL_LINE, "{spelling}");
+        assert!(walked(&stub).contains(&spelling.to_owned()), "{spelling}");
+    }
+}
+
+/// **Both conventional protected-resource spellings are reached**, and the challenge's own pointer
+/// outranks them: a server that publishes its document somewhere else entirely is still read, and
+/// the guesses are never made.
+#[test]
+fn the_protected_resource_document_is_found_wherever_the_server_keeps_it() {
+    // The ORIGIN spelling — the second guess, for a server whose document is not under the
+    // endpoint's path.
+    let at_origin = oauth_stub(None, |base, target| match target {
+        "/.well-known/oauth-protected-resource" => Some(resource_doc(base)),
+        "/.well-known/oauth-authorization-server" => Some(as_doc(base, true)),
+        _ => None,
+    });
+    assert_eq!(dial(&at_origin).line(), SELF_SERVICE_LINE);
+    assert_eq!(
+        walked(&at_origin)[..2],
+        [
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-protected-resource",
+        ]
+    );
+
+    // The server's OWN pointer, at a path no convention would ever guess.
+    let pointed = oauth_stub(Some("/oauth/resource"), |base, target| match target {
+        "/oauth/resource" => Some(resource_doc(base)),
+        "/.well-known/oauth-authorization-server" => Some(as_doc(base, false)),
+        _ => None,
+    });
+    assert_eq!(dial(&pointed).line(), MANUAL_LINE);
+    assert_eq!(
+        walked(&pointed),
+        ["/oauth/resource", "/.well-known/oauth-authorization-server",],
+        "the pointer is followed, and the conventions are not guessed at"
+    );
 }
 
 // =================================================================================================

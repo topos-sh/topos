@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "command": "verify",
+  "ok": true,
+  "data": {
+    "address": "https://tickets.acme.example/mcp",
+    "exit_code": 3,
+    "line": "sign-in required - this server accepts only pre-registered clients or tokens; an agent cannot complete sign-in by itself",
+    "name": "tickets",
+    "sign_in": "manual",
+    "state": "sign_in_required",
+    "target": "address"
+  },
+  "warnings": [],
+  "next_actions": []
+}

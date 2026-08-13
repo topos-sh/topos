@@ -25,7 +25,7 @@ use topos_types::results::{AddData, McpServerSummary, TargetOutcome};
 use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::mcp_validate::{self, McpSummary};
+use crate::mcp_validate::{self, McpAuthHint, McpSummary};
 
 use super::manifest_edit::{self as medit, EditTarget};
 
@@ -711,6 +711,17 @@ fn fold_receipt(
             what_it_is(summary)
         ),
     );
+    // The one auth word that is a TASK. `oauth` and `none` describe something that happens by
+    // itself; `manual` describes something a person has to go and do, and the entry stands here
+    // doing nothing until they do — so it says so where the row is reported, not only in the
+    // catalog someone published from.
+    if summary.auth_hint == Some(McpAuthHint::Manual) {
+        medit::push_note_line(
+            data,
+            "Signing in to this server is a one-time manual step on this machine — a token you \
+             create, or an app an administrator registers; no agent can complete it",
+        );
+    }
     if converge.placed_nothing() {
         // NOTHING stands anywhere. The row is real, so the receipt says the one thing a reader
         // cannot see from the lines below — and then lets each line say its own reason and its own

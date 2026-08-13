@@ -1127,6 +1127,21 @@ mod tests {
         assert!(text.contains("X-Quote: \"say \\\"hi\\\"\""), "{text}");
         assert!(text.ends_with("auth: oauth}  # topos:mcp\n"));
 
+        // The MANUAL hint is not a quieter oauth: Hermes's key opens a flow that registers a
+        // client, and a manual server registers nobody — so the line carries no `auth` at all,
+        // exactly like an unknown one.
+        let manual = McpEntry {
+            auth: AuthHint::Manual,
+            ..entry("topos-m", "https://m.example/mcp")
+        };
+        let manual_text = write_of(&apply(
+            McpDialect::HermesYaml,
+            None,
+            std::slice::from_ref(&manual),
+            &BTreeMap::new(),
+        ));
+        assert!(!manual_text.contains("auth:"), "{manual_text}");
+
         // The emitted line parses back to the exact desired fingerprint → a re-apply is Current.
         let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
         let again = apply(

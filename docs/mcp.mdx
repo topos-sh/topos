@@ -261,19 +261,23 @@ and prints one line. Nothing is stored and nothing is installed: it is a live ch
 server misbehaves and you want to know whether the problem is the server, the network, or the entry.
 
 There are four answers, and each is also the command's exit code, so a script can branch on it
-without reading a word:
+without reading a word. The sign-in answer comes in two sentences, because "sign-in required" hides
+two very different situations:
 
 | What it prints | Exit code | What it means |
 |---|---|---|
 | `responding (12 tools)` | `0` | The server answered and listed its tools. |
 | `sign-in required - healthy; your agent app completes sign-in on first use` | `3` | The server wants a sign-in — which is the *right* answer. Topos holds no credential and never sends one; your agent app signs in the first time it uses the server. |
+| `sign-in required - this server accepts only pre-registered clients or tokens; an agent cannot complete sign-in by itself` | `3` | The server wants a sign-in too, but it registers no new clients: somebody creates a personal token, or registers an app with the vendor, before any agent can get in. The server is healthy — the setup is manual, once per person or once per organization. |
 | `not reachable: ...` | `4` | Nothing answered, or the server is having trouble right now. The rest of the line says which. |
 | `reachable but not answering as an MCP server: ...` | `5` | Something answered at that address, but not as an MCP server — usually a wrong URL, or a redirect that was not followed. |
 
 A refusal — no such bundle, an ambiguous name, a bundle that is a skill — exits `1` like every other
 command, because nothing was checked. `-g` checks the server your machine-wide scope holds, even
 from inside a project. `--json` adds the address dialed (or the program run), the protocol revision
-the server answered on, and the same exit code inside the document.
+the server answered on, and the same exit code inside the document — plus, on a sign-in, `sign_in`:
+`self_service` or `manual`, and absent where the server's own sign-in documents could not be read
+(which is when the first sentence is printed, since an unreadable server is not a manual one).
 
 ## Updating a server
 

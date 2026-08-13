@@ -1308,8 +1308,10 @@ pub struct McpServerSummary {
     /// nothing else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<McpPackageSummary>,
-    /// The publisher's `_meta` auth word (`oauth` / `none`) when the document declared one.
-    /// Absent means it said nothing — which is NOT a claim that no credential is needed.
+    /// The publisher's `_meta` auth word (`oauth` / `none` / `manual`) when the document declared
+    /// one. Absent means it said nothing — which is NOT a claim that no credential is needed.
+    /// `manual` is the one that costs a person a step: this server takes only a token they create
+    /// or an app an administrator registers, so no agent signs in by itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     /// The names of the LITERAL headers every call will carry. A credential-shaped header never
@@ -1364,6 +1366,12 @@ pub struct VerifyData {
     pub command: Vec<String>,
     /// The verdict.
     pub state: VerifyState,
+    /// WHICH of the two sign-in worlds the server lives in, on `sign_in_required` alone. Absent
+    /// wherever the check could not read the server's own OAuth discovery documents end to end —
+    /// a chain nobody could read is never reported as the worse of the two, and it is absent on
+    /// every other state because they demand no sign-in at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignInPath>,
     /// How many tools the server listed. Present only on `responding`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<u32>,
@@ -1389,14 +1397,30 @@ pub struct VerifyData {
 pub enum VerifyState {
     /// It answered as an MCP server and listed its tools.
     Responding,
-    /// It refused without a sign-in — a HEALTHY server. The agent app completes the sign-in on
-    /// first use; topos holds no credential and never will.
+    /// It refused without a sign-in — a HEALTHY server; topos holds no credential and never will.
+    /// WHO can complete that sign-in is a second question, and [`VerifyData::sign_in`] is where it
+    /// is answered.
     SignInRequired,
     /// Nothing answered: the name did not resolve, the connection failed or timed out, or the
     /// server is having trouble right now. Never a statement about the protocol.
     NotReachable,
     /// Something answered, but not as an MCP server.
     NotAnMcpServer,
+}
+
+/// Who can complete the sign-in a server demands — the distinction the same `401` hides.
+/// **INFERRED value set** (additive-only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SignInPath {
+    /// Its authorization server registers clients on demand, so the agent app signs in on first
+    /// use with nothing arranged beforehand.
+    SelfService,
+    /// It accepts only clients or tokens registered in advance — a personal token, or an app an
+    /// administrator created. A person does that once, per machine or per organization; an agent
+    /// cannot do it for them.
+    Manual,
 }
 
 /// `fmt [-g]` — rewrite a manifest into the normal form. **INFERRED** (additive-only).

@@ -444,9 +444,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
         PublishData, PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult,
         PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SkillEntry, SkillStatus,
-        StatusData, StatusScope, StatusScopeSummary, StatusTrigger, VerifyData, VerifyState,
-        WorkspaceSyncReport,
+        RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SignInPath, SkillEntry,
+        SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger, VerifyData,
+        VerifyState, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -1480,6 +1480,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             address: Some("https://weather.acme.example/mcp".to_owned()),
             command: vec![],
             state: VerifyState::Responding,
+            sign_in: None,
             tools: Some(12),
             detail: None,
             protocol_version: Some("2026-07-28".to_owned()),
@@ -1495,7 +1496,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
     };
 
     // The SAME verb over an OAuth-gated server: healthy, and exit code 3. Topos holds no credential
-    // and sends none, so this is the expected answer for every server behind a sign-in.
+    // and sends none, so this is the expected answer for every server behind a sign-in. This one
+    // registers clients on demand, which is what `sign_in` says — the agent app needs nothing
+    // arranged first.
     let verify_sign_in = JsonEnvelope {
         schema_version: 1,
         command: "verify".to_owned(),
@@ -1506,11 +1509,42 @@ fn fixtures() -> Vec<(&'static str, String)> {
             address: Some("https://weather.acme.example/mcp".to_owned()),
             command: vec![],
             state: VerifyState::SignInRequired,
+            sign_in: Some(SignInPath::SelfService),
             tools: None,
             detail: None,
             protocol_version: None,
             exit_code: 3,
             line: "sign-in required - healthy; your agent app completes sign-in on first use"
+                .to_owned(),
+        })
+        .expect("VerifyData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // The OTHER sign-in world, on the SAME state and the SAME exit code: a server that takes only
+    // clients or tokens somebody registered in advance. The verdict is not worse — the server is
+    // healthy — but nothing an agent does on its own will get it in.
+    let verify_sign_in_manual = JsonEnvelope {
+        schema_version: 1,
+        command: "verify".to_owned(),
+        ok: true,
+        data: serde_json::to_value(VerifyData {
+            name: "tickets".to_owned(),
+            target: "address".to_owned(),
+            address: Some("https://tickets.acme.example/mcp".to_owned()),
+            command: vec![],
+            state: VerifyState::SignInRequired,
+            sign_in: Some(SignInPath::Manual),
+            tools: None,
+            detail: None,
+            protocol_version: None,
+            exit_code: 3,
+            line: "sign-in required - this server accepts only pre-registered clients or tokens; \
+                   an agent cannot complete sign-in by itself"
                 .to_owned(),
         })
         .expect("VerifyData serializes"),
@@ -2107,6 +2141,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/protect.describe", emit_json(&protect_describe)),
         ("json/verify.responding", emit_json(&verify_responding)),
         ("json/verify.sign-in-required", emit_json(&verify_sign_in)),
+        (
+            "json/verify.sign-in-manual",
+            emit_json(&verify_sign_in_manual),
+        ),
         ("json/review.inbox", emit_json(&review_inbox)),
         ("json/invite.read", emit_json(&invite_read)),
         ("json/publish.describe", emit_json(&publish_describe)),

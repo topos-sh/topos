@@ -36,7 +36,11 @@ When a server misbehaves, run `topos verify <name>`: topos dials the address (or
 and asks the server for its tools, live, storing nothing. RELAY the one line it prints — it is the
 whole answer, and its exit code repeats it: `responding (N tools)` = 0 ·
 `sign-in required - healthy; your agent app completes sign-in on first use` = 3 (the RIGHT answer for
-an OAuth server — topos holds no credential) · `not reachable: <reason>` = 4 ·
+an OAuth server — topos holds no credential) ·
+`sign-in required - this server accepts only pre-registered clients or tokens; an agent cannot complete sign-in by itself`
+= 3 as well (also healthy, and NOT something to retry: tell the human they need a personal token or
+an OAuth app registered with the vendor first, once per person or per organization) ·
+`not reachable: <reason>` = 4 ·
 `reachable but not answering as an MCP server: <detail>` = 5. A refusal (no such bundle, a skill)
 exits 1.
 

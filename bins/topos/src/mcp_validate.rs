@@ -182,10 +182,15 @@ pub(crate) struct McpHeader {
 /// `"none"`, so it is never upgraded to one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum McpAuthHint {
-    /// The agent will be sent through an authorization dance on first use.
+    /// The agent will be sent through an authorization dance on first use, and can finish it
+    /// alone.
     Oauth,
     /// The publisher stated outright that no credential is needed.
     None,
+    /// Getting in costs a PERSON a one-time step on each machine — a token they create, or an app
+    /// an administrator registers with the vendor. No agent completes it by itself, which is why
+    /// this is a caution and never a quieter `oauth`.
+    Manual,
 }
 
 impl McpAuthHint {
@@ -193,6 +198,7 @@ impl McpAuthHint {
         match self {
             McpAuthHint::Oauth => "oauth",
             McpAuthHint::None => "none",
+            McpAuthHint::Manual => "manual",
         }
     }
 }
@@ -1513,6 +1519,7 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     {
         Some("oauth") => Some(McpAuthHint::Oauth),
         Some("none") => Some(McpAuthHint::None),
+        Some("manual") => Some(McpAuthHint::Manual),
         _ => None,
     };
 
@@ -1981,6 +1988,12 @@ mod tests {
 
         let oauth = validate_server_json(&read("remote-oauth-meta.json")).expect("ok");
         assert_eq!(oauth.auth_hint, Some(McpAuthHint::Oauth));
+
+        // The OTHER sign-in world, carried as its own word — never folded into `oauth`, because
+        // the receipt's job on this one is to tell a person what they have to go and do.
+        let manual = validate_server_json(&read("remote-manual-auth.json")).expect("ok");
+        assert_eq!(manual.auth_hint, Some(McpAuthHint::Manual));
+        assert_eq!(manual.auth_hint.unwrap().as_str(), "manual");
 
         // Two remotes offered: the first streamable-http one is PLACED, and the clean sse sibling
         // is judged by the same rules without changing what the summary reports.

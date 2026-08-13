@@ -378,7 +378,7 @@
           }
         },
         "auth": {
-          "description": "The publisher's `_meta` auth word (`oauth` / `none`) when the document declared one.\nAbsent means it said nothing — which is NOT a claim that no credential is needed.",
+          "description": "The publisher's `_meta` auth word (`oauth` / `none` / `manual`) when the document declared\none. Absent means it said nothing — which is NOT a claim that no credential is needed.\n`manual` is the one that costs a person a step: this server takes only a token they create\nor an app an administrator registers, so no agent signs in by itself.",
           "type": [
             "string",
             "null"

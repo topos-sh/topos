@@ -12,8 +12,12 @@
 //!
 //! **No credential is ever supplied.** topos holds none, and this verb does not ask the harness for
 //! the one it holds. A server that refuses without a sign-in is therefore the EXPECTED answer for
-//! every OAuth-gated server, and it is reported as HEALTHY — the agent app completes that sign-in
-//! on first use.
+//! every OAuth-gated server, and it is reported as HEALTHY. WHO can complete that sign-in is a
+//! second question the refusal itself cannot answer, so the sign-in walk ([`discovery`]) reads the
+//! server's own discovery documents for it: a server that registers clients on demand keeps the
+//! line that says the agent app signs in on first use, and a server that takes only pre-registered
+//! clients or tokens says so instead. Neither changes the verdict or the exit code — a server
+//! somebody has to set up by hand is still a healthy server.
 //!
 //! ## The shape a verification checks
 //!
@@ -28,6 +32,7 @@
 //! answering as an MCP server. They are the verb's contract for a script, and they are documented
 //! in the CLI reference beside the general `1`/`2`.
 
+mod discovery;
 mod local;
 mod remote;
 mod wire;
@@ -170,6 +175,7 @@ fn data_for(name: &str, checked: &Checked) -> VerifyData {
         address: checked.address.clone(),
         command: checked.command.clone(),
         state: checked.verdict.state(),
+        sign_in: checked.verdict.sign_in(),
         tools: match &checked.verdict {
             Verdict::Responding { tools, .. } => Some(u32::try_from(*tools).unwrap_or(u32::MAX)),
             _ => None,

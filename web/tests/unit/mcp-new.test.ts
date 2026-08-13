@@ -706,8 +706,11 @@ describe("the SSRF guard", () => {
  * it carries the publish form) and read for the chip.
  */
 describe("the preview card's auth chip", () => {
+  /** Static markup escapes the apostrophes final copy is written with; read it back as written. */
+  const decode = (html: string) => html.replaceAll("&#x27;", "'").replaceAll("&quot;", '"');
+
   /** The card as the custom arm renders it, for a document declaring `auth`. */
-  async function renderPreview(authHint: "oauth" | "none" | null): Promise<string> {
+  async function renderPreview(authHint: "oauth" | "none" | "manual" | null): Promise<string> {
     const { PreviewCard } = await import("@/routes/mcp-new");
     type Preview = Parameters<typeof PreviewCard>[0]["preview"];
     const preview: Preview = {
@@ -760,10 +763,23 @@ describe("the preview card's auth chip", () => {
     expect(html).not.toContain(">oauth<");
   });
 
+  it("says a server needs a person's one-time step, and does not call it oauth", async () => {
+    // The third world. A document declaring `manual` is one an agent CANNOT sign into by itself,
+    // and the chip that used to say "oauth" for it was the false reassurance this arm removes.
+    const html = await renderPreview("manual");
+    expect(html).toContain("manual setup");
+    expect(html).not.toContain(">oauth<");
+    expect(html).not.toContain("an agent signs in on first use");
+    expect(decode(html)).toContain(
+      "the publisher says sign-in needs a one-time manual step on each machine — a token or a registered app",
+    );
+  });
+
   it("stays quiet about a document that declares neither", async () => {
     const html = await renderPreview(null);
     expect(html).not.toContain("no sign-in");
     expect(html).not.toContain(">oauth<");
+    expect(html).not.toContain("manual setup");
     // Still a preview: the transport is the chip that never depended on the declaration.
     expect(html).toContain("streamable-http");
   });
@@ -834,5 +850,63 @@ describe("the preview card's auth chip", () => {
     expect(html).toContain('<option value="" selected="">No channel</option>');
     expect(html).toContain('<option value="everyone">everyone (everyone here)</option>');
     expect(html).toContain("Optional — a channel is how it reaches people.");
+  });
+});
+
+/**
+ * WHAT THE PICKER'S CARDS SAY BEFORE ANYONE CLICKS. The list ships whole with the page, so the
+ * page is rendered whole here — the same loader payload the real one hands over — and read for the
+ * one thing a card must not leave for later: that this server costs a person a step no agent can
+ * take for it, and exactly which step.
+ */
+describe("the built-in list, on the page", () => {
+  const decode = (html: string) => html.replaceAll("&#x27;", "'").replaceAll("&quot;", '"');
+
+  async function renderPage(): Promise<string> {
+    const McpNew = (await import("@/routes/mcp-new")).default;
+    const { curatedServerRows } = await import("@/lib/mcp/curated.server");
+    const routes: RouteObject[] = [
+      {
+        path: "/",
+        loader: () => ({
+          wsName: "acme",
+          channels: [{ name: "everyone", isDefault: true, mode: "open" }],
+          role: "owner",
+          curated: curatedServerRows(),
+        }),
+        Component: McpNew,
+      },
+    ];
+    const handler = createStaticHandler(routes);
+    const context = await handler.query(new Request("http://localhost/"));
+    if (context instanceof Response) {
+      throw new Error("expected a rendered context, got a Response");
+    }
+    const router = createStaticRouter(handler.dataRoutes, context);
+    return renderToStaticMarkup(createElement(StaticRouterProvider, { router, context }));
+  }
+
+  /** How many times a marker appears — the count IS the assertion for a per-row element. */
+  const times = (html: string, needle: string) => html.split(needle).length - 1;
+
+  it("draws one card per server, every one of them offered without a round trip", async () => {
+    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
+    const html = await renderPage();
+    expect(times(html, 'data-testid="mcp-picker-option"')).toBe(CURATED_MCP_SERVERS.length);
+    expect(html).toContain(`${CURATED_MCP_SERVERS.length} servers`);
+  });
+
+  it("prints the errand on exactly the rows that carry one, in full", async () => {
+    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
+    const html = await renderPage();
+    const manual = CURATED_MCP_SERVERS.filter((entry) => entry.auth === "manual");
+    // One note per manual row and not one more: a card that showed the caution chip without the
+    // line under it would be a caution nobody can act on.
+    expect(times(html, 'data-testid="mcp-picker-auth-note"')).toBe(manual.length);
+    expect(times(html, ">manual setup<")).toBe(manual.length);
+    for (const entry of manual) {
+      // The whole sentence, not a truncated half of it — the note wraps rather than clipping.
+      expect(decode(html), `${entry.title}'s note is not on the page`).toContain(entry.authNote);
+    }
   });
 });

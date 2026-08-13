@@ -142,11 +142,13 @@ export interface McpSummary {
   packages: McpPackage[];
   /**
    * The publisher's own `_meta["sh.topos/auth"]` word, when it says something this tier
-   * understands: `"oauth"` (the agent will be sent through an authorization dance on first
-   * use) or `"none"`. NULL means the document declared nothing — which is not the same claim
-   * as "none", so it is never upgraded to one.
+   * understands: `"oauth"` (the agent will be sent through an authorization dance on first use
+   * and can finish it alone), `"manual"` (getting in costs a person a one-time step on each
+   * machine — a token, an app someone registers — so no agent completes it by itself) or
+   * `"none"`. NULL means the document declared nothing — which is not the same claim as "none",
+   * so it is never upgraded to one, and neither is it read as the caution `manual` carries.
    */
-  authHint: "oauth" | "none" | null;
+  authHint: "oauth" | "none" | "manual" | null;
 }
 
 /** One refused document: the machine-branchable code plus the sentence a person reads. */
@@ -1150,9 +1152,13 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
     packages.push(checked.summary);
   }
 
+  // A CLOSED vocabulary read off an open field: three words this tier knows, and anything else —
+  // a spelling from a newer publisher, a typo, a `true` — reads as no declaration at all rather
+  // than as one of them.
   const meta = isRecord(parsed._meta) ? parsed._meta : {};
   const declared = meta["sh.topos/auth"];
-  const authHint = declared === "oauth" ? "oauth" : declared === "none" ? "none" : null;
+  const authHint =
+    declared === "oauth" || declared === "none" || declared === "manual" ? declared : null;
 
   return {
     ok: true,

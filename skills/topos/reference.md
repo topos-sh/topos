@@ -8,7 +8,7 @@ One rule covers all of them: **a command that reaches other people, discards loc
 
 Exit codes: `0` — success. `1` — the operation was refused or failed (with `--json`, the `error` object says which and how to fix it). `2` — the command line itself was invalid.
 
-`topos verify` reports what it found through its exit code as well, so a script can branch without parsing anything: `0` — the server is responding. `3` — the server asks for a sign-in, which is healthy (your agent app signs in on first use). `4` — the server is not reachable from this machine. `5` — something answered, but not as an MCP server. It still uses `1` for a refusal (no such bundle, the name is ambiguous, the bundle is a skill) and `2` for a bad command line.
+`topos verify` reports what it found through its exit code as well, so a script can branch without parsing anything: `0` — the server is responding. `3` — the server asks for a sign-in, which is healthy; the line (and, under `--json`, `sign_in`) says whether your agent app can complete that sign-in on first use or somebody has to register a client or a token by hand first. `4` — the server is not reachable from this machine. `5` — something answered, but not as an MCP server. It still uses `1` for a refusal (no such bundle, the name is ambiguous, the bundle is a skill) and `2` for a bad command line.
 
 ## The `--json` envelope
 
@@ -314,7 +314,7 @@ topos diff [OPTIONS] <SKILL> [REF]
 
 ### `topos verify`
 
-Check that an MCP server is actually working, right now, from this machine. Topos dials the address the bundle names (or runs its package) and asks the server for its tools, then prints what happened. Nothing is stored and nothing is installed — it is a live check, not a delivery state. A server that asks for a sign-in is healthy: topos holds no credential, and your agent app signs in on first use. Exit codes: `0` responding, `3` sign-in required, `4` not reachable, `5` reachable but not answering as an MCP server.
+Check that an MCP server is actually working, right now, from this machine. Topos dials the address the bundle names (or runs its package) and asks the server for its tools, then prints what happened. Nothing is stored and nothing is installed — it is a live check, not a delivery state. A server that asks for a sign-in is healthy: topos holds no credential, and your agent app signs in on first use — unless the server takes only clients or tokens registered in advance, which the line says instead, because no agent can complete that sign-in by itself. Exit codes: `0` responding, `3` sign-in required, `4` not reachable, `5` reachable but not answering as an MCP server.
 
 ```
 topos verify [OPTIONS] <NAME>

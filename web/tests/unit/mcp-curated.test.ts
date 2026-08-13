@@ -60,9 +60,51 @@ describe("every curated server passes the real publish gate", () => {
 });
 
 describe("the list itself", () => {
-  it("holds 20–25 servers", () => {
-    expect(CURATED_MCP_SERVERS.length).toBeGreaterThanOrEqual(20);
-    expect(CURATED_MCP_SERVERS.length).toBeLessThanOrEqual(25);
+  it("holds a picker's worth of servers", () => {
+    // A range, not a number: one more server is an ordinary data edit, while a list that emptied
+    // or doubled is a mistake nobody meant to make.
+    expect(CURATED_MCP_SERVERS.length).toBeGreaterThanOrEqual(40);
+    expect(CURATED_MCP_SERVERS.length).toBeLessThanOrEqual(60);
+  });
+
+  /**
+   * THE NOTE RULE, at runtime as well as in the types. `manual` is the only word on this list that
+   * costs a person work, and the note is the whole reason such a row is allowed here — a row
+   * claiming it without saying what the person must do would put an errand on a team with no way
+   * to find out what it is. The other direction matters too: a note on a self-service row is copy
+   * about work that does not exist.
+   */
+  it("gives every manual row its note, and no other row one", () => {
+    for (const entry of CURATED_MCP_SERVERS) {
+      if (entry.auth === "manual") {
+        expect(entry.authNote.trim(), `${entry.title} claims manual and says nothing`).not.toBe("");
+        expect(entry.authNote).not.toContain("\n");
+        // One line a person reads on a picker card, not a paragraph.
+        expect(entry.authNote.length).toBeLessThanOrEqual(120);
+        continue;
+      }
+      expect(entry.authNote, `${entry.title} is self-service and carries a note`).toBeUndefined();
+    }
+  });
+
+  it("names exactly the servers whose sign-in an agent cannot complete", () => {
+    // Pinned by slug rather than counted: these four are here because their vendors run no
+    // registration an agent could use, and a fifth appearing silently would be the list quietly
+    // getting harder to receive.
+    const manual = CURATED_MCP_SERVERS.filter((entry) => entry.auth === "manual").map(
+      (entry) => entry.slug,
+    );
+    expect(manual.sort()).toEqual(["asana", "github", "pagerduty", "slack"]);
+  });
+
+  it("stays in the alphabetical order the picker scans in", () => {
+    // The list ships in file order and the grid draws it in file order, so the file IS the
+    // ordering. At fifty rows a new entry dropped in the wrong place is invisible in review and
+    // obvious to whoever is looking for a name.
+    const titles = CURATED_MCP_SERVERS.map((entry) => entry.title);
+    expect(titles).toEqual(
+      [...titles].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())),
+    );
   });
 
   it("claims each registry name once", () => {
@@ -117,6 +159,11 @@ describe("the lookups the page uses", () => {
       }
       expect(row.name).toBe(entry.name);
       expect(row.slug).toBe(entry.slug);
+      // The sign-in half travels whole: the word the chip reads and, for a manual row, the line
+      // the card prints under it. A row that lost the note on the way out would render a caution
+      // with nothing to act on.
+      expect(row.auth).toBe(entry.auth);
+      expect(row.authNote).toBe(entry.authNote);
       expect(row.host).toBe(new URL(entry.url).host);
       expect(row.url).toBe(entry.url);
       expect(row.version).toBe(CURATED_VERSION);

@@ -204,6 +204,7 @@ pub(crate) fn parse_server_json(bytes: &[u8]) -> Result<ServerDoc, String> {
     {
         Some("oauth") => AuthHint::Oauth,
         Some("none") => AuthHint::None,
+        Some("manual") => AuthHint::Manual,
         _ => AuthHint::Unknown,
     };
     Ok(ServerDoc {

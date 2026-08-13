@@ -175,6 +175,29 @@ describe("the accepted summary", () => {
     expect(result.ok === true && result.summary.authHint).toBe("oauth");
   });
 
+  /**
+   * THE WHOLE VOCABULARY, and its edge. Three words this tier understands — and `manual` is the
+   * one that changes what a surface says, because it means no agent finishes this sign-in by
+   * itself. Everything else reads as NO declaration rather than as the nearest word: a publisher
+   * inventing a spelling has said nothing here, and silence is the only honest rendering of that.
+   */
+  it.each([
+    ["oauth", "oauth"],
+    ["none", "none"],
+    ["manual", "manual"],
+    ["MANUAL", null],
+    ["token", null],
+    ["", null],
+    [true, null],
+    [null, null],
+  ] as const)("reads a declared auth of %j as %j", (declared, expected) => {
+    const document = JSON.parse(bytesOf("valid/remote-oauth-meta.json").toString("utf8"));
+    document._meta = { "sh.topos/auth": declared };
+    const result = validateServerJson(Buffer.from(JSON.stringify(document), "utf8"));
+    expect(result.ok).toBe(true);
+    expect(result.ok === true ? result.summary.authHint : "the gate refused it").toBe(expected);
+  });
+
   it("picks the streamable-http remote when an event-stream sibling is offered first", () => {
     const result = validateServerJson(bytesOf("valid/remote-sse-and-streamable.json"));
     expect(result.ok === true && result.summary.url).toBe("https://calendar.acme.example/mcp");

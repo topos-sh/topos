@@ -160,12 +160,18 @@ impl McpEntry {
 /// What the caller knows about the server's auth story. Two dialects render it — Hermes and
 /// OpenClaw, both of which gate their whole OAuth path on an explicit `auth: oauth` key and do
 /// nothing on a 401 without it. It is emitted for [`AuthHint::Oauth`] ALONE: a no-auth server
-/// must never be sent into a sign-in flow. Everywhere else OAuth is the harness's own on-401
-/// behavior and the key does not exist.
+/// must never be sent into a sign-in flow, and neither must a [`AuthHint::Manual`] one — those
+/// harnesses can only run a sign-in that registers a client on the spot, which is exactly what a
+/// manual server does not offer, so the key would start a dance that cannot end. Everywhere else
+/// OAuth is the harness's own on-401 behavior and the key does not exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthHint {
     None,
     Oauth,
+    /// A sign-in a person completes once per machine — a token they create, or an app an
+    /// administrator registers. Placement treats it exactly like [`AuthHint::None`]/
+    /// [`AuthHint::Unknown`]; the receipt is where it is said out loud.
+    Manual,
     Unknown,
 }
 
@@ -1445,11 +1451,17 @@ mod tests {
     /// The two dialects whose OAuth path is gated on the key emit it on the explicit hint and
     /// nowhere else; every other dialect never carries it (OAuth there is the harness's own
     /// on-401 behavior).
+    ///
+    /// `Manual` sits with `None`/`Unknown` deliberately, and that is the row worth reading twice:
+    /// the key starts a sign-in that registers a client on the spot, and a manual server registers
+    /// nobody — so emitting it there would hand a person a flow that cannot finish instead of the
+    /// receipt line telling them what to go and do.
     #[test]
     fn auth_is_emitted_only_on_the_explicit_oauth_hint_and_only_where_it_is_read() {
         for (hint, expect_auth) in [
             (AuthHint::Oauth, true),
             (AuthHint::None, false),
+            (AuthHint::Manual, false),
             (AuthHint::Unknown, false),
         ] {
             let e = McpEntry {

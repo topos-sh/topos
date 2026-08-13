@@ -24,6 +24,13 @@
 //! session, the fifth being the close). The reverse order costs 3 and 4 — symmetric in the worst
 //! case, worse on the era the specification calls current.
 //!
+//! A refusal costs more, and only a refusal: a `401`/`403` sends the conversation through the
+//! sign-in walk ([`super::discovery`]) before the verdict is finished, because the status says a
+//! sign-in is wanted and only the server's own discovery documents say who can complete it. That
+//! walk is bounded in BOTH senses — at most six further GETs, on its own short-clocked agent and
+//! its own overall deadline, never this arm's — so the extra cost is seconds and cannot become the
+//! sum of six protocol-sized timeouts.
+//!
 //! ## What this arm never does
 //!
 //! **It never sends a GET.** In the handshake era a GET to the MCP endpoint opens a standalone SSE
@@ -37,6 +44,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::discovery;
 use super::wire::{
     self, Era, LEGACY_REVISION, MAX_BODY_BYTES, METHOD_TOOLS_LIST, MODERN_REVISION, Reply,
     StatusRead, Verdict,
@@ -67,6 +75,10 @@ const ACCEPT: &str = "application/json, text/event-stream";
 const SESSION_HEADER: &str = "mcp-session-id";
 const PROTOCOL_HEADER: &str = "mcp-protocol-version";
 const METHOD_HEADER: &str = "mcp-method";
+
+/// The challenge a refusal states its terms in — read, never sent. It is where a server points at
+/// its own protected-resource metadata, which is where the sign-in walk starts.
+const CHALLENGE_HEADER: &str = "www-authenticate";
 
 /// **The headers this arm speaks for itself** — the protocol half of the conversation.
 ///
@@ -122,7 +134,23 @@ struct Answer {
     status: u16,
     content_type: String,
     session: Option<String>,
+    /// Every `WWW-Authenticate` value, in wire order — a refusal may carry several, and the one
+    /// naming the server's metadata is not always the first.
+    challenges: Vec<String>,
     body: String,
+}
+
+/// **The one place a sign-in verdict is finished.** A status settles THAT a sign-in is wanted; only
+/// the server's own discovery documents settle WHO can complete it. Every settled verdict goes
+/// through here, and only the sign-in arm costs anything: [`discovery::sign_in_path`] is bounded,
+/// best-effort, and silent when it cannot read the chain.
+fn settled(url: &str, answer: &Answer, verdict: Verdict) -> Verdict {
+    match verdict {
+        Verdict::SignInRequired { .. } => Verdict::SignInRequired {
+            sign_in: discovery::sign_in_path(url, &answer.challenges),
+        },
+        other => other,
+    }
 }
 
 /// **Verify the server at `url`.** `headers` are the bundle's LITERAL, gate-validated header pairs —
@@ -147,7 +175,7 @@ pub(crate) fn probe(agent: &ureq::Agent, url: &str, headers: &[(String, String)]
     };
     let status = answer.status;
     match wire::classify_status(&host, status) {
-        StatusRead::Settled(v) => return v,
+        StatusRead::Settled(v) => return settled(url, &answer, v),
         StatusRead::ReadBody => {}
     }
     match wire::correlate(&answer.content_type, &answer.body, ID_MODERN_TOOLS) {
@@ -209,7 +237,7 @@ fn legacy(agent: &ureq::Agent, url: &str, headers: &[(String, String)], host: &s
         Err(reason) => return Verdict::NotReachable { reason },
     };
     match wire::classify_status(host, answer.status) {
-        StatusRead::Settled(v) => return v,
+        StatusRead::Settled(v) => return settled(url, &answer, v),
         StatusRead::ReadBody => {}
     }
     let negotiated = match wire::correlate(&answer.content_type, &answer.body, ID_LEGACY_INIT) {
@@ -248,7 +276,7 @@ fn after_initialize(
     };
     if !matches!(answer.status, 200 | 202 | 204) {
         return match wire::classify_status(host, answer.status) {
-            StatusRead::Settled(v) => v,
+            StatusRead::Settled(v) => settled(url, &answer, v),
             // A `400` here refused the handshake's second step; there is nothing further to read.
             StatusRead::ReadBody => Verdict::NotMcp {
                 detail: format!(
@@ -271,7 +299,7 @@ fn after_initialize(
         Err(reason) => return Verdict::NotReachable { reason },
     };
     match wire::classify_status(host, answer.status) {
-        StatusRead::Settled(v) => return v,
+        StatusRead::Settled(v) => return settled(url, &answer, v),
         StatusRead::ReadBody => {}
     }
     match wire::correlate(&answer.content_type, &answer.body, ID_LEGACY_TOOLS) {
@@ -352,6 +380,13 @@ fn post(
     };
     let content_type = header("content-type").unwrap_or_default();
     let session = header(SESSION_HEADER).filter(|s| !s.trim().is_empty());
+    let challenges: Vec<String> = response
+        .headers()
+        .get_all(CHALLENGE_HEADER)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .collect();
     // Bounded by BOTH the byte cap here and the call deadline on the agent.
     let bytes = response
         .into_body()
@@ -363,6 +398,7 @@ fn post(
         status,
         content_type,
         session,
+        challenges,
         body: String::from_utf8_lossy(&bytes).into_owned(),
     })
 }
