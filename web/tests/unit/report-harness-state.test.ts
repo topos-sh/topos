@@ -255,6 +255,56 @@ describe("the report door shape-checks the block — before the credential resol
     expect(stored[0]?.note).toBe("y".repeat(199));
   });
 
+  /**
+   * THE BODY CAP MUST CLEAR THE WIDEST LEGAL REPORT. A report lands atomically — there is no
+   * partial one — so a cap a legal snapshot can reach bounces the WHOLE picture and the fleet page
+   * stays stale for as long as the condition holds. This builds the worst report this route's own
+   * shape rules allow: 128 bundles, each with the maximum harness blocks, each block's note at its
+   * cap in the encoding that costs the most bytes (`\u0001` escapes to six). It lands.
+   */
+  it("the widest legal report — every bundle × every harness, a maximal note each — LANDS", async () => {
+    const route = await import("@/routes/api.v1.report");
+    const note = "\u0001".repeat(200);
+    const state = "a".repeat(32);
+    const harnesses = Array.from({ length: 64 }, (_, n) => ({
+      slug: `h${n}${"-a".repeat(64)}`.slice(0, 64),
+      state,
+      note,
+    }));
+    // The first row is the seeded bundle, so the snapshot is proved to have LANDED and not
+    // merely parsed; the rest are legal ids of no bundle here, which the write drops on its join.
+    const applied = Array.from({ length: 128 }, (_, n) => ({
+      skill_id: n === 0 ? "s_srv" : `filler-${n}-${"x".repeat(128)}`.slice(0, 128),
+      version_id: VERSION,
+      harnesses,
+    }));
+    const body = JSON.stringify({ schema_version: 1, applied });
+    expect(body.length).toBeGreaterThan(10 * 1024 * 1024);
+
+    const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      body,
+    });
+    const res = await route.action({ request, params: { ws: wsId } } as never);
+    expect(res.status).toBe(204);
+    expect(await storedHarnessState("s_srv")).toEqual(harnesses);
+  }, 60000);
+
+  it("and the fence still stands — a body past the cap is refused, unread", async () => {
+    const route = await import("@/routes/api.v1.report");
+    // Bigger than any derivable cap, and not even valid JSON: the read never gets that far.
+    const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      body: "x".repeat(20 * 1024 * 1024),
+    });
+    const res = await route.action({ request, params: { ws: wsId } } as never);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: { context: { message: string } } };
+    expect(json.error.context.message).toBe("report body too large");
+  }, 60000);
+
   it("the field is OPTIONAL — a bare row still passes the door", async () => {
     const route = await import("@/routes/api.v1.report");
     const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {

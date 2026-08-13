@@ -8,9 +8,8 @@ import { type ReportedHarnessState, reportApplied } from "@/lib/db/queries.lane.
  * `PUT /api/v1/workspaces/{ws}/report` — the session's post-reconcile applied snapshot
  * (`WireAppliedReport`) → 204. A report is the COMPLETE per-workspace snapshot of what the
  * installation holds (absence is meaningful), workspace-membership-checked per bundle.
- * Small-body-capped; a malformed body is a 400 BEFORE the credential resolve.
+ * Body-capped; a malformed body is a 400 BEFORE the credential resolve.
  */
-const BODY_CAP = 64 * 1024;
 const HEX_64 = /^[0-9a-f]{64}$/;
 // The vault's own id rule, mirrored: lowercase path-safe charset, 1–128 bytes.
 const SKILL_ID = /^[a-z0-9_-]{1,128}$/;
@@ -26,6 +25,30 @@ const HARNESS_STATE = /^[a-z-]{1,32}$/;
  */
 const MAX_HARNESSES = 64;
 const MAX_NOTE = 200;
+
+const MIB = 1024 * 1024;
+/**
+ * The worst JSON bytes ONE harness block can weigh: a slug and a state at the full length their
+ * shapes allow (64 + 32), a note at its cap in the encoding that costs the most — every code unit
+ * escaped `\uXXXX`, six bytes each — and the keys, quotes and commas around them.
+ */
+const WORST_HARNESS_BYTES = 64 + 32 + MAX_NOTE * 6 + 40;
+/** The worst ONE applied row can weigh: a full-length id, a version id, its keys, and the blocks. */
+const WORST_ROW_BYTES = 128 + 64 + 60 + MAX_HARNESSES * WORST_HARNESS_BYTES;
+/** More bundles than one machine follows in one workspace — the breadth the cap is sized for. */
+const FULL_BREADTH_ROWS = 128;
+/**
+ * The cap on the whole body, DERIVED from the shape rules above rather than guessed: 128 rows of
+ * ~84 KiB is ~10.5 MiB, and the cap is the next whole mebibyte past it (12 MiB today).
+ *
+ * It is sized this way because a report lands ATOMICALLY — there is no partial one — so a cap a
+ * legal report can reach is a fleet page that goes stale exactly when something is wrong with the
+ * machine, and for as long as the condition persists. A real report is two orders of magnitude
+ * under this (19 MCP-capable harness rows, most of them carrying no note at all). The fence is for
+ * abuse, and it costs nothing to hold high: `readCappedBody` abandons the read mid-stream, so
+ * nothing past the cap is ever buffered.
+ */
+const BODY_CAP = (Math.ceil((WORST_ROW_BYTES * FULL_BREADTH_ROWS) / MIB) + 1) * MIB;
 
 /**
  * A note is DISPLAY TEXT, so an over-long one is trimmed rather than refused. The cut is taken on
