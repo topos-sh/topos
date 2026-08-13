@@ -13,7 +13,10 @@
 //!    this build pins a bridge → **the bridge** (`npx -y mcp-remote@<pinned> <url>`), because the
 //!    address is still the thing every machine reaches, and the bridge is how this one reaches it;
 //! 3. otherwise, the first package this build can set up, preferring **npm**, then **pypi** —
-//!    only where the harness runs programs at all;
+//!    only where the harness runs programs at all, and only a package spoken to over **stdio**
+//!    (the format also lets a package listen on http once it is running, which is neither of the
+//!    two shapes an entry can hold: not an address every machine dials, and not a program an
+//!    agent talks to over its pipes);
 //! 4. otherwise, nothing is placed, and the reason is said in plain words ([`Gap`]).
 //!
 //! **A missing runtime never falls through to the next rule.** If the selected form needs `npx`
@@ -74,12 +77,58 @@ pub(crate) struct PackageRef {
     /// The exact version the document pins (empty where the registry type carries it inside the
     /// identifier, as an OCI digest does).
     pub version: String,
+    /// **How the installed program is SPOKEN TO** — the official format's `transport.type`
+    /// (`stdio`, `streamable-http`, `sse`), empty where the document declares none (which the
+    /// publish gate refuses, so only a hand-written file arrives that way).
+    ///
+    /// It is read and kept rather than assumed, because a package that listens on http is a
+    /// package no `command`/`args` entry can reach: an agent handed one would speak stdio at a
+    /// process that answers over a socket, and get silence. [`select`] withholds those.
+    pub transport: String,
     /// Arguments to the RUNTIME, before the package is named (`docker run <these> <image>`).
     pub runtime_args: Vec<Argument>,
     /// Arguments to the SERVER, after the package is named.
     pub package_args: Vec<Argument>,
     /// The environment the server is run with.
     pub env: Vec<EnvSlot>,
+}
+
+/// What the ONE package preference needs to know about a package. Implemented by the parsed
+/// document's [`PackageRef`] and by the validation summary's own package row, so the package a
+/// RECEIPT names and the package a PLACEMENT runs are picked by one rule and cannot disagree.
+pub(crate) trait PackageChoice {
+    /// The registry it comes from (`npm`, `pypi`, …).
+    fn registry(&self) -> &str;
+    /// Whether it is a PROGRAM a machine runs and talks stdio to — the only shape a
+    /// `command`/`args` entry can express.
+    fn serves_over_stdio(&self) -> bool;
+}
+
+impl PackageChoice for PackageRef {
+    fn registry(&self) -> &str {
+        &self.registry
+    }
+
+    /// An empty declaration reads as stdio: the publish gate requires the field, so a document
+    /// reaching here without one was hand-written, and the local form is what its `command` would
+    /// have meant.
+    fn serves_over_stdio(&self) -> bool {
+        self.transport.is_empty() || self.transport == "stdio"
+    }
+}
+
+/// The npm arm's registry word, then the pypi arm's — the ONE preference order, in one place.
+pub(crate) const RUNNABLE_REGISTRIES: [&str; 2] = ["npm", "pypi"];
+
+/// **The package this build takes**: the first one it can set up, npm before pypi, whatever order
+/// the document lists them in — and only a package that is spoken to over stdio, because that is
+/// the only shape an entry can express. `None` when the document offers nothing this build runs.
+pub(crate) fn preferred_package<P: PackageChoice>(packages: &[P]) -> Option<&P> {
+    RUNNABLE_REGISTRIES.iter().find_map(|registry| {
+        packages
+            .iter()
+            .find(|p| p.registry() == *registry && p.serves_over_stdio())
+    })
 }
 
 /// One structured argument, in the official format's two shapes.
@@ -226,10 +275,17 @@ fn parse_packages(root: &Value) -> Result<Vec<PackageRef>, String> {
         if registry.is_empty() || identifier.is_empty() {
             return Err("one of its packages names no registry or no package".to_owned());
         }
+        let transport = entry
+            .get("transport")
+            .filter(|t| t.is_object())
+            .and_then(|t| t.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         out.push(PackageRef {
             registry: registry.to_owned(),
             identifier: identifier.to_owned(),
             version: string("version").to_owned(),
+            transport: transport.to_owned(),
             runtime_args: parse_arguments(entry.get("runtimeArguments"))?,
             package_args: parse_arguments(entry.get("packageArguments"))?,
             env: parse_env(entry.get("environmentVariables"))?,
@@ -408,6 +464,11 @@ fn found_on_path(
 pub(crate) enum Gap {
     /// The document offers a package from a registry this build has no runtime arm for.
     UnsupportedPackage { registry: String },
+    /// The document's package is spoken to over http rather than stdio — a server the machine
+    /// installs and then DIALS. Nothing here can set that up: the entry shapes this build writes
+    /// are a program to run or an address to dial, and this is a program that becomes an address
+    /// only once it is running.
+    PackageTransport { transport: String },
     /// The form this agent would get needs a program that is not installed here.
     MissingRuntime { tool: &'static str },
     /// The document leaves a value for each machine to fill in, and topos has nowhere to get it.
@@ -420,7 +481,9 @@ impl Gap {
     /// The machine-branchable code the message channel carries.
     pub(crate) fn code(&self) -> &'static str {
         match self {
-            Self::UnsupportedPackage { .. } | Self::Unsupported { .. } => "MCP_KIND_UNSUPPORTED",
+            Self::UnsupportedPackage { .. }
+            | Self::PackageTransport { .. }
+            | Self::Unsupported { .. } => "MCP_KIND_UNSUPPORTED",
             Self::MissingRuntime { .. } => "MCP_RUNTIME_MISSING",
             Self::Unfillable { .. } => "MCP_VALUE_UNFILLABLE",
         }
@@ -432,6 +495,10 @@ impl Gap {
             Self::UnsupportedPackage { registry } => format!(
                 "not placed: this bundle is packaged as {registry}, which this version of topos \
                  cannot set up yet."
+            ),
+            Self::PackageTransport { transport } => format!(
+                "not placed: this bundle's package serves over {transport}, which this version of \
+                 topos cannot set up yet."
             ),
             Self::MissingRuntime { tool } => format!(
                 "not placed: needs {tool}, which is not on this machine. Install {tool}, then run \
@@ -457,6 +524,9 @@ impl Gap {
         match self {
             Self::UnsupportedPackage { registry } => {
                 format!("packaged as {registry}, which topos cannot set up yet")
+            }
+            Self::PackageTransport { transport } => {
+                format!("served over {transport}, which topos cannot set up yet")
             }
             Self::MissingRuntime { tool } => format!("needs {tool}, which is not on this machine"),
             Self::Unfillable { name } => format!("{name} is a value topos cannot fill in"),
@@ -505,25 +575,33 @@ pub(crate) fn select(
     }
     // 3. The first package this build can set up — npm, then pypi.
     if caps.stdio {
-        if let Some(package) = doc
-            .packages
-            .iter()
-            .find(|p| p.registry == "npm")
-            .or_else(|| doc.packages.iter().find(|p| p.registry == "pypi"))
-        {
+        if let Some(package) = preferred_package(&doc.packages) {
             return packaged(package, caps.env_ref, runtimes, machine);
         }
-        // A package this build has no arm for: the honest capability line, naming its registry.
+        // A package no arm of this build can set up: the honest capability line, naming why for
+        // the FIRST package the document offers — the one a person reading the document sees.
         if let Some(first) = doc.packages.first() {
-            return Err(Gap::UnsupportedPackage {
-                registry: first.registry.clone(),
-            });
+            return Err(unrenderable(first));
         }
     }
     // 4. Nothing this agent can take.
     Err(Gap::Unsupported {
         program: doc.remote.is_none(),
     })
+}
+
+/// Why THIS package could not be set up, in the order a person would ask it: a registry with no
+/// runtime arm is the first thing to say; a registry that HAS one, spoken to in a way no local
+/// entry can reach, is the second.
+fn unrenderable(package: &PackageRef) -> Gap {
+    if !RUNNABLE_REGISTRIES.contains(&package.registry.as_str()) {
+        return Gap::UnsupportedPackage {
+            registry: package.registry.clone(),
+        };
+    }
+    Gap::PackageTransport {
+        transport: package.transport.clone(),
+    }
 }
 
 /// The BRIDGE rendering: `npx -y mcp-remote@<pinned> <url>`, plus one `--header` per literal
@@ -585,6 +663,13 @@ fn packaged(
     runtimes: &dyn RuntimeProbe,
     machine: Machine,
 ) -> Result<McpTarget, Gap> {
+    // A package that is spoken to over http is one this build cannot reach at all: what it renders
+    // is a program to RUN, and an agent handed a `command` for an http server would speak stdio at
+    // a process that answers over a socket and hear nothing back. Refused here as well as in
+    // [`select`], so no caller can arrive at a stdio entry for one.
+    if !package.serves_over_stdio() {
+        return Err(unrenderable(package));
+    }
     let (runner, tool, spec) = match package.registry.as_str() {
         "npm" => (
             NPX,
@@ -871,6 +956,110 @@ mod tests {
             args,
             ["-y", "--node-option", "x", "@acme/server@2.1.0"],
             "runtime arguments precede the package, package arguments follow it"
+        );
+    }
+
+    /// A package the document says is spoken to over http is NOT rendered as a program: an agent
+    /// given a `command` for one would talk stdio at a process answering over a socket. It is
+    /// withheld, with the transport named — and a stdio sibling beside it is still taken.
+    #[test]
+    fn a_package_served_over_http_is_withheld_rather_than_run_as_a_program() {
+        let http = doc(
+            r#"{"name": "io.github.acme/server", "description": "d", "version": "1.0.0",
+                "packages": [{"registryType": "npm", "identifier": "@acme/server",
+                              "version": "2.1.0",
+                              "transport": {"type": "streamable-http",
+                                            "url": "https://127.0.0.1:9000/mcp"}}]}"#,
+        );
+        assert_eq!(
+            http.packages[0].transport, "streamable-http",
+            "the declaration survives the parse"
+        );
+        let gap = select(
+            &http,
+            caps(false, true),
+            Some(&BRIDGE),
+            &EVERYTHING,
+            Machine::default(),
+        )
+        .expect_err("nothing this build can set up");
+        assert_eq!(
+            gap,
+            Gap::PackageTransport {
+                transport: "streamable-http".to_owned()
+            }
+        );
+        assert_eq!(
+            gap.message("cursor"),
+            "not placed: this bundle's package serves over streamable-http, which this version of \
+             topos cannot set up yet."
+        );
+        assert_eq!(gap.code(), "MCP_KIND_UNSUPPORTED");
+
+        // …and an `sse` package answers the same way, naming its own word.
+        let sse = doc(
+            r#"{"name": "io.github.acme/server", "description": "d", "version": "1.0.0",
+                "packages": [{"registryType": "pypi", "identifier": "acme-server",
+                              "version": "3.0.1",
+                              "transport": {"type": "sse", "url": "https://127.0.0.1:9000/sse"}}]}"#,
+        );
+        assert_eq!(
+            select(
+                &sse,
+                caps(false, true),
+                None,
+                &EVERYTHING,
+                Machine::default()
+            ),
+            Err(Gap::PackageTransport {
+                transport: "sse".to_owned()
+            })
+        );
+
+        // A document offering both: the http one is passed over, the stdio one runs.
+        let mixed = doc(
+            r#"{"name": "io.github.acme/server", "description": "d", "version": "1.0.0",
+                "packages": [
+                  {"registryType": "npm", "identifier": "@acme/served",
+                   "version": "2.1.0",
+                   "transport": {"type": "sse", "url": "https://127.0.0.1:9000/sse"}},
+                  {"registryType": "pypi", "identifier": "acme-server", "version": "3.0.1",
+                   "transport": {"type": "stdio"}}]}"#,
+        );
+        let (command, args, _) = local(
+            &select(
+                &mixed,
+                caps(false, true),
+                None,
+                &EVERYTHING,
+                Machine::default(),
+            )
+            .expect("placed"),
+        );
+        assert_eq!(
+            (command.as_str(), args[0].as_str()),
+            (UVX, "acme-server==3.0.1")
+        );
+
+        // A registry with no arm AND an http transport says the registry first — the more
+        // fundamental fact about a package nothing here could run either way.
+        let neither = doc(
+            r#"{"name": "io.github.acme/server", "description": "d", "version": "1.0.0",
+                "packages": [{"registryType": "nuget", "identifier": "Acme.Server",
+                              "version": "1.0.0",
+                              "transport": {"type": "sse", "url": "https://127.0.0.1:9000/sse"}}]}"#,
+        );
+        assert_eq!(
+            select(
+                &neither,
+                caps(false, true),
+                None,
+                &EVERYTHING,
+                Machine::default()
+            ),
+            Err(Gap::UnsupportedPackage {
+                registry: "nuget".to_owned()
+            })
         );
     }
 
