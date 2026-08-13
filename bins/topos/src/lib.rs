@@ -40,6 +40,7 @@ pub(crate) mod logfile;
 pub(crate) mod manifest;
 pub(crate) mod materialize;
 pub(crate) mod mcp_engine;
+pub(crate) mod mcp_render;
 pub(crate) mod mcp_validate;
 pub mod message;
 pub(crate) mod op_wal;

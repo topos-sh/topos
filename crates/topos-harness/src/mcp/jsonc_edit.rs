@@ -113,10 +113,10 @@ pub fn apply(
     if let Err(reason) = validate_desired(desired) {
         return unprovable(reason);
     }
-    let desired_fps: Vec<String> = desired
-        .iter()
-        .map(|e| fingerprint_value(&entry_value(dialect, e)))
-        .collect();
+    let desired_fps: Vec<String> = match super::desired_fingerprints(dialect, desired) {
+        Ok(fps) => fps,
+        Err(reason) => return unprovable(reason),
+    };
 
     if effectively_absent(current) {
         if desired.is_empty() {
@@ -491,11 +491,11 @@ fn edit(
         let prop = obj
             .get(&entry.key)
             .ok_or_else(|| format!("entry `{}` vanished during edit", entry.key))?;
-        prop.set_value(to_input(&entry_value(dialect, entry)));
+        prop.set_value(to_input(&rendered(dialect, entry)?));
     }
     for &i in &rec.inserts {
         let entry = &desired[i];
-        obj.append(&entry.key, to_input(&entry_value(dialect, entry)));
+        obj.append(&entry.key, to_input(&rendered(dialect, entry)?));
     }
     if !rec.removes.is_empty() {
         prune_emptied_path(root, spec.path);
@@ -527,6 +527,14 @@ fn prune_emptied_path(root: &CstRootNode, path: &[&str]) {
     }
 }
 
+/// One entry's rendering, as the error type this editor propagates. The refusal can only fire on
+/// a dialect/target pair `apply` did not already refuse — it is the second belt, not the first.
+fn rendered(dialect: McpDialect, entry: &McpEntry) -> Result<Value, String> {
+    entry_value(dialect, entry).ok_or_else(|| {
+        "this agent's MCP config cannot describe a server topos runs on this machine".to_owned()
+    })
+}
+
 fn to_input(v: &Value) -> CstInputValue {
     match v {
         Value::Null => CstInputValue::Null,
@@ -554,7 +562,11 @@ fn fresh_doc(dialect: McpDialect, spec: &DialectSpec, desired: &[McpEntry]) -> V
     let mut entries = Map::new();
     let sorted: BTreeMap<&str, &McpEntry> = desired.iter().map(|e| (e.key.as_str(), e)).collect();
     for (key, entry) in sorted {
-        entries.insert(key.to_owned(), entry_value(dialect, entry));
+        // Unrenderable entries never reach here — `apply` refuses the whole edit before any
+        // synthesis (see `desired_fingerprints`).
+        if let Some(value) = entry_value(dialect, entry) {
+            entries.insert(key.to_owned(), value);
+        }
     }
     // Build outside-in along the path, then add the dialect's fresh-file siblings. Keys are
     // inserted alphabetically so serialization is deterministic under either map backend.
@@ -682,11 +694,11 @@ fn strip_path(mut view: Value, path: &[&str]) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testutil::{entry, entry_with_headers};
+    use super::super::testutil::{entry, entry_with_headers, local_entry};
     use super::*;
 
     fn fp(dialect: McpDialect, e: &McpEntry) -> String {
-        fingerprint_value(&entry_value(dialect, e))
+        fingerprint_value(&entry_value(dialect, e).expect("this dialect renders this target"))
     }
 
     /// The invariant [`apply`] asserts instead of wording: every dialect the ONE dispatcher sends
@@ -891,6 +903,96 @@ mod tests {
             &ledger1,
         );
         assert_eq!(write_of(&out), USER);
+    }
+
+    /// A PROGRAM-run entry lives the same life as an address one — placed, recognized as current,
+    /// updated when the pinned version moves, removed when the demand goes — in the two JSON
+    /// shapes that differ most: the `command`/`args`/`env` triple and OpenCode's single array.
+    #[test]
+    fn a_program_entry_lands_and_leaves_like_any_other() {
+        const USER: &str = "{\n  \"mcpServers\": {\n    \"mine\": {\n      \"url\": \"https://user\"\n    }\n  }\n}\n";
+        let v1 = local_entry(
+            "topos-x",
+            "npx",
+            &["-y", "@acme/server@1.2.3"],
+            &[("ACME_TOKEN", "${ACME_TOKEN}")],
+        );
+        let v2 = local_entry("topos-x", "npx", &["-y", "@acme/server@1.3.0"], &[]);
+
+        let out = apply(
+            McpDialect::CursorJson,
+            Some(USER.as_bytes()),
+            std::slice::from_ref(&v1),
+            &BTreeMap::new(),
+        );
+        let after_add = write_of(&out);
+        assert!(after_add.contains("\"command\": \"npx\""), "{after_add}");
+        assert!(after_add.contains("\"@acme/server@1.2.3\""), "{after_add}");
+        assert!(
+            after_add.contains("\"ACME_TOKEN\": \"${ACME_TOKEN}\""),
+            "the env-var REFERENCE is the value, never a credential: {after_add}"
+        );
+        assert!(
+            !after_add.contains("\"type\""),
+            "cursor: never a type key: {after_add}"
+        );
+        assert!(after_add.contains("\"mine\""), "user entry preserved");
+
+        // Idempotent, then an update in place, then removal back to the user's own bytes.
+        let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
+        let again = apply(
+            McpDialect::CursorJson,
+            Some(after_add.as_bytes()),
+            std::slice::from_ref(&v1),
+            &ledger,
+        );
+        assert_eq!(again.plan, EditPlan::Leave);
+        assert_eq!(
+            again.states,
+            vec![("topos-x".to_owned(), EntryState::Current)]
+        );
+        let updated = apply(
+            McpDialect::CursorJson,
+            Some(after_add.as_bytes()),
+            std::slice::from_ref(&v2),
+            &ledger,
+        );
+        assert_eq!(
+            updated.states,
+            vec![("topos-x".to_owned(), EntryState::Updated)]
+        );
+        let after_update = write_of(&updated);
+        assert!(after_update.contains("\"@acme/server@1.3.0\""));
+        assert!(
+            !after_update.contains("ACME_TOKEN"),
+            "the dropped env goes with the old version: {after_update}"
+        );
+        let ledger2: BTreeMap<String, String> = updated.fingerprints.iter().cloned().collect();
+        let removed = apply(
+            McpDialect::CursorJson,
+            Some(after_update.as_bytes()),
+            &[],
+            &ledger2,
+        );
+        assert_eq!(write_of(&removed), USER);
+
+        // OpenCode: ONE `command` array, `environment`, `enabled` — the array shape lands whole.
+        let out = apply(
+            McpDialect::OpencodeJson,
+            None,
+            std::slice::from_ref(&v1),
+            &BTreeMap::new(),
+        );
+        let fresh = write_of(&out);
+        assert!(
+            fresh.contains(
+                "\"command\": [\n        \"npx\",\n        \"-y\",\n        \"@acme/server@1.2.3\"\n      ]"
+            ),
+            "{fresh}"
+        );
+        assert!(fresh.contains("\"environment\": {"), "{fresh}");
+        assert!(fresh.contains("\"type\": \"local\""), "{fresh}");
+        assert!(!fresh.contains("\"args\""), "{fresh}");
     }
 
     #[test]

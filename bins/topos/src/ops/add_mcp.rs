@@ -352,6 +352,7 @@ fn converge_one(
     let (reach, filter_warnings) = row_narrowing(ctx, target, name);
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
+        runtimes: &crate::mcp_render::PathRuntimes,
         layout: &layout,
         home: roots.home.clone(),
         project_root,

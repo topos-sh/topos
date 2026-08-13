@@ -5251,6 +5251,7 @@ fn run_mcp_converge(
                 .collect();
         let io = crate::mcp_engine::ScopeIo {
             fs: env.ctx.fs,
+            runtimes: &crate::mcp_render::PathRuntimes,
             layout: &layout,
             home: roots.home.clone(),
             project_root: project_root.clone(),

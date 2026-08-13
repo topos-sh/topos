@@ -32,6 +32,35 @@ pub enum McpDialect {
     HermesYaml,
 }
 
+/// **How a harness spells a REFERENCE to an environment variable** inside an entry's env values —
+/// the one place a machine-local server names a value topos must never carry: the variable's NAME
+/// travels in the bundle, and each machine's own environment fills it in.
+///
+/// It is a registry-row column rather than a branch in the renderer, because it is a fact ABOUT a
+/// harness, and the table is where facts about harnesses live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnvRef {
+    /// `${VAR}` — the shell-shaped spelling (Claude Code, Cursor, Codex, OpenClaw).
+    #[default]
+    DollarBrace,
+    /// `{env:VAR}` — OpenCode's own.
+    BraceEnv,
+    /// `${env:VAR}` — the VS Code / Copilot family's.
+    DollarBraceEnv,
+}
+
+impl EnvRef {
+    /// A reference to the environment variable `name`, in this harness's spelling.
+    #[must_use]
+    pub fn render(self, name: &str) -> String {
+        match self {
+            Self::DollarBrace => format!("${{{name}}}"),
+            Self::BraceEnv => format!("{{env:{name}}}"),
+            Self::DollarBraceEnv => format!("${{env:{name}}}"),
+        }
+    }
+}
+
 /// Every MCP-capable harness row, in registry-table order — a filtered view over the one table.
 #[must_use]
 pub fn mcp_harnesses() -> Vec<&'static KnownHarness> {
@@ -193,6 +222,35 @@ mod tests {
         );
         assert_eq!(s.dialect, McpDialect::HermesYaml);
         assert_eq!(hermes.project, None);
+    }
+
+    /// The capability columns as the bundled table states them: every one of the six dials an
+    /// address itself, all but Hermes run a local program, and OpenCode is the one that spells an
+    /// environment reference its own way.
+    #[test]
+    fn the_capability_columns_say_what_each_agent_can_be_given() {
+        let get = |slug: &str| bundled_mcp_row(slug).unwrap().mcp().unwrap();
+        for slug in [
+            "claude-code",
+            "openclaw",
+            "codex",
+            "cursor",
+            "hermes-agent",
+            "opencode",
+        ] {
+            assert!(get(slug).remote, "{slug} dials an address itself");
+        }
+        for slug in ["claude-code", "openclaw", "codex", "cursor", "opencode"] {
+            assert!(get(slug).stdio, "{slug} runs a local program");
+        }
+        assert!(
+            !get("hermes-agent").stdio,
+            "hermes: no evidenced program grammar, so nothing is written in one"
+        );
+        assert_eq!(get("opencode").env_ref, EnvRef::BraceEnv);
+        for slug in ["claude-code", "openclaw", "codex", "cursor", "hermes-agent"] {
+            assert_eq!(get(slug).env_ref, EnvRef::DollarBrace, "{slug}");
+        }
     }
 
     #[test]

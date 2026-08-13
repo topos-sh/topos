@@ -299,6 +299,7 @@ fn retire_mcp_entries(
     .collect();
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
+        runtimes: &crate::mcp_render::PathRuntimes,
         layout,
         home: roots.home.clone(),
         project_root,

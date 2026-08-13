@@ -3,8 +3,11 @@
 //! non-managed table survive byte-for-byte; the edit touches only `[mcp_servers.<topos-*>]`
 //! tables.
 //!
-//! An entry table carries ONLY `url = "…"` and, when headers exist, `http_headers = { … }` —
-//! never any other key (a wrong key hard-fails Codex's whole config load). The fingerprint is
+//! An entry table carries ONLY what the shared rendering ([`entry_value`]) emits — an address is
+//! `url = "…"` plus, when headers exist, `http_headers = { … }`; a program is `command` / `args`
+//! and, when the entry has any, `env = { … }` — and never any other key (a wrong key hard-fails
+//! Codex's whole config load). The bytes are BUILT from that rendering rather than beside it, so
+//! what this driver writes and what it fingerprints cannot drift apart. The fingerprint is
 //! computed over the table converted to a sorted structural value, so a whitespace or key-order
 //! reflow of the file never reads as drift.
 //!
@@ -39,10 +42,11 @@ pub fn apply(
     if let Err(reason) = validate_desired(desired) {
         return unprovable(reason);
     }
-    let desired_fps: Vec<String> = desired
-        .iter()
-        .map(|e| fingerprint_value(&entry_value(McpDialect::CodexToml, e)))
-        .collect();
+    let desired_fps: Vec<String> = match super::desired_fingerprints(McpDialect::CodexToml, desired)
+    {
+        Ok(fps) => fps,
+        Err(reason) => return unprovable(reason),
+    };
 
     if effectively_absent(current) {
         if desired.is_empty() {
@@ -97,7 +101,10 @@ pub fn apply(
         let old = servers.get(&entry.key).and_then(Item::as_table);
         let position = old.and_then(Table::position);
         let decor = old.map(|t| t.decor().clone());
-        let mut table = entry_table(entry);
+        let mut table = match entry_table(entry) {
+            Ok(table) => table,
+            Err(reason) => return unprovable(reason),
+        };
         table.set_position(position);
         if let Some(decor) = decor {
             *table.decor_mut() = decor;
@@ -298,29 +305,52 @@ fn upsert_entries(
         .ok_or_else(|| "mcp_servers is not a standard TOML table".to_owned())?;
     for &i in indices {
         let entry = &desired[i];
-        servers.insert(&entry.key, Item::Table(entry_table(entry)));
+        servers.insert(&entry.key, Item::Table(entry_table(entry)?));
     }
     Ok(())
 }
 
-/// The canonical entry table: ONLY `url` and, when headers exist, an inline `http_headers`
-/// (name-sorted) — never any other key.
-fn entry_table(entry: &McpEntry) -> Table {
+/// The canonical entry table — the SHARED rendering ([`entry_value`]) carried into TOML, so the
+/// bytes this driver writes and the fingerprint it compares them against cannot drift apart: an
+/// address is `url` plus an inline `http_headers`, a program is `command` / `args` / `env`, and
+/// never any other key (a wrong key hard-fails Codex's whole config load).
+fn entry_table(entry: &McpEntry) -> Result<Table, String> {
+    let rendered = entry_value(McpDialect::CodexToml, entry).ok_or_else(|| {
+        "this agent's MCP config cannot describe a server topos runs on this machine".to_owned()
+    })?;
+    let Some(fields) = rendered.as_object() else {
+        return Err("the entry rendering is not a table".to_owned());
+    };
     let mut table = Table::new();
-    table.insert("url", toml_edit::value(entry.url.as_str()));
-    if !entry.headers.is_empty() {
-        let sorted: BTreeMap<&str, &str> = entry
-            .headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let mut headers = InlineTable::new();
-        for (k, v) in sorted {
-            headers.insert(k, v.into());
-        }
-        table.insert("http_headers", toml_edit::value(headers));
+    for (key, value) in fields {
+        table.insert(key, toml_edit::value(toml_scalar(value)?));
     }
-    table
+    Ok(table)
+}
+
+/// One rendered field as a TOML value: strings, arrays of them, and one level of inline table
+/// (headers, env) — the whole vocabulary [`entry_value`] emits. Anything else is refused rather
+/// than approximated.
+fn toml_scalar(value: &Value) -> Result<toml_edit::Value, String> {
+    Ok(match value {
+        Value::String(s) => s.as_str().into(),
+        Value::Bool(b) => (*b).into(),
+        Value::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                array.push(toml_scalar(item)?);
+            }
+            array.into()
+        }
+        Value::Object(map) => {
+            let mut inline = InlineTable::new();
+            for (key, child) in map {
+                inline.insert(key, toml_scalar(child)?);
+            }
+            inline.into()
+        }
+        other => return Err(format!("{other} has no TOML spelling in an MCP entry")),
+    })
 }
 
 /// A TOML item as a structural [`Value`] for fingerprinting. Total: every TOML shape converts
@@ -435,11 +465,13 @@ fn verify(
 
 #[cfg(test)]
 mod tests {
-    use super::super::testutil::{entry, entry_with_headers};
+    use super::super::testutil::{entry, entry_with_headers, local_entry};
     use super::*;
 
     fn fp(e: &McpEntry) -> String {
-        fingerprint_value(&entry_value(McpDialect::CodexToml, e))
+        fingerprint_value(
+            &entry_value(McpDialect::CodexToml, e).expect("this dialect renders this target"),
+        )
     }
 
     fn write_of(out: &ApplyOutcome) -> String {
@@ -449,6 +481,10 @@ mod tests {
         }
     }
 
+    /// Golden bytes for a fresh file — one address entry and one program entry. Fields land in
+    /// the shared rendering's own (sorted) order, which is what makes the bytes and the
+    /// fingerprint one decision; TOML key order carries no meaning, and an entry already placed
+    /// in the older order still fingerprints identical, so nothing is rewritten for it.
     #[test]
     fn fresh_file_creation_golden_bytes() {
         let out = apply(
@@ -456,13 +492,21 @@ mod tests {
             &[
                 entry("topos-acme-linear", "https://mcp.example/linear"),
                 entry_with_headers("topos-h", "https://h.example", &[("X-T", "v")]),
+                local_entry(
+                    "topos-p",
+                    "uvx",
+                    &["acme-server==1.2.3"],
+                    &[("ACME_REGION", "eu")],
+                ),
             ],
             &BTreeMap::new(),
         );
         assert!(out.created_file);
         assert_eq!(
             write_of(&out),
-            "[mcp_servers.topos-acme-linear]\nurl = \"https://mcp.example/linear\"\n\n[mcp_servers.topos-h]\nurl = \"https://h.example\"\nhttp_headers = { X-T = \"v\" }\n"
+            "[mcp_servers.topos-acme-linear]\nurl = \"https://mcp.example/linear\"\n\n\
+             [mcp_servers.topos-h]\nhttp_headers = { X-T = \"v\" }\nurl = \"https://h.example\"\n\n\
+             [mcp_servers.topos-p]\nargs = [\"acme-server==1.2.3\"]\ncommand = \"uvx\"\nenv = { ACME_REGION = \"eu\" }\n"
         );
     }
 

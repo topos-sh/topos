@@ -44,15 +44,35 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::coverage::SharedDirSupport;
-use crate::mcp::descriptor::McpDialect;
+use crate::mcp::descriptor::{EnvRef, McpDialect};
 
 pub mod format;
 
 pub use format::{
     MAX_REGISTRY_BYTES, Origin, ParsedRegistry, REGISTRY_ENGINE_VERSION, RegistryError,
-    RegistryVersion, SCHEMA_VERSION, bundled_harnesses, bundled_version, cache_path, override_path,
-    parse_registry,
+    RegistryVersion, SCHEMA_VERSION, bundled_harnesses, bundled_version, cache_path, mcp_bridge,
+    override_path, parse_registry,
 };
+
+/// **The remote-to-stdio bridge** — the program topos runs to give a harness that cannot dial an
+/// address one anyway. It is registry DATA so the pin can be corrected without a code change, and
+/// it is read from the BUNDLED table alone ([`mcp_bridge`]): a downloaded table may say which
+/// harnesses need bridging, and may never change which program gets executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpBridge {
+    /// The npm package that does the bridging.
+    pub package: &'static str,
+    /// The EXACT version it is pinned to — every machine in a workspace runs the same bytes.
+    pub version: &'static str,
+}
+
+impl McpBridge {
+    /// The `npx` argument that names exactly this bridge: `<package>@<version>`.
+    #[must_use]
+    pub fn spec(&self) -> String {
+        format!("{}@{}", self.package, self.version)
+    }
+}
 
 /// The on-disk scope a skill was discovered in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +122,16 @@ pub struct McpSurfaces {
     /// entry can already stand for the same server under a name topos would not recognize. Read
     /// only to answer "is this server already here"; never edited, never owned.
     pub conflict_paths: &'static [McpConflictPath],
+    /// Whether the harness dials an https MCP endpoint ITSELF. `false` means a shared server's
+    /// address has to reach it through the bridge ([`mcp_bridge`]) — the harness runs a local
+    /// program that talks to the endpoint for it.
+    pub remote: bool,
+    /// Whether the harness runs a LOCAL program as an MCP server (stdio). `false` means a bundle
+    /// that offers only a package has nothing this harness can use, and a remote one can never be
+    /// bridged to it either.
+    pub stdio: bool,
+    /// How this harness spells a reference to an environment variable in an entry's env values.
+    pub env_ref: EnvRef,
 }
 
 /// A user-scope MCP config surface: where the file lives + the dialect it speaks.
@@ -402,6 +432,42 @@ pub const fn home_rooted_mcp_row(
         project,
         reload_note,
         conflict_paths: &[],
+        remote: true,
+        stdio: true,
+        env_ref: EnvRef::DollarBrace,
+    })
+}
+
+/// [`home_rooted_mcp_row`] with the CAPABILITY columns stated — the TEST fixture for a harness
+/// that cannot dial an address (so a shared server reaches it bridged), cannot run a program (so
+/// a packaged one does not reach it at all), or spells env references its own way.
+///
+/// It takes one parameter per COLUMN, because that is what a row is; a struct in front of it
+/// would be the row a second time.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub const fn home_rooted_mcp_row_with_caps(
+    slug: &'static str,
+    display_name: &'static str,
+    user_suffix: &'static str,
+    user_dialect: McpDialect,
+    project: Option<(&'static str, McpDialect)>,
+    reload_note: &'static str,
+    remote: bool,
+    stdio: bool,
+    env_ref: EnvRef,
+) -> KnownHarness {
+    kh(slug, display_name, &[], "", &[]).with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: home(user_suffix),
+            dialect: user_dialect,
+        }),
+        project,
+        reload_note,
+        conflict_paths: &[],
+        remote,
+        stdio,
+        env_ref,
     })
 }
 
@@ -440,6 +506,9 @@ pub const fn home_rooted_mcp_row_with_conflicts(
         project,
         reload_note,
         conflict_paths,
+        remote: true,
+        stdio: true,
+        env_ref: EnvRef::DollarBrace,
     })
 }
 

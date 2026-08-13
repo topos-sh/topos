@@ -13,9 +13,10 @@
 //!
 //! Rendered files:
 //! - `.claude-plugin/plugin.json` — the constant plugin manifest.
-//! - `.mcp.json` — `{"mcpServers": {…}}`, entries in the Claude entry shape
-//!   (`{"type": "http", "url": …, "headers": …}`), keys sorted, 2-space indent, trailing
-//!   newline — byte-identical to what the JSON driver's fresh-file synthesis writes.
+//! - `.mcp.json` — `{"mcpServers": {…}}`, entries in the Claude entry shape (an address:
+//!   `{"type": "http", "url": …, "headers": …}`; a program: `{"type": "stdio", "command": …,
+//!   "args": […], "env": {…}}`), keys sorted, 2-space indent, trailing newline — byte-identical
+//!   to what the JSON driver's fresh-file synthesis writes.
 
 use std::collections::BTreeMap;
 
@@ -66,10 +67,12 @@ fn mcp_bytes(entries: &[McpEntry]) -> Vec<u8> {
     let sorted: BTreeMap<&str, &McpEntry> = entries.iter().map(|e| (e.key.as_str(), e)).collect();
     let mut servers = Map::new();
     for (key, entry) in sorted {
-        servers.insert(
-            key.to_owned(),
-            entry_value(McpDialect::ClaudePluginDir, entry),
-        );
+        // TOTAL for this dialect: the plugin `.mcp.json` expresses both target shapes
+        // ([`super::dialect_expresses`]), so nothing is ever skipped here — and an entry that
+        // somehow could not be rendered is one the driver has already refused whole.
+        if let Some(value) = entry_value(McpDialect::ClaudePluginDir, entry) {
+            servers.insert(key.to_owned(), value);
+        }
     }
     let mut root = Map::new();
     root.insert("mcpServers".to_owned(), Value::Object(servers));

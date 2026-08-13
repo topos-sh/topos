@@ -424,13 +424,19 @@ pub(super) static SYNTHETIC: &[KnownHarness] = &[
         Some((".cursor/mcp.json", McpDialect::CursorJson)),
         "restart cursor",
     ),
-    registry::home_rooted_mcp_row(
+    // The capability columns mirror the bundled table's, because a test that answered for
+    // different ones would be testing a machine nobody has: OpenCode spells an environment
+    // reference its own way…
+    registry::home_rooted_mcp_row_with_caps(
         "opencode",
         "OpenCode",
         ".opencode/opencode.json",
         McpDialect::OpencodeJson,
         Some((".opencode/opencode.json", McpDialect::OpencodeJson)),
         "restart opencode",
+        true,
+        true,
+        topos_harness::mcp::descriptor::EnvRef::BraceEnv,
     ),
     registry::home_rooted_mcp_row(
         "openclaw",
@@ -440,13 +446,17 @@ pub(super) static SYNTHETIC: &[KnownHarness] = &[
         None,
         "picked up automatically",
     ),
-    registry::home_rooted_mcp_row(
+    // …and Hermes has no evidenced grammar for a program topos would run.
+    registry::home_rooted_mcp_row_with_caps(
         "hermes-agent",
         "Hermes Agent",
         ".hermes/config.yaml",
         McpDialect::HermesYaml,
         None,
         "/reload-mcp",
+        true,
+        false,
+        topos_harness::mcp::descriptor::EnvRef::DollarBrace,
     ),
 ];
 
@@ -460,9 +470,25 @@ pub(super) fn all_slugs() -> BTreeSet<String> {
     synthetic().iter().map(|h| h.slug.to_owned()).collect()
 }
 
+/// The runtime probe these tests stand on — a STATED set, never this machine's `PATH`. A
+/// placement's outcome has to be about the document and the config, not about whether whoever
+/// runs the suite happens to have node installed; the tests that are ABOUT a missing runtime say
+/// so with [`NO_RUNTIME`].
+pub(super) struct Runtimes(pub(super) &'static [&'static str]);
+
+impl crate::mcp_render::RuntimeProbe for Runtimes {
+    fn on_path(&self, program: &str) -> bool {
+        self.0.contains(&program)
+    }
+}
+
+pub(super) const EVERY_RUNTIME: Runtimes = Runtimes(&["npx", "uvx"]);
+pub(super) const NO_RUNTIME: Runtimes = Runtimes(&[]);
+
 pub(super) fn person_io<'a>(fs: &'a RealFs, layout: &'a Layout, home: &Path) -> ScopeIo<'a> {
     ScopeIo {
         fs,
+        runtimes: &EVERY_RUNTIME,
         layout,
         home: home.to_path_buf(),
         project_root: None,
