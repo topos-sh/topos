@@ -5,8 +5,8 @@
 //! [`remove`](mod@remove), [`list`], [`diff`](mod@diff), [`log`](mod@log),
 //! [`publish`](mod@publish), [`review`], [`revert`](mod@revert), [`protect`](mod@protect),
 //! [`invite`](mod@invite), [`self_update`](mod@self_update), [`auth`],
-//! [`uninstall`](mod@uninstall) — plus `update`, whose manifest reconcile is [`reconcile`] and
-//! whose per-skill arm is [`pull`](mod@pull).
+//! [`uninstall`](mod@uninstall), [`verify`](mod@verify) — plus `update`, whose manifest reconcile
+//! is [`reconcile`] and whose per-skill arm is [`pull`](mod@pull).
 //!
 //! **Shared machinery** (no verb of its own — the verbs above drive it):
 //! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` sync machine over the kernel's
@@ -54,6 +54,7 @@ mod self_update;
 mod status;
 pub(crate) mod sync_engine;
 mod uninstall;
+mod verify;
 mod version_check;
 
 pub(crate) use add::{
@@ -138,6 +139,12 @@ pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome
 pub(crate) use status::status_snapshot;
 pub(crate) use uninstall::{
     UninstallApplied, UninstallDescribe, UninstallFailure, UninstallOutcome, uninstall,
+};
+pub(crate) use verify::verify;
+#[cfg(test)]
+pub(crate) use verify::{
+    ProbeVerdict, probe_local, probe_remote, remote_agent, remote_agent_with,
+    spawn_env as verify_spawn_env,
 };
 pub(crate) use version_check::{version_check_env_allows, version_nag};
 

@@ -8,6 +8,8 @@ One rule covers all of them: **a command that reaches other people, discards loc
 
 Exit codes: `0` — success. `1` — the operation was refused or failed (with `--json`, the `error` object says which and how to fix it). `2` — the command line itself was invalid.
 
+`topos verify` reports what it found through its exit code as well, so a script can branch without parsing anything: `0` — the server is responding. `3` — the server asks for a sign-in, which is healthy (your agent app signs in on first use). `4` — the server is not reachable from this machine. `5` — something answered, but not as an MCP server. It still uses `1` for a refusal (no such bundle, the name is ambiguous, the bundle is a skill) and `2` for a bad command line.
+
 ## The `--json` envelope
 
 Every `--json` run prints one object on stdout: `schema_version` (1), `command`, `ok`, a per-command `data` payload, `warnings`, `messages`, `next_actions`, and — on `ok: false` — an `error` (`code`, `outcome`, `retryable`, plus its own `next_actions`). Each `next_actions` entry is a ready-to-run step: `argv` is a complete command; `needs` lists any `<placeholder>` tokens you must substitute first; `mutates`, `needs_network`, and `risk_note` are safety metadata (absent means unknown). Treat `code` as an open vocabulary — run an unfamiliar action by its `argv` rather than rejecting it.
@@ -105,10 +107,20 @@ An MCP-server bundle arrives as an entry in the agent's own MCP config rather th
 |---|---|---|
 | `claude-code` | `~/.claude/skills/topos-mcp/.mcp.json` | `.mcp.json` |
 | `openclaw` | `~/.openclaw/openclaw.json` | — |
+| `cline` | `~/.cline/data/settings/cline_mcp_settings.json` | — |
 | `codex` | `~/.codex/config.toml` | `.codex/config.toml` |
 | `cursor` | `~/.cursor/mcp.json` | `.cursor/mcp.json` |
+| `gemini-cli` | `~/.gemini/settings.json` | `.gemini/settings.json` |
+| `github-copilot` | `~/.copilot/mcp-config.json` | — |
+| `goose` | `~/.config/goose/config.yaml` | — |
 | `hermes-agent` | `~/.hermes/config.yaml` | — |
 | `opencode` | `~/.config/opencode/opencode.json` | `opencode.json` |
+| `roo` | — | `.roo/mcp.json` |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | — |
+| `zed` | `~/.config/zed/settings.json` | — |
+| `vscode` | — | `.vscode/mcp.json` |
+| `lm-studio` | `~/.lmstudio/mcp.json` | — |
+| `claude-desktop` | — | — |
 
 ## Global options
 
@@ -298,6 +310,20 @@ topos diff [OPTIONS] <SKILL> [REF]
 | `-a, --agent <SLUG>` | Read this agent's copy of the skill (a slug like `codex`) |
 | `--dest <FOLDER>` | Read the copy in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
 | `--max-bytes <BYTES>` | Cap the diff at this many bytes, cut at file boundaries (`0` = no cap). Default: unlimited on a terminal, 64 KiB under `--json` |
+
+
+### `topos verify`
+
+Check that an MCP server is actually working, right now, from this machine. Topos dials the address the bundle names (or runs its package) and asks the server for its tools, then prints what happened. Nothing is stored and nothing is installed — it is a live check, not a delivery state. A server that asks for a sign-in is healthy: topos holds no credential, and your agent app signs in on first use. Exit codes: `0` responding, `3` sign-in required, `4` not reachable, `5` reachable but not answering as an MCP server.
+
+```
+topos verify [OPTIONS] <NAME>
+```
+
+| Argument / flag | What it does |
+|---|---|
+| `<NAME>` | The MCP server bundle's name |
+| `-g, --global` | Check the server your machine-wide scope holds, even when run inside a project |
 
 
 ### `topos log`

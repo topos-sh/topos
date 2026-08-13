@@ -3,7 +3,7 @@
 //! the built-in `topos` skill's placement and custody, the identity claim (`add --as`) and its
 //! inverse, the crash/durability gate, the manifest reconcile over fakes, the `--kind mcp` doors,
 //! the MCP placement engine's ownership custody, `publish`'s auto-add pre-step, the pull/apply sync
-//! engine, and the verb surface.
+//! engine, the verb surface, and `verify`'s live check against stub servers.
 
 mod builtin_skill;
 mod claim;
@@ -14,3 +14,4 @@ mod mcp_engine;
 mod publish_autoadd;
 mod sync;
 mod verbs;
+mod verify;
