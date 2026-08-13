@@ -1408,6 +1408,34 @@ mod tests {
         assert!(parsed.warnings().is_empty(), "{:?}", parsed.warnings());
     }
 
+    /// **The bundled table demands exactly the engine this build provides** — the boundary that
+    /// makes a new COLUMN safe to ship.
+    ///
+    /// The served copy IS these bytes, so its `min_engine_version` is what every older client is
+    /// measured against: a build whose engine is lower refuses the download whole and keeps its own
+    /// bundled table, which is the honest outcome — it cannot act on the column and would otherwise
+    /// read a row's silence as a default it never meant. Adding a column without moving BOTH
+    /// numbers is exactly the mistake this pins.
+    #[test]
+    fn the_bundled_table_demands_the_engine_this_build_provides() {
+        let header: toml_edit::DocumentMut = BUNDLED.parse().expect("the bundled table parses");
+        assert_eq!(
+            header
+                .get("min_engine_version")
+                .and_then(Item::as_integer)
+                .expect("the bundled table states a min_engine_version"),
+            i64::from(REGISTRY_ENGINE_VERSION),
+            "a column older clients cannot act on rides a bump of BOTH numbers"
+        );
+        assert_eq!(
+            header
+                .get("schema_version")
+                .and_then(Item::as_integer)
+                .expect("the bundled table states a schema_version"),
+            i64::from(SCHEMA_VERSION)
+        );
+    }
+
     /// The MCP capability columns: stated only where a row is unusual, defaulting to the six
     /// original rows' behaviour, and refusing a word this build cannot act on rather than
     /// guessing at one.
