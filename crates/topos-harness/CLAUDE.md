@@ -85,10 +85,19 @@ never learns which machinery served which harness.
   (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed): the claim is a registry-row
   column, over an automatic derivation for a row carrying none.
 - **`mcp`** — pure MCP-server config placement for six harnesses; bytes in → an `EditPlan` out,
-  the CLI owns ALL file I/O. The surfaces (user/project + dialect + reload copy + the read-only
-  `conflict_paths` a harness ALSO reads servers from) are a registry-row
-  column; `descriptor` holds the dialect vocabulary + the filtered views, over three editing
-  drivers: `jsonc_edit` (Cursor / Claude-project /
+  the CLI owns ALL file I/O. An entry names one of TWO targets (`McpTarget`): an ADDRESS the
+  harness dials, or a PROGRAM it runs on this machine (command + argv + env). Both are ordinary
+  managed entries — same key contract, same fingerprint ledger, same drift rules — and the CALLER
+  decides which one a given harness gets, rendering every machine-local spelling before it builds
+  the entry: the `cmd /c` wrapper Windows needs for Node's shim commands (`windows_wrap`, skipped
+  for a WSL UNC destination), the bridge argv, and an env-var reference in the harness's own
+  syntax (`EnvRef`). `entry_value` answers `None` for the one pair no vendor evidence covers — a
+  program in Hermes's YAML — and every driver turns that into a refusal, never a guess. The
+  surfaces (user/project + dialect + reload copy + the read-only `conflict_paths` a harness ALSO
+  reads servers from) and the CAPABILITY columns (does it dial an address, does it run a program,
+  which env-reference syntax) are registry-row
+  columns; `descriptor` holds the dialect + env-reference vocabularies and the filtered views,
+  over three editing drivers: `jsonc_edit` (Cursor / Claude-project /
   OpenCode strict JSON + OpenClaw JSONC — and the Claude Code plugin dir's `.mcp.json` — through
   a lossless CST, comments and formatting preserved), `toml_patch` (Codex `[mcp_servers.*]` via
   `toml_edit`) and `yaml_splice` (Hermes one-line sentinel-marked flow entries, the `hermes.rs`
@@ -104,7 +113,10 @@ never learns which machinery served which harness.
   driver's discretion. Beside ownership sits the question ownership cannot answer — WHAT ELSE IS
   ALREADY THERE: `observe_entries` reads every entry a surface holds, whoever wrote it, as a name
   plus the server it points at (`canonical_address`: scheme+host lowercased, default port dropped,
-  bare root path equal to none, query and fragment significant), optionally at a `.`-separated
+  bare root path equal to none, query and fragment significant — and `local_address` for an entry
+  that RUNS something: its command line after the Windows wrapper is stripped, or, when that
+  command line is only a bridge, the URL it bridges, so bridging a server and dialing it are one
+  address), optionally at a `.`-separated
   `selector` whose `*` spans a level (`projects.*.mcpServers`). An entry whose shape is not read
   keeps its name and claims no address; an unreadable surface answers `None`, which is never an
   empty answer.
@@ -118,7 +130,10 @@ never learns which machinery served which harness.
   leaking the rows so every `&'static` signature is unchanged; each failure downgrades exactly
   one level with one stderr warning. The fences are all client-side and all red-tested:
   `schema_version` equality, a `min_engine_version` ceiling (`REGISTRY_ENGINE_VERSION` — a new
-  COLUMN ships behind a bump, so a build that cannot act on it keeps its own bundled table),
+  COLUMN ships behind a bump, so a build that cannot act on it keeps its own bundled table), the
+  BRIDGE fence (`[mcp_bridge]` names the program topos runs for a harness that dials nothing; a
+  fenced file may restate the bundled pin and may never change it, and `mcp_bridge()` reads the
+  bundled table regardless — a downloaded table decides WHO needs bridging, never WHAT runs),
   strictly-greater dotted-numeric versions with equal-version-different-bytes an ERROR, the
   known-slugs-only rule (a downloaded row naming a slug the BUNDLED table does not define is
   skipped — remote data never adds a write target, and a new harness still needs a release; the

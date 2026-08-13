@@ -162,6 +162,19 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   on SILENCE, so `--kind skill` adopts a `server.json`-rooted folder as a skill. `publish` reads
   the kind through the one classifier (`bundle_kind`), re-runs the gate BEFORE the op WAL, and
   threads it onto the wire.
+- `mcp_render` — WHAT ONE `server.json` BECOMES on this machine, for one agent. The document is
+  read once (`ServerDoc`: the address it offers, the packages it pins, the auth word — the header
+  re-check of the publish gate lives here, fail-closed), then `select` crosses it with the
+  harness's capability columns and this machine's runtimes, in ONE fixed order: the address where
+  the agent dials one · the address through the table-pinned bridge (`npx -y mcp-remote@<v> <url>`,
+  headers as `Name:${VAR}` with the value in the environment — the spelling that survives Windows
+  and Cursor) where it does not · else the first package this build can set up, npm before pypi
+  (`npx -y <id>@<v>` / `uvx <id>==<v>`, always the pinned version). A missing runtime NEVER falls
+  through to another form — a shared bundle must not become different bytes per laptop — it
+  becomes a plain-words `Gap` the next sweep re-decides. Env slots the document leaves empty
+  render as references in the harness's own syntax, so a name travels and a value never does. The
+  runtime probe is a seam (`RuntimeProbe` on `ScopeIo`), because "needs node" has to be a tested
+  outcome and not a property of the machine running the suite.
 - `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half: a store-only sync
   (lock custody, no dir placement) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, and the converge itself
@@ -173,7 +186,11 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   name earns the possible-leftover wording, because a prefix is a spelling and not a provenance).
   The verdict is re-decided every run from the files, so it clears itself; a key topos already
   holds on that surface is never blocked, since dropping it from the desired set would uninstall
-  the placement that stands. Reach resolves at
+  the placement that stands. WHAT each engaged agent is given is `mcp_render::select`'s answer,
+  taken per agent inside the same loop; a capability it cannot answer for reads `not placed` with
+  the reason, and a bundle no agent could be given anything for joins the failed count, because a
+  summary saying "up to date" over a machine holding nothing is the one thing a receipt may never
+  say. Reach resolves at
   PLANNING and nowhere else: a row's `dest` config-file entries map to the harnesses that claim
   them (no dest = every MCP-capable agent), a targeted verb plans only the harnesses whose
   recorded rows prove the bundle already stands there (`recorded_reach`), and the plan carries the

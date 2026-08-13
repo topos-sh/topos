@@ -1,7 +1,9 @@
 # MCP servers (the other kind of bundle)
 
-A bundle whose one file is a `server.json` is a REMOTE MCP server — a tool endpoint, not
-instructions. There are exactly TWO doors:
+A bundle whose one file is a `server.json` is an MCP server — tools, not instructions. The document
+names an ADDRESS every machine dials, a PACKAGE every machine runs (npm or PyPI, at one pinned
+version), or both; it never carries a credential, and the sign-in stays the agent's own. There are
+exactly TWO doors:
 
 ```
 topos add weather                        # a server the workspace publishes — no flag needed
@@ -19,6 +21,14 @@ SILENT and per-agent: no
 skill folder is written — each detected agent gets ONE entry in its own MCP config under an
 immutable `topos-…` key, so never hand-edit those entries or rename them (a rename strands the
 agent's OAuth sign-in). An entry a human edited reads `drifted` and is left byte-identical forever.
+
+WHAT each agent gets is decided per agent: the address where the agent dials one, the address
+through `npx -y mcp-remote@<pinned>` where it cannot, else the pinned package (npm before PyPI). An
+empty environment slot is written as a REFERENCE to a variable of that name (`${VAR}`, or
+`{env:VAR}` for OpenCode) — the name travels, the value never does. What this machine cannot set up
+says so and retries on the next sweep: `not placed: needs node, which is not on this machine.` ·
+`not placed: this bundle is packaged as <type>, which this version of topos cannot set up yet.`
+Relay those lines — installing the runtime is the whole fix.
 
 The gate is the same client-side and server-side, and refuses BEFORE anything is written:
 `MCP_PACKAGE_UNPINNED` (a package without one exact version), `MCP_NO_STREAMABLE_REMOTE`
