@@ -20,9 +20,10 @@ everything else on this page:
 
 - **Something to run.** The document offers a `streamable-http` endpoint over `https`, or one or
   more packages, or both. A document offering neither has nothing to hand an agent and refuses.
-- **Pinned.** Every package names exactly one immutable thing: an exact version for npm and PyPI, a
-  tag or a `sha256` digest for a container image, a file hash for an `.mcpb` download. A version
-  range or `latest` refuses — "the same bytes everywhere" is the promise a range breaks.
+- **Pinned.** Every package names exactly one immutable thing: an exact version for npm and PyPI, an
+  `@sha256:` digest for a container image, a file hash for an `.mcpb` download. A version range, a
+  dist-tag, `latest`, or an image tag refuses — a tag is a label the publisher can move to other
+  bytes, and "the same bytes everywhere" is the promise that breaks.
 - **Secretless.** The document carries no credential and no slot for one *in what travels*. Where a
   server needs a sign-in, that sign-in is your agent's own OAuth dance on your own machine — Topos
   never sees it, never stores it, and never moves it between machines. A package may *name* the
@@ -243,7 +244,7 @@ Every refusal is typed, and each one refuses a specific temptation rather than f
 
 | Code | Refused | Why |
 |---|---|---|
-| `MCP_PACKAGE_UNPINNED` | a version range or `latest`; an image with no tag or digest; an `.mcpb` with no `fileSha256` | the package names a moving target, so two machines installing the same bundle would not get the same bytes |
+| `MCP_PACKAGE_UNPINNED` | a version range or `latest`; an image with no `@sha256:` digest; an `.mcpb` with no `fileSha256` | the package names a moving target, so two machines installing the same bundle would not get the same bytes |
 | `MCP_NO_STREAMABLE_REMOTE` | no `streamable-http` remote (`sse`-only, or none) **and** no packages | there is nothing here for an agent to run |
 | `MCP_INSECURE_URL` | a plain `http://` endpoint | every call and every reply would go over the wire in the clear |
 | `MCP_URL_TEMPLATE` | a `{placeholder}` in the URL | a template is not an address — someone has to fill it in per machine |

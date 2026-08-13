@@ -60,6 +60,11 @@
     "note": "An OCI reference carries its version in the identifier, so a `latest` tag there is the same unpinned promise."
   },
   {
+    "file": "invalid/package-oci-tag.json",
+    "verdict": "MCP_PACKAGE_UNPINNED",
+    "note": "A tag that reads like a version is still a movable label: the publisher can point 3.0.0 at other bytes tomorrow, and two machines a week apart would run different code."
+  },
+  {
     "file": "invalid/package-mcpb-no-hash.json",
     "verdict": "MCP_PACKAGE_UNPINNED",
     "note": "An MCPB download with no fileSha256 is a URL whose contents can change under it — nothing to check the arriving bytes against."
