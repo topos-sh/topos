@@ -167,7 +167,7 @@ describe("the report door shape-checks the block — before the credential resol
     ["a non-array", { "claude-code": "current" }, "malformed report entry: harnesses"],
     [
       "more entries than any installation runs",
-      Array.from({ length: 13 }, (_, n) => ({ slug: `h-${n}`, state: "current" })),
+      Array.from({ length: 65 }, (_, n) => ({ slug: `h-${n}`, state: "current" })),
       "malformed report entry: harnesses",
     ],
     ["a non-object entry", ["claude-code"], "malformed report entry: harnesses"],
