@@ -161,6 +161,48 @@ re-key anything: the entry keeps the name it was born with on the machine that a
 teammate's machine — meeting the bundle for the first time through the workspace — mints
 `topos-<workspace>-<name>`.
 
+### When the bundle is a package
+
+A document that offers packages instead of (or as well as) an address lands as the **program the
+agent runs**, in that agent's own spelling — `npx -y @acme/weather-mcp@1.4.0` for npm,
+`uvx acme-weather==1.4.0` for PyPI, always at the version the document pins:
+
+```json title="~/.cursor/mcp.json — a package bundle"
+{
+  "mcpServers": {
+    "topos-acme-weather": {
+      "args": ["-y", "@acme/weather-mcp@1.4.0"],
+      "command": "npx",
+      "env": { "ACME_TOKEN": "${ACME_TOKEN}" }
+    }
+  }
+}
+```
+
+An environment slot the document leaves empty is written as a **reference** to a variable of that
+name, in the syntax that agent reads (`${VAR}` for most, `{env:VAR}` for OpenCode). The name
+travels in the bundle; the value stays on your machine, in your own environment, and Topos never
+sees it.
+
+Which of the two forms an agent gets is decided per agent, in this order:
+
+1. the document offers an address and the agent dials addresses itself → **the address**;
+2. the agent does **not** dial one → **the address through a bridge**: `npx -y mcp-remote@<pinned>
+   <url>`, so a stdio-only agent still reaches the same server (its sign-in runs there too);
+3. otherwise → the first package Topos can set up, **npm** before **PyPI**.
+
+Anything a given machine cannot set up is said in plain words on the receipt and re-decided on the
+next update — nothing is half-written:
+
+```
+not placed: needs node, which is not on this machine. Install node, then run 'topos update'.
+not placed: this bundle is packaged as oci, which this version of topos cannot set up yet.
+```
+
+The choice never depends on what a laptop happens to have installed: a missing runtime is a "not
+placed" line, never a quiet fallback to a different package, because the same bundle running
+different bytes on different machines is the thing sharing is supposed to prevent.
+
 ### When each agent picks it up
 
 Six agents have an MCP config surface. Topos writes into the ones it detects on the machine (and
@@ -178,6 +220,10 @@ sign in — that stays the agent's own business:
 
 Each agent's exact config file — and the environment variables that move it — is in
 [Supported agents](/docs/harnesses#mcp-servers).
+
+All six dial an address. Five of them also run a local program; Hermes Agent's entry grammar is
+confirmed for an address only, so a package bundle reports `not placed` there rather than being
+written in a shape nobody has verified.
 
 By default the entry reaches every one of those agents this machine has. On `topos add`,
 `-a <agent>` (a slug like `cursor`, repeatable) or `--dest <file>` (a config file from that same
