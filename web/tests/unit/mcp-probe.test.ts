@@ -213,15 +213,26 @@ describe("the event-stream reader", () => {
 });
 
 describe("asking one endpoint", () => {
-  it("calls nothing at all for an address the guard will not vet", async () => {
+  it("calls nothing at all for an address the guard will not vet, and says which kind", async () => {
     const transport = vi.fn<ProbeTransport>();
     // A private address: an internal server is a first-class thing to share, so this is NEUTRAL.
     expect(await probeEndpoint("https://127.0.0.1/mcp", transport)).toEqual({
       outcome: "not_verifiable",
-      detail: "the cloud cannot reach this address",
+      detail: "private address",
     });
-    expect(await probeEndpoint("http://93.184.216.34/mcp", transport)).toMatchObject({
+    // A name nothing here resolves is the OTHER neutral fact, and points somewhere else entirely:
+    // calling it a private address sends a reader looking for a firewall that is not there.
+    const unresolvable = async () => {
+      throw new Error("ENOTFOUND");
+    };
+    expect(await probeEndpoint("https://nope.acme.example/mcp", transport, unresolvable)).toEqual({
       outcome: "not_verifiable",
+      detail: "name does not resolve here",
+    });
+    // A refusal about the URL's SHAPE claims neither (the document gate refuses these anyway).
+    expect(await probeEndpoint("http://93.184.216.34/mcp", transport)).toEqual({
+      outcome: "not_verifiable",
+      detail: null,
     });
     expect(transport).not.toHaveBeenCalled();
   });
@@ -265,16 +276,28 @@ describe("the line a catalog shows", () => {
   it("says exactly what was seen, and says nothing when nothing was", () => {
     const probedAt = "2026-08-12T09:41:00.000Z";
     expect(probeStateLine(null)).toBe("not checked yet");
-    expect(probeStateLine({ outcome: "responding", probedAt })).toBe(
+    expect(probeStateLine({ outcome: "responding", probedAt, detail: null })).toBe(
       "responding, checked 12 Aug 2026",
     );
-    expect(probeStateLine({ outcome: "sign_in_required", probedAt })).toBe(
+    expect(probeStateLine({ outcome: "sign_in_required", probedAt, detail: null })).toBe(
       "sign-in required, checked 12 Aug 2026",
     );
-    expect(probeStateLine({ outcome: "not_verifiable", probedAt })).toBe(
+    // The two things "not verifiable" can mean are two different next moves for a reader, so the
+    // line says which one it saw — and says neither when the reason was not one of them.
+    expect(probeStateLine({ outcome: "not_verifiable", probedAt, detail: "private address" })).toBe(
       "not verifiable from cloud (private address)",
     );
-    expect(probeStateLine({ outcome: "not_responding", probedAt })).toBe(
+    expect(
+      probeStateLine({
+        outcome: "not_verifiable",
+        probedAt,
+        detail: "name does not resolve here",
+      }),
+    ).toBe("not verifiable from cloud (name does not resolve here)");
+    expect(probeStateLine({ outcome: "not_verifiable", probedAt, detail: null })).toBe(
+      "not verifiable from cloud",
+    );
+    expect(probeStateLine({ outcome: "not_responding", probedAt, detail: null })).toBe(
       "not responding when checked 12 Aug 2026",
     );
   });
@@ -415,7 +438,7 @@ describe("recording what was seen", () => {
       {
         version_id: landed.kind === "ok" ? landed.versionId : "",
         outcome: "not_verifiable",
-        detail: "the cloud cannot reach this address",
+        detail: "private address",
       },
     ]);
   });

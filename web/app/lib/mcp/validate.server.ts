@@ -62,8 +62,8 @@ export const MCP_ALLOWED_FILES = ["server.json", "README.md"] as const;
 /**
  * THE TWO NAME VOCABULARIES, from the shared vectors — `tests/fixtures/mcp/secret-patterns.json`,
  * the same file the client's gate compiles in. They were written out twice, in two languages, and
- * drifted: one list grew `privatekey` and the other did not, so a package slot called
- * `PRIVATE_KEY` arriving with a value passed publication here and was refused by every client's
+ * drifted: the client's list grew a word for signing keys and this one did not, so a package slot
+ * named for one, arriving with a value, passed publication here and was refused by every client's
  * update — an authority-approved bundle, permanently unplaceable, with nothing on either side to
  * say why. One source, generated into a module, drift-gated by `check:mcp-patterns`.
  *
@@ -564,8 +564,7 @@ export function isExactPep440(version: string): boolean {
   pos = readLabelled(text, pos, ["preview", "pre", "alpha", "beta", "rc", "a", "b", "c"]);
   // The implicit post-release spelling (`1.0-1`) comes before the labelled one.
   const implicitPost = text[pos] === "-" ? digitRun(text, pos + 1) : 0;
-  pos =
-    implicitPost > 0 ? pos + 1 + implicitPost : readLabelled(text, pos, ["post", "rev", "r"]);
+  pos = implicitPost > 0 ? pos + 1 + implicitPost : readLabelled(text, pos, ["post", "rev", "r"]);
   pos = readLabelled(text, pos, ["dev"]);
   if (text[pos] === "+") {
     const local = text.slice(pos + 1);

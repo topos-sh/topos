@@ -39,7 +39,23 @@ export interface FetchedDocument {
   url: string;
 }
 
-export class McpFetchError extends Error {}
+/**
+ * WHY the guard would not vet an address, for the one caller that has to tell them apart: the
+ * advisory probe says a different sentence about a server on a private network (a first-class
+ * thing for a team to share) than about a name that does not resolve here (a typo, or a name that
+ * only exists inside somebody's network). Every other refusal is about the URL's SHAPE and carries
+ * no reason — the document gate refuses those long before anything dials.
+ */
+export type McpFetchReason = "unresolved" | "private";
+
+export class McpFetchError extends Error {
+  readonly reason: McpFetchReason | null;
+
+  constructor(message: string, reason: McpFetchReason | null = null) {
+    super(message);
+    this.reason = reason;
+  }
+}
 
 // ── The SSRF guard ──────────────────────────────────────────────────────────────────────────
 
@@ -241,15 +257,18 @@ export async function assertPublicHttpsUrl(
   try {
     addresses = await resolve(hostname);
   } catch {
-    throw new McpFetchError("that host does not resolve");
+    throw new McpFetchError("that host does not resolve", "unresolved");
   }
   if (addresses.length === 0) {
-    throw new McpFetchError("that host does not resolve");
+    throw new McpFetchError("that host does not resolve", "unresolved");
   }
   for (const entry of addresses) {
     const isV4 = entry.family === 4 || isIPv4(entry.address);
     if (isV4 ? isPrivateV4(entry.address) : isPrivateV6(entry.address)) {
-      throw new McpFetchError("that host is on a private network — this server will not fetch it");
+      throw new McpFetchError(
+        "that host is on a private network — this server will not fetch it",
+        "private",
+      );
     }
   }
   return {

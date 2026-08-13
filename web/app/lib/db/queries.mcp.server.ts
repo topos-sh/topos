@@ -126,7 +126,7 @@ export async function mcpProbeFor(
   versionId: string,
 ): Promise<McpProbeRecord | null> {
   const rows = await getDb()
-    .select({ outcome: mcpProbe.outcome, probedAt: mcpProbe.probedAt })
+    .select({ outcome: mcpProbe.outcome, probedAt: mcpProbe.probedAt, detail: mcpProbe.detail })
     .from(mcpProbe)
     .where(
       and(
@@ -143,5 +143,6 @@ export async function mcpProbeFor(
   return {
     outcome: row.outcome as McpProbeOutcome,
     probedAt: row.probedAt.toISOString(),
+    detail: row.detail,
   };
 }
