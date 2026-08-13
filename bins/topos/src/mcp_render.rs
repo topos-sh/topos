@@ -28,17 +28,18 @@
 //! ## What never travels
 //!
 //! No credential, ever. A package's environment slot that carries a literal, non-secret value
-//! renders that value; a slot the document leaves EMPTY renders as a reference to an environment
-//! variable of that name, in the spelling the harness itself reads
-//! ([`EnvRef`](topos_harness::mcp::descriptor::EnvRef)) — so the name travels in the bundle and
-//! each machine's own environment fills it in. A value the document leaves for a person to
-//! fill in (a template) is not something topos can supply, and the placement says so.
+//! renders that value; a slot the document leaves EMPTY travels as a NAME
+//! ([`EnvValue::Inherited`]) and is spelled by the config dialect — a reference inside the value
+//! for most harnesses ([`EnvRef`]), a list of inherited variables for the one that names them
+//! structurally — so the name travels in the bundle and each machine's own environment fills it
+//! in. A value the document leaves for a person to fill in (a template) is not something topos can
+//! supply, and the placement says so.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use topos_harness::mcp::descriptor::EnvRef;
-use topos_harness::mcp::{AuthHint, McpTarget, canonical_address, windows_wrap};
+use topos_harness::mcp::{AuthHint, EnvValue, McpTarget, canonical_address, windows_wrap};
 use topos_harness::registry::McpBridge;
 
 // =================================================================================================
@@ -570,7 +571,7 @@ pub(crate) fn select(
         if caps.stdio
             && let Some(bridge) = bridge
         {
-            return bridged(remote, bridge, runtimes, machine);
+            return bridged(remote, bridge, caps.env_ref, runtimes, machine);
         }
     }
     // 3. The first package this build can set up — npm, then pypi.
@@ -616,6 +617,7 @@ fn unrenderable(package: &PackageRef) -> Gap {
 fn bridged(
     remote: &RemoteEndpoint,
     bridge: &McpBridge,
+    env_ref: EnvRef,
     runtimes: &dyn RuntimeProbe,
     machine: Machine,
 ) -> Result<McpTarget, Gap> {
@@ -628,10 +630,18 @@ fn bridged(
         let var = header_var(name);
         args.push("--header".to_owned());
         args.push(format!("{name}:${{{var}}}"));
-        env.push((var, value.clone()));
+        // Every slot the bridge carries is a LITERAL header value the gate approved. Nothing here
+        // is inherited from the machine — the `${VAR}` in the argument above is mcp-remote's own
+        // expansion of the slot beside it, not a reference the harness resolves.
+        env.push((var, EnvValue::Literal(value.clone())));
     }
     let (command, args) = windows_wrap(NPX, &args, machine.windows, machine.wsl_dest);
-    Ok(McpTarget::Local { command, args, env })
+    Ok(McpTarget::Local {
+        command,
+        args,
+        env,
+        env_ref,
+    })
 }
 
 /// The environment variable one bridged header's value travels in — deterministic, and named so a
@@ -705,21 +715,27 @@ fn packaged(
     for slot in &package.env {
         let value = match &slot.value {
             // A stated literal travels as it is…
-            Some(value) if !is_templated(value) => value.clone(),
+            Some(value) if !is_templated(value) => EnvValue::Literal(value.clone()),
             // …a template is a value a person fills in, and topos has nowhere to get it…
             Some(_) => {
                 return Err(Gap::Unfillable {
                     name: slot.name.clone(),
                 });
             }
-            // …and an EMPTY slot is the machine's own environment, referenced by name in the
-            // spelling this harness reads.
-            None => env_ref.render(&slot.name),
+            // …and an EMPTY slot is the machine's own environment, named and nothing more. HOW
+            // that is spelled is the config file's question, not this one's: most harnesses read a
+            // reference inside the value, and Codex names inherited variables in a list of its own.
+            None => EnvValue::Inherited,
         };
         env.push((slot.name.clone(), value));
     }
     let (command, args) = windows_wrap(runner, &args, machine.windows, machine.wsl_dest);
-    Ok(McpTarget::Local { command, args, env })
+    Ok(McpTarget::Local {
+        command,
+        args,
+        env,
+        env_ref,
+    })
 }
 
 /// One structured argument as argv. A named argument is its flag and (when the document states
@@ -785,9 +801,28 @@ mod tests {
         parse_server_json(json.as_bytes()).expect("parses")
     }
 
+    /// A placed program, with its environment rendered the way THIS harness reads it — what the
+    /// config file ends up carrying, which is what these tests are about.
     fn local(target: &McpTarget) -> (String, Vec<String>, Vec<(String, String)>) {
         match target {
-            McpTarget::Local { command, args, env } => (command.clone(), args.clone(), env.clone()),
+            McpTarget::Local {
+                command,
+                args,
+                env,
+                env_ref,
+            } => (
+                command.clone(),
+                args.clone(),
+                env.iter()
+                    .map(|(name, value)| {
+                        let text = match value {
+                            EnvValue::Literal(literal) => literal.clone(),
+                            EnvValue::Inherited => env_ref.render(name),
+                        };
+                        (name.clone(), text)
+                    })
+                    .collect(),
+            ),
             McpTarget::Remote { .. } => panic!("expected a program, got an address"),
         }
     }
