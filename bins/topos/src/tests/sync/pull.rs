@@ -313,7 +313,7 @@ fn a_re_disclosed_block_never_names_a_folder_that_is_no_longer_there() {
         "{:?}",
         row.merge
     );
-    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0);
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0, 0);
     assert!(
         tty.contains(
             "    no agent folder holds this skill right now — either way out below puts it back\n"

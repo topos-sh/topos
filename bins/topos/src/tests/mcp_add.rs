@@ -1663,21 +1663,37 @@ fn an_add_that_reached_no_agent_says_so_once_and_fails() {
             m.text
         );
     }
-    // The receipt states BOTH facts and the working remedy — and the cause exactly ONCE, however
-    // many surfaces met it.
+    // The receipt states BOTH facts, each on its OWN line, and the cause exactly ONCE however many
+    // surfaces met it. What it no longer does is fuse the reasons behind semicolons and close with
+    // `Run 'topos update' to finish the delivery`: that is a cure for some causes and not others,
+    // and told to re-run for one it cannot fix, an agent re-runs forever. Every sentence now
+    // carries its own way out, or honestly carries none.
     let note = added.data.note.clone().unwrap_or_default();
     assert!(
-        note.contains("\"tides\" was recorded, and it reached no agent — "),
+        note.contains("\"tides\" was recorded, and it reached no agent.\n"),
         "{note}"
     );
     assert!(
-        note.ends_with(". Run 'topos update' to finish the delivery."),
+        !note.contains("Run 'topos update' to finish the delivery"),
         "{note}"
     );
+    // ONE SENTENCE PER SURFACE, each naming the file it is about and its own way out — the same
+    // lines `topos update` prints for the same machine, so the two receipts describe one run in
+    // one voice. What is gone is the blob: every reason joined behind semicolons into a single
+    // sentence, plus a second copy of each as a short per-agent row above it.
+    let cause = "topos could not save its record of the entries it owns there";
     assert_eq!(
-        note.matches("topos could not save its record of the entries it owns")
-            .count(),
-        1,
-        "the shared cause is stated once, not once per surface: {note}"
+        note.matches(cause).count(),
+        2,
+        "one sentence per failed surface, and no second copy of any of them: {note}"
     );
+    for file in [&cursor, &rig.home.0.join(".codex/config.toml")] {
+        assert_eq!(
+            note.matches(&format!("{}: {cause}", file.display()))
+                .count(),
+            1,
+            "{} is named exactly once: {note}",
+            file.display()
+        );
+    }
 }

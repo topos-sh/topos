@@ -744,6 +744,17 @@ pub(crate) enum ClientError {
     /// rather than risk clobbering or a torn write.
     #[error("the skill's files cannot be written safely — {reason}")]
     PlacementUnsupported { reason: String },
+    /// `verify` on a server THIS BUILD or THIS MACHINE cannot set up: no address to dial and no
+    /// program it knows how to run (a registry with no runtime arm, a runtime that is not
+    /// installed, a value only a person can fill in).
+    ///
+    /// A REFUSAL, never a verdict about the server. Nothing was dialed and nothing ran, so
+    /// `not reachable` (which a script retries) described a condition that no amount of retrying
+    /// changes — it changes when the machine or the build does. The `&'static str` is the GAP's
+    /// own code, so an agent branches on the same word here that it reads on the placement
+    /// channel for the very same cause.
+    #[error("{1}")]
+    McpUnverifiable(&'static str, String),
     /// MORE than one of a skill's placements holds a DIFFERENT local edit — there is no single draft
     /// to sync, diff, or publish, and nothing is overwritten (the typed freeze).
     ///
@@ -1287,6 +1298,8 @@ impl ClientError {
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
             ClientError::PathNotName { .. } => "PATH_NOT_NAME",
             ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
+            // The GAP's own code travels: one cause, one word, whichever verb met it.
+            ClientError::McpUnverifiable(code, _) => code,
             ClientError::PlacementsDiverged { .. } => "PLACEMENTS_DIVERGED",
             ClientError::UnknownGoBackVersion { .. } => "UNKNOWN_GOBACK_VERSION",
             ClientError::Plane(_) => "PLANE_ERROR",

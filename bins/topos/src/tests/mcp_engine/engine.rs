@@ -243,6 +243,7 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         note_tty.contains(
@@ -280,6 +281,7 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         tty.contains("Checked 1 bundle: 1 updated."),
@@ -940,6 +942,14 @@ fn warning_lines(out: &mcp_engine::ConvergeOutcome) -> Vec<String> {
     crate::message::legacy_lines(&out.warnings)
 }
 
+/// The STANDING not-placed lines — a capability this build or this machine does not have, an entry
+/// topos does not own. They ride their own channel because a run fails only when an ACT it
+/// attempted failed, and none of these attempted anything: they print every run, and the run exits
+/// 0. Asserting them apart from `warning_lines` is what keeps that split honest.
+fn standing_lines(out: &mcp_engine::ConvergeOutcome) -> Vec<String> {
+    crate::message::legacy_lines(&out.advisories)
+}
+
 // =================================================================================================
 // A bundle that is a PROGRAM this machine runs, end to end.
 // =================================================================================================
@@ -1018,15 +1028,24 @@ fn a_package_only_bundle_passes_the_gate_and_lands_as_the_program_each_agent_run
         TargetOutcome::Withheld
     );
     assert!(
-        warning_lines(&out).iter().any(|l| l
+        standing_lines(&out).iter().any(|l| l
             == "MCP_KIND_UNSUPPORTED not placed in hermes-agent: this server runs as a program on \
                 this machine, and this version of topos cannot set that up in hermes-agent."),
         "{:?}",
-        warning_lines(&out)
+        standing_lines(&out)
     );
     assert!(!home.0.join(".hermes/config.yaml").exists());
+    // A CONDITION IS NOT A FAULT. Nothing was attempted at Hermes — topos has no verified grammar
+    // for a program entry in its config — so nothing failed there, and the failure channel that
+    // decides the exit status stays empty.
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
     // The bundle IS installed — it reached five agents — so it is not a failure.
     assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
+    assert!(
+        out.unplaced_bundles.is_empty(),
+        "{:?}",
+        out.unplaced_bundles
+    );
 
     // The custody round trip: the entry is topos's, a hand edit is drift, and dropping the demand
     // takes it back out.
@@ -1094,7 +1113,7 @@ fn a_pypi_bundle_is_run_by_uvx_at_the_version_the_document_pins() {
     );
     let cursor = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).expect("cursor");
     assert!(cursor.contains("\"command\": \"uvx\""), "{cursor}");
-    assert!(cursor.contains("\"acme-server==3.0.1\""), "{cursor}");
+    assert!(cursor.contains("\"acme-server@3.0.1\""), "{cursor}");
 }
 
 /// **A runtime that is not on this machine is a capability, not a failure of the bundle.** The
@@ -1123,19 +1142,25 @@ fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
         true,
     );
     assert!(
-        warning_lines(&out).iter().any(|l| l
+        standing_lines(&out).iter().any(|l| l
             == "MCP_RUNTIME_MISSING not placed: needs node, which is not on this machine. Install \
                 node, then run 'topos update'."),
         "{:?}",
-        warning_lines(&out)
+        standing_lines(&out)
     );
     assert_eq!(
         state_of(&out, "s_a", "cursor").state,
         TargetOutcome::Withheld
     );
     assert!(!home.0.join(".cursor/mcp.json").exists());
+    // NOT a failure, and not `already up to date` either: a machine with no node holds nothing of
+    // an npm bundle, and nothing about that is broken. It takes the summary's own `not placed`
+    // clause, and the run exits 0 — reported as a failure it exited non-zero forever on every
+    // machine that simply has not installed node.
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
     assert_eq!(
-        out.failed_bundles,
+        out.unplaced_bundles,
         vec!["s_a".to_owned()],
         "nothing of it is installed anywhere, so the summary says so"
     );
@@ -1156,12 +1181,13 @@ fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
         true,
     );
     assert!(
-        warning_lines(&out).iter().any(|l| l
+        standing_lines(&out).iter().any(|l| l
             == "MCP_KIND_UNSUPPORTED not placed: this bundle is packaged as oci, which this \
                 version of topos cannot set up yet."),
         "{:?}",
-        warning_lines(&out)
+        standing_lines(&out)
     );
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
 }
 
 /// **A package the document says is spoken to over http is withheld, not run as a program.** The
@@ -1191,11 +1217,11 @@ fn a_package_served_over_http_is_withheld_and_nothing_is_written() {
         true,
     );
     assert!(
-        warning_lines(&out).iter().any(|l| l
+        standing_lines(&out).iter().any(|l| l
             == "MCP_KIND_UNSUPPORTED not placed: this bundle's package serves over \
                 streamable-http, which this version of topos cannot set up yet."),
         "{:?}",
-        warning_lines(&out)
+        standing_lines(&out)
     );
     assert_eq!(
         state_of(&out, "s_a", "cursor").state,
@@ -1203,8 +1229,9 @@ fn a_package_served_over_http_is_withheld_and_nothing_is_written() {
     );
     assert!(!home.0.join(".cursor/mcp.json").exists());
     assert!(!home.0.join(".codex/config.toml").exists());
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
     assert_eq!(
-        out.failed_bundles,
+        out.unplaced_bundles,
         vec!["s_a".to_owned()],
         "nothing of it is installed anywhere, so the summary says so"
     );
@@ -1375,15 +1402,21 @@ fn a_foreign_entry_for_the_same_server_refuses_the_placement_and_says_how_to_fre
         Some(cursor.display().to_string().as_str()),
         "the state points at the file holding the entry in the way"
     );
+    // THE ADDRESS, not the name. The name topos would write is free; what is taken is the
+    // server, under somebody else's name — and a line calling that a name clash sent a reader
+    // looking for a name that was never there.
     assert_eq!(
-        warning_lines(&out),
+        standing_lines(&out),
         vec![format!(
-            "MCP_ENTRY_CONFLICT not placed in cursor: an entry for this server already exists \
-             (linear in {}) and topos does not manage it. Remove it to let topos manage this \
+            "MCP_ENTRY_CONFLICT not placed in cursor: an entry topos does not manage (linear in \
+             ~/{}) already dials this server's address. Remove it to let topos manage this \
              server, then run 'topos update'.",
-            cursor.display()
+            cursor.strip_prefix(&home.0).unwrap().display()
         )]
     );
+    // A collision is a CONDITION: the entry is somebody's and topos will not touch it, so nothing
+    // was attempted and nothing failed. The line prints on every run and the run exits 0.
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
     assert_eq!(
         std::fs::read_to_string(&cursor).unwrap(),
         theirs,
@@ -1406,7 +1439,8 @@ fn a_foreign_entry_for_the_same_server_refuses_the_placement_and_says_how_to_fre
         state_of(&out, "s_a", "cursor").state,
         TargetOutcome::Conflicting
     );
-    assert_eq!(warning_lines(&out).len(), 1);
+    assert_eq!(standing_lines(&out).len(), 1);
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
 
     // The person removes their entry. Nothing else changes, and the next sweep installs.
     std::fs::write(&cursor, "{\n  \"mcpServers\": {}\n}\n").unwrap();
@@ -1463,15 +1497,116 @@ fn a_topos_looking_entry_with_no_record_is_named_a_possible_leftover_never_claim
         TargetOutcome::Conflicting
     );
     assert_eq!(
-        warning_lines(&out),
+        standing_lines(&out),
         vec![format!(
             "MCP_ENTRY_LEFTOVER possible leftover from an earlier topos version: topos-eng-alpha \
-             in {} is no longer managed. Remove it with: delete the \"topos-eng-alpha\" entry from \
-             that file.",
-            cursor.display()
+             in ~/{} is no longer managed. Remove it by deleting the \"topos-eng-alpha\" entry \
+             from that file.",
+            cursor.strip_prefix(&home.0).unwrap().display()
         )]
     );
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
     assert_eq!(std::fs::read_to_string(&cursor).unwrap(), leftover);
+}
+
+/// **A server the agent already dials elsewhere is SAID, on an entry that is otherwise perfect.**
+/// The pre-flight deliberately never blocks a key topos already holds — dropping it would
+/// uninstall a placement that stands — but never blocking it is not never mentioning it: a foreign
+/// entry for the same server in a file this agent reads FIRST makes topos's own entry dead config,
+/// and the machine looked fully converged while every call went through somebody else's copy.
+///
+/// The note is re-decided from the files on every run and stored nowhere, so removing the other
+/// entry clears it with no state to reconcile. It fails nothing: both entries are legitimate,
+/// the person may well have meant it, and topos deletes neither.
+#[test]
+fn a_placed_entry_a_foreign_one_shadows_says_so_and_clears_itself() {
+    static WITH_CONFLICTS: &[KnownHarness] = &[registry::home_rooted_mcp_row_with_conflicts(
+        "claude-code",
+        "Claude Code",
+        ".claude/skills/topos-mcp",
+        McpDialect::ClaudePluginDir,
+        None,
+        "reload claude",
+        &[registry::home_rooted_conflict_path(
+            ".claude.json",
+            McpDialect::ClaudeProjectJson,
+            "projects.*.mcpServers",
+        )],
+    )];
+    let table: Vec<&'static KnownHarness> = WITH_CONFLICTS.iter().collect();
+    let slugs: BTreeSet<String> = table.iter().map(|h| h.slug.to_owned()).collect();
+
+    let home = Scratch::new("shadowed");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let claude_json = home.0.join(".claude.json");
+    let d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    let io = person_io(&fs, &layout, &home.0);
+    let converge = |io: &crate::mcp_engine::ScopeIo<'_>| {
+        mcp_engine::converge(
+            io,
+            &[d.clone().planned(io, &table, &slugs)],
+            &table,
+            &slugs,
+            &no_hold(),
+            true,
+        )
+    };
+
+    // Nothing else dials it: the entry is written and its state is the ordinary quiet one.
+    let out = converge(&io);
+    assert!(
+        state_of(&out, "s_a", "claude-code").state.wrote(),
+        "{out:?}"
+    );
+    let out = converge(&io);
+    let state = state_of(&out, "s_a", "claude-code");
+    assert_eq!(state.state, TargetOutcome::Current);
+    assert_eq!(state.note, None, "a healthy current carries no note");
+
+    // The person adds their own entry for the same server, under their own name, in the file
+    // Claude reads first. topos's entry is untouched — and no longer the one that runs.
+    let theirs = "{\n  \"projects\": {\n    \"/work/api\": { \"mcpServers\": { \"my-alpha\": { \"url\": \"https://mcp.example/a\" } } }\n  }\n}\n";
+    std::fs::write(&claude_json, theirs).unwrap();
+    let out = converge(&io);
+    let state = state_of(&out, "s_a", "claude-code");
+    assert_eq!(
+        state.state,
+        TargetOutcome::Current,
+        "the entry stands: a shadow never uninstalls one"
+    );
+    assert_eq!(
+        state.note.as_deref(),
+        Some(
+            format!(
+                "also configured as \"my-alpha\" in ~/{}, which this agent prefers",
+                claude_json.strip_prefix(&home.0).unwrap().display()
+            )
+            .as_str()
+        )
+    );
+    assert!(
+        warning_lines(&out).is_empty() && standing_lines(&out).is_empty(),
+        "a shadow is a note on the row, never a line that fails the run: {out:?}"
+    );
+    assert!(out.failed_bundles.is_empty() && out.unplaced_bundles.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&claude_json).unwrap(),
+        theirs,
+        "the file topos only READS is never edited"
+    );
+
+    // They remove it. Nothing is stored, so the very next sweep is quiet again.
+    std::fs::write(&claude_json, "{\n  \"projects\": {}\n}\n").unwrap();
+    let out = converge(&io);
+    let state = state_of(&out, "s_a", "claude-code");
+    assert_eq!(state.state, TargetOutcome::Current);
+    assert_eq!(state.note, None, "the note clears itself: {out:?}");
 }
 
 /// **A file the harness ALSO reads counts.** Claude Code keeps servers in `~/.claude.json` too —
@@ -1535,14 +1670,15 @@ fn an_entry_in_a_file_the_harness_also_reads_blocks_the_placement_there_and_nowh
         "{out:?}"
     );
     assert_eq!(
-        warning_lines(&out),
+        standing_lines(&out),
         vec![format!(
-            "MCP_ENTRY_CONFLICT not placed in claude-code: an entry for this server already exists \
-             (alpha in {}) and topos does not manage it. Remove it to let topos manage this \
+            "MCP_ENTRY_CONFLICT not placed in claude-code: an entry topos does not manage (alpha \
+             in ~/{}) already dials this server's address. Remove it to let topos manage this \
              server, then run 'topos update'.",
-            claude_json.display()
+            claude_json.strip_prefix(&home.0).unwrap().display()
         )]
     );
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
     assert!(
         !home.0.join(".claude/skills/topos-mcp").exists(),
         "nothing was written for the blocked harness"

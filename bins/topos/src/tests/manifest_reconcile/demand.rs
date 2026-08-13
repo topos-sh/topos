@@ -121,6 +121,7 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         warn_tty.contains("asks for this folder machine-wide, and the folder is gone")
@@ -150,6 +151,7 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         !tty.contains("Checked 0 skills"),
@@ -337,6 +339,7 @@ fn two_same_named_local_rows_whose_folders_are_gone_are_two_failures() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(tty.contains("2 failed"), "{tty}");
 }
@@ -372,6 +375,7 @@ fn an_update_never_calls_a_drafted_bundle_all_up_to_date() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(tty.contains("all up to date"), "{tty}");
     assert!(
@@ -402,6 +406,7 @@ fn an_update_never_calls_a_drafted_bundle_all_up_to_date() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(
         !tty.contains("all up to date"),

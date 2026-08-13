@@ -558,8 +558,15 @@ impl Gap {
         }
     }
 
-    /// The SHORT cause a per-agent receipt row carries after the outcome word.
-    pub(crate) fn note(&self) -> String {
+    /// The SHORT cause a per-agent receipt row carries after the outcome word, for the agent named
+    /// by `harness`.
+    ///
+    /// Every arm says the same kind of thing about the same subject: what THIS BUILD OF TOPOS
+    /// cannot do. The two `Unsupported` arms used to say it about the machine and the harness
+    /// instead ("this agent does not run a server from this machine"), which reads as a fact about
+    /// what Goose can do — and Goose runs servers perfectly well. The gap is topos's: it has no
+    /// verified grammar for a program entry in that harness's config.
+    pub(crate) fn note(&self, harness: &str) -> String {
         match self {
             Self::UnsupportedPackage { registry } => {
                 format!("packaged as {registry}, which topos cannot set up yet")
@@ -570,12 +577,30 @@ impl Gap {
             Self::MissingRuntime { tool } => format!("needs {tool}, which is not on this machine"),
             Self::Unfillable { name } => format!("{name} is a value topos cannot fill in"),
             Self::Unsupported { program: true } => {
-                "this agent does not run a server from this machine".to_owned()
+                format!("this version of topos cannot set up a program in {harness}")
             }
             Self::Unsupported { program: false } => {
-                "this agent does not dial an address".to_owned()
+                format!("this version of topos cannot set up an address in {harness}")
             }
         }
+    }
+
+    /// The same cause said where NO agent is in the picture — `verify`, which dials the server
+    /// itself. A capability gap there is a REFUSAL and not a verdict about the server: nothing was
+    /// dialed, nothing ran, and re-running changes nothing until the machine or the build does.
+    pub(crate) fn refusal(&self) -> String {
+        let cause = match self {
+            Self::UnsupportedPackage { registry } => format!("packaged as {registry}"),
+            Self::PackageTransport { transport } => format!("its package serves over {transport}"),
+            Self::MissingRuntime { tool } => {
+                format!("needs {tool}, which is not on this machine")
+            }
+            Self::Unfillable { name } => format!("{name} is a value topos cannot fill in"),
+            Self::Unsupported { .. } => {
+                "this bundle offers nothing this machine can run or dial".to_owned()
+            }
+        };
+        format!("this version of topos cannot set this server up on this machine ({cause})")
     }
 }
 
@@ -721,10 +746,15 @@ fn header_var(name: &str, taken: &[(String, EnvValue)]) -> String {
 /// The PACKAGE renderings — one arm per registry this build can run:
 ///
 /// - `npm` → `npx -y <identifier>@<version>`
-/// - `pypi` → `uvx <identifier>==<version>`
+/// - `pypi` → `uvx <identifier>@<version>`
 ///
 /// The version is ALWAYS the one the document pins (the publish gate refuses a range and refuses
 /// `latest`, per registry type), so every machine in a workspace installs the same bytes.
+///
+/// BOTH runners take the pin after an `@`. `uvx` reads its first argument as the COMMAND to run
+/// and accepts the version there as `<command>@<version>` (its documented tool spelling); a
+/// requirement-style `<name>==<version>` is refused outright — `Not a valid package or extra
+/// name` — so the entries topos wrote for a pypi bundle could never have started.
 fn packaged(
     package: &PackageRef,
     env_ref: EnvRef,
@@ -747,7 +777,7 @@ fn packaged(
         "pypi" => (
             UVX,
             UVX,
-            format!("{}=={}", package.identifier, package.version),
+            format!("{}@{}", package.identifier, package.version),
         ),
         other => {
             return Err(Gap::UnsupportedPackage {
@@ -1019,7 +1049,7 @@ mod tests {
         assert_eq!(command, UVX);
         assert_eq!(
             args,
-            ["acme-server==3.0.1", "--mode", "read", "--verbose", "run"]
+            ["acme-server@3.0.1", "--mode", "read", "--verbose", "run"]
         );
         assert_eq!(env, [("ACME_HOME".to_owned(), "/srv".to_owned())]);
 
@@ -1131,7 +1161,7 @@ mod tests {
         );
         assert_eq!(
             (command.as_str(), args[0].as_str()),
-            (UVX, "acme-server==3.0.1")
+            (UVX, "acme-server@3.0.1")
         );
 
         // A registry with no arm AND an http transport says the registry first — the more

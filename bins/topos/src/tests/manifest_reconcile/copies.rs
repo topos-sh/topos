@@ -516,6 +516,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &clean.advisories,
             &clean.disclosures,
             0,
+            clean.unplaced_bundles.len(),
         ),
         "checked machine-wide\nChecked 1 skill: all up to date."
     );
@@ -547,6 +548,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
         &healed.advisories,
         &healed.disclosures,
         healed.failed_bundles.len(),
+        healed.unplaced_bundles.len(),
     );
     assert!(out.contains(&format!("+ @{WS_NAME}/deploy")), "{out}");
     assert!(out.contains("installed ("), "{out}");
@@ -565,6 +567,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &again.advisories,
             &again.disclosures,
             0,
+            again.unplaced_bundles.len(),
         ),
         "checked machine-wide\nChecked 1 skill: all up to date."
     );
@@ -619,6 +622,7 @@ fn re_adding_the_feed_line_reinstalls_with_a_receipt_line() {
         &back.advisories,
         &back.disclosures,
         back.failed_bundles.len(),
+        back.unplaced_bundles.len(),
     );
     assert!(out.contains("installed ("), "{out}");
     assert!(!out.contains("all up to date"), "{out}");

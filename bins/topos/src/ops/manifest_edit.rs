@@ -508,6 +508,20 @@ pub(crate) fn push_note(data: &mut AddData, line: impl Into<String>) {
     });
 }
 
+/// The same, on a LINE OF ITS OWN. The `·` fold above reads well for two short asides about the
+/// row that was just written; it reads as a wall the moment a fact is a sentence, and the MCP
+/// receipt's facts all are — what the server is, that it reached nobody, and why. Every renderer
+/// already splits a note on newlines and indents the tail ([`crate::render::add_tty`]), so the
+/// fifteen per-config lines below it were already one to a line and only the FIRST was jammed onto
+/// the end of whatever came before.
+pub(crate) fn push_note_line(data: &mut AddData, line: impl Into<String>) {
+    let line = line.into();
+    data.note = Some(match data.note.take() {
+        Some(prev) => format!("{prev}\n{line}"),
+        None => line,
+    });
+}
+
 /// Which of the two manifests a receipt is about — the wire word behind the one spelling every
 /// add answer names its file by.
 pub(super) fn receipt_scope(target: &EditTarget) -> topos_types::results::ReceiptScope {

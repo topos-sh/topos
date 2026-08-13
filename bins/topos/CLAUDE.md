@@ -169,7 +169,7 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   the agent dials one · the address through the table-pinned bridge (`npx -y mcp-remote@<v> <url>`,
   headers as `Name:${VAR}` with the value in the environment — the spelling that survives Windows
   and Cursor) where it does not · else the first package this build can set up, npm before pypi
-  (`npx -y <id>@<v>` / `uvx <id>==<v>`, always the pinned version). A missing runtime NEVER falls
+  (`npx -y <id>@<v>` / `uvx <id>@<v>`, always the pinned version). A missing runtime NEVER falls
   through to another form — a shared bundle must not become different bytes per laptop — it
   becomes a plain-words `Gap` the next sweep re-decides. Env slots the document leaves empty
   render as references in the harness's own syntax, so a name travels and a value never does. The

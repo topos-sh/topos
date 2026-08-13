@@ -559,6 +559,7 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(tty.contains("updated (3 folders)"), "{tty}");
     // Counted rows spell their folders out — a number nobody can act on is not an answer.
@@ -591,6 +592,7 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
             &again.advisories,
             &again.disclosures,
             0,
+            again.unplaced_bundles.len(),
         )
         .contains("all up to date")
     );
@@ -652,6 +654,7 @@ fn a_heal_riding_along_with_a_settled_fanout_is_named_on_the_row() {
         &out.advisories,
         &out.disclosures,
         out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
     );
     assert!(tty.contains("synced your edits to"), "{tty}");
     assert!(

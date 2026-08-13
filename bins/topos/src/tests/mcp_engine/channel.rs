@@ -598,6 +598,7 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
             &clean.advisories,
             &clean.disclosures,
             0,
+            clean.unplaced_bundles.len(),
         ),
         "checked machine-wide\nChecked 1 skill: all up to date."
     );
@@ -684,6 +685,7 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
             &out.advisories,
             &out.disclosures,
             out.failed_bundles.len(),
+            out.unplaced_bundles.len(),
         );
         assert!(
             !tty.contains("already up to date"),

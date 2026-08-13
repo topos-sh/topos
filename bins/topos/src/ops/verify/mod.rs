@@ -79,7 +79,7 @@ pub(crate) fn verify(
     };
     let doc = mcp_render::parse_server_json(&bytes)
         .map_err(|e| ClientError::Corrupt(format!("{}: {e}", lock.name)))?;
-    Ok(data_for(&lock.name, &check(&doc)))
+    Ok(data_for(&lock.name, &check(&doc)?))
 }
 
 /// A `verify` on a bundle that is not a server. The refusal names what the verb needs and what
@@ -103,7 +103,11 @@ struct Checked {
 /// are the AGENT-NEUTRAL ones — this machine can both dial an address and run a program, which is
 /// exactly the question a verification asks — so a bundle offering an address is verified at its
 /// address, and a package bundle is verified by running the package.
-fn check(doc: &mcp_render::ServerDoc) -> Checked {
+///
+/// # Errors
+/// A capability gap: this build or this machine cannot set the server up at all, so there is
+/// nothing to verify and no verdict to give.
+fn check(doc: &mcp_render::ServerDoc) -> Result<Checked, ClientError> {
     let caps = HarnessCaps {
         remote: true,
         stdio: true,
@@ -118,37 +122,31 @@ fn check(doc: &mcp_render::ServerDoc) -> Checked {
     match mcp_render::select(doc, caps, None, &PathRuntimes, machine) {
         Ok(McpTarget::Remote { url, headers }) => {
             let verdict = remote::probe(&remote::agent(), &url, &headers);
-            Checked {
+            Ok(Checked {
                 target: TARGET_ADDRESS,
                 address: Some(url),
                 command: Vec::new(),
                 verdict,
-            }
+            })
         }
         Ok(McpTarget::Local {
             command, args, env, ..
         }) => {
             let verdict = local::probe(&command, &args, &env);
-            Checked {
+            Ok(Checked {
                 target: TARGET_PROGRAM,
                 address: None,
                 command: shown_command(&command, &args),
                 verdict,
-            }
+            })
         }
         // A capability this machine or this build does not have. Nothing was dialed and nothing
-        // ran, so the honest verdict is the not-reachable one, carrying the gap's own words — the
-        // same sentence the placement receipt gives, said once, in one place.
-        Err(gap) => Checked {
-            target: if doc.remote.is_some() {
-                TARGET_ADDRESS
-            } else {
-                TARGET_PROGRAM
-            },
-            address: doc.remote.as_ref().map(|r| r.url.clone()),
-            command: Vec::new(),
-            verdict: Verdict::NotReachable { reason: gap.note() },
-        },
+        // ran — so this is a REFUSAL, not a verdict about the server. Reported as `not reachable`
+        // it took the exit code a script retries on, over a condition that no retry can change:
+        // an unsupported package type and an uninstalled runtime stay exactly as they are until
+        // the build or the machine does. It exits 1 with the gap's own code, like every other
+        // "this command cannot be run as asked".
+        Err(gap) => Err(ClientError::McpUnverifiable(gap.code(), gap.refusal())),
     }
 }
 

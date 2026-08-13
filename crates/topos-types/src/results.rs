@@ -220,6 +220,19 @@ impl TargetOutcome {
     pub const fn wrote(self) -> bool {
         matches!(self, Self::Created | Self::Refreshed)
     }
+
+    /// Whether the target now HOLDS this bundle — the only question "did it arrive" is asking. A
+    /// hand-edited target counts: something of this bundle is there, and it is the person's. The
+    /// four that do not are the four where nothing of it stands (never placed, held by somebody
+    /// else's entry, unreadable, gone), and a receipt counting those alongside the rest claimed
+    /// `installed (16 config files)` over thirteen that hold an entry and three that do not.
+    #[must_use]
+    pub const fn stands(self) -> bool {
+        matches!(
+            self,
+            Self::Created | Self::Refreshed | Self::Current | Self::Drifted
+        )
+    }
 }
 
 /// One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation — its

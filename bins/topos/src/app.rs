@@ -2049,8 +2049,18 @@ fn finish_status(
 /// both the envelope's `ok` and the exit status, so the two can never contradict each other.
 /// Isolation is unaffected: the payload still reports every other bundle, and the failure lines
 /// ride `warnings` either way.
+///
+/// **A run fails only when an ACT it attempted failed.** The channel's own kind is what decides
+/// it, not the array's emptiness: a `failure` is the one word for "this did not happen", and a
+/// line describing a STANDING condition nobody attempted anything about — a capability this build
+/// does not have, an entry topos does not own where a placement would go — is an `advisory`, which
+/// prints on every run and fails none of them. Reading emptiness instead exited non-zero forever
+/// on any machine that merely has an agent topos cannot render some bundle for, which taught an
+/// agent watching the status that its perfectly converged machine was broken.
 fn sweep_failed(warnings: &[topos_types::Message]) -> bool {
-    !warnings.is_empty()
+    warnings
+        .iter()
+        .any(|m| m.kind == topos_types::MessageKind::Failure)
 }
 
 fn finish_pull(
@@ -2069,8 +2079,10 @@ fn finish_pull(
             // no rows, no faults. A run that FAILED on a row is none of those — it had work and
             // could not finish it — and offering `login` there answered a question nobody asked
             // while the fault's own remedy went unmentioned.
-            let unenrolled_dead_end =
-                !enrolled && out.data.skills.is_empty() && out.warnings.is_empty();
+            let unenrolled_dead_end = !enrolled
+                && out.data.skills.is_empty()
+                && out.warnings.is_empty()
+                && out.advisories.is_empty();
             // ONE binding answers both surfaces — the envelope's `ok` and the process's exit
             // status. They were computed apart, and a partial failure printed `ok: true` on the
             // very run it exited non-zero; deriving them from one value makes that disagreement
@@ -2138,6 +2150,7 @@ fn finish_pull(
                     &out.advisories,
                     &out.disclosures,
                     out.failed_bundles.len(),
+                    out.unplaced_bundles.len(),
                 );
                 if !out.access_gone.is_empty() {
                     text.push_str(&format!(
@@ -2183,6 +2196,47 @@ mod sweep_verdict_tests {
         assert_eq!(
             super::mcp_add_verdict(true, std::slice::from_ref(&failure)),
             (false, true)
+        );
+    }
+
+    /// **A run fails only when an ACT it attempted failed.** A standing not-placed fact — a
+    /// capability this build does not have, an entry topos does not own where a placement would go
+    /// — is an `advisory`: it prints its line on every run and fails none of them. It used to ride
+    /// the failure channel, which meant any machine with an agent topos cannot render some bundle
+    /// for exited non-zero on every sweep, forever, with `ok: false` beside it — teaching an agent
+    /// that a perfectly converged machine was broken. The verdict reads the KIND, so the two can
+    /// no longer be confused by an array that merely is not empty.
+    #[test]
+    fn a_standing_not_placed_fact_prints_its_line_and_fails_nothing() {
+        let standing = crate::message::advisory(
+            "MCP_RUNTIME_MISSING",
+            "not placed: needs node, which is not on this machine. Install node, then run 'topos \
+             update'."
+                .to_owned(),
+        );
+        let broke = crate::message::failure(
+            "MCP_CUSTODY_UNREADABLE",
+            "topos's record of which MCP config entries it owns could not be read.".to_owned(),
+        );
+        assert!(!super::sweep_failed(std::slice::from_ref(&standing)));
+        assert!(super::sweep_failed(std::slice::from_ref(&broke)));
+        assert!(super::sweep_failed(&[standing.clone(), broke]));
+        // The `add` verdict reads the same rule: the row landed, nothing could be placed, nothing
+        // failed — an ordinary success carrying an advisory.
+        assert_eq!(
+            super::mcp_add_verdict(false, std::slice::from_ref(&standing)),
+            (true, false)
+        );
+        // And the line still travels: an advisory rides the `--json` message channel exactly like
+        // a failure, so an agent that wants to know still reads it.
+        let mut envelope = super::render::ok_envelope("update", serde_json::json!({}));
+        envelope.warnings = crate::message::legacy_lines(std::slice::from_ref(&standing));
+        assert_eq!(
+            envelope.warnings,
+            vec![
+                "MCP_RUNTIME_MISSING not placed: needs node, which is not on this machine. \
+                 Install node, then run 'topos update'."
+            ]
         );
     }
 
@@ -2267,7 +2321,7 @@ mod sweep_verdict_tests {
             "MCP_FILE_REMOVED",
             "~/.cursor/mcp.json: deleted with the last entry.".to_owned(),
         )];
-        let tty = super::render::pull_tty(&data, &[], &warnings, &advisories, &disclosures, 2);
+        let tty = super::render::pull_tty(&data, &[], &warnings, &advisories, &disclosures, 2, 0);
         for code in [
             "CATALOG_UNAVAILABLE",
             "PATH_MISSING",
@@ -2655,8 +2709,17 @@ fn finish_add_mcp(
 /// success with a note about it. A PARTIAL reach keeps `ok: true` — some agent has the server —
 /// and still exits non-zero, the sweep's own rule, so an agent watching a loop learns the run is
 /// not converging instead of reading 0 forever.
+///
+/// Both halves read the message KIND, never the array's length — [`sweep_failed`]'s rule, said
+/// once more here: a run fails only when an act it attempted failed. An add that placed nothing
+/// because nothing could be placed (no node, an entry topos does not own) attempted nothing, so
+/// it is an ordinary success carrying an advisory, and `reached_nobody` is keyed on failures for
+/// the same reason.
 fn mcp_add_verdict(reached_nobody: bool, messages: &[topos_types::Message]) -> (bool, bool) {
-    (!reached_nobody, !messages.is_empty())
+    let failed = messages
+        .iter()
+        .any(|m| m.kind == topos_types::MessageKind::Failure);
+    (!reached_nobody, failed)
 }
 
 /// The multi-`add` finisher — one `add` receipt per imported (skill × harness) combination.
@@ -4096,6 +4159,7 @@ mod tests {
                     .iter()
                     .map(|w| ("person".to_owned(), w.text.clone()))
                     .collect(),
+                unplaced_bundles: std::collections::BTreeSet::new(),
                 data: empty(),
                 warnings,
                 fault_actions: Vec::new(),

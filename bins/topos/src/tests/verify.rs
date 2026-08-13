@@ -519,7 +519,7 @@ fn a_four_hundred_with_a_non_modern_body_falls_back_and_carries_the_session() {
         ),
     });
     let v = dial(&stub);
-    assert_eq!(v.line(), "responding (1 tools)");
+    assert_eq!(v.line(), "responding (1 tool)");
     assert_eq!(v.exit_code(), 0);
     // The version REPORTED is the one the server chose, not the one this client asked for.
     assert_eq!(v.protocol(), Some("2025-06-18"));
@@ -614,7 +614,7 @@ fn a_refused_close_never_changes_the_verdict() {
         _ => (405, ct("text/plain"), "method not allowed".to_owned()),
     });
     let v = dial(&stub);
-    assert_eq!(v.line(), "responding (1 tools)");
+    assert_eq!(v.line(), "responding (1 tool)");
     assert_eq!(v.exit_code(), 0);
     assert_eq!(stub.requests()[4].method, "DELETE");
 }
@@ -732,7 +732,7 @@ fn a_bundle_header_never_shadows_the_verifiers_own() {
         ("X-Region".to_owned(), "eu-west-1".to_owned()),
     ];
     let v = ops::probe_remote(&ops::remote_agent(), &stub.url, &headers);
-    assert_eq!(v.line(), "responding (1 tools)");
+    assert_eq!(v.line(), "responding (1 tool)");
 
     let seen = stub.requests();
     let request = &seen[0];
@@ -821,7 +821,7 @@ done
 "#,
     );
     let v = ops::probe_local(&program, &[], &[]);
-    assert_eq!(v.line(), "responding (1 tools)");
+    assert_eq!(v.line(), "responding (1 tool)");
     assert_eq!(v.exit_code(), 0);
     assert_eq!(v.protocol(), Some("2025-11-25"));
 }
@@ -966,7 +966,7 @@ done
         ),
     );
     let v = ops::probe_local(&program, &[], &[]);
-    assert_eq!(v.line(), "responding (1 tools)");
+    assert_eq!(v.line(), "responding (1 tool)");
 
     let raw = std::fs::read_to_string(&pidfile).expect("the runner records what it forked");
     let raw: i32 = raw.trim().parse().expect("a pid");
@@ -1096,6 +1096,37 @@ fn the_verb_resolves_a_bundle_by_name_and_reports_the_live_verdict() {
     // `-g` resolves the SAME machine-scope record (the adopt above was machine-wide).
     let global = ops::verify(&ctx, "weather", ops::StoreScope::Machine).unwrap();
     assert_eq!(global.address, data.address);
+}
+
+/// **A capability gap is a REFUSAL, not a verdict about the server.** A bundle packaged as `oci`
+/// was reported `not reachable: packaged as oci, which topos cannot set up yet` on exit 4 — the
+/// code a script retries on, over a condition no retry can ever change. Nothing was dialed and
+/// nothing ran: it exits 1 with the gap's own code, like every other "this command cannot be run
+/// as asked", and the sentence says whose limitation it is.
+#[test]
+fn a_bundle_this_build_cannot_set_up_refuses_rather_than_reporting_a_verdict() {
+    let rig = Rig::new("gap");
+    rig.write_manifest();
+    let src = rig.work.0.join("imaged");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("server.json"),
+        r#"{"name":"io.github.acme/imaged","description":"A container-packaged server.",
+            "version":"1.4.0","packages":[{"registryType":"oci",
+            "identifier":"ghcr.io/acme/imaged@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "transport":{"type":"stdio"}}]}"#,
+    )
+    .unwrap();
+    let ctx = rig.ctx();
+    ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default()).unwrap();
+
+    let err = ops::verify(&ctx, "imaged", ops::StoreScope::Here).unwrap_err();
+    // The GAP's own code travels: one cause, one word, whichever verb met it.
+    assert_eq!(err.code(), "MCP_KIND_UNSUPPORTED");
+    assert_eq!(
+        err.to_string(),
+        "this version of topos cannot set this server up on this machine (packaged as oci)"
+    );
 }
 
 /// A name nothing here tracks refuses — and a bundle that is a SKILL refuses too, saying what
