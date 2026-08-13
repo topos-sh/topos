@@ -101,7 +101,7 @@ A `—` means the agent has no folder at that scope. An agent absent from the ta
 
 ### MCP server config files
 
-An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. Claude Code's machine entry is a topos-owned plugin folder, not a single file.
+An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. Claude Code's machine entry is a topos-owned plugin folder, not a single file. A machine path starting `<application support>/` is the one directory that differs by platform — `~/Library/Application Support` on macOS, `%APPDATA%` on Windows, `~/.config` elsewhere; `-a <slug>` resolves it for the machine it runs on, and `--dest` takes that resolved path.
 
 | Agent | Machine config file | Project config file |
 |---|---|---|
@@ -115,12 +115,12 @@ An MCP-server bundle arrives as an entry in the agent's own MCP config rather th
 | `goose` | `~/.config/goose/config.yaml` | — |
 | `hermes-agent` | `~/.hermes/config.yaml` | — |
 | `opencode` | `~/.config/opencode/opencode.json` | `opencode.json` |
-| `roo` | — | `.roo/mcp.json` |
+| `roo` | `<application support>/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` | `.roo/mcp.json` |
 | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | — |
 | `zed` | `~/.config/zed/settings.json` | — |
-| `vscode` | — | `.vscode/mcp.json` |
+| `vscode` | `<application support>/Code/User/mcp.json` | `.vscode/mcp.json` |
 | `lm-studio` | `~/.lmstudio/mcp.json` | — |
-| `claude-desktop` | — | — |
+| `claude-desktop` | `<application support>/Claude/claude_desktop_config.json` | — |
 
 ## Global options
 

@@ -42,7 +42,12 @@ pub(crate) fn safe_project_rel(raw: &str) -> bool {
 /// Always the FILE, never the directory holding it: Claude Code's surface is a topos-owned plugin
 /// DIRECTORY, and every receipt names the `.mcp.json` inside it. Teaching one spelling while
 /// printing another meant pasting a receipt's own path into `dest` was refused.
-pub(crate) fn mcp_dest_spelling(slug: &str, scope: ManifestScope) -> Option<String> {
+///
+/// **Table-only, and only the suite reads it.** Three rows have no platform-neutral spelling and
+/// answer `None` here; every runtime caller wants [`mcp_dest_spelling_here`], which resolves those
+/// against this machine, so the two cannot be picked by accident.
+#[cfg(test)]
+fn mcp_dest_spelling(slug: &str, scope: ManifestScope) -> Option<String> {
     mcp_dest_spelling_of(descriptor::mcp_harness(slug)?, scope)
 }
 
@@ -66,6 +71,44 @@ pub(crate) fn mcp_dest_spelling_of(harness: &KnownHarness, scope: ManifestScope)
         }
         ManifestScope::Project => mcp.project.map(|(rel, _)| rel.to_owned()),
     }
+}
+
+/// [`mcp_dest_spelling`] **as this machine spells it** — the one a verb writes into a row and the
+/// one a refusal teaches.
+///
+/// Three agents keep their machine config under the platform's application-support directory
+/// (`~/Library/Application Support` on macOS, `%APPDATA%` on Windows, the XDG config home
+/// elsewhere), which the table deliberately has no single spelling for. That left them with no
+/// machine `dest` token at all: `-a vscode` refused with "agent `vscode` has no config file" — a
+/// sentence that was false twice over (it has one, and `--dest` takes a FILE) — and the
+/// known-file list a `--dest` refusal teaches named 13 of the 16 files.
+///
+/// The machine-wide manifest's own dest dialect is MACHINE PATHS (`~/`-prefixed or absolute — the
+/// grammar's rule, not a workaround), so the spelling for those three is the surface's resolved
+/// path written back as `~/…`. It round-trips: [`mcp_slug_for_dest`] already resolves a `~/` entry
+/// against this machine and matches it to the surface, which is why `--dest` accepted the very
+/// path `-a` could not produce. A root that resolves OUTSIDE home has no `~/` form and still
+/// answers `None` — an absolute machine path is not something a verb should write for someone.
+pub(crate) fn mcp_dest_spelling_here(slug: &str, scope: ManifestScope) -> Option<String> {
+    let harness = descriptor::mcp_harness(slug)?;
+    if let Some(spelling) = mcp_dest_spelling_of(harness, scope) {
+        return Some(spelling);
+    }
+    if scope != ManifestScope::Global {
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let resolved = harness.mcp_user_path(&home)?;
+    let rest = resolved.strip_prefix(&home).ok()?.to_str()?;
+    let base = format!("~/{rest}");
+    Some(match harness.mcp()?.user?.dialect {
+        McpDialect::ClaudePluginDir => format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            plugin_dir::PLUGIN_MCP_PATH
+        ),
+        _ => base,
+    })
 }
 
 /// One `dest` entry as the SURFACE is keyed — the directory, for the one dialect whose surface is
@@ -109,11 +152,13 @@ pub(crate) fn quoted_list(items: &[String]) -> String {
 }
 
 /// Every known MCP config-file spelling at `scope`, table order — the list an unknown-file
-/// refusal teaches.
+/// refusal teaches. Spelled for THIS MACHINE ([`mcp_dest_spelling_here`]), so the list a person is
+/// told to choose from names every file topos would write and not merely the ones with a
+/// platform-neutral token: a refusal that teaches an incomplete list teaches the wrong thing.
 pub(crate) fn known_mcp_files(scope: ManifestScope) -> Vec<String> {
     descriptor::mcp_harnesses()
         .iter()
-        .filter_map(|h| mcp_dest_spelling(h.slug, scope))
+        .filter_map(|h| mcp_dest_spelling_here(h.slug, scope))
         .collect()
 }
 
@@ -260,6 +305,49 @@ mod tests {
         // Unknown slugs map nowhere.
         assert_eq!(mcp_dest_spelling("notepad", ManifestScope::Global), None);
         assert_eq!(skills_dest_spelling("notepad", ManifestScope::Global), None);
+    }
+
+    /// **Every MCP-capable agent has a machine spelling, and the list a refusal teaches names
+    /// them all.** Three of them keep their config under the platform's application-support
+    /// directory, which the table has no single token for — so they had no machine `dest` at all:
+    /// `-a vscode` refused with "agent `vscode` has no config file" (false: it has one, and
+    /// `--dest` takes a FILE not a folder), and the known-file list a `--dest` refusal prints
+    /// named thirteen of sixteen. The machine-wide file's own dest dialect IS machine paths, so
+    /// the spelling for those three is the resolved path written back as `~/…` — which
+    /// [`mcp_slug_for_dest`] already accepted, which is exactly why `--dest` worked where `-a`
+    /// did not.
+    #[test]
+    fn every_mcp_agent_has_a_machine_spelling_that_resolves_back_to_it() {
+        let table = descriptor::mcp_harnesses();
+        let spelled: Vec<&str> = table
+            .iter()
+            .filter(|h| mcp_dest_spelling_here(h.slug, ManifestScope::Global).is_some())
+            .map(|h| h.slug)
+            .collect();
+        assert_eq!(
+            spelled.len(),
+            table.len(),
+            "every MCP-capable agent spells its machine config file: {spelled:?}"
+        );
+        assert_eq!(known_mcp_files(ManifestScope::Global).len(), table.len());
+
+        // The round trip that makes it a vocabulary and not a string: what `-a <slug>` writes is
+        // what `--dest` accepts, and it resolves back to the same agent.
+        for h in table {
+            let entry = mcp_dest_spelling_here(h.slug, ManifestScope::Global).expect("a spelling");
+            assert!(
+                entry.starts_with("~/"),
+                "the machine file names machine paths: {entry}"
+            );
+            crate::manifest::document::check_dest_entry(&entry, ManifestScope::Global)
+                .unwrap_or_else(|e| panic!("{entry} is not writable into a machine row: {e:?}"));
+            assert_eq!(
+                mcp_slug_for_dest(&entry, ManifestScope::Global),
+                Some(h.slug),
+                "{entry} must resolve back to {}",
+                h.slug
+            );
+        }
     }
 
     #[test]

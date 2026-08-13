@@ -315,7 +315,11 @@ fn render_agents(out: &mut String, table: &[&'static KnownHarness]) {
     out.push_str(
         "An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a \
          skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. \
-         Claude Code's machine entry is a topos-owned plugin folder, not a single file.\n\n",
+         Claude Code's machine entry is a topos-owned plugin folder, not a single file. A machine \
+         path starting `<application support>/` is the one directory that differs by platform — \
+         `~/Library/Application Support` on macOS, `%APPDATA%` on Windows, `~/.config` elsewhere; \
+         `-a <slug>` resolves it for the machine it runs on, and `--dest` takes that resolved \
+         path.\n\n",
     );
     out.push_str("| Agent | Machine config file | Project config file |\n|---|---|---|\n");
     // The MCP view is the same filter `descriptor::mcp_harnesses` applies, over the stated table.
@@ -323,14 +327,35 @@ fn render_agents(out: &mut String, table: &[&'static KnownHarness]) {
         let cell_or_dash = |spelling: Option<String>| {
             spelling.map_or_else(|| "—".to_owned(), |s| format!("`{s}`"))
         };
+        // A committed table is a property of the COMMIT, so a root with no platform-neutral
+        // spelling is named by its platform-neutral DESCRIPTION rather than by whichever machine
+        // happened to run the generator. `—` used to stand there, which read as "this agent has
+        // no machine config" about three agents that do.
+        let machine = mcp_dest_spelling_of(h, ManifestScope::Global)
+            .map(|s| format!("`{s}`"))
+            .or_else(|| app_support_cell(h))
+            .unwrap_or_else(|| "—".to_owned());
         out.push_str(&format!(
             "| `{}` | {} | {} |\n",
             h.slug,
-            cell_or_dash(mcp_dest_spelling_of(h, ManifestScope::Global)),
+            machine,
             cell_or_dash(mcp_dest_spelling_of(h, ManifestScope::Project)),
         ));
     }
     out.push('\n');
+}
+
+/// The machine cell for an MCP surface whose root has no platform-neutral `~/` spelling: the
+/// application-support directory, named as the platform-neutral thing it is. `None` for every
+/// other root (they all have a spelling) and for a row with no user surface at all.
+fn app_support_cell(h: &KnownHarness) -> Option<String> {
+    let user = h.mcp()?.user?;
+    (user.dir.root() == registry::Root::AppSupport).then(|| {
+        format!(
+            "`<application support>/{}`",
+            user.dir.suffix().trim_start_matches('/')
+        )
+    })
 }
 
 /// Render the full CLI reference markdown from the real clap command tree, with the agent tables
