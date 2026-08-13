@@ -104,19 +104,20 @@ impl ServerDoc {
     /// address when it offers one, else the first package's own identity. It is a document-level
     /// fact on purpose — the same bundle mints the same key whichever form a given agent ends up
     /// running.
+    ///
+    /// The package's VERSION is deliberately left out. The question this answers is "is a retired
+    /// key being re-minted for the same server?", and a server that published a new version is the
+    /// same server — the harness's sign-in under that key belongs to it either way. An address
+    /// carries no version either, so the two halves answer alike.
     pub(crate) fn canonical_identity(&self) -> Option<String> {
         if let Some(remote) = &self.remote
             && let Some(address) = canonical_address(&remote.url)
         {
             return Some(address);
         }
-        self.packages.first().map(|p| {
-            if p.version.is_empty() {
-                format!("{}:{}", p.registry, p.identifier)
-            } else {
-                format!("{}:{}@{}", p.registry, p.identifier, p.version)
-            }
-        })
+        self.packages
+            .first()
+            .map(|p| format!("{}:{}", p.registry, p.identifier))
     }
 }
 
@@ -1171,10 +1172,11 @@ mod tests {
             both.canonical_identity().as_deref(),
             Some("https://mcp.example/x")
         );
-        // A package-only document identifies itself by the package it pins.
+        // A package-only document identifies itself by the package — WITHOUT the version, which
+        // is not part of which server this is.
         assert_eq!(
             doc(NPM_ONLY).canonical_identity().as_deref(),
-            Some("npm:@acme/server@2.1.0")
+            Some("npm:@acme/server")
         );
 
         for (bad, says) in [
