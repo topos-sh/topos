@@ -180,7 +180,7 @@ curl -fsS -H 'Accept: application/json' https://topos.example.com
 ```
 
 Liveness answers `{"ok":true}`, and the protocol card answers
-`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api","server_version":"0.1.35","min_cli_version":"0.1.15"}`.
+`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api","server_version":"0.1.36","min_cli_version":"0.1.15"}`.
 The last two fields are this deployment's compatibility declaration — the release it runs, and the
 oldest `topos` it still speaks to (see [Upgrades](#upgrades)). In the checkout,
 `bash scripts/compose-smoke.sh` runs the same end-to-end smoke the repo's CI does — it builds the
@@ -265,8 +265,9 @@ back is: stop the stack, restore the pre-upgrade backup, check out the previous 
 
 Each side declares a compatibility floor, so an upgrade is not a fleet-wide chase. The server's
 protocol card carries the release it runs and the oldest CLI it speaks to; every CLI carries the
-oldest server it speaks to. Both floors sit at the last wire-breaking release — `0.1.15` today —
-and move only when the next break lands. A CLI below the server's floor is refused with one
+oldest server it speaks to. Each floor sits at the last release that broke the wire in its own
+direction — the CLI floor at `0.1.15`, the server floor at `0.1.36` today — and moves only when
+the next break lands. A CLI below the server's floor is refused with one
 sentence whose fix is `topos self-update`, and an agent reads the same refusal structurally and can
 run it itself. A server below the CLI's floor is refused at `topos login`, before anything commits,
 with both remedies named: ask whoever runs the server to upgrade it, or pin that machine back with

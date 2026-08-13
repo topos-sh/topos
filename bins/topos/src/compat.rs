@@ -21,12 +21,13 @@ use crate::error::ClientError;
 pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The oldest server this build can speak to. The floor sits at the last release that broke the
-/// wire in a way a client CANNOT DEGRADE THROUGH — the login wire going server-first (the
-/// authorize body's required `workspace` field was retired). Later removals that a client rides
-/// out on its own do not move it: a lane route has since been deleted whose loss costs an older
-/// client one best-effort field and no more. A break with no graceful degradation moves this floor
-/// in the same change.
-pub(crate) const MIN_SERVER_VERSION: &str = "0.1.15";
+/// wire in a way a client CANNOT DEGRADE THROUGH — this one: the client stopped tolerating omitted
+/// fields on the delivery, index, log, and proposal documents (`kind`, the staleness window, the
+/// session status, proposal ownership are required reads now), so an older server's omissions
+/// would surface as parse failures, not degraded lines. Refusing it here instead names the fix.
+/// Removals a client rides out on its own do not move this floor; a break with no graceful
+/// degradation moves it in the same change.
+pub(crate) const MIN_SERVER_VERSION: &str = "0.1.36";
 
 /// The oldest server that RECORDS MCP bundle kinds — the floor a `kind = "mcp"` publish checks
 /// before its op WAL, because an older server ignores the additive `kind` field and silently
@@ -161,9 +162,12 @@ mod tests {
         assert!(server_below_floor("0.1.14"));
         assert!(server_below_floor("0.0.9"));
         assert!(server_below_floor("v0.1.14"), "a leading v is tolerated");
+        assert!(
+            server_below_floor("0.1.35"),
+            "the release before the floor's break refuses"
+        );
         // At the floor and above, the two ends speak the same wire.
         assert!(!server_below_floor(MIN_SERVER_VERSION));
-        assert!(!server_below_floor("0.1.16"));
         assert!(!server_below_floor("1.0.0"));
     }
 
