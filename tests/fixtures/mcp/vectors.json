@@ -45,6 +45,26 @@
     "note": "Both ways offered at once. The summary still reports the placed remote; the packages ride along for the machines that prefer one."
   },
   {
+    "file": "valid/package-npm-prerelease.json",
+    "verdict": "ok",
+    "note": "The npm grammar read positively still takes everything semver spells: a prerelease tail and build metadata are part of one exact version."
+  },
+  {
+    "file": "valid/package-pypi-prerelease.json",
+    "verdict": "ok",
+    "note": "The same for the other grammar — a PEP 440 release candidate names exactly one released version, so it publishes."
+  },
+  {
+    "file": "invalid/package-npm-wildcard.json",
+    "verdict": "MCP_PACKAGE_UNPINNED",
+    "note": "A bare wildcard is no range spelling anyone lists, and npm resolves it to whatever is current on the day each machine installs."
+  },
+  {
+    "file": "invalid/package-npm-dist-tag.json",
+    "verdict": "MCP_PACKAGE_UNPINNED",
+    "note": "A dist-tag reads like a word and moves like a pointer: the version has to match the registry's own grammar, not merely avoid the range spellings."
+  },
+  {
     "file": "invalid/package-version-range.json",
     "verdict": "MCP_PACKAGE_UNPINNED",
     "note": "A range resolves to whatever the day supplies — two machines installing the same bundle would not get the same bytes."

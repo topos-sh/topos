@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/files",
+  "description": "A prerelease, spelled the way semver spells one.",
+  "version": "2.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-files",
+      "version": "2.2.0-beta.1+build.5",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/notes",
+  "description": "A release candidate, spelled the way PEP 440 spells one.",
+  "version": "2.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "acme-mcp-notes",
+      "version": "2.0.0rc1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
