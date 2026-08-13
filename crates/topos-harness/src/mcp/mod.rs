@@ -353,7 +353,7 @@ const CMD_METACHARACTERS: [char; 7] = ['^', '&', '|', '<', '>', '(', ')'];
 /// 1. the harness SPAWNS `cmd.exe` with this argument list, and the spawn API encodes it into one
 ///    command line by the C runtime's rules: an element containing a space, a tab or a quote is
 ///    wrapped in double quotes (an inner quote written `\"`), everything else is written bare;
-/// 2. `cmd.exe` parses that line — acting on [`CMD_METACHARACTERS`] wherever they fall outside
+/// 2. `cmd.exe` parses that line — acting on `^ & | < > ( )` wherever they fall outside
 ///    double quotes, and consuming a caret to take the next character literally;
 /// 3. the real program parses what `cmd` passed on, by the C runtime's rules again, which undo
 ///    step 1.
