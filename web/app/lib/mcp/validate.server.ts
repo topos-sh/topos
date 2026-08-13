@@ -483,13 +483,29 @@ function literalValueOf(entry: Record<string, unknown>): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-/** The named-slot rule, one sentence for env vars, flags and package headers alike. */
+/**
+ * The named-slot rule, one sentence for env vars, flags and package headers alike.
+ *
+ * A slot is judged by what the DOCUMENT says about it and by what its NAME says, in that order.
+ * `isSecret: true` is the publisher stating outright that the slot holds a credential — a
+ * declaration, and fine on its own, because a slot with no value is exactly the arrangement this
+ * product wants. With a value already in it, the declaration names what is travelling: refused
+ * whatever the slot is called, because a heuristic over names is a belt and the publisher's own
+ * word is not.
+ */
 function checkNamedSlot(entry: Record<string, unknown>, what: string): McpRefusal | null {
   const name = entry.name;
   if (typeof name !== "string" || name.length === 0) {
     return refuse("MCP_INVALID", `every ${what} needs a name`);
   }
-  if (looksLikeCredentialName(name) && literalValueOf(entry) !== null) {
+  const filled = literalValueOf(entry) !== null;
+  if (entry.isSecret === true && filled) {
+    return refuse(
+      "MCP_SECRET_REFUSED",
+      `the ${what} ${name} is declared secret and arrives with its value filled in — a shared bundle names the slot and lets each machine fill it`,
+    );
+  }
+  if (looksLikeCredentialName(name) && filled) {
     return refuse(
       "MCP_SECRET_REFUSED",
       `the ${what} ${name} arrives with its value filled in — a shared bundle names the slot and lets each machine fill it`,

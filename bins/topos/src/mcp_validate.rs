@@ -873,6 +873,13 @@ fn literal_value_of(entry: &Value) -> Option<&str> {
 
 /// The named-slot rule, one sentence for environment variables, flags and package headers alike.
 ///
+/// A slot is judged by what the DOCUMENT says about it and by what its NAME says, in that order.
+/// `isSecret: true` is the publisher stating outright that the slot holds a credential — a
+/// declaration, and fine on its own, because a slot with no value is exactly the arrangement this
+/// product wants. With a value already in it, the declaration names what is travelling: refused
+/// whatever the slot is called, because a heuristic over names is a belt and the publisher's own
+/// word is not.
+///
 /// # Errors
 /// One [`McpRefusal`]; mirrors the web tier's `checkNamedSlot`.
 fn check_named_slot(entry: &Value, what: &str) -> Result<(), McpRefusal> {
@@ -886,7 +893,17 @@ fn check_named_slot(entry: &Value, what: &str) -> Result<(), McpRefusal> {
             format!("every {what} needs a name"),
         );
     }
-    if looks_like_credential_name(name) && literal_value_of(entry).is_some() {
+    let filled = literal_value_of(entry).is_some();
+    if entry.get("isSecret").and_then(Value::as_bool) == Some(true) && filled {
+        return refuse(
+            McpRefusalCode::SecretRefused,
+            format!(
+                "its {what} {name} is declared secret and arrives with the value filled in — a \
+                 shared bundle names the slot and lets each machine fill it"
+            ),
+        );
+    }
+    if looks_like_credential_name(name) && filled {
         return refuse(
             McpRefusalCode::SecretRefused,
             format!(
@@ -1891,6 +1908,12 @@ mod tests {
             Ok(())
         );
         assert_eq!(code(r#"{"name":"ACME_ROOT","value":"/srv"}"#), Ok(()));
+        // The DOCUMENT'S OWN WORD outranks the name heuristic: a slot nothing about the name
+        // suspects, declared secret, arriving with an ordinary-looking value in it.
+        assert_eq!(
+            code(r#"{"name":"SESSION","isSecret":true,"value":"changeme"}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
         for name in ["GITHUB_TOKEN", "github-token", "acmeApiKey", "DB_PASSWORD"] {
             assert_eq!(
                 code(&format!(r#"{{"name":"{name}","value":"filled-in"}}"#)),
