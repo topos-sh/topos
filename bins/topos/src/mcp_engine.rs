@@ -472,7 +472,12 @@ pub(crate) fn converge(
         // plain words, and re-decided from scratch on the next sweep.
         let caps = h.mcp().map(|m| crate::mcp_render::HarnessCaps {
             remote: m.remote,
-            stdio: m.stdio,
+            // A ROW may not promise a program shape its DIALECT has no grammar for. The two are
+            // separate columns, and a table that set them at odds — a downloaded one, an
+            // override — would have the driver refuse the whole surface, taking every OTHER
+            // bundle's entry in that file down with it. Answering here withholds one placement
+            // instead, which is what a capability gap is supposed to cost.
+            stdio: m.stdio && mcp::dialect_expresses(dialect, &EMPTY_PROGRAM),
             env_ref: m.env_ref,
         });
         let machine = crate::mcp_render::Machine::at(&file);
@@ -1038,6 +1043,14 @@ fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, Message>
         )
     })
 }
+
+/// A program-run target with nothing in it — the probe that asks a DIALECT whether it has any
+/// grammar for one at all ([`mcp::dialect_expresses`] answers on the shape, never on the contents).
+static EMPTY_PROGRAM: mcp::McpTarget = mcp::McpTarget::Local {
+    command: String::new(),
+    args: Vec::new(),
+    env: Vec::new(),
+};
 
 fn agent_state(
     slug: &str,
