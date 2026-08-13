@@ -180,8 +180,30 @@ struct Running {
     child: std::process::Child,
     stdin: Option<std::process::ChildStdin>,
     lines: Receiver<String>,
-    stderr: std::sync::Arc<std::sync::Mutex<String>>,
+    stderr: std::sync::Arc<StderrSink>,
 }
+
+/// The drained stderr plus the fact of its end — a condvar pair, so a reader of the tail can WAIT
+/// for the drain to finish instead of racing it. A child that dies on startup writes its one
+/// explanatory line and closes the pipe; without the wait, the verdict thread can observe the
+/// closed stdout first and print "ended without answering" with no tail — a race CI loses and
+/// laptops win, which is exactly the kind of flake that erodes trust in the suite.
+struct StderrSink {
+    held: std::sync::Mutex<StderrHeld>,
+    drained: std::sync::Condvar,
+}
+
+/// What the stderr thread has read, and whether the pipe has ended.
+struct StderrHeld {
+    text: String,
+    done: bool,
+}
+
+/// How long a verdict waits for the stderr drain to reach EOF before settling for what it has.
+/// The wait only ever runs on a failure path where the child's streams are closing or closed, so
+/// EOF is normally immediate; the bound is for the corner where a child closed stdout but holds
+/// stderr open, which must not stall the verdict.
+const STDERR_DRAIN_WAIT: Duration = Duration::from_millis(250);
 
 impl Running {
     /// Close stdin (the binding's own graceful-shutdown signal), then kill the whole tree and reap.
@@ -197,10 +219,28 @@ impl Running {
         let _ = self.child.wait();
     }
 
-    /// The bounded tail of what the child wrote to stderr — a diagnostic, never a verdict.
+    /// The bounded tail of what the child wrote to stderr — a diagnostic, never a verdict. Waits
+    /// (briefly, bounded) for the drain to reach the pipe's end, so a child that died explaining
+    /// itself is quoted rather than raced.
     fn stderr_tail(&self) -> String {
-        let held = self.stderr.lock().map(|s| s.clone()).unwrap_or_default();
-        wire::clip(held.trim(), MAX_STDERR_TAIL)
+        let deadline = Instant::now() + STDERR_DRAIN_WAIT;
+        let text = match self.stderr.held.lock() {
+            Ok(mut held) => loop {
+                if held.done {
+                    break held.text.clone();
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break held.text.clone();
+                }
+                match self.stderr.drained.wait_timeout(held, left) {
+                    Ok((h, _)) => held = h,
+                    Err(_) => break String::new(),
+                }
+            },
+            Err(_) => String::new(),
+        };
+        wire::clip(text.trim(), MAX_STDERR_TAIL)
     }
 }
 
@@ -265,25 +305,43 @@ fn spawn(command: &str, args: &[String], env: &[(String, EnvValue)]) -> std::io:
             }
         });
     }
-    let stderr = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr = std::sync::Arc::new(StderrSink {
+        held: std::sync::Mutex::new(StderrHeld {
+            text: String::new(),
+            done: false,
+        }),
+        drained: std::sync::Condvar::new(),
+    });
     if let Some(err) = child.stderr.take() {
         let sink = std::sync::Arc::clone(&stderr);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(err).take(MAX_LINE_BYTES);
             let mut line = String::new();
             while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                if let Ok(mut held) = sink.lock() {
+                if let Ok(mut held) = sink.held.lock() {
                     // A rolling tail: only the last words are ever shown, and the buffer never
                     // grows past what the read itself is capped at.
-                    held.push_str(&line);
-                    let over = held.chars().count().saturating_sub(MAX_STDERR_TAIL * 2);
+                    held.text.push_str(&line);
+                    let over = held
+                        .text
+                        .chars()
+                        .count()
+                        .saturating_sub(MAX_STDERR_TAIL * 2);
                     if over > 0 {
-                        *held = held.chars().skip(over).collect();
+                        held.text = held.text.chars().skip(over).collect();
                     }
                 }
                 line.clear();
             }
+            // The pipe has ended; say so, and wake anyone waiting to quote it.
+            if let Ok(mut held) = sink.held.lock() {
+                held.done = true;
+            }
+            sink.drained.notify_all();
         });
+    } else if let Ok(mut held) = stderr.held.lock() {
+        // No pipe at all: there is nothing to drain, and no one should wait for it.
+        held.done = true;
     }
     Ok(Running {
         child,
