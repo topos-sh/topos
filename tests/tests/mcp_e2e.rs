@@ -150,6 +150,31 @@ fn seed_user_configs(home: &Path) -> Vec<(&'static str, PathBuf, String)> {
     seeds
 }
 
+/// Mark every driven harness's trigger REGISTERED in the shared `~/.topos`, the state a real
+/// machine reaches at login: the sweep offers a trigger once per agent ever, and this document is
+/// that record. Written by arrangement because the fixture rig's ops-level login never runs the
+/// composition root's breadth registration — without it, the first `update` would settle the
+/// question itself and write trigger artifacts into configs these tests pin byte-exactly.
+fn settle_trigger_registration(install: &Install) {
+    let agents: serde_json::Map<String, Value> = SIX
+        .iter()
+        .map(|slug| {
+            (
+                (*slug).to_owned(),
+                json!({ "at_ms": 1, "registered": true, "retry_at_ms": 0 }),
+            )
+        })
+        .collect();
+    let state_dir = install.root().join(".topos").join("state");
+    std::fs::create_dir_all(&state_dir).expect("create the state dir");
+    std::fs::write(
+        state_dir.join("trigger_registration.json"),
+        serde_json::to_vec(&json!({ "schema_version": 1, "agents": agents }))
+            .expect("serialize the registration record"),
+    )
+    .expect("write the registration record");
+}
+
 /// A path as the CLIENT reports it — canonicalized (on macOS `/var` is a symlink to
 /// `/private/var`, and the receipts carry the resolved spelling).
 fn canon(path: &Path) -> String {
@@ -345,6 +370,12 @@ fn the_mcp_bundle_loop_across_six_agents() {
     let dev = Install::new("mcp-dev");
     login(&stack, &dev, &dev_browser);
     let home = dev.home();
+    // The fixture rig's login is ops-level and never runs the composition root's breadth
+    // registration, so on this install the trigger question is still open — and the first real
+    // `update` would settle it by writing trigger artifacts into the very configs the seeds below
+    // pin byte-exactly. A real machine settles registration at login; this rig settles it by
+    // arrangement, so the assertions stay about MCP entry custody alone.
+    settle_trigger_registration(&dev);
     let seeds = seed_user_configs(&home);
 
     let swept = dev.run(dev.root(), &["update", "--json"]).data("update");
