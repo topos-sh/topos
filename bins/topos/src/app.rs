@@ -808,7 +808,7 @@ fn run_command(
                     let result = result.map(|outcome| match outcome {
                         // The breadth arming sweep + the built-in ride an APPLIED add exactly as
                         // they ride an adopt receipt (the same trigger-arming moment).
-                        ops::AddRefOutcome::Applied(mut data) => {
+                        ops::AddRefOutcome::Applied { mut data, messages } => {
                             if data.currency.is_some() {
                                 let triggers = breadth_arm(
                                     &ctx,
@@ -821,7 +821,7 @@ fn run_command(
                                     let _ = diag.note(cmd_name, &e);
                                 }
                             }
-                            ops::AddRefOutcome::Applied(data)
+                            ops::AddRefOutcome::Applied { data, messages }
                         }
                         described => described,
                     });
@@ -1002,7 +1002,7 @@ fn run_command(
                                     kind,
                                 );
                                 let result = result.map(|outcome| match outcome {
-                                    ops::AddRefOutcome::Applied(mut data) => {
+                                    ops::AddRefOutcome::Applied { mut data, messages } => {
                                         if let Some(note) = note {
                                             ops::push_note(&mut data, note);
                                         }
@@ -1020,7 +1020,7 @@ fn run_command(
                                                 let _ = diag.note(cmd_name, &e);
                                             }
                                         }
-                                        ops::AddRefOutcome::Applied(data)
+                                        ops::AddRefOutcome::Applied { data, messages }
                                     }
                                     described => described,
                                 });
@@ -2649,10 +2649,14 @@ fn finish_add_reference(
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(ops::AddRefOutcome::Applied(data)) => {
+        Ok(ops::AddRefOutcome::Applied { data, messages }) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
+                // The converge this add ran of its own carries its diagnostics out on the SAME two
+                // arrays the sweep's do — a fault an add swallowed is a fault nothing reports.
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
                 // A workspace reference resolves to whatever the catalog says it is, so the undo's
                 // caution is read off the RECEIPT, not assumed: an `add @ws/linear` of an MCP
                 // bundle came through here and borrowed a skill's sentence about folders.

@@ -205,7 +205,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
             assert!(note.contains("demand, not consent"), "{note}");
             assert!(yes_argv.contains(&"--yes".to_owned()));
         }
-        ops::AddRefOutcome::Applied(_) => {
+        ops::AddRefOutcome::Applied { .. } => {
             panic!("an interactive add of a git source always describes first")
         }
     }
@@ -227,7 +227,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Applied { .. } => {}
         ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
     }
     assert!(proj.0.join(".claude/skills/alpha/SKILL.md").exists());
@@ -248,7 +248,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
     .unwrap()
     {
         ops::AddRefOutcome::Described { .. } => {}
-        ops::AddRefOutcome::Applied(_) => {
+        ops::AddRefOutcome::Applied { .. } => {
             panic!("a repeat add describes too — the shape belongs to the verb")
         }
     }
@@ -340,7 +340,7 @@ fn a_selector_import_describes_first_then_installs() {
     .unwrap()
     {
         ops::AddRefOutcome::Described { .. } => {}
-        ops::AddRefOutcome::Applied(_) => panic!("an interactive add describes first"),
+        ops::AddRefOutcome::Applied { .. } => panic!("an interactive add describes first"),
     }
 }
 

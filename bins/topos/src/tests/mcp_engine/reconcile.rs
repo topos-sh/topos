@@ -235,7 +235,7 @@ fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
         None,
     )
     .unwrap();
-    let ops::AddRefOutcome::Applied(data) = outcome else {
+    let ops::AddRefOutcome::Applied { data, .. } = outcome else {
         panic!("a workspace subscribe applies");
     };
     let mcp = data.mcp.expect("the receipt carries the typed block");
@@ -1067,13 +1067,23 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
             None,
         )
         .unwrap();
-        let ops::AddRefOutcome::Applied(data) = outcome else {
+        let ops::AddRefOutcome::Applied { data, .. } = outcome else {
             panic!("a set-delivered add applies");
         };
         data
     };
 
+    // A NON-ASKED surface is not rewritten by an add about another one: the converge is
+    // idempotent, and a byte moving here would be a config file edited for nobody's benefit.
+    let untouched = proj.0.join(".mcp.json");
+    let before_bytes = std::fs::read(&untouched).unwrap();
+
     let data = add("opencode");
+    assert_eq!(
+        std::fs::read(&untouched).unwrap(),
+        before_bytes,
+        "claude-code's surface was not asked about and is byte-identical"
+    );
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         channel_row,

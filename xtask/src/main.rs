@@ -444,9 +444,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
         PublishData, PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult,
         PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SignInPath, SkillEntry,
-        SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger, VerifyData,
-        VerifyState, WorkspaceSyncReport,
+        RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SetDelivery, SignInPath,
+        SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
+        Surface, TargetOutcome, VerifyData, VerifyState, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -935,6 +935,69 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 "~/.cursor/skills",
             ]),
         )],
+        receipt: None,
+        error: None,
+    };
+
+    // THE SET-DELIVERED add — `topos add @acme/sentry -a opencode` on a bundle the scope's
+    // `channels/everyone` line already delivers. No row is written (an explicit row could only
+    // narrow what the channel reaches), so there is no `manifest`, no `dest`, and no undo; the
+    // typed `set_delivery` block carries the set, the reach word, the surfaces the converge
+    // answered for, and the agents that were asked about.
+    let add_set_delivered = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: true,
+        data: serde_json::to_value(AddData {
+            skill_id: Some("topos_5c1e0d44".to_owned()),
+            name: "sentry".to_owned(),
+            version_id: Some(fx_version.to_owned()),
+            bundle_digest: Some(fx_digest.to_owned()),
+            tracked: true,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            source: Some("topos.sh/acme/sentry".to_owned()),
+            manifest: None,
+            scope: None,
+            reference: Some("topos.sh/acme/sentry".to_owned()),
+            undo: Vec::new(),
+            governed_copy: None,
+            published_match: None,
+            note: None,
+            mcp: None,
+            dest: Vec::new(),
+            display: None,
+            dest_resolved: Vec::new(),
+            dest_change: None,
+            claim: None,
+            unchanged: false,
+            machine_copy: None,
+            set_delivery: Some(SetDelivery {
+                set: "channels/everyone".to_owned(),
+                scope: ReceiptScope::Project,
+                surfaces: vec![
+                    Surface {
+                        agent: "opencode".to_owned(),
+                        target: Some("opencode.json".to_owned()),
+                        state: TargetOutcome::Created,
+                        note: None,
+                    },
+                    Surface {
+                        agent: "claude-code".to_owned(),
+                        target: Some(".mcp.json".to_owned()),
+                        state: TargetOutcome::Current,
+                        note: None,
+                    },
+                ],
+                asked: vec!["opencode".to_owned()],
+                failure: None,
+            }),
+        })
+        .expect("AddData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![],
         receipt: None,
         error: None,
     };
@@ -2130,6 +2193,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/add.published-match", emit_json(&add_published_match)),
         ("json/add.ambiguous", emit_json(&add_ambiguous)),
         ("json/add.dest-extended", emit_json(&add_dest_extended)),
+        ("json/add.set-delivered", emit_json(&add_set_delivered)),
         ("json/add.claimed", emit_json(&add_claimed)),
         ("json/add.already-added", emit_json(&add_already_added)),
         (

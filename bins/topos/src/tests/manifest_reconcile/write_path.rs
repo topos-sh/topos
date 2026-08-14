@@ -52,7 +52,7 @@ fn two_manifest_edits_through_the_locked_path_both_land() {
         )
         .unwrap()
         {
-            ops::AddRefOutcome::Applied(_) => {}
+            ops::AddRefOutcome::Applied { .. } => {}
             ops::AddRefOutcome::Described { .. } => panic!("a workspace ref applies immediately"),
         }
     }
@@ -909,7 +909,7 @@ fn a_subtree_url_records_a_skill_row_carrying_the_literal_path() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Applied { .. } => {}
         ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
     }
     let text =

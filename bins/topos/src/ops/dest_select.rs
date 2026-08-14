@@ -166,6 +166,17 @@ impl Selection {
             }
         }
         for entry in &self.dests {
+            // THE DEFAULT-REACH TOKEN IS ROW GRAMMAR, not a destination anyone can ask for: it is
+            // what a row spells to keep the reach it already had, and there is nothing for a verb
+            // to place at it. The manifest's own dialect check lets it through (a row may carry
+            // it), so the argv refuses it here, where the ask is.
+            if entry == crate::manifest::dest::DEFAULT_REACH {
+                return Err(ClientError::SelectionRefused(format!(
+                    "`{}` is not a destination — it is the topos.toml token for a row's default \
+                     reach; a bare `topos add <bundle>` already reaches every agent",
+                    crate::manifest::dest::DEFAULT_REACH
+                )));
+            }
             crate::manifest::document::check_dest_entry(entry, scope)
                 .map_err(|e| ClientError::SelectionRefused(e.message))?;
             if mcp && crate::manifest::dest::mcp_slug_for_dest(entry, scope).is_none() {
@@ -549,6 +560,28 @@ mod tests {
             .collect();
         slugs.sort_unstable();
         assert_eq!(*known, format!("{}, …", slugs[..4].join(", ")));
+    }
+
+    /// The DEFAULT-REACH token is a row's own spelling, never something to ask for: there is
+    /// nothing at `*` to place at. `--dest '*'` refuses at the argv, teaching the command that
+    /// already does what it was reaching for.
+    #[test]
+    fn the_default_reach_token_is_not_an_askable_destination() {
+        for scope in [ManifestScope::Global, ManifestScope::Project] {
+            for entries in [
+                sel(&[], &["*"]).skill_entries(scope),
+                sel(&[], &["*"]).mcp_entries(scope),
+            ] {
+                let ClientError::SelectionRefused(m) = entries.unwrap_err() else {
+                    panic!("the token refuses as a selection");
+                };
+                assert_eq!(
+                    m,
+                    "`*` is not a destination — it is the topos.toml token for a row's default \
+                     reach; a bare `topos add <bundle>` already reaches every agent"
+                );
+            }
+        }
     }
 
     #[test]

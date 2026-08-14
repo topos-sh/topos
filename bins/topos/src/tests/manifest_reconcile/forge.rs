@@ -357,7 +357,7 @@ fn a_machine_with_no_prior_grant_auto_updates_a_cloned_projects_row() {
             assert_eq!(data.source, "github.com/o/r");
             assert!(yes_argv.contains(&"--yes".to_owned()), "{yes_argv:?}");
         }
-        ops::AddRefOutcome::Applied(_) => {
+        ops::AddRefOutcome::Applied { .. } => {
             panic!("an interactive add of a git source always describes first")
         }
     }

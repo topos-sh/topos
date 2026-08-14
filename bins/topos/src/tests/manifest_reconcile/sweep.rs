@@ -853,7 +853,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Applied { .. } => {}
         ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
     }
     let a_copy = proj_a.0.join(".claude/skills/alpha/SKILL.md");
@@ -876,7 +876,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Applied { .. } => {}
         ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
     }
     let b_copy = proj_b.0.join(".claude/skills/alpha/SKILL.md");
@@ -1245,7 +1245,7 @@ fn a_failed_member_install_leaves_the_row_and_the_next_update_converges() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => d,
+        ops::AddRefOutcome::Applied { data: d, .. } => d,
         ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
     };
     // The DEMAND landed first — the row is in the manifest even though beta did not land.

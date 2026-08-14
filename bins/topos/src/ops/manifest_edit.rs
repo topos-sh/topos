@@ -584,7 +584,8 @@ pub(super) fn write_row(
     // folder the caller already resolved (canonical, links followed) — never overwritten here,
     // because the row's `./…` spelling means nothing away from the file that holds it.
     data.source.get_or_insert_with(|| reference.to_owned());
-    let (value, extend) = extend_dest(prior.as_ref(), value);
+    let in_reach = reach_already_held(ctx, target, reference, prior.as_ref(), value)?;
+    let (value, extend) = extend_dest(prior.as_ref(), value, &in_reach);
     let value = &value;
     if prior.as_ref() == Some(value) {
         // The redundancy disclosure: the file already spells exactly this row — which is also how
@@ -690,9 +691,20 @@ pub(super) fn write_row(
 /// the last destination, drops the row, and resumes the feed EVERYWHERE — the opposite of the
 /// state it claimed to restore.
 ///
+/// A DESTINATION THE ROW ALREADY REACHES IS NOT AN ADDITION. `in_reach` is the row's own default
+/// reach ([`reach_already_held`]), non-empty only while the row still stands for it, and an asked
+/// entry inside it is a request for nothing: recording it would leave the receipt's undo a
+/// NARROWING, because subtracting an in-reach entry is exactly what makes the collapse materialize
+/// the token into an exact list. Such an entry drops like a string the line already spells, and an
+/// ask that drops whole is the ordinary redundancy no-op.
+///
 /// Returns the value to write and, when this WAS a destination-only act over a standing row, what
 /// it changed.
-fn extend_dest(prior: Option<&EntryValue>, value: &EntryValue) -> (EntryValue, Option<DestExtend>) {
+fn extend_dest(
+    prior: Option<&EntryValue>,
+    value: &EntryValue,
+    in_reach: &[String],
+) -> (EntryValue, Option<DestExtend>) {
     let (Some(prior), EntryValue::Fields(fields)) = (prior, value) else {
         return (value.clone(), None);
     };
@@ -730,6 +742,9 @@ fn extend_dest(prior: Option<&EntryValue>, value: &EntryValue) -> (EntryValue, O
             None => Vec::new(),
         };
         for entry in asked {
+            if is_row_dest && in_reach.contains(entry) {
+                continue;
+            }
             if !base.contains(entry) {
                 base.push(entry.clone());
                 added.push(entry.clone());
@@ -2636,6 +2651,57 @@ fn default_reach_roots(
     Ok(out)
 }
 
+/// WHAT AN ADD MUST NOT RECORD on a standing row: its DEFAULT REACH, asked only while the row
+/// still stands for it (no `dest` at all, or a `dest` carrying the token). Empty everywhere else —
+/// a row born by this add records what it was asked for, an `"off"` switch is no destination set,
+/// and a row naming its own destinations reaches exactly what it names, so every asked entry there
+/// is a real addition.
+///
+/// The reach is [`default_reach_roots`]' answer, the same one the collapse consults, so an add and
+/// the `remove` its receipt prints cannot disagree about which entries the token already holds.
+///
+/// # Errors
+/// A store read failure, or a manifest the grammar refuses.
+fn reach_already_held(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    reference: &str,
+    prior: Option<&EntryValue>,
+    value: &EntryValue,
+) -> Result<Vec<String>, ClientError> {
+    let (Some(prior), EntryValue::Fields(fields)) = (prior, value) else {
+        return Ok(Vec::new());
+    };
+    if fields.dest.is_none() || matches!(prior, EntryValue::Off) {
+        return Ok(Vec::new());
+    }
+    if !prior
+        .fields()
+        .dest
+        .as_deref()
+        .is_none_or(crate::manifest::dest::carries_default_reach)
+    {
+        return Ok(Vec::new());
+    }
+    let Ok(shape) = crate::manifest::keys::classify_key(reference) else {
+        return Ok(Vec::new());
+    };
+    let ws = match &shape {
+        KeyShape::WorkspaceBundle {
+            host, workspace, ..
+        } => Some((host.clone(), workspace.clone())),
+        _ => None,
+    };
+    let row = PlanRow {
+        reference: reference.to_owned(),
+        shape,
+        value: prior.clone(),
+    };
+    let name = row.display_name();
+    let kind = row_kind(ctx, target, Some(&row), ws.as_ref(), &name);
+    default_reach_roots(ctx, target, Some(&row), &name, kind)
+}
+
 /// A record-free placement map — the "nothing has been placed yet" input a default-reach plan is
 /// asked over.
 fn empty_placement_map() -> topos_types::persisted::PlacementMap {
@@ -2693,8 +2759,11 @@ fn set_covers(
         return Ok(false);
     };
     let plan = plan_for(ctx, target)?;
-    // The FEED row delivers whatever the workspace serves this person, this bundle included.
-    if plan.feeds.iter().any(|(h, w)| h == host && w == workspace) {
+    // The FEED row delivers whatever the workspace serves this person — but a cache entry marked
+    // `via_manifest` exists BECAUSE the feed does not serve the bundle (the row this narrowing is
+    // about is what asked for it), so it proves no coverage and the row has to stay. This is the
+    // same fence [`set_delivering`] puts on its own feed arm.
+    if !delivered.via_manifest && plan.feeds.iter().any(|(h, w)| h == host && w == workspace) {
         return Ok(true);
     }
     Ok(plan.sets.iter().any(|set| {

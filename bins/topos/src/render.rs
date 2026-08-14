@@ -1061,7 +1061,9 @@ pub(crate) fn add_tty(data: &AddData) -> String {
 /// holding it says so about that destination — a sentence about "every agent" would be true and
 /// would answer a question nobody asked — and closes on the ordinary `nothing changed`. And an
 /// asked agent nothing could be placed for reads in the `not placed` vocabulary with its reason,
-/// under the lead, because the sentence about reaching it would be false.
+/// under the lead, because the sentence about reaching it would be false. That reason is the
+/// CONVERGE's where it failed the bundle, and a failed run may not close on `nothing changed` — it
+/// established no such thing — so it closes on the bundle instead.
 ///
 /// There is no `(undo: …)` on any of them: nothing was recorded, so there is nothing to invert.
 fn add_set_delivered_tty(data: &AddData, delivery: &topos_types::results::SetDelivery) -> String {
@@ -1086,8 +1088,11 @@ fn add_set_delivered_tty(data: &AddData, delivery: &topos_types::results::SetDel
         data.name, delivery.set
     );
     if placed.is_empty() {
-        let standing = match delivery.asked.as_slice() {
-            [one] => delivery
+        // A CONVERGE THAT FAILED THE BUNDLE has established nothing about where it reaches, so
+        // neither the already-current sentence nor the `nothing changed` closing may be printed
+        // over it: the failure is the answer, and the receipt closes on the bundle it was about.
+        let standing = match (&delivery.failure, delivery.asked.as_slice()) {
+            (None, [one]) => delivery
                 .surfaces
                 .iter()
                 .find(|s| &s.agent == one && s.state.stands()),
@@ -1109,6 +1114,10 @@ fn add_set_delivered_tty(data: &AddData, delivery: &topos_types::results::SetDel
                 head
             }
         };
+        if delivery.failure.is_some() {
+            out.push_str(&source_line(data));
+            return out.trim_end().to_owned();
+        }
         out.push_str("nothing changed");
         return out;
     }

@@ -229,7 +229,7 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
         &Default::default(),
         None,
     ) {
-        Ok(ops::AddRefOutcome::Applied(d)) => {
+        Ok(ops::AddRefOutcome::Applied { data: d, .. }) => {
             assert_eq!(
                 d.reference.as_deref(),
                 Some(&format!("{HOST}/{WS_NAME}/{BARE}")[..])

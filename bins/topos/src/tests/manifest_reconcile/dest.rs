@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use topos_core::digest::FileMode;
 use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
-    WireSkillIndex, WireSkillLog,
+    WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::results::PullAction;
 
@@ -292,7 +292,7 @@ fn a_repo_set_rows_dest_aims_its_members_at_the_named_folder() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Applied { .. } => {}
         ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
     }
     // Re-aim the whole set: the row's dest replaces the default dir for every member.
@@ -346,7 +346,7 @@ fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     };
     // The row is frozen to exactly the selected destination.
@@ -398,7 +398,7 @@ fn an_agent_selected_add_whose_delivery_fails_does_not_claim_installed() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     };
     // The row froze to the destination regardless — the demand is durably recorded.
@@ -451,7 +451,7 @@ fn a_same_named_local_rows_report_does_not_prove_the_workspace_add() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     };
     // No workspace copy landed — the local row's up-to-date report is not this bundle's proof.
@@ -562,7 +562,7 @@ fn a_channel_add_whose_expansion_fails_does_not_borrow_the_feeds_proof() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     };
     // The row froze to the destination regardless — the demand is durably recorded.
@@ -611,7 +611,7 @@ fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() 
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     };
     assert_eq!(data.dest, vec!["~/.codex/skills".to_owned()]);
@@ -636,7 +636,7 @@ fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() 
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     };
     // The merge landed BOTH edits at the destination — the receipt may say so.
@@ -679,7 +679,7 @@ fn an_agent_selected_add_whose_reconcile_conflicts_names_the_standing_state() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Applied { .. } => {}
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     }
     let placed = rig.home.0.join(".codex/skills/deploy/SKILL.md");
@@ -703,7 +703,7 @@ fn an_agent_selected_add_whose_reconcile_conflicts_names_the_standing_state() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     };
     // The conflicted state is not a placed install — the destination claim clears …
@@ -1092,6 +1092,277 @@ fn a_row_left_at_its_default_reach_goes_when_a_set_still_delivers_it_and_stays_w
     );
 }
 
+/// FEED COVERAGE IS THE FEED'S TO PROVE, and a `via_manifest` cache row proves the opposite: it is
+/// written BECAUSE the workspace's feed did not serve the bundle — the explicit row is what
+/// fetched it. Reading it as coverage dropped the only demand there was, and the bundle left the
+/// machine on the next sweep.
+#[test]
+fn a_collapse_under_a_feed_row_keeps_a_row_the_feed_never_served() {
+    let rig = Rig::new("dest-collapse-feed");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    // The FEED line stands, and serves NOTHING — the explicit row beside it is what delivers.
+    let feed = format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n");
+    let both = format!("{feed}\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let subtract = |ctx: &crate::ctx::Ctx<'_>| match ops::remove_global(
+        ctx,
+        &connect(&plane, &dir),
+        &[format!("{HOST}/{WS_NAME}/deploy")],
+        None,
+        false,
+        &sel(&[], &["~/dest-x"]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a clean subtraction applies immediately: {other:?}"),
+    };
+
+    rig.write_global(&both);
+    plane.serves(Vec::new());
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    applied_dest_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["~/dest-x"],
+    );
+    subtract(&ctx);
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        both,
+        "the feed never served this bundle, so the feed line covers nothing — the row stays"
+    );
+
+    // The SIBLING fact: once the feed itself serves it, the cache row stops saying `via_manifest`
+    // and the same subtraction collapses the redundant row away.
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    applied_dest_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["~/dest-x"],
+    );
+    subtract(&ctx);
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        feed,
+        "the feed delivers it now, so the row says nothing the feed line does not"
+    );
+}
+
+/// AN ADD ASKING FOR WHAT THE ROW ALREADY REACHES ASKS FOR NOTHING. A row standing for its default
+/// reach already places in the folder the ask names, so `-a <that agent>` records nothing — the
+/// ordinary redundancy no-op — and the file is untouched. Recording it would have made the
+/// receipt's own undo a NARROWING: the subtraction bites the token and freezes the row to a list.
+#[test]
+fn an_add_naming_a_destination_the_default_reach_already_holds_changes_nothing() {
+    let (rig, plane, dir, v) = add_rig("dest-in-reach");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let row = format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    rig.write_global(&row);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    // THE PREMISE: the row's default reach already holds claude-code's own folder.
+    assert!(rig.skills().join("deploy/SKILL.md").exists());
+    assert_eq!(rig.pretty(&rig.skills()), "~/.claude/skills");
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let before = std::fs::read_to_string(&manifest).unwrap();
+
+    let reference = format!("{HOST}/{WS_NAME}/deploy");
+    let data = applied_selected_add(&ctx, &plane, &dir, &reference, &["claude-code"], &[]);
+    assert!(data.dest_change.is_none(), "{:?}", data.dest_change);
+    assert!(data.undo.is_empty(), "{:?}", data.undo);
+    assert!(
+        data.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("nothing changed"),
+        "{:?}",
+        data.note
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        before,
+        "the row already reaches claude-code — nothing was written"
+    );
+
+    // A MIXED ask records the half that is a real addition and says only that.
+    let data = applied_selected_add(
+        &ctx,
+        &plane,
+        &dir,
+        &reference,
+        &["claude-code"],
+        &["~/dest-x"],
+    );
+    let change = data.dest_change.clone().expect("a destination-only act");
+    assert_eq!(
+        change.added,
+        vec!["~/dest-x".to_owned()],
+        "the in-reach agent asked for nothing; the folder is the whole change"
+    );
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(text.contains("dest = [\"*\", \"~/dest-x\"]"), "{text}");
+    assert!(!text.contains(".claude/skills"), "{text}");
+}
+
+/// A rig whose CHANNEL line delivers `deploy`, swept once so the scope holds the record a
+/// set-delivered add needs. Returns the rig, the plane, the directory, and the version.
+fn channel_delivered_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory, Version) {
+    let rig = Rig::new(tag);
+    rig.seed_session();
+    // `cline` DETECTED — a harness the shared `~/.agents/skills` folder covers, so the plan holds
+    // that shared root beside claude-code's own native one.
+    std::fs::create_dir_all(rig.home.0.join(".cline")).unwrap();
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &v)],
+        vec![WireChannelEntry {
+            name: "everyone".into(),
+            mode: "open".into(),
+            builtin: true,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_deploy".into(),
+                name: "deploy".into(),
+            }],
+        }],
+    );
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/everyone\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    (rig, plane, dir, v)
+}
+
+/// A SHARED skills folder names no single agent, so the converge's own surface carries no slug —
+/// and matching the asked agent BY SLUG found nothing and reported a copy sitting right there as
+/// `not placed — it is not set up here`, under a header about placing copies. The asked agent's
+/// own folder is what the answer is about: the line names the agent and the shared root it reads.
+#[test]
+fn an_asked_agent_that_reads_the_shared_folder_is_not_reported_missing() {
+    let (rig, plane, dir, _v) = channel_delivered_rig("set-shared-dir");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // THE PREMISE: the copy stands in the folder several agents share, `cline` among them, and no
+    // single slug spells it.
+    let shared = rig.home.0.join(".agents/skills");
+    assert!(shared.join("deploy/SKILL.md").exists());
+    assert_eq!(
+        crate::manifest::dest::skills_dest_spelling(
+            "cline",
+            crate::manifest::document::ManifestScope::Global
+        )
+        .as_deref(),
+        Some("~/.agents/skills")
+    );
+
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let before = std::fs::read_to_string(&manifest).unwrap();
+    let data = applied_selected_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["cline"],
+        &[],
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        before,
+        "no row is written — the channel already demands it"
+    );
+    assert_eq!(
+        crate::render::add_tty(&data),
+        "deploy already reaches cline through channels/everyone (~/.agents/skills — \
+         current).\nnothing changed",
+        "{data:?}"
+    );
+}
+
+/// A CONVERGE THAT FAILED is the answer. Swallowing its outcome rendered the asked agent as
+/// `not placed — it is not set up here` — a cause the run never established — and closed on
+/// `nothing changed`, which it had no way to know. The failure names itself on the agent's line,
+/// rides the envelope's warnings, and the receipt closes on the bundle instead.
+#[test]
+fn a_set_delivered_add_whose_converge_fails_says_the_failure_and_never_nothing_changed() {
+    let (rig, plane, _dir, _v) = channel_delivered_rig("set-converge-fails");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // The workspace moves to a version whose bytes this plane cannot serve: the converge the add
+    // runs fails THIS bundle, in the sweep's own words.
+    let v2 = one_file(b"# deploy 2\n");
+    plane.serves(vec![crate::plane::DeliverySkill {
+        generation: 2,
+        ..delivered("s_deploy", "deploy", &v2)
+    }]);
+    let dir2 = FakeDirectory::new(
+        vec![WireSkillIndexEntry {
+            generation: 2,
+            ..catalog_entry("s_deploy", "deploy", &v2)
+        }],
+        vec![WireChannelEntry {
+            name: "everyone".into(),
+            mode: "open".into(),
+            builtin: true,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_deploy".into(),
+                name: "deploy".into(),
+            }],
+        }],
+    );
+    let (data, messages) = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir2),
+        None,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+        None,
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied { data, messages } => (*data, messages),
+        other => panic!("a set-delivered add applies: {other:?}"),
+    };
+    let delivery = data.set_delivery.clone().expect("the set-delivered arm");
+    let failure = delivery.failure.clone().expect("the converge failed");
+    assert!(
+        failure.contains("does not serve version"),
+        "the sweep's own wording: {failure}"
+    );
+    let tty = crate::render::add_tty(&data);
+    assert!(
+        tty.contains(&format!("codex: not placed — {failure}")),
+        "{tty}"
+    );
+    assert!(
+        !tty.contains("it is not set up here"),
+        "the cause is the converge's, not a missing agent: {tty}"
+    );
+    assert!(
+        tty.ends_with(&format!("source: {HOST}/{WS_NAME}/deploy")),
+        "a failed run cannot close on `nothing changed`: {tty}"
+    );
+    assert!(
+        crate::message::legacy_lines(&messages)
+            .iter()
+            .any(|w| w.contains("deploy")),
+        "the converge's warnings ride out with the add: {messages:?}"
+    );
+}
+
 /// Dropping an explicit row whose bundle the FEED still delivers: the row edit lands, the copies
 /// CORRECTLY stay (the feed still demands them) — and the receipt says exactly that, with the off
 /// switch, instead of the stock "the copies it placed leave this machine now" lie.
@@ -1233,7 +1504,7 @@ fn a_feed_add_states_what_this_machine_now_takes_exactly_once() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         other => panic!("a feed row applies immediately: {other:?}"),
     };
 
