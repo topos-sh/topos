@@ -1066,10 +1066,15 @@ fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_an
             .as_ref()
             .is_some_and(|c| c.default_reach && c.added == vec!["~/dest-x".to_owned()])
     );
-    // The CANONICAL spelling of that same subtraction: while a channel line carries the bundle
-    // too, a bare name names two removals (the row, and the line's member) and `remove` asks which
-    // — so the undo the receipt prints is spelled out here instead. The exact printed argv is run
-    // where it resolves, in the feed test below.
+    // While a channel line carries the bundle too, a bare name names two removals (the row, and
+    // the line's member) and `remove` asks which — so the receipt's undo keeps the CANONICAL
+    // spelling here, runnable as printed, and this subtraction runs exactly that spelling.
+    assert!(
+        added.undo.contains(&format!("{HOST}/{WS_NAME}/deploy"))
+            && !added.undo.contains(&"deploy".to_owned()),
+        "beside a channel line the printed undo spells the full reference: {:?}",
+        added.undo
+    );
     let subtract = |ctx: &crate::ctx::Ctx<'_>| match ops::remove_global(
         ctx,
         &connect(&plane, &dir),
