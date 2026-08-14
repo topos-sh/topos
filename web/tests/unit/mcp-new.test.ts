@@ -896,17 +896,24 @@ describe("the built-in list, on the page", () => {
     expect(html).toContain(`${CURATED_MCP_SERVERS.length} servers`);
   });
 
-  it("prints the errand on exactly the rows that carry one, in full", async () => {
+  it("marks manual rows with the chip alone and keeps the errand's sentence off the cards", async () => {
     const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
     const html = await renderPage();
     const manual = CURATED_MCP_SERVERS.filter((entry) => entry.auth === "manual");
-    // One note per manual row and not one more: a card that showed the caution chip without the
-    // line under it would be a caution nobody can act on.
-    expect(times(html, 'data-testid="mcp-picker-auth-note"')).toBe(manual.length);
+    // The card carries only the chip; the sentence lives in the pick dialog, where the person is
+    // actually deciding — a paragraph per manual row would out-shout twenty-four neighbours. The
+    // notes still ride the page's data payload (the dialog opens without a round trip), so the
+    // assertion scopes to the card buttons rather than the whole document.
     expect(times(html, ">manual setup<")).toBe(manual.length);
+    const cards = html
+      .split('data-testid="mcp-picker-option"')
+      .slice(1)
+      .map((chunk) => decode(chunk.slice(0, chunk.indexOf("</button>"))));
+    expect(cards.length).toBe(CURATED_MCP_SERVERS.length);
     for (const entry of manual) {
-      // The whole sentence, not a truncated half of it — the note wraps rather than clipping.
-      expect(decode(html), `${entry.title}'s note is not on the page`).toContain(entry.authNote);
+      const card = cards.find((c) => c.includes(entry.title));
+      expect(card, `${entry.title}'s card is missing`).toBeDefined();
+      expect(card, `${entry.title}'s note leaked onto its card`).not.toContain(entry.authNote);
     }
   });
 });

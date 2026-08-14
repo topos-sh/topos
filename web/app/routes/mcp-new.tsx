@@ -493,18 +493,6 @@ function ServerPicker({
               <span className="w-full truncate font-mono text-[11px] text-faint">
                 {server.host}
               </span>
-              {/* THE ERRAND, ON THE CARD. The one line that costs this row its self-service
-                  standing wraps instead of truncating — half a sentence about a token someone
-                  has to mint is worse than none, and the card growing is the honest price of
-                  saying it before the click rather than after the agent fails to sign in. */}
-              {server.auth === "manual" && (
-                <span
-                  data-testid="mcp-picker-auth-note"
-                  className="w-full text-[11px] text-dim leading-snug"
-                >
-                  {server.authNote}
-                </span>
-              )}
             </span>
           </button>
         ))}
@@ -587,15 +575,19 @@ function AddServerDialog({
             person&apos;s own machine, never here, and no credential rides in these bytes.
           </p>
         )}
-        {/* The same sentence the card carried, repeated where the decision is actually made: the
-            dialog covers the row that raised it, so a caveat only the card knew would be a
-            caveat nobody reads at the moment of publishing. */}
+        {/* THE ERRAND, SAID WHERE THE DECISION IS MADE. The card carries only the chip; the one
+            sentence about a token someone has to mint or an app an admin registers lives here,
+            because this dialog is the moment of publishing — a caveat on a grid card competes
+            with twenty-four neighbours, and a caveat here is read by exactly the person acting. */}
         {server.auth === "manual" && (
           <p className="text-faint text-xs leading-relaxed" data-testid="mcp-dialog-auth-note">
             {server.authNote}
           </p>
         )}
-        <details>
+        {/* `min-w-0`, because DialogContent is a GRID: without it this item's minimum width is
+            the document's longest line, and the whole dialog grows past its own max-width
+            instead of the pre scrolling. */}
+        <details className="min-w-0">
           <summary className="cursor-pointer text-faint text-xs">
             The exact bytes this would store
           </summary>
@@ -904,7 +896,7 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
             ))}
           </ul>
         )}
-        <details>
+        <details className="min-w-0">
           <summary className="cursor-pointer text-faint text-xs">
             The exact bytes this would store
           </summary>
