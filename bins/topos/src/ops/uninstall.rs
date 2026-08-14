@@ -752,7 +752,7 @@ mod tests {
         };
         assert!(
             describe.trigger_artifacts.iter().any(|row| row
-                == "the OpenClaw scheduled update job, if armed (removed through OpenClaw's \
+                == "the OpenClaw scheduled update job, if registered (removed through OpenClaw's \
                     scheduler)"),
             "the out-of-process trigger must be named: {:?}",
             describe.trigger_artifacts

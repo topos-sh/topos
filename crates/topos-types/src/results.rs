@@ -47,6 +47,12 @@ pub struct PullData {
     /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub behind_elsewhere: Vec<BehindElsewhere>,
+    /// The auto-update triggers this run REGISTERED — one row per newly detected agent whose
+    /// trigger the sweep installed, in the same shape `login`/`add` report their own arming. Asked
+    /// once per agent ever, so a trigger somebody removed by hand never reappears here. Empty (and
+    /// omitted) on every run that found nothing new. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<crate::TriggerReport>,
 }
 
 /// One bundle whose copy in ANOTHER scope stands behind the workspace's current. **INFERRED**
@@ -2819,6 +2825,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let v = serde_json::to_value(&data).unwrap();

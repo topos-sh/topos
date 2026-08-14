@@ -574,7 +574,8 @@ fn run_command(
             // acceptance event is the trigger-arming moment), exactly as on `follow`'s receipt.
             let result = result.map(|mut data| {
                 if data.currency.is_some() {
-                    data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                    let triggers = breadth_arm(&ctx, harness.as_ref(), &fs, data.currency.as_ref());
+                    data.triggers = triggers;
                     if let Err(e) = ops::ensure_builtin(&ctx) {
                         let _ = diag.note(cmd_name, &e);
                     }
@@ -659,7 +660,9 @@ fn run_command(
                 // other adopt receipt (the same trigger-arming moment).
                 let result = result.map(|mut added| {
                     if added.data.currency.is_some() {
-                        added.data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                        let triggers =
+                            breadth_arm(&ctx, harness.as_ref(), &fs, added.data.currency.as_ref());
+                        added.data.triggers = triggers;
                         if let Err(e) = ops::ensure_builtin(&ctx) {
                             let _ = diag.note(cmd_name, &e);
                         }
@@ -697,7 +700,8 @@ fn run_command(
                     // they ride any other adopt receipt (the same trigger-arming moment).
                     ops::AddManyOutcome::Applied(mut items) => {
                         if items.iter().any(|d| d.currency.is_some()) {
-                            let triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                            let active = items.iter().find_map(|d| d.currency.as_ref());
+                            let triggers = breadth_arm(&ctx, harness.as_ref(), &fs, active);
                             if let Err(e) = ops::ensure_builtin(&ctx) {
                                 let _ = diag.note(cmd_name, &e);
                             }
@@ -806,7 +810,13 @@ fn run_command(
                         // they ride an adopt receipt (the same trigger-arming moment).
                         ops::AddRefOutcome::Applied(mut data) => {
                             if data.currency.is_some() {
-                                data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                                let triggers = breadth_arm(
+                                    &ctx,
+                                    harness.as_ref(),
+                                    &fs,
+                                    data.currency.as_ref(),
+                                );
+                                data.triggers = triggers;
                                 if let Err(e) = ops::ensure_builtin(&ctx) {
                                     let _ = diag.note(cmd_name, &e);
                                 }
@@ -999,8 +1009,13 @@ fn run_command(
                                         // The arming sweep + the built-in ride an APPLIED add,
                                         // exactly as on the spelled-out reference arm above.
                                         if data.currency.is_some() {
-                                            data.triggers =
-                                                breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                                            let triggers = breadth_arm(
+                                                &ctx,
+                                                harness.as_ref(),
+                                                &fs,
+                                                data.currency.as_ref(),
+                                            );
+                                            data.triggers = triggers;
                                             if let Err(e) = ops::ensure_builtin(&ctx) {
                                                 let _ = diag.note(cmd_name, &e);
                                             }
@@ -1175,7 +1190,8 @@ fn run_command(
             // it), so a freshly wired harness knows how to drive the tool.
             let result = result.map(|mut data| {
                 if data.currency.is_some() {
-                    data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                    let triggers = breadth_arm(&ctx, harness.as_ref(), &fs, data.currency.as_ref());
+                    data.triggers = triggers;
                     if let Err(e) = ops::ensure_builtin(&ctx) {
                         let _ = diag.note(cmd_name, &e);
                     }
@@ -2307,6 +2323,7 @@ mod sweep_verdict_tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let warnings = vec![
@@ -3777,16 +3794,31 @@ fn claim_grammar(
 /// The breadth arming sweep, run at the composition root — the one layer holding the real ports
 /// (`RealFs` is both the `ConfigStore` and the `CommandRunner`) and the resolved machine roots.
 /// `None` roots (no `$HOME`) arms nothing: detection needs a home, and the active adapter's own
-/// trigger was already armed by the verb.
+/// trigger was already armed by the verb — `active_report` is that outcome, recorded here with the
+/// rest.
+///
+/// UNCONDITIONAL, and deliberately so: a person who ran a verb that wires topos into their machine
+/// asked for exactly this, so no registration record gates it. What the record gets is the
+/// REFRESH — the sweep offers a trigger once per agent ever, and a verb that just answered for
+/// these agents is what it must see (`crate::trigger_record`).
 fn breadth_arm(
-    roots: &Option<crate::ctx::AgentRoots>,
+    ctx: &crate::ctx::Ctx<'_>,
     active: &dyn HarnessAdapter,
     fs: &RealFs,
+    active_report: Option<&topos_types::TriggerReport>,
 ) -> Vec<topos_types::TriggerReport> {
-    match roots {
-        Some(r) => ops::arm_detected(&r.home, r.cwd.as_deref(), active.id().slug(), fs, fs),
-        None => Vec::new(),
-    }
+    let Some(roots) = &ctx.roots else {
+        return Vec::new();
+    };
+    let reports = ops::arm_detected(
+        &roots.home,
+        roots.cwd.as_deref(),
+        active.id().slug(),
+        fs,
+        fs,
+    );
+    crate::trigger_record::record_reports(ctx, active_report.into_iter().chain(&reports));
+    reports
 }
 
 /// Build the PLACEMENT adapter for `id`. Adding a harness is ONE new match arm — no caller change.
@@ -4148,6 +4180,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: Some("machine".to_owned()),
         };
         let outcome = |decisions: Vec<crate::ops::PendingDecision>,

@@ -232,7 +232,7 @@ ignores itself.
 
 ## Updates apply themselves
 
-Logging in arms a session-start trigger, so each time an agent starts the machine quietly catches
+Logging in registers a session-start trigger, so each time an agent starts the machine quietly catches
 up — that sweep always covers both sets, this folder's and your machine's, so nothing goes stale
 while you work in one place. By hand, any time:
 
@@ -348,7 +348,7 @@ The inventory where you stand, each skill with its version and source; one skill
 exact file and line behind it, or the workspace feed, and where its files sit; the skills already in
 your agents' folders that topos doesn't manage yet; what your workspaces offer, the one command here
 that needs the network; and the health panel — logins, sessions, whether the auto-update triggers
-are armed, and what needs attention, each with the command that resolves it.
+are registered, and what needs attention, each with the command that resolves it.
 
 Nothing a view leaves out is hidden: a bare `topos list` inside a project ends with one line for the
 machine-wide set and one for the untracked skills, each naming the command that opens it in full.

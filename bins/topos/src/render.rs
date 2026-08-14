@@ -1276,21 +1276,34 @@ pub(crate) fn fmt_tty(data: &topos_types::results::FmtData) -> String {
     }
 }
 
-/// The breadth arming sweep's receipt lines — one per OTHER detected agent, honest per row (an
-/// `Active` row names its live moment; a registered-but-ungated row names the consent still owed;
-/// a degraded row names the explicit-pull floor). Empty input renders nothing.
+/// The breadth arming sweep's receipt lines — one per OTHER detected agent. See
+/// [`trigger_lines`] for the per-row wording. Empty input renders nothing.
 pub(crate) fn breadth_trigger_lines(triggers: &[topos_types::TriggerReport]) -> String {
+    trigger_lines("Other detected agents:", triggers)
+}
+
+/// The `update` sweep's registration lines — one per agent this run found newly detected and
+/// offered its trigger to. The rows are the ones every install receipt prints; only the lead says
+/// which question they answer.
+pub(crate) fn registered_trigger_lines(triggers: &[topos_types::TriggerReport]) -> String {
+    trigger_lines("Newly detected agents:", triggers)
+}
+
+/// One trigger-report block: the lead, then a row per agent, honest per row (an `Active` row names
+/// its live moment; a registered-but-ungated row names the consent still owed; a degraded row
+/// names the explicit-pull floor). Empty input renders nothing.
+fn trigger_lines(lead: &str, triggers: &[topos_types::TriggerReport]) -> String {
     if triggers.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\nOther detected agents:");
+    let mut out = format!("\n{lead}");
     for t in triggers {
         let phrase = match (t.state, t.currency_kind) {
-            (TriggerState::Active, CurrencyKind::SessionStart) => "armed (session start)",
-            (TriggerState::Active, CurrencyKind::Scheduled) => "armed (scheduled)",
-            (TriggerState::Active, _) => "armed",
+            (TriggerState::Active, CurrencyKind::SessionStart) => "active (session start)",
+            (TriggerState::Active, CurrencyKind::Scheduled) => "active (scheduled)",
+            (TriggerState::Active, _) => "active",
             (TriggerState::Inactive, _) => "registered",
-            (TriggerState::Degraded, _) => "couldn't arm — `topos update` still works",
+            (TriggerState::Degraded, _) => "couldn't register — `topos update` still works",
             (TriggerState::AlreadyPresentUnmanaged, _) => "left your existing trigger untouched",
         };
         out.push_str(&format!("\n  {}: {}", t.agent, phrase));
@@ -2285,7 +2298,7 @@ pub(crate) fn uninstall_describe_tty(
 ) -> String {
     let mut s = String::from("Uninstalling topos would:");
     if d.trigger_artifacts.is_empty() {
-        s.push_str("\n  · scrub the session-start auto-update hook: none is armed");
+        s.push_str("\n  · scrub the session-start auto-update hook: none is registered");
     } else {
         s.push_str(&format!(
             "\n  · scrub the session-start auto-update hook from: {}",
@@ -2500,10 +2513,10 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
         s.push_str("\nauto-update triggers:");
         for t in &d.triggers {
             // The word the EVIDENCE supports. `status` never installs anything, so it holds no
-            // `Active` report to call a trigger armed: all it has is the artifact's footprint,
+            // `Active` report to call a trigger live: all it has is the artifact's footprint,
             // which proves the trigger is REGISTERED — the same word the install receipt uses for
-            // exactly that evidence level (see [`breadth_trigger_lines`]). `armed` is reserved
-            // there, for a report that stated a live update moment.
+            // exactly that evidence level (see [`trigger_lines`]). `active` is reserved there, for
+            // a report that stated a live update moment.
             let state = match t.armed {
                 Some(true) => "registered",
                 Some(false) => "not registered",
@@ -2874,9 +2887,9 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     s.push_str(&format!(
         "\nauto-update hook: {}",
         if d.hook_armed {
-            "armed"
+            "registered"
         } else {
-            "not installed"
+            "not registered"
         }
     ));
     for r in &d.reporting {
@@ -3949,7 +3962,8 @@ pub(crate) fn pull_tty(
         for behind in behind_trailer(&data.behind_elsewhere) {
             line.push_str(&format!("\n{behind}"));
         }
-        return append_proposals_trailer(line, data.proposals_awaiting);
+        let line = append_proposals_trailer(line, data.proposals_awaiting);
+        return line + &registered_trigger_lines(&data.triggers);
     }
     use topos_types::results::PullAction;
     let mut kept_lines: Vec<String> = Vec::new();
@@ -4138,7 +4152,11 @@ pub(crate) fn pull_tty(
     for line in behind_trailer(&data.behind_elsewhere) {
         out.push_str(&format!("\n{line}"));
     }
-    append_proposals_trailer(out, data.proposals_awaiting)
+    // The registrations LAST, where every other receipt prints them: they are a fact about this
+    // machine's agents, not about a bundle, and a person reading the sweep's arithmetic should
+    // reach the end of it before the subject changes.
+    let out = append_proposals_trailer(out, data.proposals_awaiting);
+    out + &registered_trigger_lines(&data.triggers)
 }
 
 /// What an `update` receipt's summary counts, by name. The clause exists so the reader never has
@@ -6370,6 +6388,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
@@ -6437,6 +6456,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
@@ -6496,6 +6516,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
@@ -6565,6 +6586,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
@@ -6668,6 +6690,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         assert_eq!(
@@ -6682,6 +6705,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         assert_eq!(
@@ -6711,6 +6735,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&surfaced, &[], &[], &[], &[], 0, 0);
@@ -6751,6 +6776,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
                 scope: None,
             },
             &[],
@@ -6945,6 +6971,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         assert_eq!(
@@ -6958,6 +6985,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         assert_eq!(
@@ -7010,6 +7038,74 @@ mod tests {
         assert!(!out.contains("failed"), "{out}");
     }
 
+    /// The registrations this run performed close the receipt — the rows every install receipt
+    /// prints, under a lead that says which question they answer. They ride the run that had
+    /// nothing else to do as well: an agent installed today is exactly the machine whose bundles
+    /// are all current.
+    #[test]
+    fn the_update_receipt_names_the_agents_this_run_registered() {
+        use topos_types::{CurrencyKind, TriggerState};
+        let trigger = |agent: &str, state, kind| topos_types::TriggerReport {
+            agent: agent.to_owned(),
+            currency_kind: kind,
+            touched_path: None,
+            marker_id: "topos".to_owned(),
+            state,
+            note: None,
+        };
+        let data = PullData {
+            skills: Vec::new(),
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            triggers: vec![
+                trigger("cursor", TriggerState::Active, CurrencyKind::SessionStart),
+                trigger(
+                    "openclaw",
+                    TriggerState::Degraded,
+                    CurrencyKind::ExplicitPullOnly,
+                ),
+            ],
+            scope: None,
+        };
+        assert_eq!(
+            pull_tty(&data, &[], &[], &[], &[], 0, 0),
+            "Nothing to update here — no manifest or profile demands anything in this directory.\n\
+             Newly detected agents:\n\
+             \x20 cursor: active (session start)\n\
+             \x20 openclaw: couldn't register — `topos update` still works"
+        );
+        // The word for a trigger nobody has to touch again is REGISTERED — `armed` is not this
+        // CLI's vocabulary anywhere a person reads.
+        let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
+        assert!(!out.contains("armed"), "{out}");
+        // A run with rows to show carries the block too, after the summary.
+        let with_rows = PullData {
+            skills: vec![row("a", PullAction::UpToDate)],
+            ..data
+        };
+        let out = pull_tty(&with_rows, &[], &[], &[], &[], 0, 0);
+        assert!(
+            out.ends_with(
+                "Checked 1 skill: all up to date.\n\
+                 Newly detected agents:\n\
+                 \x20 cursor: active (session start)\n\
+                 \x20 openclaw: couldn't register — `topos update` still works"
+            ),
+            "{out}"
+        );
+        // And a run that registered nothing says nothing about triggers.
+        let none = PullData {
+            triggers: Vec::new(),
+            ..with_rows
+        };
+        assert_eq!(
+            pull_tty(&none, &[], &[], &[], &[], 0, 0),
+            "Checked 1 skill: all up to date."
+        );
+    }
+
     /// THE update receipt, byte for byte — the final copy. The lead line names the project folder
     /// ONCE and every path below it is written against that name; the counted row spells its
     /// folders out; the summary does the arithmetic; the trailer says what this run left alone and
@@ -7030,6 +7126,7 @@ mod tests {
                 bundle: "coolify-deploy".to_owned(),
                 project_dir: None,
             }],
+            triggers: Vec::new(),
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
@@ -7056,6 +7153,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
@@ -7081,6 +7179,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
@@ -7110,6 +7209,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
@@ -7134,6 +7234,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
                 scope: None,
             };
             let out = pull_tty(&data, &[], warnings, &[], &[], failed, 0);
@@ -7224,6 +7325,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
                 scope: None,
             };
             pull_tty(&data, &[], &[], &[], &[], 0, 0)
@@ -7369,6 +7471,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &warnings, &[], &[], warnings.len(), 0);
@@ -7420,6 +7523,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: entries,
+                triggers: Vec::new(),
                 scope: None,
             };
             let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
@@ -7468,6 +7572,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: behind,
+            triggers: Vec::new(),
             scope: Some("project ~/Forward/labs/api".to_owned()),
         };
         assert_eq!(
@@ -7536,6 +7641,7 @@ mod tests {
             ],
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
@@ -8414,6 +8520,7 @@ mod tests {
                     notices: Vec::new(),
                     sync: Vec::new(),
                     behind_elsewhere: Vec::new(),
+                    triggers: Vec::new(),
                     scope: Some(scope.to_owned()),
                 },
                 &[],
@@ -8577,6 +8684,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
                 scope: Some("machine".to_owned()),
             },
             &[],
@@ -8633,6 +8741,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
@@ -8665,6 +8774,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
@@ -9201,10 +9311,10 @@ mod tests {
             "{text}"
         );
         // The trigger words say what the EVIDENCE supports: `status` only ever reads a footprint,
-        // so a present artifact is REGISTERED — never `armed`, which the install receipt reserves
+        // so a present artifact is REGISTERED — never `active`, which the install receipt reserves
         // for a report that stated a live update moment.
         assert!(text.contains("claude-code: registered"), "{text}");
-        assert!(!text.contains("claude-code: armed"), "{text}");
+        assert!(!text.contains("claude-code: active"), "{text}");
         assert!(
             text.contains("openclaw: not checked — presence needs"),
             "{text}"
@@ -9575,6 +9685,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
                 scope: None,
             };
             pull_tty(&data, &[], &[], &[], &[], 0, 0)
@@ -9687,6 +9798,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
 
@@ -9866,6 +9978,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
                 scope: None,
             };
             pull_tty(&data, &[], &[], &[], &[], 0, 0)

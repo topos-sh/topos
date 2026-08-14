@@ -291,7 +291,7 @@ impl TriggerAdapter for OpenClaw<'_> {
         // topos owns NO file under the OpenClaw home: the trigger is OpenClaw-owned SCHEDULER
         // state, so it has no path to disclose — and it is named UNCONDITIONALLY, because a scrub
         // of this adapter always dials the scheduler. Probing it here would mean running the
-        // harness; the row's own wording carries that ("if armed"), so the preview promises the
+        // harness; the row's own wording carries that ("if registered"), so the preview promises the
         // attempt and never a presence it did not check.
         vec![TriggerArtifact::OutOfProcess {
             harness: DISPLAY_NAME,

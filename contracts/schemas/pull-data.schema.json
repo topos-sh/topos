@@ -43,6 +43,13 @@
       "items": {
         "$ref": "#/$defs/WorkspaceSyncReport"
       }
+    },
+    "triggers": {
+      "description": "The auto-update triggers this run REGISTERED — one row per newly detected agent whose\ntrigger the sweep installed, in the same shape `login`/`add` report their own arming. Asked\nonce per agent ever, so a trigger somebody removed by hand never reappears here. Empty (and\nomitted) on every run that found nothing new. **INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TriggerReport"
+      }
     }
   },
   "required": [
@@ -181,6 +188,26 @@
           "description": "Unrelated histories — no recorded base; a 2-way manual choice is required.",
           "type": "string",
           "const": "no_base"
+        }
+      ]
+    },
+    "CurrencyKind": {
+      "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "oneOf": [
+        {
+          "description": "A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's\n`on_session_start`/`on_session_reset`) — updates are current when a session begins.",
+          "type": "string",
+          "const": "session_start"
+        },
+        {
+          "description": "A harness-scheduled recurring job runs the sweep (OpenClaw's silent cron) — updates land\nwithin the cadence while the harness's scheduler is running.",
+          "type": "string",
+          "const": "scheduled"
+        },
+        {
+          "description": "No automatic trigger is provably live — updates land on an explicit `topos update`.",
+          "type": "string",
+          "const": "explicit_pull_only"
         }
       ]
     },
@@ -603,6 +630,64 @@
           "description": "The surface exists but this bundle was deliberately not placed there (no config of that\nkind at this scope, a `dest` that excludes it).",
           "type": "string",
           "const": "not-supported"
+        }
+      ]
+    },
+    "TriggerReport": {
+      "description": "The result of (un)installing ONE agent's auto-update trigger — what was touched + the marker, so\nre-install is idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill\nbytes). The one shape every trigger reports in, whichever machinery served it.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The agent's registry slug (`claude-code`, `cursor`, `hermes-agent`).",
+          "type": "string"
+        },
+        "currency_kind": {
+          "description": "Only an `active` state carries a live kind; every other state advertises the explicit-pull floor.",
+          "$ref": "#/$defs/CurrencyKind"
+        },
+        "marker_id": {
+          "description": "`topos` + agent slug + schema version + command identity.",
+          "type": "string"
+        },
+        "note": {
+          "description": "The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TriggerState"
+        },
+        "touched_path": {
+          "description": "The config file edited (never a skill dir).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "currency_kind",
+        "marker_id",
+        "state"
+      ]
+    },
+    "TriggerState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "inactive",
+            "degraded"
+          ]
+        },
+        {
+          "description": "An equivalent command exists without our marker — adopt-or-leave, never blind-append.",
+          "type": "string",
+          "const": "already_present_unmanaged"
         }
       ]
     },

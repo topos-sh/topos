@@ -964,6 +964,100 @@ fn the_quiet_sweeps_hook_document_follows_the_calling_triggers_dialect() {
     }
 }
 
+/// **A newly installed agent needs no flags.** The sweep registers the auto-update trigger of an
+/// agent it has found for the first time — over the REAL argv, the real detection roots, and the
+/// real config writes, which is the seam the unit tests cannot reach. Three facts, one run each:
+/// the trigger lands, the offer is never repeated (so a hand-removal stands), and the quiet
+/// sweep's stdout is BYTE-IDENTICAL with a registration happening — a hook document that gained a
+/// line, or a `reloadSkills` over bytes that never moved, is a lie a strict-schema agent pays for.
+#[test]
+fn the_quiet_sweep_registers_a_newly_detected_agent_once_and_says_nothing_about_it() {
+    let home = scratch("register-home");
+    let disc = scratch("register-disc");
+    let claude = scratch("register-claude");
+
+    // Settle the built-in FIRST, with no other agent around: the sweep under test then changes no
+    // bytes at all, so the `reloadSkills` half of this test proves something.
+    let warmup = sweep_raw(&home, &disc, &claude, &["update", "--quiet", "--ttl", "0"]);
+    assert!(warmup.status.success(), "warm-up sweep exits 0");
+    assert!(
+        claude
+            .join("skills")
+            .join("topos")
+            .join("SKILL.md")
+            .exists(),
+        "the warm-up placed the built-in, so the next sweep changes nothing"
+    );
+    // The ACTIVE agent was registered by that first sweep, exactly like any other detected one.
+    assert!(
+        claude.join("settings.json").exists(),
+        "the sweep arms nobody on a verb's account — every detected agent is a candidate"
+    );
+
+    // Now an agent is installed. Its config dir is all detection needs.
+    std::fs::create_dir_all(disc.join(".cursor")).unwrap();
+    let hooks = disc.join(".cursor").join("hooks.json");
+
+    let record = home.join("state").join("trigger_registration.json");
+    let out = sweep_raw(
+        &home,
+        &disc,
+        &claude,
+        &["update", "--quiet", "--ttl", "0", "--hook", "claude-code"],
+    );
+    assert!(out.status.success(), "a session-start sweep always exits 0");
+    assert!(hooks.exists(), "the newly detected agent was registered");
+    assert!(record.exists(), "and the offer is written down");
+    // The other half of the same sentence: the delivered bundle reached it too, with no flags.
+    assert!(
+        disc.join(".cursor")
+            .join("skills")
+            .join("topos")
+            .join("SKILL.md")
+            .exists(),
+        "an agent found today gets the machine's bundles"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        !stdout.contains("additionalContext"),
+        "a registration is never a line a person must read: {stdout:?}"
+    );
+
+    // REGISTRATION ALONE, with no byte anywhere left to move: the record is gone (a lost state
+    // file re-opens the question) and so is the hook, while every placement above still stands.
+    // The trigger goes back in and the hook document is byte-identical to a sweep that did
+    // nothing — a `reloadSkills` here would ask for a re-scan over bytes that never moved.
+    std::fs::remove_file(&record).unwrap();
+    std::fs::remove_file(&hooks).unwrap();
+    let out = sweep_raw(
+        &home,
+        &disc,
+        &claude,
+        &["update", "--quiet", "--ttl", "0", "--hook", "claude-code"],
+    );
+    assert!(out.status.success());
+    assert!(hooks.exists(), "the offer was open again, and it landed");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).as_ref(),
+        "",
+        "a registration adds NOTHING to the hook's stdout — not a line, not a reload"
+    );
+
+    // The person deletes the hook. The sweep leaves it deleted: the question is asked once.
+    std::fs::remove_file(&hooks).unwrap();
+    let out = sweep_raw(&home, &disc, &claude, &["update", "--quiet", "--ttl", "0"]);
+    assert!(out.status.success());
+    assert!(
+        !hooks.exists(),
+        "a trigger somebody removed is never offered again"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).as_ref(), "");
+
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&disc);
+    let _ = std::fs::remove_dir_all(&claude);
+}
+
 /// A throwaway HTTP server that answers EVERY request `404 Not Found` — the shape a workspace this
 /// device no longer reaches presents (unlinked, seat removed, workspace gone). Std-only; the guard
 /// shuts the listener when dropped.

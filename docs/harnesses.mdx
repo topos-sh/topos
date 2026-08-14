@@ -30,7 +30,7 @@ the loop belongs to your agent, not to Topos.
   (Codex trusts hooks in-app via `/hooks`; Gemini CLI confirms new hooks; Goose enables
   plugins itself). Until you grant it the trigger sits there and never fires, and the agent
   behaves like the delivery tier. `topos status` answers whether the trigger is *installed* —
-  it reports `armed` as soon as the artifact is in place — so it cannot tell you an approval
+  it reports `registered` as soon as the artifact is in place — so it cannot tell you an approval
   is still outstanding. That step is yours to complete in the agent.
 </Note>
 
@@ -76,7 +76,16 @@ error.
 
 An ownership marker written alongside each trigger is how Topos recognizes its own and never
 touches yours. Triggers are installed when Topos wires into an agent (a completed login, an adopt)
-and removed by `topos uninstall --yes`. Removal is confirmed for triggers living in a config file
+and removed by `topos uninstall --yes`. Every `topos update` also registers the trigger of an agent
+it has found for the first time — install an agent today and its next sweep wires it in, with no
+flags and no re-login. That question is asked **once per agent, ever**: delete the hook and it stays
+deleted, because the sweep never offers twice. A login or an `add` is the deliberate way back — both
+register every detected agent unconditionally.
+
+A newly installed agent needs no flags: run `topos update` and every delivered bundle reaches
+it — its update trigger is registered too. Destinations extend; narrowing is `remove -a`.
+
+Removal is confirmed for triggers living in a config file
 Topos can read; where one lives behind an agent's own service and that service isn't reachable at
 the time, Topos reports the removal as unconfirmed — a scheduled job may survive and resume —
 rather than claiming it is gone. Every adapter is idempotent and fails closed: if a config file's
@@ -185,8 +194,8 @@ verified.
   Devin for Terminal, Droid, Gemini CLI, GitHub Copilot, Goose, Grok Build, Kilo Code,
   Kimi Code CLI, OpenCode, Pi, and Qoder.
 - Some trigger shapes are confirmed against a live build; others follow vendor documentation.
-  `topos status` tells you the truth for your machine — per agent: `armed`, `not armed`, or
-  `unknown`.
+  `topos status` tells you the truth for your machine — per agent: `registered`,
+  `not registered`, or `not checked`.
 
 ## The agent table
 

@@ -204,7 +204,7 @@ running deployment.
 
 ## Mail
 
-Topos has no built-in mail service. Arm an SMTP relay with all five variables — a partial set is
+Topos has no built-in mail service. Configure an SMTP relay with all five variables — a partial set is
 treated as unset:
 
 ```bash title=".env"
@@ -220,7 +220,7 @@ publishing, review, delivery — the entire core loop.
 **Needs mail:** inviting teammates (the mailbox round-trip is the identity proof), password-reset
 mail, and magic-link sign-in (that option only appears on the sign-in page when mail can send).
 
-Without SMTP an install is effectively single-user until you arm a relay or open registration:
+Without SMTP an install is effectively single-user until you configure a relay or open registration:
 **Settings → General → Registration → Open** (owner-only) lets anyone who can reach the origin
 create an account — reasonable behind a VPN, think twice on a public origin.
 

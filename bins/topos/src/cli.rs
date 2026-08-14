@@ -73,7 +73,7 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
     /// Check topos's health: your workspace logins and sessions, whether the auto-update
-    /// triggers are armed, which `topos.toml` governs where you stand, and what needs
+    /// triggers are registered, which `topos.toml` governs where you stand, and what needs
     /// attention — updates pending, deliveries not applied yet, edits of your own — each with
     /// the command that resolves it. `-g` reports your machine-wide set instead; `--all` both.
     /// For the skill inventory use `topos list`, and `topos list <skill>` for one skill in

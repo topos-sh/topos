@@ -108,6 +108,11 @@ downloads only on a real change, receipted with the commit it moved to. `topos u
 checks every source immediately; `topos status` shows when each was last checked, and `topos list`
 marks the rows a stopped source froze — `[not responding]`, with the last time it answered.
 
+A newly installed agent needs no flags: run `topos update` and every delivered bundle reaches
+it — its update trigger is registered too. Destinations extend; narrowing is `remove -a`.
+That registration is offered once per agent ever, so a trigger the person deleted stays deleted;
+a `login` or an `add` is the deliberate way to put one back.
+
 ## Adding skills (a manifest row is the demand)
 
 ```
@@ -133,9 +138,10 @@ invocation with `-g`. It never crosses that line by itself either: removing a ma
 skill from a project refuses toward `-g`. `-g` edits `~/.topos/topos.toml` instead:
 `add -g @<workspace>` adopts that whole feed, `remove -g <name>` writes the machine-local `off`
 row (and `add -g <name>` deletes it again). By default a skill reaches every agent on the
-machine; `-a <agent>` / `--dest <folder>` freeze the row to exactly those destinations (recorded
+machine; `-a <agent>` / `--dest <folder>` record the row's destinations as exactly those (written
 as `dest = [...]`, so updates keep landing there). The same flags on a later `add` EXTEND that set
-— what is recorded stays and the new ones join it — and on `remove` they SUBTRACT a
+— what is recorded stays and the new ones join it, and on a row that named none they join the
+reserved `"*"` entry, which IS that row's default reach — and on `remove` they SUBTRACT a
 destination: the row keeps the rest, and removing the last one removes the row. Removing a row
 also uninstalls the copies it placed, in the same command (an edited copy stays in place,
 disclosed). `~/.topos/topos.toml` is always the machine's whole
@@ -239,7 +245,7 @@ its three steps — the only browser moments are theirs.
 
 ## This skill itself
 
-This bundle rides the binary: re-placed when triggers arm, re-synced every sweep — hand edits
+This bundle rides the binary: re-placed when triggers are registered, re-synced every sweep — hand edits
 here are overwritten. A downloaded copy is adopted only by an explicit `topos add topos` (a
 `topos` dir that is not a downloaded copy of this skill stays untouched).
 `topos remove topos --yes` opts this machine out durably; `topos add topos` brings it back.
