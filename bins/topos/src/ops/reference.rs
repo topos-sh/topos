@@ -42,13 +42,30 @@ use super::reconcile::{SessionConnect, SessionTransports};
 pub(crate) enum AddRefOutcome {
     /// The row is written (and, where it delivers bytes, they landed). Boxed: `AddData` dwarfs
     /// the describe variant.
-    Applied(Box<AddData>),
+    Applied {
+        data: Box<AddData>,
+        /// The DIAGNOSTICS this invocation's own converge produced — the sweep's warning lines,
+        /// which ride the envelope's `warnings` exactly as they do on an `update`. Empty for every
+        /// add that converged nothing of its own.
+        messages: Vec<topos_types::Message>,
+    },
     /// A git source this machine has never used: what it holds and what would be written. Boxed
     /// for the same reason `Applied` is — neither variant should set the enum's size.
     Described {
         data: Box<AddDescribeData>,
         yes_argv: Vec<String>,
     },
+}
+
+impl AddRefOutcome {
+    /// The applied receipt of an add that converged nothing of its own — every arm but the
+    /// set-delivered one.
+    fn applied(data: AddData) -> Self {
+        AddRefOutcome::Applied {
+            data: Box::new(data),
+            messages: Vec::new(),
+        }
+    }
 }
 
 /// `topos add <reference> [-g] [-a <agent>]… [--dest <folder>]… [--yes]`.
@@ -156,14 +173,14 @@ fn add_feed(
             &mut data,
             format!("already adopting {workspace}'s feed here — nothing changed"),
         );
-        return Ok(AddRefOutcome::Applied(Box::new(data)));
+        return Ok(AddRefOutcome::applied(data));
     }
     // NO note here: the receipt's own closing sentence for a feed row already says this machine
     // now takes whatever the workspace gives it (`render::add_tty`, off the reference SHAPE). A
     // note repeating it printed the same fact twice, one line apart. The no-op arm above keeps
     // its note — "already adopting …" is a fact that sentence does not carry.
     medit::write_row(ctx, &mut data, &target, &reference, &EntryValue::Star)?;
-    Ok(AddRefOutcome::Applied(Box::new(data)))
+    Ok(AddRefOutcome::applied(data))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -295,9 +312,9 @@ fn add_workspace(
             &resolved.session.workspace_name,
             &resolved.name,
         )? {
-            return Ok(set_delivered_add(
+            return set_delivered_add(
                 ctx, connect, data, &resolved, &target, global, selection, set, mcp_kind,
-            ));
+            );
         }
     }
 
@@ -363,7 +380,7 @@ fn add_workspace(
                     resolved.session.workspace_name, resolved.name
                 ),
             );
-            return Ok(AddRefOutcome::Applied(Box::new(data)));
+            return Ok(AddRefOutcome::applied(data));
         }
         let declined = feeds.iter().any(|i| {
             i.declined
@@ -414,6 +431,14 @@ fn add_workspace(
 /// The converge is the ORDINARY reconcile narrowed to this bundle and this scope: the same code
 /// the sweep runs, at the reach the set's own row resolves (nothing here widens or narrows it).
 /// The add's whole act is to make it happen now instead of at the next sweep.
+///
+/// ITS OUTCOME IS THE ANSWER'S, not a detail it may drop: a converge that could not run is this
+/// add's own error, and one that ran and FAILED the bundle says so on the asked agent's line and
+/// carries the sweep's warnings out with it. Reporting `not placed — it is not set up here` over
+/// `nothing changed` named the wrong cause and closed on a claim the run had not established.
+///
+/// # Errors
+/// Whatever the converge failed with.
 #[allow(clippy::too_many_arguments)]
 fn set_delivered_add(
     ctx: &Ctx<'_>,
@@ -425,7 +450,7 @@ fn set_delivered_add(
     selection: &super::dest_select::Selection,
     set: String,
     mcp: bool,
-) -> AddRefOutcome {
+) -> Result<AddRefOutcome, ClientError> {
     let kind = if mcp {
         BundleKind::Mcp
     } else {
@@ -454,24 +479,49 @@ fn set_delivered_add(
             },
             ..Default::default()
         },
-    );
-    let asked = asked_keys(selection, target.scope, kind);
+    )?;
+    let failure = converge_failure(&outcome, sid.as_deref(), &resolved.name);
+    let asked = asked_surfaces(selection, target.scope, kind);
     let mut surfaces = if mcp {
-        converged_entries(ctx, target, outcome.as_ref().ok(), resolved)
+        converged_entries(ctx, target, Some(&outcome), resolved)
     } else {
         converged_dirs(ctx, target, sid.as_deref(), &before)
     };
-    // An asked agent the converge said NOTHING about is one this machine does not run: the answer
-    // owes it the same line every other unreachable surface gets, in the same words.
-    for key in &asked {
-        if !surfaces.iter().any(|s| &s.agent == key) {
-            surfaces.push(topos_types::results::Surface {
-                agent: key.clone(),
-                target: None,
-                state: topos_types::results::TargetOutcome::Withheld,
-                note: Some("it is not set up here".to_owned()),
-            });
+    for a in &asked {
+        if surfaces.iter().any(|s| s.agent == a.key) {
+            continue;
         }
+        // A SHARED skills folder names no single agent, so a slug-keyed match found nothing for an
+        // agent whose copy was sitting right there and reported it `not placed`. The asked agent's
+        // own folder is what the converge answered about: a surface inside it IS that agent's copy,
+        // and the line names the agent and the folder it reads.
+        if let Some(dest) = &a.dest
+            && let Some(state) = surfaces
+                .iter()
+                .find(|s| reads_folder(s.target.as_deref(), dest))
+                .map(|s| s.state)
+        {
+            surfaces.retain(|s| !(s.agent.is_empty() && reads_folder(s.target.as_deref(), dest)));
+            surfaces.push(topos_types::results::Surface {
+                agent: a.key.clone(),
+                target: Some(dest.clone()),
+                state,
+                note: None,
+            });
+            continue;
+        }
+        // Nothing of the bundle stands for this agent. WHY is the converge's answer where it has
+        // one — a failed converge is the cause, and "it is not set up here" would name another.
+        surfaces.push(topos_types::results::Surface {
+            agent: a.key.clone(),
+            target: None,
+            state: topos_types::results::TargetOutcome::Withheld,
+            note: Some(
+                failure
+                    .clone()
+                    .unwrap_or_else(|| "it is not set up here".to_owned()),
+            ),
+        });
     }
     data.manifest = None;
     data.reference = Some(resolved.canonical.clone());
@@ -482,34 +532,93 @@ fn set_delivered_add(
         set,
         scope: medit::receipt_scope(target),
         surfaces,
-        asked,
+        asked: asked.into_iter().map(|a| a.key).collect(),
+        failure,
     });
-    AddRefOutcome::Applied(Box::new(data))
+    Ok(AddRefOutcome::Applied {
+        data: Box::new(data),
+        messages: outcome.warnings,
+    })
+}
+
+/// WHAT THE CONVERGE FAILED THIS BUNDLE WITH, in the sweep's own words — `None` on a converge that
+/// carried it forward. The tally is keyed by identity, so the answer is the skill id's; the line is
+/// the warning the sweep already wrote, minus the bundle name it leads with (the receipt has just
+/// said it).
+fn converge_failure(outcome: &super::PullOutcome, sid: Option<&str>, name: &str) -> Option<String> {
+    let failed = outcome
+        .failed_bundles
+        .iter()
+        .any(|(_, identity)| Some(identity.as_str()) == sid);
+    if !failed {
+        return None;
+    }
+    // THE LINE ABOUT THIS BUNDLE. The sweep leads every per-item failure with the bundle's name,
+    // so that prefix is what picks it out of a run that faulted on more than one thing; anything
+    // else fails back to the first failure the run wrote, which is still the run's own words.
+    let lead = format!("{name}: ");
+    let failures = || {
+        outcome
+            .warnings
+            .iter()
+            .filter(|m| m.kind == topos_types::MessageKind::Failure)
+    };
+    let text = failures()
+        .find(|m| m.text.starts_with(&lead))
+        .or_else(|| failures().next())
+        .map(|m| m.text.clone())?;
+    Some(text.strip_prefix(&lead).unwrap_or(&text).to_owned())
+}
+
+/// Whether a converged surface's target is the folder `dest` names, or a copy sitting inside it.
+fn reads_folder(target: Option<&str>, dest: &str) -> bool {
+    target.is_some_and(|t| {
+        t == dest
+            || std::path::Path::new(t)
+                .parent()
+                .is_some_and(|p| p.display().to_string() == dest)
+    })
+}
+
+/// ONE surface the invocation asked for: the key it is REPORTED under (the harness slug where one
+/// names the destination, the destination's own spelling where none does) and the folder or config
+/// file it resolves to here — the same `dest_select` resolution the add validated the slug with.
+struct AskedSurface {
+    key: String,
+    /// `None` for a slug with no destination at this scope (the selection would have refused it
+    /// already) — such an ask can only be matched by key.
+    dest: Option<String>,
 }
 
 /// The surfaces the invocation ASKED for, keyed the way [`converged_entries`] /
-/// [`converged_dirs`] key theirs: the harness slug where one names the destination, the
-/// destination's own spelling where none does.
-fn asked_keys(
+/// [`converged_dirs`] key theirs, each carrying the destination it resolves to.
+fn asked_surfaces(
     selection: &super::dest_select::Selection,
     scope: ManifestScope,
     kind: BundleKind,
-) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let keys = selection
+) -> Vec<AskedSurface> {
+    let slug_of = |entry: &str| match kind {
+        BundleKind::Mcp => super::dest_select::slug_for_mcp_entry(entry, scope),
+        BundleKind::Skill => super::dest_select::slug_for_skill_entry(entry, scope),
+    };
+    let asked = selection
         .agents
         .iter()
-        .cloned()
-        .chain(selection.dests.iter().map(|dest| {
-            match kind {
-                BundleKind::Mcp => super::dest_select::slug_for_mcp_entry(dest, scope),
-                BundleKind::Skill => super::dest_select::slug_for_skill_entry(dest, scope),
-            }
-            .unwrap_or_else(|| dest.clone())
+        .map(|slug| AskedSurface {
+            key: slug.clone(),
+            dest: match kind {
+                BundleKind::Mcp => crate::manifest::dest::mcp_dest_spelling_here(slug, scope),
+                BundleKind::Skill => crate::manifest::dest::skills_dest_spelling(slug, scope),
+            },
+        })
+        .chain(selection.dests.iter().map(|dest| AskedSurface {
+            key: slug_of(dest).unwrap_or_else(|| dest.clone()),
+            dest: Some(dest.clone()),
         }));
-    for key in keys {
-        if !out.contains(&key) {
-            out.push(key);
+    let mut out: Vec<AskedSurface> = Vec::new();
+    for a in asked {
+        if !out.iter().any(|prev| prev.key == a.key) {
+            out.push(a);
         }
     }
     out
@@ -793,7 +902,7 @@ fn finish_workspace(
     if global {
         data.machine_copy = machine_copy_beside_project(ctx, &data);
     }
-    AddRefOutcome::Applied(Box::new(data))
+    AddRefOutcome::applied(data)
 }
 
 /// The MACHINE folder a `-g` add just landed its own copy in, when a checkout at or above this
@@ -1239,7 +1348,7 @@ fn add_forge(
     } else if !dest_entries.is_empty() {
         data.dest = dest_entries.clone();
     }
-    Ok(AddRefOutcome::Applied(Box::new(data)))
+    Ok(AddRefOutcome::applied(data))
 }
 
 /// The landing slots a `-a`/`--dest` selection fans each member over: one per `-a` slug (the

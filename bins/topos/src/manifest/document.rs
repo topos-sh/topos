@@ -409,6 +409,20 @@ fn fields_check(
     // members down with it.
     if let Some(mcp_dest) = &f.mcp_dest {
         dest_list_check(reference, "mcp_dest", scope, mcp_dest)?;
+        // The DEFAULT-REACH token is a BUNDLE ROW's `dest` grammar and nothing else: it stands for
+        // what one row would reach carrying no `dest`, while `mcp_dest` is a filter over a set's
+        // members. Naming it here has no reading, so it refuses rather than parsing into one.
+        if super::dest::carries_default_reach(mcp_dest) {
+            return Err(at(
+                reference,
+                format!(
+                    "`mcp_dest` entry `{}` is not a config file — `{}` is a bundle row's `dest` \
+                     token for its default reach; drop `mcp_dest` to reach every MCP-capable agent",
+                    super::dest::DEFAULT_REACH,
+                    super::dest::DEFAULT_REACH
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1642,6 +1656,33 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
             e.message
                 .contains("dest entry `~/.codex/notes.yaml` is not a known MCP config file"),
             "{e}"
+        );
+    }
+
+    /// …and it is `dest` grammar ALONE. A channel's `mcp_dest` is a filter over that set's members,
+    /// not a reach of its own, so the token has no reading there and refuses at LOAD — naming the
+    /// rule and the way to reach every MCP-capable agent.
+    #[test]
+    fn the_default_reach_token_refuses_in_a_channels_mcp_dest() {
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/channels/backend\" = { mcp_dest = [\"*\"] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(
+            e.message.contains(
+                "`mcp_dest` entry `*` is not a config file — `*` is a bundle row's `dest` token \
+                 for its default reach; drop `mcp_dest` to reach every MCP-capable agent"
+            ),
+            "{e}"
+        );
+        // Beside a real file it refuses the same way — the token is never one entry among many.
+        assert!(
+            parse_manifest(
+                "[bundles]\n\"topos.sh/acme/channels/backend\" = { mcp_dest = [\"~/.cursor/mcp.json\", \"*\"] }\n",
+                ManifestScope::Global,
+            )
+            .is_err()
         );
     }
 

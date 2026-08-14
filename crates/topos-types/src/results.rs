@@ -1258,6 +1258,12 @@ pub struct SetDelivery {
     /// nothing-was-missing answer speaks about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<String>,
+    /// The converge's own FAILURE for this bundle, in the sweep's words — present only when the
+    /// converge ran and could not carry the bundle forward. It is what the asked agent's line says
+    /// instead of a reason it does not have, and it is why the answer cannot close on
+    /// `nothing changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 /// `add <path> --as <bundle>` — the folder is recorded as one of the bundle's places, byte for

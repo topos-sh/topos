@@ -884,7 +884,7 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => {
             panic!("a workspace reference applies immediately")
         }

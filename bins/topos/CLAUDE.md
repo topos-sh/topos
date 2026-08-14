@@ -60,12 +60,22 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   row that named none they join the reserved **`"*"` token** (`manifest/dest`'s `DEFAULT_REACH`) —
   the row's DEFAULT REACH, recomputed at plan time on every run (`placement::dest_reach_plan` over
   `default_reach_plan`; for an MCP row the token is simply the unnarrowed reach), with named
-  entries placed regardless of detection as ever. The normal form sorts `"*"` first, collapses
-  duplicates, and spells a row whose only field is `dest = ["*"]` as the plain `"*"` value.
+  entries placed regardless of detection as ever. On a row standing for that reach, an asked entry
+  the reach ALREADY holds (`manifest_edit::reach_already_held`, over the same `default_reach_roots`
+  the collapse consults) records nothing — recording it would make the printed undo a narrowing —
+  and an ask that drops whole is the ordinary `nothing changed`. The normal form sorts `"*"`
+  first, collapses duplicates, and spells a row whose only field is `dest = ["*"]` as the plain
+  `"*"` value; the token is ROW GRAMMAR alone — `--dest '*'` refuses at the argv and a channel's
+  `mcp_dest` refuses it at load.
   A `-a`/`--dest` on a bundle the invoked scope has NO row for and a channel or feed line
   provably delivers (`manifest_edit::set_delivering`, the proof the collapse asks) writes NO row
   at all — one could only narrow what the set reaches — and converges that bundle's placements in
-  the same invocation instead, answering with the surfaces the converge wrote and no undo.
+  the same invocation instead, answering with the surfaces the converge wrote and no undo. That
+  converge's outcome IS the answer: an error is the add's own, a bundle it failed says so on the
+  asked agent's line (never `not placed — it is not set up here`, which is the DETECTION answer)
+  and never closes on `nothing changed`, and its warnings ride the add's envelope. Asked agents
+  match the converge's surfaces by FOLDER, so an agent reading a shared skills root is reported
+  against that root instead of missing.
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members — a row edit
   uninstalls its copies EAGERLY (one scope reconcile in the same invocation; edited copies kept
   in place) — and `-a`/`--dest` on `remove` SUBTRACT destinations from the row's `dest`

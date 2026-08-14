@@ -429,7 +429,7 @@ impl SessionInstall {
             )
             .map_err(err_str)?
             {
-                ops::AddRefOutcome::Applied(data) => Ok(*data),
+                ops::AddRefOutcome::Applied { data, .. } => Ok(*data),
                 ops::AddRefOutcome::Described { data, .. } => {
                     Err(format!("unexpected describe: {data:?}"))
                 }

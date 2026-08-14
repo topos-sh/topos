@@ -496,6 +496,13 @@
             "type": "string"
           }
         },
+        "failure": {
+          "description": "The converge's own FAILURE for this bundle, in the sweep's words — present only when the\nconverge ran and could not carry the bundle forward. It is what the asked agent's line says\ninstead of a reason it does not have, and it is why the answer cannot close on\n`nothing changed`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "scope": {
           "description": "WHICH FILE'S set this is — the receipt's word for the reach (\"here\" / \"on this machine\").\nCarried here rather than on the envelope's `scope`, which belongs to a manifest this add\ndeliberately did not write.",
           "$ref": "#/$defs/ReceiptScope"

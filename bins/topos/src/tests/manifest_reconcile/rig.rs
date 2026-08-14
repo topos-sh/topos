@@ -747,7 +747,7 @@ pub(super) fn gate_add(
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Applied { .. } => {}
         ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
     }
 }
@@ -799,12 +799,12 @@ pub(super) fn applied_add(
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     }
 }
 
-/// [`applied_add`] carrying a `-a`/`--dest` selection — the destination-extending form.
+/// [`applied_add`] carrying a `--dest` selection — the destination-extending form.
 pub(super) fn applied_dest_add(
     ctx: &Ctx<'_>,
     plane: &FakePlane,
@@ -812,8 +812,20 @@ pub(super) fn applied_dest_add(
     raw: &str,
     dests: &[&str],
 ) -> topos_types::results::AddData {
+    applied_selected_add(ctx, plane, dir, raw, &[], dests)
+}
+
+/// [`applied_add`] carrying the WHOLE `-a`/`--dest` selection, agents and folders alike.
+pub(super) fn applied_selected_add(
+    ctx: &Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    raw: &str,
+    agents: &[&str],
+    dests: &[&str],
+) -> topos_types::results::AddData {
     let selection = crate::ops::dest_select::Selection::new(
-        &[],
+        &agents.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>(),
         &dests.iter().map(|d| (*d).to_owned()).collect::<Vec<_>>(),
     );
     match ops::add_reference(
@@ -828,7 +840,7 @@ pub(super) fn applied_dest_add(
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Applied { data: d, .. } => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     }
 }
