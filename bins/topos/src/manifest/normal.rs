@@ -12,9 +12,11 @@
 //! above an entry travels with the entry, an inline comment AFTER a value (`"x" = "*"  # why`)
 //! stays on its line — through regrouping and through the version-table collapse alike — and a
 //! comment above a section header stays with it.
-//! Values normalize too — a fields table carrying ONLY `version` collapses to the plain version
-//! string, and inline tables render single-line in canonical field order (version, dest,
-//! mcp_dest, name, subdir, kind).
+//! Values normalize too — a fields table carrying ONLY `version` (or only a `dest` that names
+//! nothing beyond the default-reach token, which is what an absent `dest` already means)
+//! collapses to the plain version string; a `dest` array sorts its default-reach token first and
+//! collapses duplicates; and inline tables render single-line in canonical field order (version,
+//! dest, mcp_dest, name, subdir, kind).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -174,11 +176,15 @@ fn push_row(
 }
 
 /// The value in normal spelling: a fields table carrying ONLY `version` collapses to the plain
-/// version string (an empty fields table means track-current); everything else renders through
-/// the one deterministic renderer.
+/// version string (an empty fields table means track-current), and a `dest` that names nothing
+/// but the DEFAULT-REACH token says exactly what an absent `dest` says, so it collapses with it;
+/// everything else renders through the one deterministic renderer (which spells the `dest` array
+/// itself in normal form).
 fn normal_value_item(v: &EntryValue) -> Item {
     if let EntryValue::Fields(f) = v
-        && f.dest.is_none()
+        && f.dest
+            .as_deref()
+            .is_none_or(|d| crate::manifest::dest::named_entries(d).is_empty())
         && f.mcp_dest.is_none()
         && f.name.is_none()
         && f.subdir.is_none()
@@ -424,6 +430,31 @@ deploy = "*"
                 "[bundles.\"topos.sh/acme\"]\na = {{ version = \"{digest}\", dest = [\"~/.codex/skills\"] }}\n"
             )
         );
+    }
+
+    /// The DEFAULT-REACH token's normal form: it sorts first, duplicates collapse, and a row
+    /// whose only field is the token alone is the plain `"*"` row — the same reach, spelled the
+    /// short way. A row carrying other fields keeps the array.
+    #[test]
+    fn the_default_reach_token_sorts_first_and_collapses_onto_the_plain_row() {
+        let text = fmt_global(
+            "[bundles]\n\"topos.sh/acme/a\" = { dest = [\"~/.codex/skills\", \"*\", \"~/.codex/skills\"] }\n",
+        );
+        assert_eq!(
+            text,
+            "[bundles.\"topos.sh/acme\"]\na = { dest = [\"*\", \"~/.codex/skills\"] }\n"
+        );
+        // The token ALONE says what a bare `"*"` says.
+        assert_eq!(
+            fmt_global("[bundles]\n\"topos.sh/acme/a\" = { dest = [\"*\"] }\n"),
+            "[bundles.\"topos.sh/acme\"]\na = \"*\"\n"
+        );
+        // …unless the row carries something else, which the collapse would drop.
+        assert_eq!(
+            fmt_global("[bundles]\n\"topos.sh/acme/a\" = { dest = [\"*\"], name = \"b\" }\n"),
+            "[bundles.\"topos.sh/acme\"]\na = { dest = [\"*\"], name = \"b\" }\n"
+        );
+        assert_eq!(fmt_global(&text), text, "the token's form is idempotent");
     }
 
     #[test]

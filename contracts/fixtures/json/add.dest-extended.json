@@ -10,7 +10,8 @@
     "dest_change": {
       "added": [
         "~/.cursor/skills"
-      ]
+      ],
+      "default_reach": true
     },
     "manifest": "/home/ada/.topos/topos.toml",
     "name": "coolify-deploy",

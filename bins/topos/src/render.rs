@@ -1104,26 +1104,13 @@ fn add_dest_receipt(data: &AddData) -> String {
     s
 }
 
-/// The lead line of an add that changed a STANDING row's destinations.
-///
-/// A first freeze has to say what it froze: the row reached every agent a moment ago, so the whole
-/// set that replaced "everywhere" is listed, one per line — otherwise nobody could tell what
-/// quietly stopped being implied. A row that already named destinations only gained some, and
-/// naming those is the whole story.
+/// The lead line of an add that changed a STANDING row's destinations — what it gained, and (on a
+/// row that had reached every agent) that it still does. An add never costs a row an agent, and
+/// the row a person opens says so with a `"*"` they may otherwise have to look up.
 fn dest_change_lead(name: &str, change: &topos_types::results::DestChange) -> String {
-    if change.frozen.is_empty() {
-        return format!("added {} to {name}'s destinations", change.added.join(", "));
-    }
-    let plural = if change.added.len() == 1 {
-        "one"
-    } else {
-        "ones"
-    };
-    let mut lead = format!(
-        "{name} reached every agent — recorded its current destinations plus the new {plural}:"
-    );
-    for entry in &change.frozen {
-        lead.push_str(&format!("\n  {entry}"));
+    let mut lead = format!("added {} to {name}'s destinations", change.added.join(", "));
+    if change.default_reach {
+        lead.push_str("\n(it keeps reaching every agent — \"*\" holds its default reach)");
     }
     lead
 }
@@ -5344,7 +5331,7 @@ mod tests {
         ];
         extended.dest_change = Some(topos_types::results::DestChange {
             added: vec!["~/.cursor/skills".to_owned()],
-            frozen: Vec::new(),
+            default_reach: false,
         });
         assert_eq!(
             add_tty(&extended),
@@ -5353,24 +5340,28 @@ mod tests {
              (undo: topos remove -g coolify-deploy --dest ~/.cursor/skills)"
         );
 
-        // The FIRST destination on a row that had reached every agent says what it froze, one
-        // folder per line — otherwise nobody could tell what quietly stopped being implied.
-        let mut frozen = extended.clone();
-        frozen.dest_change = Some(topos_types::results::DestChange {
-            added: vec!["~/.codex/skills".to_owned()],
-            frozen: vec![
-                "~/.agents/skills".to_owned(),
-                "~/.claude/skills".to_owned(),
-                "~/.codex/skills".to_owned(),
-            ],
+        // THE FIRST destination on a row that reached every agent costs it nothing: the `"*"` the
+        // row now carries holds that reach, and the second line is where a reader learns it.
+        let mut kept = local(vec!["prompts/skills".to_owned()]);
+        kept.name = "code-review".to_owned();
+        kept.source = Some("topos.sh/ideamotive/code-review".to_owned());
+        kept.undo = vec![
+            "topos".to_owned(),
+            "remove".to_owned(),
+            "code-review".to_owned(),
+            "--dest".to_owned(),
+            "prompts/skills".to_owned(),
+        ];
+        kept.dest_change = Some(topos_types::results::DestChange {
+            added: vec!["prompts/skills".to_owned()],
+            default_reach: true,
         });
-        assert!(
-            add_tty(&frozen).starts_with(
-                "coolify-deploy reached every agent — recorded its current destinations plus the \
-                 new one:\n  ~/.agents/skills\n  ~/.claude/skills\n  ~/.codex/skills\n"
-            ),
-            "{}",
-            add_tty(&frozen)
+        assert_eq!(
+            add_tty(&kept),
+            "added prompts/skills to code-review's destinations\n\
+             (it keeps reaching every agent — \"*\" holds its default reach)\n\
+             source: topos.sh/ideamotive/code-review\n\
+             (undo: topos remove code-review --dest prompts/skills)"
         );
 
         // THE SECOND CHECKOUT: a machine-wide add of a bundle the project already delivers says

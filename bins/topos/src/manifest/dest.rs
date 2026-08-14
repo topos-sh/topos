@@ -1,9 +1,11 @@
 //! The `dest` field's VOCABULARY — the one place destination spellings are derived.
 //!
-//! A `dest` entry is a literal destination the row freezes placement to: a skills FOLDER for a
-//! skill row, a config FILE for an MCP row. Spellings are scope-dialect: the machine file names
-//! machine paths (`~/`-prefixed or absolute), a project file names relative paths inside the
-//! checkout. This module owns:
+//! A `dest` entry is a literal destination the row places at: a skills FOLDER for a skill row, a
+//! config FILE for an MCP row. Spellings are scope-dialect: the machine file names machine paths
+//! (`~/`-prefixed or absolute), a project file names relative paths inside the checkout. One
+//! entry is not a path at all — [`DEFAULT_REACH`], the `"*"` token, stands for everything the row
+//! would resolve to with no `dest` at all, so a row can name a destination without giving up the
+//! reach it already had. This module owns:
 //!
 //! - the DEFAULT spellings (no env resolution) the `-a` selector's recorded rows use — a harness
 //!   slug's skills root (`~/.codex/skills` /
@@ -21,6 +23,40 @@ use topos_harness::mcp::{McpDialect, descriptor, plugin_dir};
 use topos_harness::registry::{self, KnownHarness};
 
 use crate::manifest::document::ManifestScope;
+
+/// The one `dest` entry that is not a path: the row's DEFAULT REACH — every destination the row
+/// would resolve to carrying no `dest` at all (a skill row: the shared dir plus each detected
+/// agent's own, decided at plan time on every run; an MCP row: every MCP-capable agent this scope
+/// engages). Named entries beside it are ADDITIONS, placed whether or not their agent is detected.
+pub(crate) const DEFAULT_REACH: &str = "*";
+
+/// Whether a `dest` array stands for the row's default reach as well as what it names.
+pub(crate) fn carries_default_reach(dest: &[String]) -> bool {
+    dest.iter().any(|e| e == DEFAULT_REACH)
+}
+
+/// A `dest` array's NAMED entries — everything but the [`DEFAULT_REACH`] token, in array order.
+pub(crate) fn named_entries(dest: &[String]) -> Vec<String> {
+    dest.iter()
+        .filter(|e| *e != DEFAULT_REACH)
+        .cloned()
+        .collect()
+}
+
+/// A `dest` array in NORMAL form: the [`DEFAULT_REACH`] token first when the array carries it,
+/// then the named entries in their own order, duplicates collapsed.
+pub(crate) fn normal_dest(dest: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(dest.len());
+    if carries_default_reach(dest) {
+        out.push(DEFAULT_REACH.to_owned());
+    }
+    for entry in named_entries(dest) {
+        if !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+    out
+}
 
 /// Whether a string is a SAFE project-relative path: non-empty, relative, every component
 /// ordinary (no `..`, no root) — so `project_dir.join(value)` provably stays inside the

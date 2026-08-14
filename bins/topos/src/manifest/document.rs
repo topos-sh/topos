@@ -31,9 +31,13 @@
 //! are global-only too (a project manifest is a repo fact, identical for every contributor).
 //!
 //! PLACEMENT is ONE field: `dest`, an array of destinations. A row without `dest` reaches every
-//! agent this machine has, now and later (detection decides); a row with `dest` is FROZEN to
-//! exactly those destinations. The machine file spells machine paths (`~/`-prefixed or
-//! absolute); a project file spells relative paths inside the checkout.
+//! agent this machine has, now and later (detection decides); a row with `dest` places at exactly
+//! what it names. The machine file spells machine paths (`~/`-prefixed or absolute); a project
+//! file spells relative paths inside the checkout — except the reserved `"*"` token
+//! ([`super::dest::DEFAULT_REACH`]), which is not a path: it stands for the reach the row would
+//! have with no `dest` at all, so entries beside it ADD to that reach instead of replacing it. A
+//! row whose only field is `dest = ["*"]` says exactly what a bare `"*"` row says, and the normal
+//! form writes it that way.
 //!
 //! A CHANNEL row carries members of BOTH kinds, so one array cannot speak for them: its `dest`
 //! names placement FOLDERS for its skill members and `mcp_dest` names CONFIG FILES for its mcp
@@ -390,9 +394,10 @@ fn fields_check(
         if matches!(shape, KeyShape::LocalPath { .. })
             && f.kind.as_deref() == Some(crate::bundle_kind::BundleKind::Mcp.as_str())
         {
-            for entry in dest {
-                if super::dest::mcp_slug_for_dest(entry, scope).is_none() {
-                    return Err(at(reference, super::dest::unknown_mcp_file(entry, scope)));
+            // The default-reach token names no file, so there is none to know the format of.
+            for entry in super::dest::named_entries(dest) {
+                if super::dest::mcp_slug_for_dest(&entry, scope).is_none() {
+                    return Err(at(reference, super::dest::unknown_mcp_file(&entry, scope)));
                 }
             }
         }
@@ -459,6 +464,10 @@ fn dest_entry_check(
             reference,
             format!("`{field}` entries are non-empty directory strings"),
         ));
+    }
+    // The default-reach token is the one entry that is not a path, so no dialect rules it.
+    if entry == super::dest::DEFAULT_REACH {
+        return Ok(());
     }
     match scope {
         ManifestScope::Global => {
@@ -1133,7 +1142,9 @@ fn append_trailing(doc: &mut DocumentMut, extra: &str) {
 }
 
 /// Render a value deterministically: version strings plain, fields as a single-line inline
-/// table in canonical order (version, dest, name, subdir, kind).
+/// table in canonical order (version, dest, name, subdir, kind). `dest` renders in its own normal
+/// form ([`super::dest::normal_dest`]: the default-reach token first, duplicates collapsed), so
+/// the editor's writes and `fmt` spell one array one way.
 pub(crate) fn value_item(v: &EntryValue) -> Item {
     match v {
         EntryValue::Star => toml_edit::value("*"),
@@ -1146,7 +1157,7 @@ pub(crate) fn value_item(v: &EntryValue) -> Item {
             }
             if let Some(d) = &f.dest {
                 let mut a = Array::new();
-                for x in d {
+                for x in super::dest::normal_dest(d) {
                     a.push(x.as_str());
                 }
                 t.insert("dest", Value::Array(a));
@@ -1593,6 +1604,43 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
             e.message.contains(
                 "an mcp_dest names at least one destination; drop the field to reach every agent"
             ),
+            "{e}"
+        );
+    }
+
+    /// The `"*"` token is a `dest` entry no dialect rules: it is not a path, it is the reach the
+    /// row would have with no `dest` at all. It parses in BOTH scopes, beside named entries, and
+    /// on a local MCP row — whose named entries must still be config files the table knows.
+    #[test]
+    fn the_default_reach_token_is_a_legal_dest_entry_in_both_scopes() {
+        let row = |doc: ManifestDoc| doc.rows[0].value.fields().dest.expect("a dest");
+        assert_eq!(
+            row(parse_global(
+                "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"*\", \"~/.codex/skills\"] }\n"
+            )),
+            vec!["*".to_owned(), "~/.codex/skills".to_owned()]
+        );
+        assert_eq!(
+            row(parse_manifest(
+                "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"*\", \".agents/skills\"] }\n",
+                ManifestScope::Project,
+            )
+            .unwrap()),
+            vec!["*".to_owned(), ".agents/skills".to_owned()]
+        );
+        // A local MCP row: the token names no file, so there is no format to refuse — and the
+        // entry beside it is checked exactly as it always was.
+        parse_global(
+            "[bundles]\n\"./tools/linear\" = { dest = [\"*\", \"~/.codex/config.toml\"], kind = \"mcp\" }\n",
+        );
+        let e = parse_manifest(
+            "[bundles]\n\"./tools/linear\" = { dest = [\"*\", \"~/.codex/notes.yaml\"], kind = \"mcp\" }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(
+            e.message
+                .contains("dest entry `~/.codex/notes.yaml` is not a known MCP config file"),
             "{e}"
         );
     }

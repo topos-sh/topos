@@ -115,10 +115,8 @@ fn destinations_extend_on_a_re_add_and_the_undo_takes_back_only_the_new_ones() {
         "the receipt names ONLY what it added"
     );
     assert!(
-        data.dest_change
-            .as_ref()
-            .is_some_and(|c| c.frozen.is_empty()),
-        "the row already named destinations, so there is no freeze to disclose"
+        data.dest_change.as_ref().is_some_and(|c| !c.default_reach),
+        "the row already named destinations, so there is no default reach to disclose"
     );
     assert_eq!(
         data.undo,
@@ -168,11 +166,11 @@ fn destinations_extend_on_a_re_add_and_the_undo_takes_back_only_the_new_ones() {
 }
 
 #[test]
-fn the_first_destination_on_a_row_that_reached_everywhere_writes_out_what_it_reaches() {
-    // A row with NO `dest` reaches every agent. Freezing it to just the new entry would silently
-    // stop the copies it already places, so its CURRENT set is written out beside the new one and
-    // the receipt lists the whole result.
-    let rig = Rig::new("dest-materialize");
+fn the_first_destination_on_a_row_that_reached_everywhere_keeps_that_reach() {
+    // A row with NO `dest` reaches every agent, now and later. The add joins the new entry to the
+    // `"*"` token that stands for that reach — never to a list of the folders one machine held on
+    // one day, which would stop every agent installed after today.
+    let rig = Rig::new("dest-star");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -182,40 +180,73 @@ fn the_first_destination_on_a_row_that_reached_everywhere_writes_out_what_it_rea
     let reference = format!("{HOST}/{WS_NAME}/deploy");
     rig.write_global(&format!("[bundles]\n\"{reference}\" = \"*\"\n"));
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    // Place it, so the row HAS a current resolved set to write out.
     sweep(&ctx, &plane, &dir);
-    let placed = ops::dest_select::Selection::new(&[], &[]);
-    assert!(placed.is_empty());
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let before = std::fs::read_to_string(&manifest).unwrap();
 
     let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
-    let change = data
-        .dest_change
-        .clone()
-        .expect("the materialize is disclosed");
+    let change = data.dest_change.clone().expect("a destination-only act");
     assert_eq!(change.added, vec!["~/.cursor/skills".to_owned()]);
-    let recorded: Vec<&str> = change.frozen.iter().map(String::as_str).collect();
+    assert!(change.default_reach, "the row still stands for its reach");
+    let text = std::fs::read_to_string(&manifest).unwrap();
     assert!(
-        recorded.contains(&"~/.cursor/skills") && recorded.len() > 1,
-        "the whole set is named, the new entry included: {recorded:?}"
+        text.contains("dest = [\"*\", \"~/.cursor/skills\"]"),
+        "the token sorts first and the new entry joins it: {text}"
     );
-    let text =
-        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
-    for entry in &recorded {
-        assert!(text.contains(entry), "{entry} is recorded: {text}");
-    }
-    // The row reached every agent, so no subtraction spells it back: the exact inverse is the
-    // prior value's own restore.
+
+    // The inverse SUBTRACTS what this add put there — and lands the file back byte for byte,
+    // because a row left standing for nothing but its default reach IS the `"*"` row it was.
     assert_eq!(
         data.undo,
         vec![
             "topos".to_owned(),
-            "add".to_owned(),
+            "remove".to_owned(),
             "-g".to_owned(),
-            reference.clone(),
+            "deploy".to_owned(),
+            "--dest".to_owned(),
+            "~/.cursor/skills".to_owned(),
         ],
         "{:?}",
         data.undo
     );
+    match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&[], &["~/.cursor/skills"]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(_) => {}
+        other => panic!("the undo applies immediately: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        before,
+        "add and its undo are exact inverses over the file"
+    );
+
+    // A PINNED row is the same story: the pin is what the row says beyond its reach, so the
+    // collapse hands back the pin row itself, not a table spelling the pin and a lone token.
+    let pinned = format!("[bundles]\n\"{reference}\" = \"{}\"\n", "a".repeat(64));
+    rig.write_global(&pinned);
+    applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
+    match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&[], &["~/.cursor/skills"]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(_) => {}
+        other => panic!("the undo applies immediately: {other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), pinned);
 }
 
 #[test]
@@ -299,10 +330,10 @@ fn a_pin_move_beside_a_destination_is_a_replacement_not_an_extend() {
 }
 
 #[test]
-fn a_frozen_rows_current_set_comes_from_the_row_not_from_a_name_two_bundles_share() {
+fn a_narrowed_rows_current_set_comes_from_the_row_not_from_a_name_two_bundles_share() {
     // Resolving "where does this bundle live now" by BARE NAME collapsed on a collision, and an
-    // empty current set reads as "reaches nowhere" — so the freeze would have dropped every copy
-    // the bundle really had. The row's own identity cannot collide.
+    // empty current set reads as "reaches nowhere" — so the materialize a narrowing runs would
+    // have dropped every copy the bundle really had. The row's own identity cannot collide.
     let rig = Rig::new("dest-qualified");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -327,14 +358,29 @@ fn a_frozen_rows_current_set_comes_from_the_row_not_from_a_name_two_bundles_shar
     )
     .unwrap();
 
-    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
-    let change = data.dest_change.expect("the row froze");
+    // The narrow materializes the row's current set before subtracting. Resolved by bare name the
+    // set would be EMPTY (two records answer to `deploy`), and the subtraction would refuse with
+    // "nothing has synced" over a bundle whose copy is on disk.
+    let shared = rig.pretty(&rig.skills());
+    // `--yes`: the twin makes the by-name draft scan indeterminate, which is its own gate.
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        std::slice::from_ref(&reference),
+        None,
+        true,
+        &sel(&[], &[&shared]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("the workspace row's own copy resolved: {other:?}"),
+    };
+    assert_eq!(data.items.len(), 1, "{:?}", data.items);
     assert!(
-        change.frozen.len() > 1,
-        "the workspace bundle's OWN copies were written out beside the new folder: {:?}",
-        change.frozen
+        !rig.skills().join("deploy").exists(),
+        "the copy the row's own record named is the one that left"
     );
-    assert!(change.frozen.contains(&"~/.cursor/skills".to_owned()));
 }
 
 #[test]

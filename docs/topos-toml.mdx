@@ -106,16 +106,26 @@ The table form carries the same version alongside a few placement fields:
 | Field | Legal on | Effect |
 |---|---|---|
 | `version` | a workspace skill, a GitHub skill | exactly the plain-string form |
-| `dest` | every shape except a whole-workspace line | the destinations this line is frozen to |
+| `dest` | every shape except a whole-workspace line | the destinations this line lands at (`"*"` = the reach it would have without the field) |
 | `mcp_dest` | a channel | the MCP config files this channel's server members are frozen to |
 | `name` | a workspace skill, a GitHub skill, a local folder | renames the delivered folder |
 | `subdir` | a GitHub skill | the literal directory inside the repo |
 | `kind` | a local folder, a GitHub skill | what the bundle *is* when nothing else can say — `"mcp"` marks a folder holding a `server.json` |
 
 `dest` is ONE idea: an array of destinations, and it replaces detection. A line **without** it
-reaches every agent this machine has — now and later, as they come and go; a line **with** it is
-frozen to exactly the destinations it names, and a newly appearing agent changes nothing until the
-line does. Each file speaks its own path dialect: your machine's file names machine paths
+reaches every agent this machine has — now and later, as they come and go; a line **with** it
+lands at exactly the destinations it names, and a newly appearing agent changes nothing until the
+line does.
+
+One entry is not a path: **`"*"`** stands for the reach the line would have with no `dest` at all,
+answered afresh on every run. `dest = ["*", "~/.codex/skills"]` therefore reads "every agent this
+machine has, plus that folder always" — the agent you install tomorrow is still reached, and the
+named folder is placed whether or not its agent is detected. This is what `topos add … -a <agent>`
+writes on a line that named nothing: an add never costs a line an agent. `"*"` sorts first in the
+array, and a line whose only field is `dest = ["*"]` is the plain `"*"` line — the same reach,
+spelled the short way.
+
+Each file speaks its own path dialect: your machine's file names machine paths
 (`~/`-prefixed or absolute), a committed file names relative paths that stay inside the checkout —
 no `..`, no `~`, not absolute — so a repo can never aim managed bytes elsewhere on a contributor's
 disk. For a skill line the entries are folders (any dialect-legal folder works); for an MCP line
@@ -125,7 +135,8 @@ uninstalled — with an edited copy kept in place, disclosed. `dest` is also wha
 `topos add … -a <agent>` (and `--dest <folder>`) records on any line, spelled as that agent's
 skills folder, so a copy aimed at one agent stays there across updates — and what
 `topos remove … -a <agent>` subtracts from, one destination at a time, the row surviving with the
-rest.
+rest — a row left standing for nothing but `"*"` is written back as the plain `"*"` line, and goes
+entirely where a channel or workspace line in the same file already delivers the bundle.
 
 A channel line is the one line whose members can be of both kinds, so it takes **two** arrays and
 each narrows only its own. `dest` names the folders the channel's skills land in. `mcp_dest` names

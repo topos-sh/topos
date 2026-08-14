@@ -102,6 +102,50 @@ fn a_dest_row_freezes_placement_and_grows_and_shrinks_on_the_next_update() {
     );
 }
 
+/// The `"*"` token in a `dest` array is the row's DEFAULT REACH, answered at plan time on every
+/// run: the named entry lands where it always did, the default half lands where a row with no
+/// `dest` would, and an agent installed AFTER the row was written is reached without the row
+/// changing. Dropping the token narrows to the named entry alone, which is what a dest row means.
+#[test]
+fn the_default_reach_token_places_beside_the_named_entry_and_keeps_answering_detection() {
+    let rig = Rig::new("dest-token");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let starred =
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\", \"~/dest-a\"] }}\n");
+    rig.write_global(&starred);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let named = rig.home.0.join("dest-a/deploy");
+    assert!(named.join("SKILL.md").exists(), "the named entry landed");
+    assert!(
+        rig.skills().join("deploy/SKILL.md").exists(),
+        "and so did the default reach — the token is not a narrowing"
+    );
+
+    // A NEW agent appears. The row is untouched; the token answers detection again.
+    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        rig.home.0.join(".codex/skills/deploy/SKILL.md").exists(),
+        "the newly detected agent is reached: {:?}",
+        out.data.skills
+    );
+    assert!(named.join("SKILL.md").exists(), "the named entry stands");
+
+    // Dropping the token narrows the row to what it names — the ordinary dest shrink.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\"] }}\n"
+    ));
+    sweep(&ctx, &plane, &dir);
+    assert!(named.join("SKILL.md").exists());
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+    assert!(!rig.skills().join("deploy").exists());
+}
+
 /// A dest SHRINK meets the keep-edited-in-place discipline: an EDITED copy at the dropped
 /// destination is snapshotted and KEPT on disk (its record released), never swept up — exactly
 /// like the feed-drop receipts.
@@ -920,9 +964,87 @@ fn narrowing_a_no_dest_row_freezes_the_remainder() {
     assert!(!text.contains("~/.codex/skills"), "{text}");
     // The materialize disclosure rides the receipt.
     let note = data.items[0].note.clone().unwrap_or_default();
-    assert!(note.contains("named no destinations"), "{note}");
+    assert!(note.contains("the row reached every agent"), "{note}");
     let u = &data.uninstalled[0];
     assert_eq!(u.destinations, vec!["~/.codex/skills".to_owned()]);
+}
+
+/// A row the subtraction leaves standing for nothing but its DEFAULT REACH says exactly what the
+/// set line beside it already says — so it goes, and the file lands back where the `-a` add found
+/// it. Set coverage is PROVEN from the delivery cache; without a set the row survives as the plain
+/// `"*"` row, because dropping the only demand is not a narrowing.
+#[test]
+fn a_row_left_at_its_default_reach_goes_when_a_set_still_delivers_it_and_stays_when_none_does() {
+    let rig = Rig::new("dest-collapse");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &v)],
+        vec![WireChannelEntry {
+            name: "everyone".into(),
+            mode: "open".into(),
+            builtin: true,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_deploy".into(),
+                name: "deploy".into(),
+            }],
+        }],
+    );
+    // The CHANNEL line delivers it; the explicit row beside it is what the `-a` add extends.
+    let channel = format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/everyone\" = \"*\"\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    rig.write_global(&format!("{channel}\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+
+    let added = applied_dest_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["~/dest-x"],
+    );
+    assert!(added.dest_change.is_some_and(|c| c.default_reach));
+    let subtract = |ctx: &crate::ctx::Ctx<'_>| match ops::remove_global(
+        ctx,
+        &connect(&plane, &dir),
+        // The canonical reference: a bare name is ambiguous while the channel also carries it.
+        &[format!("{HOST}/{WS_NAME}/deploy")],
+        None,
+        false,
+        &sel(&[], &["~/dest-x"]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a clean subtraction applies immediately: {other:?}"),
+    };
+    subtract(&ctx);
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        format!("{channel}"),
+        "the redundant row went — the channel line already says what it said"
+    );
+
+    // WITHOUT the set line, the same subtraction keeps the row: it is the only demand there is.
+    let alone = format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    rig.write_global(&alone);
+    applied_dest_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["~/dest-x"],
+    );
+    subtract(&ctx);
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        alone,
+        "no set covers it, so the row stays — spelled the way the add found it"
+    );
 }
 
 /// Dropping an explicit row whose bundle the FEED still delivers: the row edit lands, the copies

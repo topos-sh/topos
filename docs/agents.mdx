@@ -191,14 +191,16 @@ registry does not know is refused, never guessed at) and `--dest <folder>` (an e
 MCP server). Combined, their union is the destination set.
 
 ```bash
-topos add code-review -a codex --json      # freeze this row to Codex's skills folder
+topos add code-review -a codex --json      # add Codex's skills folder to this row
 topos add code-review --dest ./.agents/skills --json
 topos remove code-review -a codex --json   # subtract that one destination; the row keeps the rest
 ```
 
 On `add` they are recorded on the manifest line, so every later `update` keeps the copy exactly
-there instead of following agents as they come and go; the receipt's `dest` echoes the line as the
-file now spells it. On `remove` they **subtract**: only the named destinations are uninstalled,
+there whether or not that agent is detected — and a line that named nothing keeps everything it
+already reached, through the `"*"` entry the add writes beside them (an add never costs a line an
+agent). The receipt's `dest` echoes the line as the file now spells it. On `remove` they
+**subtract**: only the named destinations are uninstalled,
 the row survives with the others (`kind: "manifest-narrowed"`, and `uninstalled[].remaining` counts
 what the row still names), and subtracting the last one removes the row.
 

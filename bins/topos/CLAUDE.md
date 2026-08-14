@@ -46,14 +46,21 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   the bundle (`matches the published current` / `edited` / `edited differently`, proved by digest
   or withheld) and closes with the one `topos add <folder> [--as <bundle>]` — a runnable claim
   still rides the agent surface for every folder a version EXPLAINS, and never for one it does
-  not. `-a <agent>`/`--dest
-  <folder>` on `add` freeze the row's `dest` and EXTEND it on a re-add (the `ops/dest_select`
-  resolution: `-a` is registry/descriptor sugar for the scope-correct folder or config file;
-  unknown slugs refuse with the registry list, closing `nothing changed`);
+  not. **AN `add` NEVER NARROWS:** `-a <agent>`/`--dest <folder>` EXTEND the row's `dest` (the
+  `ops/dest_select` resolution: `-a` is registry/descriptor sugar for the scope-correct folder or
+  config file; unknown slugs refuse with the registry list, closing `nothing changed`), and on a
+  row that named none they join the reserved **`"*"` token** (`manifest/dest`'s `DEFAULT_REACH`) —
+  the row's DEFAULT REACH, recomputed at plan time on every run (`placement::dest_reach_plan` over
+  `default_reach_plan`; for an MCP row the token is simply the unnarrowed reach), with named
+  entries placed regardless of detection as ever. The normal form sorts `"*"` first, collapses
+  duplicates, and spells a row whose only field is `dest = ["*"]` as the plain `"*"` value.
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members — a row edit
   uninstalls its copies EAGERLY (one scope reconcile in the same invocation; edited copies kept
   in place) — and `-a`/`--dest` on `remove` SUBTRACT destinations from the row's `dest`
-  (materialized first from the current resolved set on a no-dest row; the last subtraction drops
+  (materialized first from the current resolved set on a row naming none of its own, `"*"`
+  included; a remainder still holding the WHOLE default reach collapses back onto the token, and
+  goes entirely where a channel or feed line in the same file provably delivers the bundle — which
+  is what makes an `-a` add and its `remove -a` undo exact inverses; the last subtraction drops
   the row; a shared-folder-only copy refuses with both ways out). Two-phase
   (describe → `--yes`) for an indeterminate edit scan, a set split, and every git source (the
   listing is the point of the command); everything else applies immediately with an undo-led
@@ -89,7 +96,8 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   the table. `TOPOS_NO_HARNESS_REGISTRY_UPDATE` switches the lane off.
 - `manifest/` (`keys`, `document`, `dest`, `normal`, `scopes`) — the reference grammar, the
   format-preserving `toml_edit` editor (property-tested exact inverse), the `dest` vocabulary
-  (default destination spellings, the known-MCP-file table), the normal form, scope discovery. `ops/manifest_edit` picks the file a
+  (default destination spellings, the known-MCP-file table, and the one entry that is not a path —
+  the `"*"` DEFAULT-REACH token), the normal form, scope discovery. `ops/manifest_edit` picks the file a
   verb edits and owns file birth + the writer-lock + compare-and-swap discipline every manifest
   mutation rides.
 - `ops/claim` — `add <path> --as <bundle>`: a folder that ALREADY holds a copy of a bundle the
@@ -192,7 +200,7 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   summary saying "up to date" over a machine holding nothing is the one thing a receipt may never
   say. Reach resolves at
   PLANNING and nowhere else: a row's `dest` config-file entries map to the harnesses that claim
-  them (no dest = every MCP-capable agent), a targeted verb plans only the harnesses whose
+  them (no dest — or a dest carrying `"*"` — = every MCP-capable agent), a targeted verb plans only the harnesses whose
   recorded rows prove the bundle already stands there (`recorded_reach`), and the plan carries the
   surfaces it withheld so a receipt still says what reach cost. Every demand the sweep and `add`
   converge is built by `DemandedBundle::planned`, so a caller cannot hand the converge a reach the

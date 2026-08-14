@@ -1250,11 +1250,11 @@ pub struct ClaimTwin {
 pub struct DestChange {
     /// The destinations this add ADDED, in the order the row now spells them.
     pub added: Vec<String>,
-    /// The WHOLE set the row names now — stated only where this add was the first to freeze a row
-    /// that had been reaching every agent, so the reader sees exactly what replaced "everywhere".
-    /// Empty when the row already named destinations.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub frozen: Vec<String>,
+    /// Whether the row the add wrote carries the `"*"` destination — the token standing for the
+    /// row's default reach. `true` means the added destinations are ADDITIONS on top of everything
+    /// the row already reached, so nothing stopped being implied.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_reach: bool,
 }
 
 /// The describe a bare `add` of a git source returns: the source, what was discovered in it, and
@@ -2034,7 +2034,8 @@ pub struct UninstalledBundle {
     pub kept: Vec<String>,
     /// A NARROWED removal (`-a`/`--dest`): how many destinations the row still names after the
     /// subtraction — the receipt's `— N folders remain` clause (config files for an MCP
-    /// bundle). Absent on a whole-row removal. **INFERRED** (additive).
+    /// bundle). Absent on a whole-row removal, and on a narrow that leaves the row standing for
+    /// its DEFAULT reach (there is no count to state). **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<u64>,
 }

@@ -2382,6 +2382,10 @@ impl DestNarrowing {
 /// spellings for the scope (default spelling, or the resolved env-override path); an entry no
 /// harness claims is dropped from the narrowing and reported back in `unknown` — this resolution
 /// decides reach, never wording.
+///
+/// The DEFAULT-REACH token narrows nothing: an array carrying it reaches every MCP-capable agent
+/// exactly as an absent `dest` does, and its named entries are already inside that set — so the
+/// answer is the unnarrowed one, with the array's unclaimed entries still reported.
 pub(crate) fn mcp_dest_narrowing(
     row_dest: Option<Vec<String>>,
     scope: crate::manifest::document::ManifestScope,
@@ -2392,24 +2396,25 @@ pub(crate) fn mcp_dest_narrowing(
             unknown: Vec::new(),
         };
     };
+    let default_reach = crate::manifest::dest::carries_default_reach(&dest);
     let mut mapped: Vec<String> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
-    for entry in &dest {
-        match crate::manifest::dest::mcp_slug_for_dest(entry, scope) {
+    for entry in crate::manifest::dest::named_entries(&dest) {
+        match crate::manifest::dest::mcp_slug_for_dest(&entry, scope) {
             Some(slug) => {
                 if !mapped.iter().any(|s| s == slug) {
                     mapped.push(slug.to_owned());
                 }
             }
             None => {
-                if !unknown.contains(entry) {
-                    unknown.push(entry.clone());
+                if !unknown.contains(&entry) {
+                    unknown.push(entry);
                 }
             }
         }
     }
     DestNarrowing {
-        filter: Some(mapped),
+        filter: (!default_reach).then_some(mapped),
         unknown,
     }
 }
@@ -3143,11 +3148,12 @@ fn sync_workspace_skill<'a>(
             name: Some(&named.name),
             workspace_slug: Some(&naming_slug),
         };
-        // A row WITH `dest` is FROZEN to exactly those destinations — one target per entry,
-        // detection ignored, in BOTH scopes (project entries pass the containment rail; a
-        // refused root is disclosed, never redirected).
-        if let Some(dest) = &dest {
-            let plan = placement::dest_plan(
+        // A row WITH `dest` places at exactly what it names — one target per entry, detection
+        // ignored, in BOTH scopes (project entries pass the containment rail; a refused root is
+        // disclosed, never redirected) — PLUS the plan it would have with no `dest` at all, where
+        // the default-reach token asks for it (recomputed here, so a newly detected agent joins).
+        let plan = match &dest {
+            Some(dest) => placement::dest_reach_plan(
                 ctx,
                 skill_id,
                 naming,
@@ -3155,19 +3161,17 @@ fn sync_workspace_skill<'a>(
                 project_dir.as_deref(),
                 Some(map),
                 adopt_digest,
-            );
-            escapes.borrow_mut().extend(plan.refused.iter().cloned());
-            return plan;
-        }
-        match &project_dir {
-            Some(dir) => {
-                let plan =
-                    placement::project_plan(ctx, dir, skill_id, naming, Some(map), adopt_digest);
-                escapes.borrow_mut().extend(plan.refused.iter().cloned());
-                plan
-            }
-            None => placement::plan_for_skill(ctx, skill_id, &named, map),
-        }
+                || placement::default_reach_plan(ctx, skill_id, naming, true, map, adopt_digest),
+            ),
+            None => match &project_dir {
+                Some(dir) => {
+                    placement::project_plan(ctx, dir, skill_id, naming, Some(map), adopt_digest)
+                }
+                None => placement::plan_for_skill(ctx, skill_id, &named, map),
+            },
+        };
+        escapes.borrow_mut().extend(plan.refused.iter().cloned());
+        plan
     };
     // Every engine step below runs against the SCOPE's store: same fs/clock/ids, the scope's layout,
     // and this session's plane + the run's follow seam.
@@ -3383,18 +3387,22 @@ fn converge_dest_freeze(
     ) else {
         return;
     };
-    // The frozen target set, recomputed by the ONE dest planner (same fn, same answer).
-    let plan = placement::dest_plan(
+    // The row's target set, recomputed by the ONE dest planner (same fn, same answer) — the
+    // default-reach half included, or a row carrying the token would retire everything its own
+    // sync just placed.
+    let naming = topos_harness::PlacementNaming {
+        name: Some(display),
+        workspace_slug: Some(naming_slug),
+    };
+    let plan = placement::dest_reach_plan(
         run_ctx,
         sid.as_str(),
-        topos_harness::PlacementNaming {
-            name: Some(display),
-            workspace_slug: Some(naming_slug),
-        },
+        naming,
         dest,
         project_dir,
         Some(&map),
         None,
+        || placement::default_reach_plan(run_ctx, sid.as_str(), naming, true, &map, None),
     );
     // GROW: a dir this run first materialized is an install — say so with its destination. A row
     // the engine's own converge already flipped (a healed placement) keeps what it named; the
@@ -3539,6 +3547,8 @@ fn local_dest_apply(
         ResolvedScope::Project { dir } => Some(dir.as_path()),
         ResolvedScope::Person => None,
     };
+    // NAMED entries only: a path row's default reach is the folder the person adopted, which is
+    // never a managed copy — so the default-reach token asks this rail for nothing.
     let plan = placement::dest_plan(
         ctx,
         sid.as_str(),
@@ -6871,6 +6881,31 @@ pub(crate) fn lay_baseline_with_plan(
 #[cfg(test)]
 mod tests {
     use super::Step;
+
+    /// An MCP row's DEFAULT-REACH token narrows nothing: the answer is the same one an absent
+    /// `dest` gets (every MCP-capable agent), and the entries beside it are already inside that
+    /// set. An entry no harness claims is still reported — the token does not silence a typo — and
+    /// the row never reads as reaching nothing.
+    #[test]
+    fn the_default_reach_token_leaves_an_mcp_rows_reach_unnarrowed() {
+        use crate::manifest::document::ManifestScope::Global;
+        let narrowing = |dest: &[&str]| {
+            super::mcp_dest_narrowing(Some(dest.iter().map(|d| (*d).to_owned()).collect()), Global)
+        };
+        // Without the token: exactly the agents the named files belong to.
+        let narrowed = narrowing(&["~/.cursor/mcp.json"]);
+        assert_eq!(narrowed.filter.as_deref(), Some(&["cursor".to_owned()][..]));
+        // With it: no filter at all — the unnarrowed answer, which is what `None` means.
+        let open = narrowing(&["*", "~/.cursor/mcp.json"]);
+        assert_eq!(open.filter, None);
+        assert!(!open.reaches_nothing());
+        assert!(open.unknown.is_empty());
+        // A typo beside the token is still reported, and still reaches every agent.
+        let typo = narrowing(&["*", "~/.typo/mcp.json"]);
+        assert_eq!(typo.filter, None);
+        assert_eq!(typo.unknown, vec!["~/.typo/mcp.json".to_owned()]);
+        assert!(!typo.reaches_nothing());
+    }
 
     #[test]
     fn the_activity_label_counts_a_batch_and_stays_quiet_about_a_lone_row() {

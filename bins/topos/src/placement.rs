@@ -149,6 +149,31 @@ impl PlacementPlan {
     pub(crate) fn holds_planned_dir(&self, dir: &Path) -> bool {
         self.holds_dir(dir)
     }
+
+    /// UNION another plan into this one — the join a `dest` carrying the default-reach token
+    /// makes: the plan the row would have with no `dest` at all, plus the plan its named entries
+    /// resolve to. One dir is one copy, so a target both halves reach is planned once, in the
+    /// order this plan already holds it.
+    pub(crate) fn absorb(&mut self, other: PlacementPlan) {
+        for target in other.targets {
+            match &target {
+                PlannedTarget::Dir(d) if self.holds_dir(&d.dir) => continue,
+                PlannedTarget::Entries(e) if self.entries_for(&e.agent).is_some() => continue,
+                _ => self.targets.push(target),
+            }
+        }
+        for line in other.refused {
+            if !self.refused.contains(&line) {
+                self.refused.push(line);
+            }
+        }
+        for w in other.withheld {
+            if self.withheld_for(&w.agent).is_none() {
+                self.withheld.push(w);
+            }
+        }
+        self.shared_covered |= other.shared_covered;
+    }
 }
 
 /// The full placement plan for one bundle at one scope — WHAT SHOULD STAND. Its targets are the
@@ -491,15 +516,54 @@ pub(crate) fn project_plan(
     plan
 }
 
-/// The DEST-FROZEN placement plan — a manifest row carrying `dest = [...]`: exactly one target
-/// per dest entry, DETECTION IGNORED (the row froze its destinations; a newly appearing agent
-/// changes nothing until the row does). `~/` entries resolve against the machine home, absolute
+/// The placement plan of a manifest row carrying `dest = [...]`, where `default` computes the
+/// plan the row would have with NO `dest` at all.
+///
+/// The array's default-reach token stands for exactly that plan, recomputed on every run — so a
+/// newly installed agent is reached by the token's half without the row changing — and every
+/// named entry ADDS to it through [`dest_plan`], detection ignored. Without the token the named
+/// entries are the whole plan, and `default` is never called.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dest_reach_plan(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    naming: PlacementNaming<'_>,
+    dest: &[String],
+    project_dir: Option<&Path>,
+    prior: Option<&PlacementMap>,
+    adopt: Option<[u8; 32]>,
+    default: impl FnOnce() -> PlacementPlan,
+) -> PlacementPlan {
+    let named = crate::manifest::dest::named_entries(dest);
+    let mut plan = if crate::manifest::dest::carries_default_reach(dest) {
+        default()
+    } else {
+        PlacementPlan::default()
+    };
+    plan.absorb(dest_plan(
+        ctx,
+        skill_id,
+        naming,
+        &named,
+        project_dir,
+        prior,
+        adopt,
+    ));
+    plan
+}
+
+/// The NAMED-DESTINATION placement plan — a manifest row's `dest` entries: exactly one target
+/// per entry, DETECTION IGNORED (the row named its destinations; a newly appearing agent changes
+/// nothing until the row does). `~/` entries resolve against the machine home, absolute
 /// entries stand as-is; `project_dir` = the PROJECT scope, whose entries resolve against the
 /// checkout behind the [`within_project`] containment rail (refused + disclosed, never
 /// redirected). Prior-dir stability: a recorded placement directly under an entry's root keeps
 /// its dir verbatim; a fresh entry chooses through the ONE naming discipline with the usual
 /// adopt-in-place override. Applies to both scopes — the person scope gains the override seam
 /// it never had.
+///
+/// The default-reach token is NOT a destination and resolves nowhere here: a caller holding a
+/// whole row's array wants [`dest_reach_plan`], which is the one place the token becomes a plan.
 pub(crate) fn dest_plan(
     ctx: &Ctx<'_>,
     skill_id: &str,
@@ -514,6 +578,9 @@ pub(crate) fn dest_plan(
         |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
     let mut plan = PlacementPlan::default();
     for entry in dest {
+        if entry == crate::manifest::dest::DEFAULT_REACH {
+            continue;
+        }
         let root: PathBuf = match project_dir {
             Some(dir) => {
                 if !safe_project_rel(entry) {
@@ -1662,60 +1729,60 @@ pub(crate) fn plan_for_skill(
 ) -> PlacementPlan {
     let ws = crate::ops::followed_workspace(ctx, skill_id);
     let slug = workspace_slug(ctx, ws.as_deref());
-    // A manifest row that FROZE this bundle's destinations governs the targeted verbs exactly as
+    let naming = PlacementNaming {
+        name: Some(&lock.name),
+        workspace_slug: slug.as_deref(),
+    };
+    // A manifest row that NAMED this bundle's destinations governs the targeted verbs exactly as
     // it governs the reconcile: the same dest planner, never detection — so an `update <name>`,
-    // a go-back, or a reset re-plans onto the row's own destinations.
+    // a go-back, or a reset re-plans onto the row's own destinations. A row carrying the
+    // default-reach token keeps the arm below it as its other half, which is what the token means.
     if let Some(dest) = row_dest_for(ctx, skill_id, lock, ws.as_deref(), prior) {
-        return dest_plan(
+        return dest_reach_plan(
             ctx,
             skill_id,
-            PlacementNaming {
-                name: Some(&lock.name),
-                workspace_slug: slug.as_deref(),
-            },
+            naming,
             &dest,
             ctx.layout.project_root(),
             Some(prior),
             None,
+            || default_reach_plan(ctx, skill_id, naming, ws.is_some(), prior, None),
         );
     }
-    if ws.is_none() {
+    default_reach_plan(ctx, skill_id, naming, ws.is_some(), prior, None)
+}
+
+/// What a tracked bundle reaches with NO `dest` at all — the plan a bare row gets, and the plan
+/// the default-reach token stands for on a row that names destinations too. The purely-local arm
+/// comes first here for the reason it comes first in [`plan_for_skill`]: the recorded placement IS
+/// the folder the person works in.
+///
+/// No adopt probe: a tracked skill's adoption continuity rides the record — the baseline's
+/// adoption reservation (`pre_existing_sha`) keeps [`prior_dir`] answering the adopted dir.
+pub(crate) fn default_reach_plan(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    naming: PlacementNaming<'_>,
+    followed: bool,
+    prior: &PlacementMap,
+    adopt: Option<[u8; 32]>,
+) -> PlacementPlan {
+    if !followed {
         return classic_plan(
             ctx,
             skill_id,
             PlacementNaming {
-                name: Some(&lock.name),
                 workspace_slug: None,
+                ..naming
             },
             Some(prior),
-            None,
+            adopt,
         );
     }
-    if let Some(root) = ctx.layout.project_root() {
-        return project_plan(
-            ctx,
-            root,
-            skill_id,
-            PlacementNaming {
-                name: Some(&lock.name),
-                workspace_slug: slug.as_deref(),
-            },
-            Some(prior),
-            None,
-        );
+    match ctx.layout.project_root() {
+        Some(root) => project_plan(ctx, root, skill_id, naming, Some(prior), adopt),
+        None => plan_targets(ctx, skill_id, naming, Some(prior), adopt),
     }
-    // No adopt probe here: a tracked skill's adoption continuity rides the record — the baseline's
-    // adoption reservation (`pre_existing_sha`) keeps [`prior_dir`] answering the adopted dir.
-    plan_targets(
-        ctx,
-        skill_id,
-        PlacementNaming {
-            name: Some(&lock.name),
-            workspace_slug: slug.as_deref(),
-        },
-        Some(prior),
-        None,
-    )
 }
 
 /// The `dest` field of the manifest row that DEMANDS this bundle in the scope this ctx's layout
