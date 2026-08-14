@@ -35,9 +35,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   instead of a bare `removed` row over a bundle the machine still holds. Forge rows ride their OWN hardcoded
   clock (`forge_check`, machine-scoped, no config surface): a floating row is PROBED (the git ref
   advertisement — outside the REST allowance) and downloaded only on a real change, with a
-  per-round circuit breaker and a clock that advances on failure too. `update --quiet` is the
+  per-round circuit breaker and a clock that advances on failure too. Every reconcile CLOSES by
+  REGISTERING a newly detected agent's auto-update trigger (`ops::register_new_detected` over
+  `ctx.triggers`, the ACTIVE harness a candidate like any other): detected + trigger-capable + no
+  record → install and record; a trigger already standing is recorded without an attempt; a harness
+  WITH a record is never touched, which is what makes a hand-removal permanent. The non-quiet
+  receipt lists what it registered. `update --quiet` is the
   harness-hook sweep: self-throttled, schema-conservative stdout (`--hook claude-code` opts that
-  harness into `reloadSkills`).
+  harness into `reloadSkills`) — a registration moves no bundle bytes, so it adds nothing there.
 - **`add`/`remove` are exact file inverses** (property-tested). `add` is source-polymorphic
   (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE
   NAME resolves STANDING first — a name the invoked scope already records answers `ALREADY_TRACKED`
@@ -89,10 +94,17 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   dir-handle-anchored writes, private-file primitives) + crash-safe JSON docs with fail-closed
   schema migration. Every durable mutation goes through here; crash-safety contracts live in the
   module docs.
-- `sidecar`, `forge_check`, `harness_registry`, `visited_stores`, `sync_status` — the per-scope
+- `sidecar`, `forge_check`, `harness_registry`, `visited_stores`, `sync_status`, `trigger_record`
+  — the per-scope
   store layout + recovery sweep, and the machine-local state documents (the forge auto-update
   clock + per-source check log, visited project stores, the offline delivery cache that keeps
-  `status`/`list` honest). `harness_registry` is the HARNESS TABLE's own lane, on the forge
+  `status`/`list` honest, and which agents this machine has been OFFERED a trigger).
+  `trigger_record` is the sweep's one-time-offer gate: a row per harness slug, written by every
+  trigger installation there is (`login`/`add`'s unconditional breadth arming and the sweep's own),
+  so a hook the person deleted stays deleted — a FAILED attempt is recorded too and retried on the
+  forge clock's rhythm, never per sweep; a newer build's document is neither read nor written, and
+  an unparseable one reads as absent (garbage is not evidence that anybody removed anything).
+  `harness_registry` is the HARNESS TABLE's own lane, on the forge
   clock's rhythm and its fail-open discipline: the bare sweep downloads
   `TOPOS_HARNESS_REGISTRY_URL` (default `https://topos.sh/harness-registry.toml`), runs
   `topos_harness::registry`'s fences, and writes `~/.topos/harness-registry/registry.toml`
@@ -138,7 +150,7 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
   machine root the whole-machine set resolves under, so `artifacts` (the uninstall describe, and its
   path rows `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE SAME set — plus the
-  detection-scoped `arm_detected`/`probe_detected` sweeps. All of it iterates harness-table rows
+  detection-scoped `arm_detected`/`probe_detected`/`register_new_detected` sweeps. All of it iterates harness-table rows
   and asks `topos-harness::triggers` for each row's adapter, so no caller knows which machinery
   serves which agent — ARMING over the table this machine resolved, TEARDOWN over
   `registry::teardown_harnesses()` (that table plus the bundled floor), because a row a newer

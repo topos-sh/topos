@@ -54,7 +54,7 @@ use crate::plane::{
 };
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Session};
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
-use crate::{doc, placement, sidecar};
+use crate::{doc, placement, sidecar, trigger_record};
 
 use super::pull::{PullOutcome, StaleForge, StaleReason, UnreachableWorkspace};
 use super::sync_engine::{self, Invocation};
@@ -1809,6 +1809,26 @@ pub(crate) fn manifest_update(
     behind_elsewhere.sort_by(|a, b| (&a.project_dir, &a.bundle).cmp(&(&b.project_dir, &b.bundle)));
     behind_elsewhere.dedup();
 
+    // ---- 9. REGISTER a newly detected agent's auto-update trigger. Placement already reaches
+    // every agent on this machine; an agent installed after topos was wired in was the one case
+    // where the bytes arrived and nothing kept them current. Asked once per agent ever (the gate
+    // is `crate::trigger_record`), quiet or not — the whole point is an agent whose first contact
+    // with topos is a sweep somebody else's trigger fired. LAST, and best-effort: it moves no
+    // bundle bytes and nothing above depends on it. ----
+    let jitter_ms = i64::try_from(
+        ctx.ids
+            .jitter_below(u64::try_from(trigger_record::RETRY_JITTER_MS).unwrap_or(0)),
+    )
+    .unwrap_or(0);
+    let triggers = super::register_new_detected(
+        &ctx.triggers,
+        cwd.as_deref(),
+        ctx.fs,
+        &ctx.layout,
+        now_millis,
+        jitter_ms,
+    );
+
     Ok(PullOutcome {
         data: PullData {
             skills: sweep.rows,
@@ -1817,6 +1837,7 @@ pub(crate) fn manifest_update(
             sync,
             scope: Some(scope_label),
             behind_elsewhere,
+            triggers,
         },
         warnings: sweep.warnings,
         failed_bundles: sweep.failed_bundles,

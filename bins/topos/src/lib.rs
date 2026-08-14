@@ -60,6 +60,7 @@ pub(crate) mod sidecar;
 pub(crate) mod source;
 pub(crate) mod stat_cache;
 pub(crate) mod sync_status;
+pub(crate) mod trigger_record;
 pub(crate) mod visited_stores;
 
 /// Test-only public facade (feature `test-fixtures`) — lets an EXTERNAL integration crate drive the real

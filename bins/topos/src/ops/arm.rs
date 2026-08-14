@@ -22,9 +22,12 @@
 //! [`Triggers::scrub_others`] walk the same set, so `uninstall`'s describe names exactly the
 //! artifacts `uninstall --yes` reaches (and `list --footprint`, a path-typed surface, prints that
 //! set's path rows). The detection-scoped sweeps
-//! ([`arm_detected`], [`probe_detected`]) stay free functions at the composition root, which is the
-//! one layer holding `$HOME`, the cwd, and the real ports. Everything is injected, so tests never
-//! probe the developer's machine or spawn a harness CLI.
+//! ([`arm_detected`], [`probe_detected`], [`register_new_detected`]) stay free functions taking the
+//! ports explicitly, so tests never probe the developer's machine or spawn a harness CLI.
+//!
+//! **Two directions, two rules.** A VERB arms unconditionally ([`arm_detected`] — `login`, `add`:
+//! a person asked for it). The SWEEP offers once per agent ever ([`register_new_detected`], gated
+//! by [`crate::trigger_record`]), because a trigger somebody removed by hand must stay removed.
 
 use std::path::{Path, PathBuf};
 
@@ -154,6 +157,44 @@ impl<'a> Triggers<'a> {
             }
             #[cfg(test)]
             Some(Breadth::Explicit(adapters)) => {
+                for adapter in *adapters {
+                    f(adapter.as_ref());
+                }
+            }
+        }
+    }
+
+    /// Visit every DETECTED trigger-capable harness's adapter — the ACTIVE one INCLUDED, unlike
+    /// [`Self::for_each_other`]. The sweep arms nothing on a verb's account, so the agent topos
+    /// happens to be running inside is a candidate exactly like the rest; the active row rides the
+    /// adapter the composition root built, every other row the registry's.
+    ///
+    /// DETECTION, not the teardown table: this decides who is OFFERED a trigger, and a row a newer
+    /// downloaded table dropped is one topos no longer arms (the scrub's own set is the wider one,
+    /// for the reasons [`Self::for_each_other`] gives).
+    pub(crate) fn for_each_detected(
+        &self,
+        cwd: Option<&Path>,
+        mut f: impl FnMut(&dyn TriggerAdapter),
+    ) {
+        match &self.breadth {
+            None => {}
+            Some(Breadth::Machine { home, cfg, run }) => {
+                for harness in registry::detected_harnesses(home, cwd) {
+                    if harness.slug == self.active.slug() {
+                        f(self.active);
+                    } else if let Some(adapter) =
+                        triggers::adapter_for_slug(harness.slug, home, *cfg, *run)
+                    {
+                        f(adapter.as_ref());
+                    }
+                    // Every other detected harness is placement-only — no trigger surface, nothing
+                    // to offer.
+                }
+            }
+            #[cfg(test)]
+            Some(Breadth::Explicit(adapters)) => {
+                f(self.active);
                 for adapter in *adapters {
                     f(adapter.as_ref());
                 }
@@ -293,6 +334,50 @@ pub(crate) fn arm_detected(
         // current through the harness's own session-start skill scan reading the placed bytes.
     }
     out
+}
+
+/// Offer the auto-update trigger to every DETECTED trigger-capable agent this machine has never
+/// been asked about — what the update sweep runs, and the one thing a newly installed agent
+/// lacked. Returns the rows this run ATTEMPTED, for the receipt.
+///
+/// The RECORD ([`crate::trigger_record`]) is the whole gate, and it is asked ONCE PER AGENT EVER:
+/// a hook somebody deleted stays deleted, because the sweep never offers twice. A trigger that
+/// already stands is recorded without an attempt and reported nowhere — nothing happened. A failed
+/// attempt is recorded too and retried on the slow clock, never per sweep. [`arm_detected`]
+/// (`login`, `add`) is the deliberate re-registration and consults no record at all.
+pub(crate) fn register_new_detected(
+    ports: &Triggers<'_>,
+    cwd: Option<&Path>,
+    fs: &dyn crate::fs_seam::FsOps,
+    layout: &crate::sidecar::Layout,
+    now_ms: i64,
+    jitter_ms: i64,
+) -> Vec<TriggerReport> {
+    let Some(record) = crate::trigger_record::read(fs, layout) else {
+        return Vec::new(); // a newer build's document is that build's to decide from
+    };
+    let mut attempted: Vec<TriggerReport> = Vec::new();
+    let mut outcomes: Vec<(String, bool)> = Vec::new();
+    ports.for_each_detected(cwd, |adapter| {
+        if !record.may_offer(adapter.slug(), now_ms) {
+            return;
+        }
+        // A trigger already in place was armed by an earlier run (or by the person): record it, so
+        // a LATER removal is honored, and attempt nothing. The probe is skipped for an adapter
+        // that cannot answer it without running the harness — its install is idempotent, and
+        // dialing a harness twice to learn what one attempt settles is exactly the cost the record
+        // exists to bound.
+        if adapter.offline_probe_refusal().is_none() && adapter.present() {
+            outcomes.push((adapter.slug().to_owned(), true));
+            return;
+        }
+        let report = adapter.install();
+        outcomes.push((report.agent.clone(), crate::trigger_record::stands(&report)));
+        attempted.push(report);
+    });
+    let outcomes: Vec<(&str, bool)> = outcomes.iter().map(|(s, ok)| (s.as_str(), *ok)).collect();
+    crate::trigger_record::record(fs, layout, now_ms, jitter_ms, &outcomes);
+    attempted
 }
 
 /// Probe the auto-update trigger of every DETECTED trigger-capable agent, READ-ONLY — the
@@ -753,6 +838,148 @@ mod tests {
             openclaw.report.touched_path.is_none(),
             "a scheduler job is no file — the row carries no path"
         );
+    }
+
+    /// The sweep's registration rig: the temp home's own `~/.topos` layout, a REAL config store
+    /// (a hand-removal below has to be a real edit of a real file), and the breadth stated
+    /// explicitly so no ambient env can redirect a write.
+    struct SweepRig {
+        home: TempHome,
+        layout: crate::sidecar::Layout,
+    }
+
+    impl SweepRig {
+        fn new() -> Self {
+            let home = TempHome::new();
+            let layout = crate::sidecar::Layout::new(&home.0.join(".topos"));
+            Self { home, layout }
+        }
+
+        /// One sweep's registration, over the explicit breadth set.
+        fn sweep(&self, cfg: &dyn ConfigStore, now_ms: i64) -> Vec<String> {
+            let active = claude_trigger(&self.home.0, cfg);
+            let others = other_triggers(&self.home.0, cfg, &NoBinary);
+            let ports = Triggers::machine_of(active.as_ref(), &others);
+            register_new_detected(
+                &ports,
+                None,
+                &crate::fs_seam::RealFs,
+                &self.layout,
+                now_ms,
+                0,
+            )
+            .into_iter()
+            .map(|r| r.agent)
+            .collect()
+        }
+    }
+
+    const NOW: i64 = 1_700_000_000_000;
+
+    /// **The one-time offer.** A newly detected agent is registered by the sweep — and never
+    /// offered again, which is what makes a hook the person removed stay removed. A failed
+    /// attempt (OpenClaw with no CLI on this machine) is not retried on the next sweep either: it
+    /// waits out the slow clock, because a registration that dials a harness's own program must
+    /// not run once per session start.
+    #[test]
+    fn the_sweep_registers_a_new_agent_once_and_respects_a_hand_removal() {
+        let rig = SweepRig::new();
+        let cfg = crate::fs_seam::RealFs;
+        let cursor_hooks = rig.home.0.join(".cursor").join("hooks.json");
+
+        let first = rig.sweep(&cfg, NOW);
+        assert!(
+            first.iter().any(|a| a == "cursor"),
+            "a detected agent with no record is registered: {first:?}"
+        );
+        assert!(
+            first.iter().any(|a| a == "claude-code"),
+            "the ACTIVE agent is a candidate like any other — the sweep arms nobody on a verb's \
+             account: {first:?}"
+        );
+        assert!(cursor_hooks.exists(), "the trigger really landed");
+
+        // The same sweep again: the question has been asked.
+        assert!(
+            rig.sweep(&cfg, NOW).is_empty(),
+            "a recorded agent is never touched again"
+        );
+
+        // The person deletes the hook. The sweep leaves it deleted — forever. (A year on, the one
+        // row still offered is the FAILED one, which is the retry clock and not a second offer.)
+        std::fs::remove_file(&cursor_hooks).unwrap();
+        assert!(rig.sweep(&cfg, NOW).is_empty());
+        let year = rig.sweep(&cfg, NOW + 365 * 24 * 60 * 60 * 1000);
+        assert!(
+            !year.iter().any(|a| a == "cursor"),
+            "not a year later either: {year:?}"
+        );
+        assert!(!cursor_hooks.exists(), "and the removal stands");
+    }
+
+    /// A FAILED attempt is the one row that comes back — on the slow clock, never on the next
+    /// sweep. OpenClaw's registration dials its own CLI, which is absent in the test runner, so it
+    /// degrades exactly as it does on a machine where the harness is not really installed.
+    #[test]
+    fn a_failed_registration_retries_on_the_slow_clock_and_not_before() {
+        let rig = SweepRig::new();
+        let cfg = crate::fs_seam::RealFs;
+        let first = rig.sweep(&cfg, NOW);
+        assert!(first.iter().any(|a| a == "openclaw"), "{first:?}");
+
+        assert!(
+            rig.sweep(&cfg, NOW + crate::trigger_record::RETRY_INTERVAL_MS - 1)
+                .is_empty(),
+            "one ms short of the interval, nothing is dialed again"
+        );
+        assert_eq!(
+            rig.sweep(&cfg, NOW + crate::trigger_record::RETRY_INTERVAL_MS),
+            vec!["openclaw".to_owned()],
+            "and then the FAILED row alone comes back — every registration that stands is done"
+        );
+    }
+
+    /// A trigger already in place is RECORDED without being touched: the sweep reports nothing
+    /// (nothing happened), and the record it writes is what honors a removal made afterwards.
+    #[test]
+    fn a_standing_trigger_is_recorded_without_an_attempt() {
+        let rig = SweepRig::new();
+        let cfg = crate::fs_seam::RealFs;
+        let cursor = triggers::adapter_for_slug("cursor", &rig.home.0, &cfg, &NoBinary)
+            .expect("cursor has a trigger");
+        cursor.install();
+        assert!(cursor.present());
+
+        let first = rig.sweep(&cfg, NOW);
+        assert!(
+            !first.iter().any(|a| a == "cursor"),
+            "nothing was installed for cursor, so nothing is reported: {first:?}"
+        );
+        // …and the record still went in, so a later hand-removal is respected.
+        std::fs::remove_file(rig.home.0.join(".cursor").join("hooks.json")).unwrap();
+        assert!(rig.sweep(&cfg, NOW).is_empty());
+    }
+
+    /// **`login`/`add` are the deliberate re-registration.** The record gates the SWEEP and
+    /// nothing else: a person who ran a verb that wires topos into their machine asked for exactly
+    /// this, so a recorded — and since removed — trigger is written back.
+    #[test]
+    fn the_record_never_gates_the_verbs_own_arming_sweep() {
+        let rig = SweepRig::new();
+        let cfg = crate::fs_seam::RealFs;
+        std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+        let cursor_hooks = rig.home.0.join(".cursor").join("hooks.json");
+
+        rig.sweep(&cfg, NOW);
+        std::fs::remove_file(&cursor_hooks).unwrap();
+        assert!(rig.sweep(&cfg, NOW).is_empty(), "the sweep honors it");
+
+        let armed = arm_detected(&rig.home.0, None, "claude-code", &cfg, &NoBinary);
+        assert!(
+            armed.iter().any(|r| r.agent == "cursor"),
+            "the verb arms every detected agent, record or no record: {armed:?}"
+        );
+        assert!(cursor_hooks.exists(), "and the trigger is back");
     }
 
     /// With no `$HOME` there is no detection and therefore no breadth: the active trigger is the

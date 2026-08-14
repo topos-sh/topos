@@ -14,8 +14,13 @@ and a grouped section spell the same row:
 ```
 
 Placement is ONE field: `dest`, an array of destinations. A row without it reaches every agent
-this machine has, now and later; a row with it is FROZEN to exactly what it names (skill rows:
-folders; MCP rows: the agents' config files). The global file spells machine paths (`~/…` or
+this machine has, now and later; a row with it lands at exactly what it names, detected or not
+(skill rows: folders; MCP rows: the agents' config files). One entry is not a destination:
+**`"*"`** stands for the reach the row would have with no `dest` at all, recomputed on every run —
+so `dest = ["*", "~/.codex/skills"]` reads "every agent this machine has, plus that folder
+always", and a row whose only field is `dest = ["*"]` is written as the plain `"*"` row. It is
+what `topos add … -a <agent>` joins onto a row that named no destinations: destinations EXTEND,
+and narrowing is `topos remove … -a <agent>`. The global file spells machine paths (`~/…` or
 absolute), a project file spells relative paths inside the checkout. Hand-edit the array and the
 next `topos update` converges it — a new entry installs, a dropped entry uninstalls (edited
 copies kept, disclosed).

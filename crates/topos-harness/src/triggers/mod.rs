@@ -233,7 +233,7 @@ impl std::fmt::Display for TriggerArtifact {
             Self::Path(p) => write!(f, "{}", p.to_string_lossy()),
             Self::OutOfProcess { harness } => write!(
                 f,
-                "the {harness} scheduled update job, if armed (removed through {harness}'s scheduler)"
+                "the {harness} scheduled update job, if registered (removed through {harness}'s scheduler)"
             ),
         }
     }
@@ -517,7 +517,7 @@ mod tests {
     }
 
     /// The disclosure's WORDS, pinned. A path prints as itself; a trigger with no path names the
-    /// harness, admits it was not probed ("if armed" — proving it would mean running the harness),
+    /// harness, admits it was not probed ("if registered" — proving it would mean running the harness),
     /// and says where the removal actually happens, so a person reading a preview is never
     /// surprised by what an apply reaches.
     #[test]
@@ -531,7 +531,7 @@ mod tests {
                 harness: "OpenClaw"
             }
             .to_string(),
-            "the OpenClaw scheduled update job, if armed (removed through OpenClaw's scheduler)"
+            "the OpenClaw scheduled update job, if registered (removed through OpenClaw's scheduler)"
         );
         // The path row is the filter a path-typed surface applies; the other one has none to give.
         assert_eq!(

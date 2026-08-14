@@ -66,7 +66,7 @@ pub(crate) use add::{
 pub(crate) use add_mcp::{McpAdded, add_mcp};
 #[cfg(test)]
 pub(crate) use arm::INERT_TRIGGER;
-pub(crate) use arm::{Scrubbed, Triggers, arm_detected, probe_detected};
+pub(crate) use arm::{Scrubbed, Triggers, arm_detected, probe_detected, register_new_detected};
 pub(crate) use builtin::{
     ensure_builtin, is_builtin, restore_builtin, skill_md as builtin_skill_md,
 };

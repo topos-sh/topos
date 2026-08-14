@@ -412,6 +412,7 @@ mod tests {
                 notices: Vec::new(),
                 sync: Vec::new(),
                 behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
                 scope: None,
             };
             assert_eq!(sweep_changed_bytes(&data), changed, "{action:?}");
@@ -422,9 +423,38 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
             behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
             scope: None,
         };
         assert!(!sweep_changed_bytes(&empty));
+
+        // A REGISTRATION is not a byte change. The sweep may wire a newly detected agent's
+        // trigger into that agent's own config, and no skill folder moved for it — so a hook
+        // document must not claim a reload, and the whole quiet answer stays what it was.
+        let registered = PullData {
+            triggers: vec![topos_types::TriggerReport {
+                agent: "cursor".to_owned(),
+                currency_kind: topos_types::CurrencyKind::SessionStart,
+                touched_path: Some("/home/u/.cursor/hooks.json".to_owned()),
+                marker_id: "topos".to_owned(),
+                state: topos_types::TriggerState::Active,
+                note: None,
+            }],
+            ..empty
+        };
+        assert!(
+            !sweep_changed_bytes(&registered),
+            "registering a trigger moves no bundle bytes"
+        );
+        assert_eq!(
+            hook_output_json(
+                HookDialect::ClaudeCode,
+                sweep_changed_bytes(&registered),
+                &[]
+            ),
+            None,
+            "and the quiet sweep's stdout stays byte-identical: nothing to say, nothing printed"
+        );
     }
 
     /// The WHOLE decision surface: dialect × `changed` × person-lines, with the exact bytes. A
