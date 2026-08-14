@@ -522,6 +522,22 @@ pub(crate) fn push_note_line(data: &mut AddData, line: impl Into<String>) {
     });
 }
 
+/// THE FILE WAS UNTOUCHED AND BYTES MOVED ANYWAY — a first placement at a destination the row
+/// already named, a merge onto a new current. The redundancy answer is retracted whole: its flag
+/// AND the sentence that carried it, because `nothing changed` printed beside a line naming what
+/// was just installed is a receipt contradicting itself. Every other disclosure on the note stays.
+pub(crate) fn clear_unchanged(data: &mut AddData) {
+    data.unchanged = false;
+    let Some(note) = data.note.take() else {
+        return;
+    };
+    let kept: Vec<&str> = note
+        .split(" · ")
+        .filter(|clause| !clause.ends_with("nothing changed"))
+        .collect();
+    data.note = (!kept.is_empty()).then(|| kept.join(" · "));
+}
+
 /// Which of the two manifests a receipt is about — the wire word behind the one spelling every
 /// add answer names its file by.
 pub(super) fn receipt_scope(target: &EditTarget) -> topos_types::results::ReceiptScope {
@@ -2029,18 +2045,14 @@ fn narrow_one(
             }
             // A row left saying nothing but "my default reach" says exactly what the plain value
             // row says — the normal form's own collapse, applied at write time so an `-a` add and
-            // its `remove -a` undo land the file back byte for byte. Where a SET in this same file
-            // already delivers the bundle, an unpinned row says nothing at all and goes: the state
-            // the add that wrote it found. Coverage that cannot be PROVEN keeps the row — dropping
-            // the only demand is not a narrowing.
+            // its `remove -a` undo land the file back byte for byte. THE COLLAPSE NEVER DROPS THE
+            // ROW: a subtraction edits where a row delivers, and deleting the demand itself is
+            // `remove <name>`'s job alone. Dropping it here cost a row that PREDATED the add its
+            // undo was inverting — a pin outlives a `dest` subtraction, and so does the line a
+            // person wrote by hand.
             let value = match fields.version.as_deref() {
                 _ if named_left > 0 || !plain_default_row(&fields) => EntryValue::Fields(fields),
-                Some("*") | None => {
-                    if set_covers(ctx, target, &row, &name)? {
-                        return Ok(Arm::RowDrop { row, name });
-                    }
-                    EntryValue::Star
-                }
+                Some("*") | None => EntryValue::Star,
                 Some(pin) => EntryValue::Pin(pin.to_owned()),
             };
             crate::manifest::document::check_row(&row.reference, target.scope, &value)
@@ -2702,6 +2714,51 @@ fn reach_already_held(
     default_reach_roots(ctx, target, Some(&row), &name, kind)
 }
 
+/// WHAT A SET LINE CAN NEVER REACH: the asked destinations that are no agent's own — a folder a
+/// person named, which nothing but a row can demand. Everything else is dropped: a destination the
+/// bundle's DEFAULT REACH already holds is a request for nothing, and one belonging to a harness
+/// this machine has not installed yet joins that reach the day it is (detection is answered at plan
+/// time, on every run), so neither needs a line in the file.
+///
+/// The reach is [`default_reach_roots`]' answer — the same one the collapse consults — over the
+/// row this add would write, and the harness question is the [`super::dest_select`] resolution the
+/// selection itself was validated with.
+///
+/// # Errors
+/// A store read failure, or a manifest the grammar refuses.
+pub(super) fn outside_default_reach(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    reference: &str,
+    name: &str,
+    kind: BundleKind,
+    asked: &[String],
+) -> Result<Vec<String>, ClientError> {
+    let Ok(shape) = crate::manifest::keys::classify_key(reference) else {
+        return Ok(Vec::new());
+    };
+    let row = PlanRow {
+        reference: reference.to_owned(),
+        shape,
+        value: EntryValue::Star,
+    };
+    let reach = default_reach_roots(ctx, target, Some(&row), name, kind)?;
+    // ANY harness claiming the entry is enough — a folder several of them read is still theirs,
+    // and the one-claimant question the undo spelling asks is a different one.
+    let claimed = |entry: &str| match kind {
+        BundleKind::Mcp => crate::manifest::dest::mcp_slug_for_dest(entry, target.scope).is_some(),
+        BundleKind::Skill => topos_harness::registry::known_harnesses().iter().any(|h| {
+            crate::manifest::dest::skills_dest_spelling(h.slug, target.scope).as_deref()
+                == Some(entry)
+        }),
+    };
+    Ok(asked
+        .iter()
+        .filter(|entry| !reach.contains(entry) && !claimed(entry))
+        .cloned()
+        .collect())
+}
+
 /// A record-free placement map — the "nothing has been placed yet" input a default-reach plan is
 /// asked over.
 fn empty_placement_map() -> topos_types::persisted::PlacementMap {
@@ -2726,63 +2783,16 @@ fn plain_default_row(fields: &crate::manifest::document::EntryFields) -> bool {
         && fields.kind.is_none()
 }
 
-/// Whether a SET LINE in this same file already delivers the bundle `row` names — a channel row it
-/// arrives through, or the workspace FEED row. Proven from the offline delivery cache (which
-/// records the channels each delivered bundle came through), never guessed: a bundle the cache
-/// cannot speak for answers `false`, and the row stays.
-///
-/// # Errors
-/// A read failure, or a manifest the grammar refuses.
-fn set_covers(
-    ctx: &Ctx<'_>,
-    target: &EditTarget,
-    row: &PlanRow,
-    name: &str,
-) -> Result<bool, ClientError> {
-    let KeyShape::WorkspaceBundle {
-        host, workspace, ..
-    } = &row.shape
-    else {
-        return Ok(false); // a local or forge row has no set to arrive through
-    };
-    let Some(sid) = row_record(ctx, target, Some(row), name) else {
-        return Ok(false);
-    };
-    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
-    let Some(entry) = cache.workspaces.values().find(|e| {
-        e.host.as_deref() == Some(host.as_str())
-            && e.workspace_name.as_deref() == Some(workspace.as_str())
-    }) else {
-        return Ok(false);
-    };
-    let Some(delivered) = entry.delivered.get(&sid).filter(|d| !d.withdrawn) else {
-        return Ok(false);
-    };
-    let plan = plan_for(ctx, target)?;
-    // The FEED row delivers whatever the workspace serves this person — but a cache entry marked
-    // `via_manifest` exists BECAUSE the feed does not serve the bundle (the row this narrowing is
-    // about is what asked for it), so it proves no coverage and the row has to stay. This is the
-    // same fence [`set_delivering`] puts on its own feed arm.
-    if !delivered.via_manifest && plan.feeds.iter().any(|(h, w)| h == host && w == workspace) {
-        return Ok(true);
-    }
-    Ok(plan.sets.iter().any(|set| {
-        matches!(
-            &set.shape,
-            KeyShape::Channel { host: h, workspace: w, channel }
-                if h == host && w == workspace && delivered.via_channels.contains(channel)
-        )
-    }))
-}
-
 /// WHICH SET LINE in `target`'s file delivers the workspace bundle `<host>/<workspace>/<bundle>`,
 /// spelled as this scope names it: `channels/<name>` for the channel row it arrives through, the
 /// workspace reference for the FEED row.
 ///
 /// `None` whenever the answer is not PROVEN: the file names the bundle explicitly (an explicit row
 /// beats every set, and an `"off"` switch withholds it), no set line covers it, the offline
-/// delivery cache cannot speak for it, or this scope's store holds no record of it. Every caller
-/// here is about to write nothing on the strength of the answer, so an unproven set is no set.
+/// delivery cache cannot speak for it, or this scope's store holds no record of it. A caller acts
+/// on this answer by writing NOTHING, or (for an ask the set cannot reach — [`outside_default_reach`])
+/// by writing the one line that can, so an unproven set is no set: the ordinary row write is what
+/// an unproven answer falls back to.
 ///
 /// # Errors
 /// A read failure, or a manifest the grammar refuses.
@@ -3761,8 +3771,7 @@ struct EagerBundle {
     display: String,
     kind: BundleKind,
     /// `(host, workspace)` for a workspace bundle's row — the identity every record lookup for
-    /// this bundle is cross-checked against (see [`scope_record`]). `None` for a local/forge row
-    /// (and for a narrow, which keeps its row).
+    /// this bundle is cross-checked against (see [`scope_record`]). `None` for a local/forge row.
     workspace: Option<(String, String)>,
     /// A NARROWED bundle: the subtracted dest entries + how many destinations the row still names
     /// (`None` when it names none of its own and stands for its default reach).
@@ -3891,7 +3900,10 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     )),
                     record: None,
                     local: None,
-                    workspace: None,
+                    // The row's own workspace identity: the narrow's retirement rail resolves the
+                    // record through it, so a same-named record another workspace delivered can
+                    // never answer for this row (see [`scope_record`]).
+                    workspace: workspace.clone(),
                 });
             }
             // A split re-homes its survivors to their own rows — nothing leaves. Neither does a
@@ -4059,6 +4071,30 @@ fn eager_cleanup(
             // own line.
             Some((subtract, remaining)) => {
                 if rows.is_empty() {
+                    // THE SWEEP DID NOT RETIRE IT, so the verb does. A row left standing for its
+                    // DEFAULT REACH plans every agent-less placement it finds recorded, which is
+                    // what keeps an adopted folder — and would keep the de-listed one forever,
+                    // under a receipt promising the next update takes it. The verb knows exactly
+                    // which folders left the row, so it retires those and nothing else, through
+                    // the same by-choice rail the whole-row arm runs (edited copies kept in
+                    // place). Best-effort, like the whole eager contract.
+                    if let Some(clean) = retire_subtracted(ctx, target, b, subtract) {
+                        // The receipt speaks in the row's own spellings, and only where a copy
+                        // really left: a retire that only KEPT edited copies claims no removal.
+                        let destinations = if clean.removed.is_empty() {
+                            Vec::new()
+                        } else {
+                            subtract.clone()
+                        };
+                        out.push(UninstalledBundle {
+                            name: b.display.clone(),
+                            destinations,
+                            kind: b.kind.tag(),
+                            kept: clean.kept,
+                            remaining: *remaining,
+                        });
+                        continue;
+                    }
                     let keeps = match remaining {
                         Some(n) => crate::actions::Subject::of_kind(b.kind.tag().as_deref())
                             .targets(usize::try_from(*n).unwrap_or(usize::MAX)),
@@ -4153,6 +4189,47 @@ fn eager_cleanup(
         }
     }
     out
+}
+
+/// Retire the copies a NARROW just de-listed, in the invocation that narrowed the row — the rail
+/// [`eager_cleanup`] falls back to when the reconcile reported nothing moving (see the comment at
+/// its call site). `None` when there is nothing to speak for: no store here, no record of this
+/// bundle, a config-placed bundle (whose entries are the converge's own to retire), a dest entry
+/// that resolves nowhere, or no retirable copy under any of them.
+fn retire_subtracted(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    b: &EagerBundle,
+    subtract: &[String],
+) -> Option<super::reconcile::ByChoiceClean> {
+    if b.kind.is_mcp() {
+        return None;
+    }
+    let sctx = scope_store_ctx(ctx, target)?;
+    let sid = scope_record(&sctx, b.workspace.as_ref(), &b.name)?;
+    let roots: Vec<PathBuf> = subtract
+        .iter()
+        .filter_map(|entry| dest_root(ctx, target, entry))
+        .collect();
+    if roots.is_empty() {
+        return None;
+    }
+    super::reconcile::clean_dest_roots(&sctx, &sid, &roots)
+        .ok()
+        .flatten()
+}
+
+/// Where one `dest` entry resolves on this machine — the same reading the placement planner gives
+/// it: checkout-relative for a project row, `~/`-expanded (else absolute) for the machine's.
+/// `None` when the entry cannot resolve here (a `~/` entry on a machine with no known home).
+fn dest_root(ctx: &Ctx<'_>, target: &EditTarget, entry: &str) -> Option<PathBuf> {
+    if target.scope == ManifestScope::Project {
+        return Some(target.dir.join(entry.trim_start_matches("./")));
+    }
+    match entry.strip_prefix("~/") {
+        Some(rest) => Some(ctx.roots.as_ref()?.home.join(rest)),
+        None => Some(PathBuf::from(entry)),
+    }
 }
 
 /// What the POST-EDIT machine resolution says about a bundle whose row just left (see the

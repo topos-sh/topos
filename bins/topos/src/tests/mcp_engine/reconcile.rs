@@ -1205,4 +1205,10 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
         !receipt.contains("removed (2 config files)"),
         "the loss is said once: {receipt}"
     );
+    // AND THE SUMMARY AGREES WITH IT. `removed` over a bundle the lead just said still delivers
+    // contradicted the receipt two lines above; the word for a shrunken reach is `narrowed`.
+    assert!(
+        receipt.contains("Checked 1 bundle: 1 narrowed."),
+        "{receipt}"
+    );
 }

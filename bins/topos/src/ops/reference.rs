@@ -253,7 +253,7 @@ fn add_workspace(
         )));
     }
     let mcp_kind = kind.is_some_and(BundleKind::is_mcp);
-    let dest_entries = if selection.is_empty() {
+    let mut dest_entries = if selection.is_empty() {
         Vec::new()
     } else if mcp_kind {
         selection.mcp_entries(scope)?
@@ -299,6 +299,12 @@ fn add_workspace(
     // NARROW what the set reaches. So nothing is recorded and the placements converge instead,
     // which is what actually puts the asked surface's missing copy there. A pinned reference is a
     // real conversion to machine-local control and writes its row as ever.
+    //
+    // UNLESS THE ASK IS SOMEWHERE THE SET CANNOT GO. A folder that is no agent's own is reached by
+    // nothing but a row: recording none would leave the person's `--dest` demanded by nobody, and
+    // the next sweep would report the machine up to date over a folder that never gets a copy. Such
+    // an ask BIRTHS the row, carrying the token so the set's whole reach rides with it.
+    let mut set_line: Option<String> = None;
     if !dest_entries.is_empty() && pin.is_none() && resolved.entry.is_some() {
         let target = if global {
             medit::global_target(ctx)
@@ -312,11 +318,36 @@ fn add_workspace(
             &resolved.session.workspace_name,
             &resolved.name,
         )? {
-            return set_delivered_add(
-                ctx, connect, data, &resolved, &target, global, selection, set, mcp_kind,
-            );
+            let outside = medit::outside_default_reach(
+                ctx,
+                &target,
+                &resolved.canonical,
+                &resolved.name,
+                kind.unwrap_or(BundleKind::Skill),
+                &dest_entries,
+            )?;
+            if outside.is_empty() {
+                return set_delivered_add(
+                    ctx, connect, data, &resolved, &target, global, selection, set, mcp_kind,
+                );
+            }
+            dest_entries = outside;
+            set_line = Some(set);
         }
     }
+    // The row a set-delivered ask outside the reach writes: the token first (the set's own reach,
+    // recomputed every run), then the destinations only this line can demand.
+    let value = match &set_line {
+        None => value,
+        Some(_) => EntryValue::Fields(EntryFields {
+            dest: Some(
+                std::iter::once(crate::manifest::dest::DEFAULT_REACH.to_owned())
+                    .chain(dest_entries.iter().cloned())
+                    .collect(),
+            ),
+            ..EntryFields::default()
+        }),
+    };
 
     if global {
         let target = medit::global_target(ctx);
@@ -405,7 +436,13 @@ fn add_workspace(
                 "the feed already delivers it — this row pins what this machine takes".to_owned(),
             );
         }
-        shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries);
+        shape_dest_receipt(
+            ctx,
+            &mut data,
+            &resolved,
+            &dest_entries,
+            set_line.as_deref(),
+        );
         return Ok(finish_workspace(
             ctx, connect, data, &resolved, &target, true,
         ));
@@ -415,7 +452,13 @@ fn add_workspace(
         return Err(ClientError::NoManifest);
     };
     medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value)?;
-    shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries);
+    shape_dest_receipt(
+        ctx,
+        &mut data,
+        &resolved,
+        &dest_entries,
+        set_line.as_deref(),
+    );
     Ok(finish_workspace(
         ctx, connect, data, &resolved, &target, false,
     ))
@@ -481,7 +524,12 @@ fn set_delivered_add(
         },
     )?;
     let failure = converge_failure(&outcome, sid.as_deref(), &resolved.name);
-    let asked = asked_surfaces(selection, target.scope, kind);
+    let asked = asked_surfaces(
+        selection,
+        target.scope,
+        kind,
+        shared_root(ctx, target, kind),
+    );
     let mut surfaces = if mcp {
         converged_entries(ctx, target, Some(&outcome), resolved)
     } else {
@@ -495,16 +543,22 @@ fn set_delivered_add(
         // agent whose copy was sitting right there and reported it `not placed`. The asked agent's
         // own folder is what the converge answered about: a surface inside it IS that agent's copy,
         // and the line names the agent and the folder it reads.
-        if let Some(dest) = &a.dest
-            && let Some(state) = surfaces
+        //
+        // Placement is shared-dir-FIRST, so for an agent the shared folder COVERS that folder is
+        // where its copy is and its own root holds nothing — the agent's own dest can only be
+        // asked first and missed. Both folders are the same question, asked in the order placement
+        // answers it.
+        if let Some((folder, state)) = a.dest.iter().chain(a.shared.iter()).find_map(|dest| {
+            surfaces
                 .iter()
                 .find(|s| reads_folder(s.target.as_deref(), dest))
-                .map(|s| s.state)
-        {
-            surfaces.retain(|s| !(s.agent.is_empty() && reads_folder(s.target.as_deref(), dest)));
+                .map(|s| (dest.clone(), s.state))
+        }) {
+            surfaces
+                .retain(|s| !(s.agent.is_empty() && reads_folder(s.target.as_deref(), &folder)));
             surfaces.push(topos_types::results::Surface {
                 agent: a.key.clone(),
-                target: Some(dest.clone()),
+                target: Some(folder),
                 state,
                 note: None,
             });
@@ -528,6 +582,10 @@ fn set_delivered_add(
     data.source = Some(resolved.canonical.clone());
     data.dest = Vec::new();
     data.undo = Vec::new();
+    // WHAT THE CONVERGE REGISTERED rides the answer that ran it: a sweep closes by registering a
+    // newly detected agent's trigger, and this add IS that sweep — an agent's config file was
+    // edited, and the receipt is where a person learns of it.
+    data.triggers = outcome.data.triggers.clone();
     data.set_delivery = Some(topos_types::results::SetDelivery {
         set,
         scope: medit::receipt_scope(target),
@@ -570,6 +628,26 @@ fn converge_failure(outcome: &super::PullOutcome, sid: Option<&str>, name: &str)
     Some(text.strip_prefix(&lead).unwrap_or(&text).to_owned())
 }
 
+/// The CROSS-AGENT skills folder at this scope, in the spelling this receipt gives its folders —
+/// the one copy every covered harness reads (`placement`'s shared-dir-first policy). `None` for a
+/// config-placed bundle, which owns entries in files and has no shared folder at all, and for a
+/// machine whose home is unknown.
+fn shared_root(ctx: &Ctx<'_>, target: &EditTarget, kind: BundleKind) -> Option<String> {
+    if kind.is_mcp() {
+        return None;
+    }
+    let dir = match target.scope {
+        ManifestScope::Global => {
+            topos_harness::coverage::shared_skills_dir(&ctx.roots.as_ref()?.home)
+        }
+        ManifestScope::Project => target.dir.join(".agents/skills"),
+    };
+    Some(spell_in(
+        spelled_dir(ctx, target).as_deref(),
+        &super::inventory::pretty(ctx, &dir),
+    ))
+}
+
 /// Whether a converged surface's target is the folder `dest` names, or a copy sitting inside it.
 fn reads_folder(target: Option<&str>, dest: &str) -> bool {
     target.is_some_and(|t| {
@@ -588,18 +666,33 @@ struct AskedSurface {
     /// `None` for a slug with no destination at this scope (the selection would have refused it
     /// already) — such an ask can only be matched by key.
     dest: Option<String>,
+    /// The SHARED skills folder, for an asked agent that folder covers — where placement puts its
+    /// one copy instead of the agent's own root. `None` for every uncovered agent and for every
+    /// config-placed bundle.
+    shared: Option<String>,
 }
 
 /// The surfaces the invocation ASKED for, keyed the way [`converged_entries`] /
-/// [`converged_dirs`] key theirs, each carrying the destination it resolves to.
+/// [`converged_dirs`] key theirs, each carrying the destination it resolves to — and, for an
+/// agent the cross-agent folder covers, that folder too (`shared`).
 fn asked_surfaces(
     selection: &super::dest_select::Selection,
     scope: ManifestScope,
     kind: BundleKind,
+    shared: Option<String>,
 ) -> Vec<AskedSurface> {
     let slug_of = |entry: &str| match kind {
         BundleKind::Mcp => super::dest_select::slug_for_mcp_entry(entry, scope),
         BundleKind::Skill => super::dest_select::slug_for_skill_entry(entry, scope),
+    };
+    // The coverage question is the PLACEMENT engine's own (`topos_harness::coverage`), asked of
+    // the slug the ask resolves to, so an asked agent and the folder its copy really landed in
+    // cannot disagree.
+    let shared_of = |slug: &str| {
+        topos_harness::coverage::shared_dir_support(slug)
+            .covered()
+            .then(|| shared.clone())
+            .flatten()
     };
     let asked = selection
         .agents
@@ -610,10 +703,15 @@ fn asked_surfaces(
                 BundleKind::Mcp => crate::manifest::dest::mcp_dest_spelling_here(slug, scope),
                 BundleKind::Skill => crate::manifest::dest::skills_dest_spelling(slug, scope),
             },
+            shared: shared_of(slug),
         })
-        .chain(selection.dests.iter().map(|dest| AskedSurface {
-            key: slug_of(dest).unwrap_or_else(|| dest.clone()),
-            dest: Some(dest.clone()),
+        .chain(selection.dests.iter().map(|dest| {
+            let slug = slug_of(dest);
+            AskedSurface {
+                shared: slug.as_deref().and_then(shared_of),
+                key: slug.unwrap_or_else(|| dest.clone()),
+                dest: Some(dest.clone()),
+            }
         }));
     let mut out: Vec<AskedSurface> = Vec::new();
     for a in asked {
@@ -730,11 +828,18 @@ fn spell_in(dir: Option<&str>, path: &str) -> String {
 /// receipt's `installed (…)` column speaks in), the workspace-QUALIFIED display name, and the
 /// bare-name undo — `topos remove [-g] <name>` drops the whole row, which is a fresh row's exact
 /// inverse. A replaced row keeps `write_row`'s own undo story (a wrong undo is worse than none).
+///
+/// `set_line` names the channel or feed line that ALREADY delivers this bundle here, on the one
+/// add that writes a row beside one: the destinations are what that line cannot reach, and the row
+/// carries the token so it costs the set nothing. Its receipt is the standing-row shape (what the
+/// line gained, and that the default reach rides with it) with NO undo — deleting a row is not a
+/// command, and no undo beats a wrong one — closing on the hand edit that puts the file back.
 fn shape_dest_receipt(
     ctx: &Ctx<'_>,
     data: &mut AddData,
     resolved: &Resolved,
     dest_entries: &[String],
+    set_line: Option<&str>,
 ) {
     if dest_entries.is_empty() {
         return;
@@ -746,6 +851,21 @@ fn shape_dest_receipt(
         &resolved.session.workspace_name,
         &resolved.name,
     ));
+    if let Some(set) = set_line {
+        data.dest_change = Some(topos_types::results::DestChange {
+            added: dest_entries.to_vec(),
+            default_reach: true,
+        });
+        data.undo = Vec::new();
+        medit::push_note(
+            data,
+            format!(
+                "this line is new — delete it from the manifest to hand the bundle back to {set} \
+                 alone."
+            ),
+        );
+        return;
+    }
     // A REMOVE undo names its target as the bare name — the receipt's promised inverse, byte for
     // byte, whether the inverse drops the whole row (a fresh add) or subtracts just the
     // destinations this add added (an extend). Only a remove: an `add`-shaped restore undo means
@@ -801,6 +921,12 @@ fn finish_workspace(
     // note — the row is the durable demand either way, and the next sweep lands the copies.
     use topos_types::results::{PullAction, PullSkill};
     let out = outcome.as_ref().ok();
+    // The registrations this invocation's own converge made — see [`set_delivered_add`]. The
+    // breadth sweep the composition root runs writes this field too, on the arms that arm; a
+    // reference add arms nothing itself, so nothing here is overwritten.
+    if let Some(o) = out {
+        data.triggers = o.data.triggers.clone();
+    }
     // A row proves THIS reference's bytes only when the reconcile stamped it with the
     // session's workspace id — a same-named local or forge row reconciled in the same scope
     // says nothing about the workspace delivery.
@@ -824,7 +950,7 @@ fn finish_workspace(
                 .any(|r| owned(r) && super::reconcile::moved_bytes(r.action))
         })
     {
-        data.unchanged = false;
+        medit::clear_unchanged(&mut data);
     }
     if !data.dest.is_empty() {
         // Bytes provably PRESENT: installed / current / fast-forwarded / refreshed — and the draft
@@ -886,16 +1012,36 @@ fn finish_workspace(
                      land on the next `topos update`",
                 ),
             }
+        } else if !mcp_bundle(resolved) {
+            // EVERY FOLDER THIS RUN WROTE. A row carrying the default-reach token places wherever
+            // that reach goes, so a column naming only the folder the ask spelled reported one of
+            // four. The row's own spelling stays in the FILE; the receipt says where the bytes are.
+            // (A config-placed bundle owns ENTRIES inside files, not folders — its own receipt
+            // half states them, and a file's parent directory is not a destination.)
+            let dir = spelled_dir(ctx, target);
+            let mut roots: Vec<String> = Vec::new();
+            for placed in out
+                .iter()
+                .flat_map(|o| o.data.skills.iter())
+                .filter(|r| owned(r) && bytes_present(r.action))
+                .flat_map(|r| r.destinations.iter())
+            {
+                let Some(parent) = std::path::Path::new(placed).parent() else {
+                    continue;
+                };
+                let spelled = spell_in(dir.as_deref(), &parent.display().to_string());
+                if !roots.contains(&spelled) {
+                    roots.push(spelled);
+                }
+            }
+            if !roots.is_empty() {
+                data.dest = roots;
+            }
         }
     }
     // The kind was parsed (and an unknown one refused) before any row was written; a bundle
     // that got this far names a kind this build delivers.
-    if resolved
-        .entry
-        .as_deref()
-        .and_then(|e| BundleKind::parse(&e.kind))
-        .is_some_and(BundleKind::is_mcp)
-    {
+    if mcp_bundle(resolved) {
         super::add_mcp::fold_workspace_mcp(ctx, target, global, &mut data);
     }
     // THE SECOND CHECKOUT, disclosed at the moment it is created (see [`machine_copy_beside_project`]).
@@ -903,6 +1049,17 @@ fn finish_workspace(
         data.machine_copy = machine_copy_beside_project(ctx, &data);
     }
     AddRefOutcome::applied(data)
+}
+
+/// Whether the catalog says this reference is a config-placed bundle. The kind was parsed (and an
+/// unknown one refused) before any row was written, so a bundle that got this far names a kind
+/// this build delivers.
+fn mcp_bundle(resolved: &Resolved) -> bool {
+    resolved
+        .entry
+        .as_deref()
+        .and_then(|e| BundleKind::parse(&e.kind))
+        .is_some_and(BundleKind::is_mcp)
 }
 
 /// The MACHINE folder a `-g` add just landed its own copy in, when a checkout at or above this
@@ -1003,6 +1160,38 @@ fn resolve_workspace(
             })
         }
         _ => unreachable!("guarded above"),
+    }
+}
+
+/// The answer a BARE add gives over a bundle this scope's set line already delivers and its
+/// manifest does not record: the same lead the destination-carrying arm prints, closing on the
+/// ordinary `nothing changed`.
+///
+/// Nothing converges here — no destination was asked about, so there is no surface whose missing
+/// copy this add was called to place; the sweep owns that. Saying `<name> is already added
+/// machine-wide (~/.topos/topos.toml)` named a file that holds no such row: what stands is the
+/// set's line, and that is what the answer names.
+pub(crate) fn set_delivered_answer(
+    name: &str,
+    reference: &str,
+    set: String,
+    global: bool,
+) -> AddData {
+    AddData {
+        reference: Some(reference.to_owned()),
+        source: Some(reference.to_owned()),
+        set_delivery: Some(topos_types::results::SetDelivery {
+            set,
+            scope: if global {
+                topos_types::results::ReceiptScope::Machine
+            } else {
+                topos_types::results::ReceiptScope::Project
+            },
+            surfaces: Vec::new(),
+            asked: Vec::new(),
+            failure: None,
+        }),
+        ..set_data(name)
     }
 }
 

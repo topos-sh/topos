@@ -1026,6 +1026,14 @@ fn run_command(
                                 });
                                 return finish_add_reference(json, cmd_name, result, &diag);
                             }
+                            // A CHANNEL OR FEED LINE already delivers it and this file records no
+                            // row of its own: there is nothing to add. No destination was named,
+                            // so nothing converges either — the answer is what stands.
+                            Ok(ops::BareAddPlan::SetDelivered {
+                                name,
+                                reference,
+                                set,
+                            }) => Ok(ops::set_delivered_answer(&name, &reference, set, global)),
                             // The bundle already stands HERE, adopted from a folder, and the
                             // invocation named destinations: the row gains them. Nothing is
                             // adopted again, so no trigger is armed and no version is minted —
@@ -3742,7 +3750,7 @@ fn clear_unchanged_if_bytes_moved(
             .iter()
             .any(|r| r.skill == data.name && ops::moved_bytes(r.action))
     }) {
-        data.unchanged = false;
+        ops::clear_unchanged(data);
     }
 }
 

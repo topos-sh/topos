@@ -218,6 +218,10 @@ Placed the copy that was missing:
   opencode: opencode.json — created
 ```
 
+A folder no agent owns is the one exception: nothing but a line reaches it, so `--dest <that
+folder>` does write one — carrying `"*"`, so everything the channel reaches rides along — and the
+receipt closes by saying how to hand the bundle back to the channel alone.
+
 The same flags on `remove` **subtract**: only that agent's copy leaves, the line keeps the rest,
 and the receipt says what remains (`removed (~/.codex/skills) — 2 folders remain`). Removing the
 last destination removes the line. On a line that named no destinations, a subtraction first
