@@ -6641,10 +6641,10 @@ mod tests {
                 None,
             ),
             agent_state(
-                "goose",
+                "lm-studio",
                 None,
                 TargetOutcome::Withheld,
-                Some("this version of topos cannot set up a program in goose"),
+                Some("this version of topos cannot set up a program in lm-studio"),
             ),
             agent_state(
                 "claude-code",
@@ -6668,7 +6668,7 @@ mod tests {
             "two of the four surfaces hold an entry: {out}"
         );
         // The other two are not hidden — they say what happened, each in its own line.
-        assert!(out.contains("goose: not placed —"), "{out}");
+        assert!(out.contains("lm-studio: not placed —"), "{out}");
         assert!(
             out.contains("~/.claude.json: held by another entry —"),
             "{out}"

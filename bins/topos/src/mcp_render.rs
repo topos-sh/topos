@@ -565,8 +565,8 @@ impl Gap {
     /// Every arm says the same kind of thing about the same subject: what THIS BUILD OF TOPOS
     /// cannot do. The two `Unsupported` arms used to say it about the machine and the harness
     /// instead ("this agent does not run a server from this machine"), which reads as a fact about
-    /// what Goose can do — and Goose runs servers perfectly well. The gap is topos's: it has no
-    /// verified grammar for a program entry in that harness's config.
+    /// what LM Studio can do — and LM Studio runs servers perfectly well. The gap is topos's: it
+    /// has no verified grammar for a program entry in that harness's config.
     pub(crate) fn note(&self, harness: &str) -> String {
         match self {
             Self::UnsupportedPackage { registry } => {
@@ -1532,9 +1532,9 @@ mod tests {
                 Machine::default()
             )
             .expect_err("no stdio")
-            .message("hermes-agent"),
-            "not placed in hermes-agent: this server runs as a program on this machine, and this \
-             version of topos cannot set that up in hermes-agent."
+            .message("lm-studio"),
+            "not placed in lm-studio: this server runs as a program on this machine, and this \
+             version of topos cannot set that up in lm-studio."
         );
     }
 

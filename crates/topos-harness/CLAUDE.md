@@ -97,8 +97,8 @@ never learns which machinery served which harness.
   and is spelled by the renderer, because the form is not just syntax: most harnesses read a
   reference inside the value (`EnvRef`), Codex names inherited variables in its own `env_vars`
   list and would hand a `${VAR}` in `env` straight to the server. `entry_value` answers `None` for
-  the four pairs no vendor evidence covers — a program in Hermes's, Goose's and LM Studio's
-  configs, and an ADDRESS in Claude Desktop's — and every driver turns that into a refusal, never a
+  the two pairs no vendor evidence covers — a program in LM Studio's config, and an ADDRESS in
+  Claude Desktop's — and every driver turns that into a refusal, never a
   guess. The
   surfaces (user/project + dialect + reload copy + the read-only `conflict_paths` a harness ALSO
   reads servers from) and the CAPABILITY columns (does it dial an address, does it run a program,

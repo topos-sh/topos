@@ -425,8 +425,8 @@ pub(super) static SYNTHETIC: &[KnownHarness] = &[
         "restart cursor",
     ),
     // The capability columns mirror the bundled table's, because a test that answered for
-    // different ones would be testing a machine nobody has: OpenCode spells an environment
-    // reference its own way…
+    // different ones would be testing a machine nobody has: every row here reaches a server both
+    // ways, and OpenCode is the one that spells an environment reference its own way.
     registry::home_rooted_mcp_row_with_caps(
         "opencode",
         "OpenCode",
@@ -446,17 +446,13 @@ pub(super) static SYNTHETIC: &[KnownHarness] = &[
         None,
         "picked up automatically",
     ),
-    // …and Hermes has no evidenced grammar for a program topos would run.
-    registry::home_rooted_mcp_row_with_caps(
+    registry::home_rooted_mcp_row(
         "hermes-agent",
         "Hermes Agent",
         ".hermes/config.yaml",
         McpDialect::HermesYaml,
         None,
         "/reload-mcp",
-        true,
-        false,
-        topos_harness::mcp::descriptor::EnvRef::DollarBrace,
     ),
 ];
 

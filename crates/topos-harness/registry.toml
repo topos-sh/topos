@@ -31,7 +31,7 @@
 # `brace-env` = `{env:VAR}`, `dollar-brace-env` = `${env:VAR}`; `dollar-brace` unless stated).
 
 schema_version = 1
-version = "2026.8.13.4"
+version = "2026.8.14.1"
 min_engine_version = 3
 
 # The remote-to-stdio BRIDGE: the program topos runs so an agent that cannot dial an MCP address
@@ -351,14 +351,14 @@ project_dir = ".goose/skills"
 detect_dirs = ["configHome/goose"]
 shared_dir = { level = "probed", covered = true }
 
-# An ADDRESS and nothing else. Goose's own grammar for a program it runs spells the command `cmd`
-# and its arguments a YAML sequence, which is outside the flow shapes this splicer can prove it
-# gives back — so a bundle offering only a package is reported unplaceable here rather than
-# written in a shape nobody verified.
+# BOTH shapes, both verified against goose 1.46.0 in a container: an address as a
+# `streamable_http` extension, and a program on the same tagged enum's `stdio` variant, written as
+# one flow line — `{enabled: true, name: <key>, type: stdio, cmd: "npx", args: ["-y", "…"],
+# envs: {…}}`. Goose renames the command line's own fields (`cmd`, `envs`); the entry loads and
+# registers the server's tools with `timeout` left out.
 [harness.mcp]
 reload_note = "restart your goose session"
 user = { dir = "configHome/goose/config.yaml", dialect = "goose-yaml" }
-stdio = false
 
 [[harness]]
 slug = "grok"
@@ -376,10 +376,9 @@ detect_dirs = ["hermesHome"]
 
 [harness.mcp]
 reload_note = "/reload-mcp in a session, or next session"
-# The one-line entry grammar this file's entries are written in is evidenced for an ADDRESS and
-# nothing else, so a server topos would RUN is withheld here rather than written in a shape nobody
-# confirmed. Flip this the day the program spelling is confirmed against a real Hermes build.
-stdio = false
+# BOTH shapes, both verified against Hermes Agent v0.17.0 (`hermes mcp test`): an address, and a
+# program on the same one-line grammar — `{command: "npx", args: ["-y", "…"], env: {…}}`, with no
+# transport key of any kind, which is what its config carries.
 user = { dir = "hermesHome/config.yaml", dialect = "hermes-yaml" }
 
 [[harness]]
@@ -748,9 +747,10 @@ user_dirs = []
 project_dir = ""
 detect_dirs = ["home/.lmstudio"]
 
-# An ADDRESS and nothing else: LM Studio's documented entry is a url with optional headers, and no
-# documented entry of its own runs a local program — so a bundle that offers only a package is
-# reported unplaceable here rather than written in an invented shape.
+# An ADDRESS and nothing else. LM Studio has supported local servers since 0.3.17 and points at
+# Cursor's `mcp.json` notation for them, but publishes no verbatim program entry of its own and no
+# build of it has been probed — so a bundle that offers only a package is reported unplaceable here
+# rather than written in a shape nobody confirmed. Flip this the day one is.
 [harness.mcp]
 reload_note = "loads automatically when the file is saved"
 user = { dir = "home/.lmstudio/mcp.json", dialect = "lm-studio-json" }
