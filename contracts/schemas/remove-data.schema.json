@@ -171,7 +171,7 @@
           "type": "string"
         },
         "remaining": {
-          "description": "A NARROWED removal (`-a`/`--dest`): how many destinations the row still names after the\nsubtraction — the receipt's `— N folders remain` clause (config files for an MCP\nbundle). Absent on a whole-row removal. **INFERRED** (additive).",
+          "description": "A NARROWED removal (`-a`/`--dest`): how many destinations the row still names after the\nsubtraction — the receipt's `— N folders remain` clause (config files for an MCP\nbundle). Absent on a whole-row removal, and on a narrow that leaves the row standing for\nits DEFAULT reach (there is no count to state). **INFERRED** (additive).",
           "type": [
             "integer",
             "null"

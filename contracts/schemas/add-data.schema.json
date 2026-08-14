@@ -304,12 +304,9 @@
             "type": "string"
           }
         },
-        "frozen": {
-          "description": "The WHOLE set the row names now — stated only where this add was the first to freeze a row\nthat had been reaching every agent, so the reader sees exactly what replaced \"everywhere\".\nEmpty when the row already named destinations.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "default_reach": {
+          "description": "Whether the row the add wrote carries the `\"*\"` destination — the token standing for the\nrow's default reach. `true` means the added destinations are ADDITIONS on top of everything\nthe row already reached, so nothing stopped being implied.",
+          "type": "boolean"
         }
       },
       "required": [

@@ -550,27 +550,25 @@ fn a_standing_folder_with_a_destination_extends_that_folders_own_row() {
     };
     assert_eq!(planned, folder);
 
-    // The row named NO destinations, so the first one written out has to say what it froze.
+    // The row named NO destinations, so the new one joins the token standing for its reach.
     let selection = ops::dest_select::Selection::new(&[], &["~/.cursor/skills".to_owned()]);
     let data = ops::extend_folder_dest(&ctx, &scope, &folder, &selection)
         .unwrap()
         .expect("the folder is tracked here");
     let change = data.dest_change.clone().expect("the row gained a folder");
     assert_eq!(change.added, vec!["~/.cursor/skills".to_owned()]);
-    // The record was adopted IN PLACE and topos has placed no copy of it anywhere: the source
-    // folder is the person's own and no freeze manages it, so there is no standing reach to
-    // write out beside the new entry — nothing is quietly narrowed, and nothing is claimed.
-    assert!(change.frozen.is_empty(), "{:?}", change.frozen);
+    assert!(change.default_reach, "the row kept what it already reached");
     assert_eq!(
         data.undo,
         vec![
             "topos".to_owned(),
-            "add".to_owned(),
+            "remove".to_owned(),
             "-g".to_owned(),
             folder.display().to_string(),
+            "--dest".to_owned(),
+            "~/.cursor/skills".to_owned(),
         ],
-        "the row named NO destinations, so this add FROZE it — subtracting would leave a frozen \
-         row, and only the prior value's own restore puts back `\"*\"`"
+        "the inverse subtracts exactly what this add put on the row"
     );
     // No adopt happened, so nothing was armed and no version was minted a second time.
     assert!(data.currency.is_none());

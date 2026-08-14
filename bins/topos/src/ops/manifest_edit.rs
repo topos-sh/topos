@@ -553,9 +553,10 @@ pub(super) fn undo_add(reference: &str, global: bool) -> Vec<String> {
 ///   for a prior pin; a prior fields table has no single restoring command, so no undo is
 ///   offered and the note says why (no undo beats a wrong one).
 ///
-/// DESTINATIONS EXTEND, they never replace ([`extend_dest`]): `-a`/`--dest` on a row that already
-/// names destinations ADDS to them, and the undo subtracts only what this add put there.
-/// Narrowing is `remove -a`/`--dest`, and a hand edit of the file still replaces outright.
+/// DESTINATIONS EXTEND, they never replace ([`extend_dest`]): `-a`/`--dest` ADDS to what the row
+/// already names, and to the DEFAULT-REACH token when it named nothing, so an add can never cost
+/// the row an agent. The undo subtracts only what this add put there. Narrowing is
+/// `remove -a`/`--dest`, and a hand edit of the file still replaces outright.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] when the row is illegal for the file (the editor's own typed
@@ -583,7 +584,7 @@ pub(super) fn write_row(
     // folder the caller already resolved (canonical, links followed) — never overwritten here,
     // because the row's `./…` spelling means nothing away from the file that holds it.
     data.source.get_or_insert_with(|| reference.to_owned());
-    let (value, extend) = extend_dest(ctx, target, &data.name, reference, prior.as_ref(), value)?;
+    let (value, extend) = extend_dest(prior.as_ref(), value);
     let value = &value;
     if prior.as_ref() == Some(value) {
         // The redundancy disclosure: the file already spells exactly this row — which is also how
@@ -606,12 +607,13 @@ pub(super) fn write_row(
     // the receipt leads with the destinations it gained.
     //
     // THE INVERSE IS OFFERED ONLY WHERE IT VERIFIABLY RESTORES. Subtracting the new entries puts
-    // a row that ALREADY named destinations back exactly as it was. A row that named none was
-    // reaching every agent, and this add FROZE it — subtraction would leave a frozen row, so the
-    // inverse is the prior value's own restore (`"*"`, or the pin it carried), and where no single
-    // command spells the prior value there is no undo at all.
+    // the row's own `dest` back exactly as it was, whether it named destinations before or stood
+    // for its default reach (the subtraction collapses the row back to that reach — see
+    // [`narrow_one`]). A channel's `mcp_dest` is the one array no `remove` flag subtracts from, so
+    // its inverse is the prior value's own restore (`"*"`, or the pin it carried), and where no
+    // single command spells the prior value there is no undo at all.
     if let Some(extend) = extend {
-        data.undo = match (extend.froze, &prior) {
+        data.undo = match (extend.mcp_dest, &prior) {
             (false, _) => undo_dest_add(reference, global, &extend.change.added),
             (true, Some(EntryValue::Star)) => restore_add(reference, None, global),
             (true, Some(EntryValue::Pin(p))) => restore_add(reference, Some(p), global),
@@ -622,9 +624,8 @@ pub(super) fn write_row(
             push_note(
                 data,
                 format!(
-                    "'{}' reached every agent through a row no single command re-spells — no undo \
-                     is offered; edit {} by hand to put it back",
-                    data.name,
+                    "no single command re-spells the prior value of `{reference}` — no undo is \
+                     offered; edit {} by hand to put it back",
                     target.path.display()
                 ),
             );
@@ -675,11 +676,12 @@ pub(super) fn write_row(
 /// an mcp bundle's config files, `mcp_dest` for a channel's mcp members) and preserving the file's
 /// own entry order — appending is the only edit; nothing already recorded is dropped.
 ///
-/// A row that named NO destinations reached every agent, so freezing it to the new entry alone
-/// would be a silent narrowing. Its CURRENT resolved set is materialized first (the mirror of
-/// remove's own narrow) and the new entries appended, and the receipt names the whole set.
-/// Nothing to materialize — a row with no copies placed yet, a channel, a scope with no store —
-/// leaves the new entries as the whole set, which is what the add asked for.
+/// AN ADD NEVER NARROWS. A row that names NO destinations reaches every agent, now and later, so
+/// the entries join the DEFAULT-REACH token rather than replacing what the row already had:
+/// `dest = ["*", <new>]` keeps that reach as a live plan-time answer (a machine that installs
+/// another agent tomorrow still gets the bundle) and adds the named destinations on top. Writing
+/// out the resolved set instead — a list of folders one machine happened to hold on one day —
+/// froze the row to that day.
 ///
 /// AN `"off"` SWITCH IS NOT A DESTINATION SET. It is the row's own negation — the bundle is not
 /// delivered here at all — so an add over one is a re-activation, never an extend, and it takes
@@ -690,25 +692,15 @@ pub(super) fn write_row(
 ///
 /// Returns the value to write and, when this WAS a destination-only act over a standing row, what
 /// it changed.
-///
-/// # Errors
-/// A store read failure while resolving the current destination set.
-fn extend_dest(
-    ctx: &Ctx<'_>,
-    target: &EditTarget,
-    name: &str,
-    reference: &str,
-    prior: Option<&EntryValue>,
-    value: &EntryValue,
-) -> Result<(EntryValue, Option<DestExtend>), ClientError> {
+fn extend_dest(prior: Option<&EntryValue>, value: &EntryValue) -> (EntryValue, Option<DestExtend>) {
     let (Some(prior), EntryValue::Fields(fields)) = (prior, value) else {
-        return Ok((value.clone(), None));
+        return (value.clone(), None);
     };
     if fields.dest.is_none() && fields.mcp_dest.is_none() {
-        return Ok((value.clone(), None));
+        return (value.clone(), None);
     }
     if matches!(prior, EntryValue::Off) {
-        return Ok((value.clone(), None));
+        return (value.clone(), None);
     }
     let prior_fields = prior.fields();
     // AN EXTEND KEEPS THE ROW. It starts from what the file already spells and overlays only the
@@ -723,14 +715,7 @@ fn extend_dest(
         kind: fields.kind.clone().or(prior_fields.kind.clone()),
     };
     let mut added: Vec<String> = Vec::new();
-    let mut materialized: Vec<String> = Vec::new();
-    // The bundle's kind decides the vocabulary its `dest` is spelled in — folders or config files
-    // — and so decides what "its current destinations" even means. The row is rebuilt from the
-    // reference and what stands, because an MCP bundle filed under a LOCAL path resolves its
-    // recorded entries through that very row key.
-    let ws = workspace_of(reference);
-    let row = plan_row(reference, prior)?;
-    let kind = row_kind(ctx, target, row.as_ref(), ws.as_ref(), name);
+    let mut mcp_dest_touched = false;
     for (asked, standing, is_row_dest) in [
         (&fields.dest, &prior_fields.dest, true),
         (&fields.mcp_dest, &prior_fields.mcp_dest, false),
@@ -738,13 +723,10 @@ fn extend_dest(
         let Some(asked) = asked else { continue };
         let mut base = match standing {
             Some(standing) => standing.clone(),
-            // Only the row's OWN `dest` has a resolved set to read; a channel's `mcp_dest` names
-            // a filter over members, which no single bundle's placements can speak for.
-            None if is_row_dest => {
-                let current = current_dest_roots(ctx, target, row.as_ref(), name, kind)?;
-                materialized = current.clone();
-                current
-            }
+            // A row's OWN `dest` starts from the token that stands for what it reaches today, so
+            // the add is purely additive. A channel's `mcp_dest` is a FILTER over members, not a
+            // reach the token could speak for, and starts empty exactly as it always has.
+            None if is_row_dest => vec![crate::manifest::dest::DEFAULT_REACH.to_owned()],
             None => Vec::new(),
         };
         for entry in asked {
@@ -755,12 +737,8 @@ fn extend_dest(
         }
         if is_row_dest {
             merged.dest = Some(base);
-            materialized = if materialized.is_empty() {
-                Vec::new()
-            } else {
-                merged.dest.clone().unwrap_or_default()
-            };
         } else {
+            mcp_dest_touched = true;
             merged.mcp_dest = Some(base);
         }
     }
@@ -774,71 +752,45 @@ fn extend_dest(
     without_dest.mcp_dest = prior_fields.mcp_dest.clone();
     let dest_only = without_dest == prior_fields;
     if added.is_empty() {
-        // NOTHING NEW TO RECORD IS A TRUE NO-OP, and the row goes back exactly as it stood.
-        //
-        // A row that names NO destinations reaches every agent, and this arm materialized its
-        // current set to append to — so returning the merged value where nothing WAS appended
-        // froze "every agent" into whatever the machine happened to reach today. The person had
-        // asked for a destination the row already reaches, which is a request for nothing; an
-        // agent set up tomorrow would silently stop receiving. (`write_row`'s redundancy arm then
-        // answers `nothing changed`, which is the documented promise for naming a destination a
-        // line already has.) A MIXED add still carries its other change through.
-        return Ok((
+        // NOTHING NEW TO RECORD IS A TRUE NO-OP, and the row goes back exactly as it stood — the
+        // asked entry is already on the line. (`write_row`'s redundancy arm then answers
+        // `nothing changed`, which is the documented promise for naming a destination a line
+        // already has.) A MIXED add still carries its other change through.
+        return (
             if dest_only {
                 prior.clone()
             } else {
                 EntryValue::Fields(merged)
             },
             None,
-        ));
+        );
     }
     if !dest_only {
-        return Ok((EntryValue::Fields(merged), None));
+        return (EntryValue::Fields(merged), None);
     }
-    Ok((
+    let default_reach = merged
+        .dest
+        .as_deref()
+        .is_some_and(crate::manifest::dest::carries_default_reach);
+    (
         EntryValue::Fields(merged),
         Some(DestExtend {
             change: DestChange {
                 added,
-                frozen: materialized,
+                default_reach,
             },
-            // The row NAMED destinations before ⇒ subtracting the new ones restores it exactly.
-            // A row that named none has changed SHAPE (from "every agent" to a fixed set), and no
-            // subtraction spells that back.
-            froze: prior_fields.dest.is_none(),
+            mcp_dest: mcp_dest_touched,
         }),
-    ))
+    )
 }
 
 /// What a destination-only add did, and whether its inverse can be a subtraction.
 struct DestExtend {
     change: DestChange,
-    /// The row named NO destinations before, so this add FROZE it: subtracting the new entries
-    /// would leave a frozen row, not the "reaches every agent" the row used to be. The exact
-    /// inverse is then the prior VALUE's own restore, where one is spellable at all.
-    froze: bool,
-}
-
-/// The STANDING row as the plan sees it — the shape a kind lookup and a placement read both ask
-/// for. `None` for a reference the grammar cannot classify, which is a row no editor could have
-/// written in the first place.
-fn plan_row(reference: &str, value: &EntryValue) -> Result<Option<PlanRow>, ClientError> {
-    Ok(keys::classify_key(reference).ok().map(|shape| PlanRow {
-        reference: reference.to_owned(),
-        shape,
-        value: value.clone(),
-    }))
-}
-
-/// The `(host, workspace)` a reference names, for the kind lookup — `None` for anything that is
-/// not a workspace bundle.
-fn workspace_of(reference: &str) -> Option<(String, String)> {
-    match keys::classify_key(reference) {
-        Ok(KeyShape::WorkspaceBundle {
-            host, workspace, ..
-        }) => Some((host, workspace)),
-        _ => None,
-    }
+    /// This add extended a channel's `mcp_dest`, which `remove --dest` does not subtract from —
+    /// there is no argv that writes that array. The exact inverse is then the prior VALUE's own
+    /// restore, where one is spellable at all, and otherwise there is none.
+    mcp_dest: bool,
 }
 
 /// The inverse of a destination EXTEND: `topos remove [-g] <ref> --dest <new>` naming ONLY what
@@ -1322,9 +1274,11 @@ enum Arm {
         keeps_own: Vec<String>,
     },
     /// A `-a`/`--dest` NARROWING: subtract the named destination(s) from the row's `dest` and
-    /// retire that copy — the row survives with the rest. A row that named NO destinations first
-    /// materializes its CURRENT resolved set (the only reading under which subtraction means
-    /// anything), so the result is a frozen row of the remaining destinations.
+    /// retire that copy — the row survives with the rest. A row that named no destination of its
+    /// own — no `dest`, or the DEFAULT-REACH token — first materializes its CURRENT resolved set
+    /// (the only reading under which subtraction means anything), so the result is an exact row of
+    /// the remaining destinations; a remainder that still holds the whole default reach collapses
+    /// back onto the token instead of freezing.
     DestNarrow {
         /// The standing row (`None` = a feed-delivered bundle with no row — the narrow writes a
         /// fresh dest-frozen row).
@@ -1338,9 +1292,11 @@ enum Arm {
         value: EntryValue,
         /// The destination entries leaving (dest spellings — what the receipt names).
         subtract: Vec<String>,
-        /// How many destinations the row still names.
-        remaining: usize,
-        /// Whether the row named no `dest` before (the materialize disclosure).
+        /// How many destinations the row still names — `None` when it names none of its own and
+        /// stands for its DEFAULT REACH, which is not a number.
+        remaining: Option<usize>,
+        /// Whether the row's current resolved set had to be written out because the row named no
+        /// destination of its own (the materialize disclosure).
         materialized: bool,
         /// What the bundle IS — the vocabulary its destinations are spelled in.
         kind: BundleKind,
@@ -1971,12 +1927,30 @@ fn narrow_one(
             } else {
                 selection.skill_entries(target.scope)?
             };
-            let (row_dest, materialized) = match row.fields().dest {
-                Some(d) => (d, false),
-                None => (
-                    current_dest_roots(ctx, target, Some(&row), &name, kind)?,
-                    true,
-                ),
+            let row_fields = row.fields();
+            // NARROWING IS EXACT. A row that names no destination of its own — no `dest` at all,
+            // or the DEFAULT-REACH token standing for whatever this machine resolves today — has
+            // its CURRENT resolved set materialized first, because that is the only reading under
+            // which subtracting one destination means anything.
+            let stood_for_default = row_fields
+                .dest
+                .as_deref()
+                .is_none_or(crate::manifest::dest::carries_default_reach);
+            let row_dest = if stood_for_default {
+                let mut set = current_dest_roots(ctx, target, Some(&row), &name, kind)?;
+                for entry in row_fields
+                    .dest
+                    .as_deref()
+                    .map(crate::manifest::dest::named_entries)
+                    .unwrap_or_default()
+                {
+                    if !set.contains(&entry) {
+                        set.push(entry);
+                    }
+                }
+                set
+            } else {
+                row_fields.dest.clone().unwrap_or_default()
             };
             let (subtract, remaining) = split_dest(
                 ctx,
@@ -1988,12 +1962,47 @@ fn narrow_one(
                 &entries,
                 &record_copies(ctx, target, Some(&row), &name),
             )?;
-            if remaining.is_empty() {
+            // THE COLLAPSE. A row carrying the token gives it up only when the subtraction
+            // actually took something the DEFAULT REACH still holds — otherwise the removal took
+            // a named addition and nothing else, and freezing the row would cost it every agent
+            // installed after today for a subtraction that never touched them. The token stays,
+            // with whatever the row still names beside it, which is what makes an `-a` add and its
+            // `remove -a` undo exact inverses.
+            let carries_token = row_fields
+                .dest
+                .as_deref()
+                .is_some_and(crate::manifest::dest::carries_default_reach);
+            let default_reach = carries_token
+                .then(|| default_reach_roots(ctx, target, Some(&row), &name, kind))
+                .transpose()?
+                .unwrap_or_default();
+            let back_to_default =
+                carries_token && !subtract.iter().any(|s| default_reach.contains(s));
+            if !back_to_default && remaining.is_empty() {
                 // The last destination: the whole row goes (never a bare row).
                 return Ok(Arm::RowDrop { row, name });
             }
-            let mut fields = row.fields();
-            fields.dest = Some(remaining.clone());
+            let mut new_dest: Vec<String> = if back_to_default {
+                // What the ROW named, minus what left — never the materialized set, whose other
+                // entries are the token's own reach written out.
+                let mut v = vec![crate::manifest::dest::DEFAULT_REACH.to_owned()];
+                v.extend(
+                    row_fields
+                        .dest
+                        .as_deref()
+                        .map(crate::manifest::dest::named_entries)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|e| remaining.contains(e)),
+                );
+                v
+            } else {
+                remaining.clone()
+            };
+            new_dest = crate::manifest::dest::normal_dest(&new_dest);
+            let named_left = crate::manifest::dest::named_entries(&new_dest).len();
+            let mut fields = row_fields;
+            fields.dest = Some(new_dest.clone());
             // A value-level pin survives the narrow as the `version` field where its shape
             // carries one; a whole-repo pin cannot ride beside `dest` and is dropped, disclosed
             // by the ordinary write path refusing — kept simple: the pin is preserved only where
@@ -2003,7 +2012,22 @@ fn narrow_one(
             {
                 fields.version = Some(p.clone());
             }
-            let value = EntryValue::Fields(fields);
+            // A row left saying nothing but "my default reach" says exactly what the plain value
+            // row says — the normal form's own collapse, applied at write time so an `-a` add and
+            // its `remove -a` undo land the file back byte for byte. Where a SET in this same file
+            // already delivers the bundle, an unpinned row says nothing at all and goes: the state
+            // the add that wrote it found. Coverage that cannot be PROVEN keeps the row — dropping
+            // the only demand is not a narrowing.
+            let value = match fields.version.as_deref() {
+                _ if named_left > 0 || !plain_default_row(&fields) => EntryValue::Fields(fields),
+                Some("*") | None => {
+                    if set_covers(ctx, target, &row, &name)? {
+                        return Ok(Arm::RowDrop { row, name });
+                    }
+                    EntryValue::Star
+                }
+                Some(pin) => EntryValue::Pin(pin.to_owned()),
+            };
             crate::manifest::document::check_row(&row.reference, target.scope, &value)
                 .map_err(|e| ClientError::InvalidArgument(e.message))?;
             Ok(Arm::DestNarrow {
@@ -2013,8 +2037,10 @@ fn narrow_one(
                 workspace: ws,
                 value,
                 subtract,
-                remaining: remaining.len(),
-                materialized,
+                // The row keeping its default reach names no count to state — "1 folder remains"
+                // over a row that reaches every agent is a smaller number than the truth.
+                remaining: (!back_to_default).then_some(remaining.len()),
+                materialized: stood_for_default && !back_to_default,
                 kind,
             })
         }
@@ -2083,7 +2109,7 @@ fn narrow_one(
                 workspace: ws,
                 value,
                 subtract,
-                remaining: remaining.len(),
+                remaining: Some(remaining.len()),
                 materialized: true,
                 kind,
             })
@@ -2539,6 +2565,145 @@ fn current_dest_roots(
         }
     }
     Ok(out)
+}
+
+/// THE DEFAULT REACH of a bundle in this scope — what the row resolves to carrying no `dest` at
+/// all, which is exactly what the `"*"` token stands for. Asked of the ONE planner the reconcile
+/// asks (`placement::default_reach_plan` for a skill; the scope's engaged MCP surfaces for a
+/// config-placed bundle), so a narrowing and the sweep that follows it cannot disagree about which
+/// destinations the token still holds.
+///
+/// A narrowing asks this ONE question of it: did the subtraction take a destination the token
+/// still stands for? Empty — nothing in this scope answers for the bundle — reads as no, which is
+/// the honest answer when there is no plan to compare against, and leaves the token where the
+/// person put it.
+///
+/// # Errors
+/// A store read failure.
+fn default_reach_roots(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    row: Option<&PlanRow>,
+    name: &str,
+    kind: BundleKind,
+) -> Result<Vec<String>, ClientError> {
+    let Some(sctx) = scope_store_ctx(ctx, target) else {
+        return Ok(Vec::new());
+    };
+    if kind.is_mcp() {
+        let plan = crate::placement::entries_plan(&sctx, sctx.layout.project_root(), None);
+        let mut files: Vec<String> = plan
+            .entries()
+            .map(|e| dest_display(ctx, target, &e.file))
+            .collect();
+        files.sort();
+        files.dedup();
+        return Ok(files);
+    }
+    let Some(sid) = row_record(ctx, target, row, name).and_then(|s| SkillId::parse(&s).ok()) else {
+        return Ok(Vec::new());
+    };
+    let sp = sctx.layout.published(&sid);
+    let Some(lock) = crate::doc::read_doc::<topos_types::persisted::Lock>(sctx.fs, &sp.lock)?
+    else {
+        return Ok(Vec::new());
+    };
+    // PLANNED OVER NO PRIOR RECORD, deliberately. The prior-stability rule keeps every recorded
+    // placement, and the row's OWN named entries put copies there — so a plan built over the
+    // record would hand back the very destinations the token is being asked about, and no
+    // subtraction would ever look like it left the default half alone.
+    let plan = crate::placement::default_reach_plan(
+        &sctx,
+        sid.as_str(),
+        topos_harness::PlacementNaming {
+            name: Some(&lock.name),
+            workspace_slug: None,
+        },
+        super::followed_workspace(&sctx, sid.as_str()).is_some(),
+        &empty_placement_map(),
+        None,
+    );
+    let mut out: Vec<String> = Vec::new();
+    for dir in plan.dirs() {
+        let Some(parent) = dir.dir.parent() else {
+            continue;
+        };
+        let spelled = dest_display(ctx, target, parent);
+        if !out.contains(&spelled) {
+            out.push(spelled);
+        }
+    }
+    Ok(out)
+}
+
+/// A record-free placement map — the "nothing has been placed yet" input a default-reach plan is
+/// asked over.
+fn empty_placement_map() -> topos_types::persisted::PlacementMap {
+    topos_types::persisted::PlacementMap {
+        schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+        placements: Vec::new(),
+        applied_commit: String::new(),
+        materialized_sha: String::new(),
+        placement_state: Vec::new(),
+        harness: None,
+        harness_slug: None,
+    }
+}
+
+/// Whether a narrowed row's remaining fields carry nothing a plain value row cannot say: no
+/// name/subdir/kind override and no `mcp_dest`. Such a row plus a `dest` naming only the
+/// default-reach token IS the plain value row, spelled the long way.
+fn plain_default_row(fields: &crate::manifest::document::EntryFields) -> bool {
+    fields.mcp_dest.is_none()
+        && fields.name.is_none()
+        && fields.subdir.is_none()
+        && fields.kind.is_none()
+}
+
+/// Whether a SET LINE in this same file already delivers the bundle `row` names — a channel row it
+/// arrives through, or the workspace FEED row. Proven from the offline delivery cache (which
+/// records the channels each delivered bundle came through), never guessed: a bundle the cache
+/// cannot speak for answers `false`, and the row stays.
+///
+/// # Errors
+/// A read failure, or a manifest the grammar refuses.
+fn set_covers(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    row: &PlanRow,
+    name: &str,
+) -> Result<bool, ClientError> {
+    let KeyShape::WorkspaceBundle {
+        host, workspace, ..
+    } = &row.shape
+    else {
+        return Ok(false); // a local or forge row has no set to arrive through
+    };
+    let Some(sid) = row_record(ctx, target, Some(row), name) else {
+        return Ok(false);
+    };
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let Some(entry) = cache.workspaces.values().find(|e| {
+        e.host.as_deref() == Some(host.as_str())
+            && e.workspace_name.as_deref() == Some(workspace.as_str())
+    }) else {
+        return Ok(false);
+    };
+    let Some(delivered) = entry.delivered.get(&sid).filter(|d| !d.withdrawn) else {
+        return Ok(false);
+    };
+    let plan = plan_for(ctx, target)?;
+    // The FEED row delivers whatever the workspace serves this person, this bundle included.
+    if plan.feeds.iter().any(|(h, w)| h == host && w == workspace) {
+        return Ok(true);
+    }
+    Ok(plan.sets.iter().any(|set| {
+        matches!(
+            &set.shape,
+            KeyShape::Channel { host: h, workspace: w, channel }
+                if h == host && w == workspace && delivered.via_channels.contains(channel)
+        )
+    }))
 }
 
 /// THE RECORD A ROW NAMES, resolved by the row's own QUALIFIED identity — the id, as a string,
@@ -3093,9 +3258,10 @@ fn apply_arms(
             } => {
                 let materialize_note = materialized.then(|| {
                     format!(
-                        "the row named no destinations, so its current set was written out \
-                         minus {} — {remaining} remain",
-                        crate::manifest::dest::quoted_list(subtract)
+                        "the row reached every agent, so its current set was written out \
+                         minus {} — {} remain",
+                        crate::manifest::dest::quoted_list(subtract),
+                        remaining.unwrap_or_default()
                     )
                 });
                 match draft_state(ctx, name) {
@@ -3454,8 +3620,9 @@ struct EagerBundle {
     /// this bundle is cross-checked against (see [`scope_record`]). `None` for a local/forge row
     /// (and for a narrow, which keeps its row).
     workspace: Option<(String, String)>,
-    /// A NARROWED bundle: the subtracted dest entries + how many destinations remain.
-    narrow: Option<(Vec<String>, u64)>,
+    /// A NARROWED bundle: the subtracted dest entries + how many destinations the row still names
+    /// (`None` when it names none of its own and stands for its default reach).
+    narrow: Option<(Vec<String>, Option<u64>)>,
     /// The MACHINE scope store's record for a whole-row edit, resolved BEFORE the apply — the
     /// verb's own retire rail needs it when the reconcile's cache/forge walks miss the record
     /// (and the same reconcile's orphan pass may retire it mid-run, after which the name no
@@ -3574,7 +3741,10 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     display: qualified_name(ctx, workspace.as_ref(), name),
                     kind: *kind,
                     name: name.clone(),
-                    narrow: Some((subtract.clone(), *remaining as u64)),
+                    narrow: Some((
+                        subtract.clone(),
+                        remaining.map(|n| u64::try_from(n).unwrap_or(u64::MAX)),
+                    )),
                     record: None,
                     local: None,
                     workspace: None,
@@ -3745,8 +3915,11 @@ fn eager_cleanup(
             // own line.
             Some((subtract, remaining)) => {
                 if rows.is_empty() {
-                    let keeps = crate::actions::Subject::of_kind(b.kind.tag().as_deref())
-                        .targets(usize::try_from(*remaining).unwrap_or(usize::MAX));
+                    let keeps = match remaining {
+                        Some(n) => crate::actions::Subject::of_kind(b.kind.tag().as_deref())
+                            .targets(usize::try_from(*n).unwrap_or(usize::MAX)),
+                        None => "its default reach".to_owned(),
+                    };
                     let note = format!(
                         "the destination left its row, but its copy could not be uninstalled \
                          this run — it leaves on the next `topos update`; the row keeps {keeps}"
@@ -3767,7 +3940,7 @@ fn eager_cleanup(
                     destinations: subtract.clone(),
                     kind: b.kind.tag(),
                     kept,
-                    remaining: Some(*remaining),
+                    remaining: *remaining,
                 });
             }
             None => {

@@ -903,12 +903,12 @@ fn an_add_that_changed_nothing_leads_with_that_and_nothing_else() {
 }
 
 #[test]
-fn a_dest_a_row_already_reaches_freezes_nothing_and_says_so() {
-    // A row that names NO destinations reaches EVERY agent. Naming one it already reaches asks for
-    // nothing — and the extend arm, having materialized the current set to append to, wrote that
-    // set back as the row's frozen `dest`. The file silently changed shape, and an agent set up
-    // tomorrow would stop receiving. The documented promise is the opposite: naming a destination
-    // the line already has changes nothing, and says so.
+fn a_dest_a_row_already_reaches_is_recorded_without_costing_the_row_its_reach() {
+    // A row that names NO destinations reaches EVERY agent. Naming one it already reaches is a
+    // request to keep reaching it whatever detection says tomorrow — so the entry is recorded,
+    // beside the DEFAULT-REACH token that holds everything the row had. What the extend must never
+    // do is write the current resolved set back as the row's destinations: the file would change
+    // shape and an agent set up tomorrow would stop receiving.
     let rig = Rig::new("already-reached");
     let source = rig.folder("pr-describe", "# pr\n");
     let added = rig.adopt(&source);
@@ -939,11 +939,42 @@ fn a_dest_a_row_already_reaches_freezes_nothing_and_says_so() {
     )
     .unwrap();
 
-    assert_eq!(rig.manifest(), before, "the row is untouched, and unfrozen");
-    assert!(data.unchanged, "and the answer says so");
-    let tty = crate::render::add_tty(&data);
-    assert!(tty.contains("nothing changed"), "{tty}");
-    assert!(!tty.contains("installed ("), "{tty}");
+    let after = rig.manifest();
+    assert!(
+        after.contains("dest = [\"*\", \"~/agents\"]"),
+        "the entry joins the token, and NOTHING else was written out: {after}"
+    );
+    assert!(!after.contains("agents/pr-describe"), "{after}");
+    assert!(!data.unchanged, "the row gained a destination");
+    let change = data.dest_change.clone().expect("a destination-only act");
+    assert_eq!(change.added, vec!["~/agents".to_owned()]);
+    assert!(change.default_reach, "the row still reaches every agent");
+    assert_eq!(
+        data.undo.last().map(String::as_str),
+        Some("~/agents"),
+        "the inverse subtracts exactly the entry this add recorded: {:?}",
+        data.undo
+    );
+
+    // The SAME destination again is the string-level no-op — and the row is untouched.
+    let mut again = added.clone();
+    again.note = None;
+    again.undo = Vec::new();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut again,
+        &scope.target,
+        &source,
+        &["~/agents".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(rig.manifest(), after, "a duplicate add writes nothing");
+    assert!(again.unchanged, "and the answer says so");
+    assert!(
+        crate::render::add_tty(&again).contains("nothing changed"),
+        "{:?}",
+        again.note
+    );
 }
 
 #[test]
