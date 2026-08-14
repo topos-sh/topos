@@ -473,6 +473,75 @@ extensions:
     assert_eq!(written(&out), before, "goose's own file, back as it was");
 }
 
+/// The same converge for a program goose RUNS — its extension enum's other variant, where the
+/// command line carries goose's own field names (`cmd`, `envs`) under the `type: stdio` tag. The
+/// builtins beside it are block mappings and stay block mappings.
+#[test]
+fn goose_converges_a_program_among_its_own_bundled_extensions() {
+    let before = "\
+GOOSE_PROVIDER: anthropic
+extensions:
+  developer:
+    bundled: true
+    display_name: Developer
+    enabled: true
+    name: developer
+    timeout: 300
+    type: builtin
+";
+    let want = local_entry_with(
+        KEY,
+        "npx",
+        &["-y", "some-server@1.0.0"],
+        vec![("LINEAR_TOKEN".to_owned(), EnvValue::Inherited)],
+        EnvRef::DollarBrace,
+    );
+    let out = apply(
+        McpDialect::GooseYaml,
+        Some(before.as_bytes()),
+        std::slice::from_ref(&want),
+        &BTreeMap::new(),
+    );
+    let added = written(&out);
+    assert_eq!(state(&out, KEY), EntryState::PlacedNew);
+    assert!(
+        added.contains(&format!(
+            "  {KEY}: {{enabled: true, name: {KEY}, type: stdio, cmd: \"npx\", args: [\"-y\", \"some-server@1.0.0\"], envs: {{LINEAR_TOKEN: \"${{LINEAR_TOKEN}}\"}}}}  # topos:mcp\n"
+        )),
+        "{added}"
+    );
+    // NOTHING of goose's own moved.
+    for line in before.lines() {
+        assert!(added.contains(line), "lost {line:?} from:\n{added}");
+    }
+
+    // The program topos runs is the address this entry names, read back off the line it wrote —
+    // `cmd` is the same field as `command` under another name.
+    let seen = super::observe_entries(McpDialect::GooseYaml, Some(added.as_bytes()), None)
+        .expect("readable");
+    assert_eq!(
+        seen.iter()
+            .find(|e| e.name == KEY)
+            .and_then(|e| e.address.clone()),
+        super::local_address("npx", &["-y".to_owned(), "some-server@1.0.0".to_owned()]),
+    );
+
+    // Idempotent, then removed — and the file comes back byte for byte.
+    let prior: BTreeMap<String, String> = ledger(&out);
+    let again = apply(
+        McpDialect::GooseYaml,
+        Some(added.as_bytes()),
+        std::slice::from_ref(&want),
+        &prior,
+    );
+    assert_eq!(again.plan, EditPlan::Leave);
+    assert_eq!(state(&again, KEY), EntryState::Current);
+
+    let out = apply(McpDialect::GooseYaml, Some(added.as_bytes()), &[], &prior);
+    assert_eq!(state(&out, KEY), EntryState::Removed);
+    assert_eq!(written(&out), before, "goose's own file, back as it was");
+}
+
 /// A builtin whose NAME topos would never mint is not topos's — and one written in the flow style
 /// topos writes is still not topos's without the sentinel. Both are read, neither is touched.
 #[test]
@@ -550,10 +619,9 @@ fn a_dialect_says_nothing_where_its_agent_documents_nothing() {
         EnvRef::DollarBraceEnv,
     );
     assert!(entry_value(McpDialect::LmStudioJson, &program).is_none());
-    assert!(entry_value(McpDialect::GooseYaml, &program).is_none());
-    assert!(entry_value(McpDialect::GooseYaml, &address).is_some());
     assert!(entry_value(McpDialect::ClaudeDesktopJson, &address).is_none());
-    // Everything else this increment added answers for BOTH shapes.
+    // Every other breadth dialect answers for BOTH shapes — goose included, since its program
+    // grammar was verified against a real build.
     for dialect in [
         McpDialect::VscodeJson,
         McpDialect::CopilotCliJson,
@@ -562,6 +630,7 @@ fn a_dialect_says_nothing_where_its_agent_documents_nothing() {
         McpDialect::ClineJson,
         McpDialect::RooJson,
         McpDialect::ZedJson,
+        McpDialect::GooseYaml,
     ] {
         assert!(entry_value(dialect, &address).is_some(), "{dialect:?}");
         assert!(entry_value(dialect, &program).is_some(), "{dialect:?}");

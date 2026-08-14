@@ -168,16 +168,18 @@ The entry's exact shape is each agent's own, down to details that decide whether
 VS Code keeps servers under `servers` rather than `mcpServers`, Windsurf spells the address
 `serverUrl`, Goose calls it `uri`, and Cline and Roo need the transport named — `streamableHttp`
 and `streamable-http` respectively — because leaving it out means the old SSE transport, silently.
+A program splits the same way: Hermes writes the usual `command`, `args` and `env`, while Goose
+spells them `cmd`, `args` and `envs` and marks the entry `type: stdio`.
 
 Nine of the sixteen have **no project-level MCP config** — the rows marked `— (none)` above — so a
 project row reports `not placed — no project-level config` for them rather than falling back to
 your home config. They receive the same server through your machine-wide scope.
 
-Four of them reach a server exactly one way. **Claude Desktop** adds remote servers in the app, not
-in this file, so a shared address reaches it as a local bridge process instead. **Goose**, **Hermes
-Agent** and **LM Studio** are the mirror image: Topos can give them an address, and a bundle that
-ships only a package reports `not placed` there rather than being written in a shape nobody has
-verified.
+Two of them reach a server exactly one way. **Claude Desktop** adds remote servers in the app, not
+in this file, so a shared address reaches it as a local bridge process instead. **LM Studio** is the
+mirror image: Topos can give it an address, and a bundle that ships only a package reports
+`not placed` there — LM Studio documents local servers but publishes no entry grammar for one, and
+the shape stays unwritten until a real build confirms it.
 
 <Note>
   Signing in is the agent's own act, on your own machine. A shared MCP bundle carries no credential

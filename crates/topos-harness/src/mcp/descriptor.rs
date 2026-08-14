@@ -395,7 +395,7 @@ mod tests {
     }
 
     /// The capability columns as the bundled table states them: every one of the six dials an
-    /// address itself, all but Hermes run a local program, and OpenCode is the one that spells an
+    /// address itself and runs a local program, and OpenCode is the one that spells an
     /// environment reference its own way.
     #[test]
     fn the_capability_columns_say_what_each_agent_can_be_given() {
@@ -409,14 +409,10 @@ mod tests {
             "opencode",
         ] {
             assert!(get(slug).remote, "{slug} dials an address itself");
-        }
-        for slug in ["claude-code", "openclaw", "codex", "cursor", "opencode"] {
+            // Hermes's program spelling was verified against a real build, so it stands with the
+            // rest: a bundle offering only a package is placeable everywhere here.
             assert!(get(slug).stdio, "{slug} runs a local program");
         }
-        assert!(
-            !get("hermes-agent").stdio,
-            "hermes: no evidenced program grammar, so nothing is written in one"
-        );
         assert_eq!(get("opencode").env_ref, EnvRef::BraceEnv);
         for slug in ["claude-code", "openclaw", "codex", "cursor", "hermes-agent"] {
             assert_eq!(get(slug).env_ref, EnvRef::DollarBrace, "{slug}");
@@ -430,17 +426,18 @@ mod tests {
     fn a_row_that_reaches_a_server_only_one_way_says_so() {
         let get = |slug: &str| bundled_mcp_row(slug).unwrap().mcp().unwrap();
 
-        // LM Studio documents an address and only an address…
+        // LM Studio documents an address and only an address: its local-server support is
+        // documented, its entry grammar for one is not, and no build of it has been probed…
         assert!(get("lm-studio").remote);
         assert!(!get("lm-studio").stdio);
         // …and Claude Desktop a program and only a program: its remote servers are added in the
         // app, so a shared address reaches it through the bridge or not at all.
         assert!(!get("claude-desktop").remote);
         assert!(get("claude-desktop").stdio);
-        // Goose is LM Studio's case in YAML: an address it can be given, and a program grammar
-        // whose sequence shapes this splicer cannot prove it hands back.
+        // Goose is neither case: both of its spellings were verified against a real build, so both
+        // columns stand.
         assert!(get("goose").remote);
-        assert!(!get("goose").stdio);
+        assert!(get("goose").stdio);
 
         for slug in ["vscode", "cline", "roo", "windsurf"] {
             assert_eq!(get(slug).env_ref, EnvRef::DollarBraceEnv, "{slug}");

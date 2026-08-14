@@ -1021,25 +1021,28 @@ fn a_package_only_bundle_passes_the_gate_and_lands_as_the_program_each_agent_run
         "opencode's own spelling, from the table: {oc}"
     );
 
-    // Hermes has no evidenced grammar for a program, so it is WITHHELD — said plainly, and
-    // nothing is written there.
+    // Hermes: the same triple as one line of its own flow mapping, under the entry's key, with
+    // the sentinel tail its address entries carry.
     assert_eq!(
         state_of(&out, "s_a", "hermes-agent").state,
-        TargetOutcome::Withheld
+        TargetOutcome::Created
+    );
+    let hermes = std::fs::read_to_string(home.0.join(".hermes/config.yaml")).expect("hermes");
+    assert!(hermes.contains("  topos-eng-acme: {"), "{hermes}");
+    assert!(hermes.contains("command: \"npx\""), "{hermes}");
+    assert!(
+        hermes.contains("args: [\"-y\", \"@acme/server@2.1.0\"]"),
+        "{hermes}"
     );
     assert!(
-        standing_lines(&out).iter().any(|l| l
-            == "MCP_KIND_UNSUPPORTED not placed in hermes-agent: this server runs as a program on \
-                this machine, and this version of topos cannot set that up in hermes-agent."),
-        "{:?}",
-        standing_lines(&out)
+        hermes.contains("env: {ACME_TOKEN: \"${ACME_TOKEN}\"}"),
+        "{hermes}"
     );
-    assert!(!home.0.join(".hermes/config.yaml").exists());
-    // A CONDITION IS NOT A FAULT. Nothing was attempted at Hermes — topos has no verified grammar
-    // for a program entry in its config — so nothing failed there, and the failure channel that
+    assert!(hermes.contains("  # topos:mcp"), "{hermes}");
+    // Nothing here is a fault: every engaged agent took the program, so the failure channel that
     // decides the exit status stays empty.
     assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
-    // The bundle IS installed — it reached five agents — so it is not a failure.
+    // The bundle IS installed — it reached every one of the six — so it is not a failure.
     assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
     assert!(
         out.unplaced_bundles.is_empty(),
@@ -1245,12 +1248,12 @@ fn a_package_served_over_http_is_withheld_and_nothing_is_written() {
 #[test]
 fn a_row_claiming_a_shape_its_dialect_cannot_spell_withholds_only_that_placement() {
     static OVERPROMISED: &[KnownHarness] = &[registry::home_rooted_mcp_row_with_caps(
-        "hermes-agent",
-        "Hermes Agent",
-        ".hermes/config.yaml",
-        McpDialect::HermesYaml,
+        "lm-studio",
+        "LM Studio",
+        ".lmstudio/mcp.json",
+        McpDialect::LmStudioJson,
         None,
-        "/reload-mcp",
+        "loads automatically when the file is saved",
         true,
         true, // …but this dialect has no grammar for a program
         topos_harness::mcp::descriptor::EnvRef::DollarBrace,
@@ -1283,18 +1286,29 @@ fn a_row_claiming_a_shape_its_dialect_cannot_spell_withholds_only_that_placement
     let out = mcp_engine::converge(&io, &demands, &table, &slugs, &no_hold(), true);
 
     assert_eq!(
-        state_of(&out, "s_a", "hermes-agent").state,
+        state_of(&out, "s_a", "lm-studio").state,
         TargetOutcome::Withheld,
         "the package bundle is the one that cannot be spelled"
     );
+    assert!(
+        standing_lines(&out).iter().any(|l| l
+            == "MCP_KIND_UNSUPPORTED not placed in lm-studio: this server runs as a program on \
+                this machine, and this version of topos cannot set that up in lm-studio."),
+        "{:?}",
+        standing_lines(&out)
+    );
     assert_eq!(
-        state_of(&out, "s_b", "hermes-agent").state,
+        state_of(&out, "s_b", "lm-studio").state,
         TargetOutcome::Created,
         "the address bundle lands in the same file, untouched by the other's gap"
     );
-    let written = std::fs::read_to_string(home.0.join(".hermes/config.yaml")).expect("hermes");
+    let written = std::fs::read_to_string(home.0.join(".lmstudio/mcp.json")).expect("lm studio");
     assert!(written.contains("topos-eng-linear"), "{written}");
     assert!(!written.contains("topos-eng-acme"), "{written}");
+    // A CONDITION IS NOT A FAULT. Nothing was attempted for the package bundle — topos has no
+    // verified grammar for a program entry in this config — so nothing failed there, and the
+    // failure channel that decides the exit status stays empty.
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
 }
 
 /// **An agent that cannot dial an address still gets the server** — through the bridge, pinned in

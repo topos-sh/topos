@@ -5,11 +5,12 @@
 //! on everything else, untouched lines preserved byte-for-byte.
 //!
 //! A managed entry is ONE line — a flow mapping ending with the ownership sentinel comment
-//! ` # topos:mcp`:
+//! ` # topos:mcp`, for an address the harness dials or a program it runs:
 //!
 //! ```yaml
 //! mcp_servers:
 //!   topos-acme-linear: {url: "https://…", headers: {X-T: "v"}, auth: oauth}  # topos:mcp
+//!   topos-acme-files: {command: "npx", args: ["-y", "@acme/files"], env: {REGION: "eu"}}  # topos:mcp
 //! ```
 //!
 //! TWO harnesses share it and differ in exactly three things, all of them held in one internal
@@ -22,11 +23,13 @@
 //! topos's without one is Foreign, exactly as everywhere else.
 //!
 //! `auth: oauth` is emitted ONLY for [`AuthHint::Oauth`] (Hermes needs the explicit opt-in but
-//! must not be sent into OAuth for a no-auth server) and ONLY for Hermes, whose key it is; goose
-//! runs its own sign-in and would find the word unreadable. The url and header values are ALWAYS
-//! double-quoted (PyYAML is YAML 1.1 — an unquoted scalar can coerce); header names follow the
-//! example spelling (bare for `[A-Za-z0-9_-]`, double-quoted otherwise); the entry key stays
-//! bare (`[a-z0-9-]` is safe). Managed lines are identified by the sentinel suffix ALONE, and
+//! must not be sent into OAuth for a no-auth server), ONLY for Hermes, whose key it is (goose
+//! runs its own sign-in and would find the word unreadable), and only on an ADDRESS — a program
+//! signs nothing in. The url, command, argument, header and environment values are ALWAYS
+//! double-quoted (PyYAML is YAML 1.1 — an unquoted scalar can coerce), and a program's argv is a
+//! flow sequence of exactly those; header and environment names follow the example spelling (bare
+//! for `[A-Za-z0-9_-]`, double-quoted otherwise); the entry key stays bare (`[a-z0-9-]` is safe).
+//! Managed lines are identified by the sentinel suffix ALONE, and
 //! must sit at the block's own child indent: a sentinel-bearing line at ANY other indent inside
 //! the block fails the whole analysis closed — it may be OUR OWN entry re-indented (or a pasted
 //! copy of one), and reasoning around it could re-insert a key the block already holds, minting
@@ -116,8 +119,9 @@ pub fn apply(
     if let Err(reason) = validate_desired(desired) {
         return unprovable(reason);
     }
-    // A PROGRAM-run server has no proven spelling in this file (see the module doc), so the whole
-    // edit refuses before a line is planned rather than inventing one.
+    // Both of this driver's dialects spell both targets today, so this is a gate rather than a
+    // live refusal: a target either of them ever stops expressing refuses the WHOLE edit before a
+    // line is planned, instead of being discovered halfway through one.
     let desired_fps: Vec<String> = match super::desired_fingerprints(dialect, desired) {
         Ok(fps) => fps,
         Err(reason) => return unprovable(reason),
@@ -470,8 +474,9 @@ fn analyze(spec: YamlSpec, text: &str) -> Result<Shape, String> {
 // whitespace variation within it). Anything else answers `None` → `Drifted`.
 // ---------------------------------------------------------------------------------------------
 
-/// Parse `{k: v, …}` (values: double-quoted strings, one-level nested mappings, bare words)
-/// into a structural [`Value`]. `s` must be exactly one flow mapping.
+/// Parse `{k: v, …}` (values: double-quoted strings, nested mappings, flow sequences of
+/// double-quoted strings, bare words) into a structural [`Value`]. `s` must be exactly one flow
+/// mapping.
 fn parse_flow_mapping(s: &str) -> Option<Value> {
     let mut chars = s.char_indices().peekable();
     let value = parse_mapping(s, &mut chars)?;
@@ -527,6 +532,7 @@ fn parse_mapping(src: &str, chars: &mut Chars<'_>) -> Option<Value> {
         let value = match chars.peek() {
             Some((_, '"')) => Value::String(parse_quoted(src, chars)?),
             Some((_, '{')) => parse_mapping(src, chars)?,
+            Some((_, '[')) => parse_sequence(src, chars)?,
             _ => {
                 let mut word = String::new();
                 while let Some((_, c)) = chars.peek() {
@@ -556,6 +562,36 @@ fn parse_mapping(src: &str, chars: &mut Chars<'_>) -> Option<Value> {
         match chars.next() {
             Some((_, ',')) => {}
             Some((_, '}')) => return Some(Value::Object(map)),
+            _ => return None,
+        }
+    }
+}
+
+/// Parse `["a", "b"]` — the ONE sequence shape this grammar has, a flat list of double-quoted
+/// strings (a program's argv). An EMPTY list is legal and parses to one: an argument-less program
+/// renders `args: []`, and reading that back as anything else would drift an entry from the value
+/// it was written from on the very next sweep. Everything else between the brackets — a bare
+/// word, a nested collection, a trailing comma — answers `None`, which the caller turns into
+/// `Drifted`: untouched, never removed, zero writes.
+fn parse_sequence(src: &str, chars: &mut Chars<'_>) -> Option<Value> {
+    skip_ws(chars);
+    let (_, open) = chars.next()?;
+    if open != '[' {
+        return None;
+    }
+    let mut items = Vec::new();
+    skip_ws(chars);
+    if matches!(chars.peek(), Some((_, ']'))) {
+        chars.next();
+        return Some(Value::Array(items));
+    }
+    loop {
+        skip_ws(chars);
+        items.push(Value::String(parse_quoted(src, chars)?));
+        skip_ws(chars);
+        match chars.next() {
+            Some((_, ',')) => {}
+            Some((_, ']')) => return Some(Value::Array(items)),
             _ => return None,
         }
     }
@@ -593,9 +629,10 @@ fn quote(s: &str) -> String {
     Value::String(s.to_owned()).to_string()
 }
 
-/// A header NAME: bare where the example grammar's charset allows, double-quoted otherwise (the
-/// parser accepts both, so the round trip holds for any gate-validated name).
-fn header_name(name: &str) -> String {
+/// A header or environment-slot NAME: bare where the example grammar's charset allows,
+/// double-quoted otherwise (the parser accepts both, so the round trip holds for any
+/// gate-validated name).
+fn pair_name(name: &str) -> String {
     let bare_safe = !name.is_empty()
         && name
             .chars()
@@ -607,55 +644,96 @@ fn header_name(name: &str) -> String {
     }
 }
 
-/// The one-line managed entry at `indent`. ADDRESS entries only — `apply` refuses a desired set
-/// carrying a program-run server before any line is planned, so the address fields are total here.
+/// The one-line managed entry at `indent`, for either target. **The line must parse back to the
+/// mapping [`super::entry_value`] renders for the same entry** — the fingerprint the ledger holds
+/// is taken from that value and re-taken from these bytes, so a single divergence would read as
+/// permanent drift on an entry topos itself just wrote.
 fn render_line(spec: YamlSpec, indent: usize, entry: &McpEntry) -> String {
     let mut line = " ".repeat(indent);
     line.push_str(&entry.key);
-    let (url, headers) = match &entry.target {
-        super::McpTarget::Remote { url, headers } => (url.as_str(), headers.as_slice()),
-        super::McpTarget::Local { .. } => ("", &[][..]),
-    };
     line.push_str(": {");
-    // Goose reads an extension, not a server: it needs the switch that turns one on, the name it
-    // is filed under (which it also injects from the key, but writing it costs nothing and its
-    // own tool writes it), and the transport word spelled the way its config enum reads. The
-    // address key is `uri` there, `url` in Hermes.
-    if spec.dialect == McpDialect::GooseYaml {
-        line.push_str("enabled: true, name: ");
-        line.push_str(&entry.key);
-        line.push_str(", type: streamable_http, uri: ");
-    } else {
-        line.push_str("url: ");
-    }
-    line.push_str(&quote(url));
-    if !headers.is_empty() {
-        line.push_str(", headers: {");
-        let sorted: BTreeMap<&str, &str> = headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let mut first = true;
-        for (name, value) in sorted {
-            if !first {
-                line.push_str(", ");
+    match &entry.target {
+        super::McpTarget::Remote { url, headers } => {
+            // Goose reads an extension, not a server: it needs the switch that turns one on, the
+            // name it is filed under (which it also injects from the key, but writing it costs
+            // nothing and its own tool writes it), and the transport word spelled the way its
+            // config enum reads. The address key is `uri` there, `url` in Hermes.
+            if spec.dialect == McpDialect::GooseYaml {
+                line.push_str("enabled: true, name: ");
+                line.push_str(&entry.key);
+                line.push_str(", type: streamable_http, uri: ");
+            } else {
+                line.push_str("url: ");
             }
-            first = false;
-            line.push_str(&header_name(name));
-            line.push_str(": ");
-            line.push_str(&quote(value));
+            line.push_str(&quote(url));
+            push_pairs(&mut line, "headers", headers);
+            // `auth: oauth` is HERMES's opt-in. Goose has no such key: it runs its own OAuth on a
+            // 401, and a word its config enum does not know would make the whole entry unreadable
+            // to it.
+            if entry.auth == AuthHint::Oauth && spec.dialect == McpDialect::HermesYaml {
+                line.push_str(", auth: oauth");
+            }
         }
-        line.push('}');
-    }
-    // `auth: oauth` is HERMES's opt-in. Goose has no such key: it runs its own OAuth on a 401,
-    // and a word its config enum does not know would make the whole entry unreadable to it.
-    if entry.auth == AuthHint::Oauth && spec.dialect == McpDialect::HermesYaml {
-        line.push_str(", auth: oauth");
+        super::McpTarget::Local {
+            command,
+            args,
+            env,
+            env_ref,
+        } => {
+            // The SAME divergence one level down: goose's extension enum is tagged on `type`
+            // (`stdio` for the variant that runs something), and it alone renames the command
+            // line's fields — `cmd` for the program, `envs` for the environment. Hermes writes
+            // the `command`/`args`/`env` triple almost every harness spells, and no type key at
+            // all. `auth` never rides a program in either.
+            let env_key = if spec.dialect == McpDialect::GooseYaml {
+                line.push_str("enabled: true, name: ");
+                line.push_str(&entry.key);
+                line.push_str(", type: stdio, cmd: ");
+                "envs"
+            } else {
+                line.push_str("command: ");
+                "env"
+            };
+            line.push_str(&quote(command));
+            line.push_str(", args: [");
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    line.push_str(", ");
+                }
+                line.push_str(&quote(arg));
+            }
+            line.push(']');
+            push_pairs(&mut line, env_key, &super::rendered(env, *env_ref));
+        }
     }
     line.push_str("}  ");
     line.push_str(SENTINEL);
     line.push('\n');
     line
+}
+
+/// A nested flow mapping — `, <key>: {A: "1", B: "2"}` — name-sorted, or nothing at all when
+/// there are no pairs (exactly what [`super::entry_value`] omits, so the two mappings stay equal).
+fn push_pairs(line: &mut String, key: &str, pairs: &[(String, String)]) {
+    if pairs.is_empty() {
+        return;
+    }
+    line.push_str(", ");
+    line.push_str(key);
+    line.push_str(": {");
+    let sorted: BTreeMap<&str, &str> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    for (i, (name, value)) in sorted.into_iter().enumerate() {
+        if i > 0 {
+            line.push_str(", ");
+        }
+        line.push_str(&pair_name(name));
+        line.push_str(": ");
+        line.push_str(&quote(value));
+    }
+    line.push('}');
 }
 
 /// The fresh-file content: the key line + the managed lines, nothing else.
@@ -790,12 +868,12 @@ fn verify(
 
 #[cfg(test)]
 mod tests {
-    use super::super::testutil::{entry, entry_with_headers};
+    use super::super::testutil::{entry, entry_with_headers, local_entry};
     use super::*;
 
     fn fp(e: &McpEntry) -> String {
         fingerprint_value(
-            &entry_value(McpDialect::HermesYaml, e).expect("this dialect renders an address"),
+            &entry_value(McpDialect::HermesYaml, e).expect("this dialect renders this target"),
         )
     }
 
@@ -828,6 +906,178 @@ mod tests {
         assert_eq!(
             write_of(&out),
             "mcp_servers:\n  topos-acme-linear: {url: \"https://mcp.example/l\", headers: {X-T: \"v\"}, auth: oauth}  # topos:mcp\n  topos-plain: {url: \"https://p.example\"}  # topos:mcp\n"
+        );
+    }
+
+    /// The PROGRAM line, in each dialect's own spelling — the bytes a real build connected from.
+    /// Hermes writes the `command`/`args`/`env` triple and no transport key; goose renames the
+    /// command line (`cmd`, `envs`) under the `type: stdio` its extension enum is tagged on.
+    #[test]
+    fn a_program_lands_as_each_dialects_own_one_line_grammar() {
+        let with_env = local_entry(
+            "topos-files",
+            "npx",
+            &["-y", "@acme/files@1.2.3"],
+            &[("ACME_REGION", "eu")],
+        );
+        let bare = local_entry("topos-bin", "acme-server", &[], &[]);
+        let both = [with_env, bare];
+
+        let hermes = write_of(&apply(
+            McpDialect::HermesYaml,
+            None,
+            &both,
+            &BTreeMap::new(),
+        ));
+        assert_eq!(
+            hermes,
+            "mcp_servers:\n  topos-files: {command: \"npx\", args: [\"-y\", \"@acme/files@1.2.3\"], env: {ACME_REGION: \"eu\"}}  # topos:mcp\n  topos-bin: {command: \"acme-server\", args: []}  # topos:mcp\n"
+        );
+
+        let goose = write_of(&apply(McpDialect::GooseYaml, None, &both, &BTreeMap::new()));
+        assert_eq!(
+            goose,
+            "extensions:\n  topos-files: {enabled: true, name: topos-files, type: stdio, cmd: \"npx\", args: [\"-y\", \"@acme/files@1.2.3\"], envs: {ACME_REGION: \"eu\"}}  # topos:mcp\n  topos-bin: {enabled: true, name: topos-bin, type: stdio, cmd: \"acme-server\", args: []}  # topos:mcp\n"
+        );
+    }
+
+    /// **The invariant every ledger row rests on:** the line this driver emits must parse back to
+    /// the exact mapping [`entry_value`] renders for the same entry. They are computed in two
+    /// different places from one entry, and a single divergence would fingerprint an entry topos
+    /// itself just wrote as drifted, on the first sweep after it landed — silently, forever.
+    #[test]
+    fn every_emitted_line_parses_back_to_the_value_it_was_rendered_from() {
+        let program = local_entry(
+            "topos-p",
+            "npx",
+            &["-y", "@acme/s@1.2.3"],
+            &[("ACME_REGION", "eu"), ("odd name", "say \"hi\"")],
+        );
+        let argless = local_entry("topos-q", "acme-server", &[], &[]);
+        let address = McpEntry {
+            auth: AuthHint::Oauth,
+            ..entry_with_headers("topos-a", "https://a.example/mcp", &[("X-T", "v")])
+        };
+        for dialect in [McpDialect::HermesYaml, McpDialect::GooseYaml] {
+            for e in [&program, &argless, &address] {
+                let line = render_line(spec(dialect), 2, e);
+                let body = line
+                    .trim()
+                    .split_once(':')
+                    .and_then(|(_, body)| body.trim_end().strip_suffix(SENTINEL))
+                    .map(str::trim_end)
+                    .expect("the line carries the sentinel");
+                assert_eq!(
+                    parse_flow_mapping(body),
+                    entry_value(dialect, e),
+                    "{dialect:?} {}: the emitted line and the fingerprint shape are ONE value",
+                    e.key
+                );
+            }
+        }
+    }
+
+    /// A program entry's whole life in a file that is somebody else's: it lands, re-applies to
+    /// nothing, takes an ARGUMENT change in place, and leaves the file byte for byte.
+    #[test]
+    fn a_program_entry_converges_through_its_whole_life() {
+        const USER: &str = "# hermes config\nmodel: gpt-9\nmcp_servers:\n  their-server: {url: \"https://theirs\"}\n";
+        let v1 = local_entry("topos-p", "npx", &["-y", "@acme/s@1.0.0"], &[]);
+        let v2 = local_entry("topos-p", "npx", &["-y", "@acme/s@2.0.0"], &[]);
+
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(USER.as_bytes()),
+            std::slice::from_ref(&v1),
+            &BTreeMap::new(),
+        );
+        let after_add = write_of(&out);
+        assert_eq!(
+            out.states,
+            vec![("topos-p".to_owned(), EntryState::PlacedNew)]
+        );
+        assert!(
+            after_add.contains(
+                "  topos-p: {command: \"npx\", args: [\"-y\", \"@acme/s@1.0.0\"]}  # topos:mcp\n"
+            ),
+            "{after_add}"
+        );
+        let ledger1: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
+
+        // Idempotent: the emitted line reads back as exactly what it was rendered from.
+        let again = apply(
+            McpDialect::HermesYaml,
+            Some(after_add.as_bytes()),
+            std::slice::from_ref(&v1),
+            &ledger1,
+        );
+        assert_eq!(again.plan, EditPlan::Leave);
+        assert_eq!(
+            again.states,
+            vec![("topos-p".to_owned(), EntryState::Current)]
+        );
+
+        // A changed ARGUMENT is an update in place — the sequence is part of the fingerprint.
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(after_add.as_bytes()),
+            std::slice::from_ref(&v2),
+            &ledger1,
+        );
+        assert_eq!(
+            out.states,
+            vec![("topos-p".to_owned(), EntryState::Updated)]
+        );
+        let after_update = write_of(&out);
+        assert!(after_update.contains("\"@acme/s@2.0.0\""), "{after_update}");
+        assert!(!after_update.contains("1.0.0"), "{after_update}");
+        let ledger2: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
+
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(after_update.as_bytes()),
+            &[],
+            &ledger2,
+        );
+        assert_eq!(
+            out.states,
+            vec![("topos-p".to_owned(), EntryState::Removed)]
+        );
+        assert_eq!(write_of(&out), USER);
+    }
+
+    /// The two targets are ordinary managed entries side by side: one file, one block, one
+    /// sentinel — and removing either leaves the other exactly where it was.
+    #[test]
+    fn an_address_and_a_program_share_one_block() {
+        let address = entry("topos-a", "https://a.example/mcp");
+        let program = local_entry("topos-p", "uvx", &["acme-server@1.0.0"], &[]);
+        let both = [address, program.clone()];
+        let out = apply(McpDialect::HermesYaml, None, &both, &BTreeMap::new());
+        let text = write_of(&out);
+        assert_eq!(
+            text,
+            "mcp_servers:\n  topos-a: {url: \"https://a.example/mcp\"}  # topos:mcp\n  topos-p: {command: \"uvx\", args: [\"acme-server@1.0.0\"]}  # topos:mcp\n"
+        );
+        let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
+
+        // Drop the address alone: the program's line is untouched, and the ledger still holds it.
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(text.as_bytes()),
+            std::slice::from_ref(&program),
+            &ledger,
+        );
+        assert_eq!(
+            out.states,
+            vec![
+                ("topos-p".to_owned(), EntryState::Current),
+                ("topos-a".to_owned(), EntryState::Removed),
+            ]
+        );
+        assert_eq!(
+            write_of(&out),
+            "mcp_servers:\n  topos-p: {command: \"uvx\", args: [\"acme-server@1.0.0\"]}  # topos:mcp\n"
         );
     }
 
@@ -956,6 +1206,62 @@ mod tests {
         assert_eq!(
             out.states,
             vec![("topos-x".to_owned(), EntryState::Drifted)]
+        );
+    }
+
+    /// The flow SEQUENCE this grammar reads is a flat list of double-quoted strings and nothing
+    /// else. A line carrying any other shape between the brackets does not parse, which makes it
+    /// `Drifted` — untouched, never removed, zero writes — exactly like every other mangled
+    /// sentinel line. An EMPTY list is not mangled: it is what an argument-less program renders,
+    /// and it has to read back as one or that entry would drift the moment it landed.
+    #[test]
+    fn a_sequence_outside_the_emitted_grammar_reads_as_drift_not_as_data() {
+        let placed = local_entry("topos-x", "npx", &["-y", "pkg@1.0.0"], &[]);
+        let prior: BTreeMap<String, String> =
+            [("topos-x".to_owned(), fp(&placed))].into_iter().collect();
+        for mangled in [
+            // A bare word among the items…
+            "mcp_servers:\n  topos-x: {command: \"npx\", args: [-y, \"pkg@1.0.0\"]}  # topos:mcp\n",
+            // …a nested collection…
+            "mcp_servers:\n  topos-x: {command: \"npx\", args: [[\"-y\"]]}  # topos:mcp\n",
+            // …and a trailing comma, which leaves nothing where an item must be.
+            "mcp_servers:\n  topos-x: {command: \"npx\", args: [\"-y\",]}  # topos:mcp\n",
+        ] {
+            let out = apply(
+                McpDialect::HermesYaml,
+                Some(mangled.as_bytes()),
+                std::slice::from_ref(&placed),
+                &prior,
+            );
+            assert_eq!(out.plan, EditPlan::Leave, "{mangled}");
+            assert_eq!(
+                out.states,
+                vec![("topos-x".to_owned(), EntryState::Drifted)],
+                "{mangled}"
+            );
+        }
+
+        // The empty list is read as itself: an argument-less program re-applies to Current.
+        let argless = local_entry("topos-x", "acme-server", &[], &[]);
+        let out = apply(
+            McpDialect::HermesYaml,
+            None,
+            std::slice::from_ref(&argless),
+            &BTreeMap::new(),
+        );
+        let text = write_of(&out);
+        assert!(text.contains("args: []"), "{text}");
+        let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
+        let again = apply(
+            McpDialect::HermesYaml,
+            Some(text.as_bytes()),
+            std::slice::from_ref(&argless),
+            &ledger,
+        );
+        assert_eq!(again.plan, EditPlan::Leave);
+        assert_eq!(
+            again.states,
+            vec![("topos-x".to_owned(), EntryState::Current)]
         );
     }
 

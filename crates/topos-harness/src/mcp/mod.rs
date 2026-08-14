@@ -53,8 +53,9 @@
 //! the entry. What it does NOT resolve is an environment slot the machine fills: that arrives as a
 //! name ([`EnvValue::Inherited`]) and is spelled HERE, because the form differs by more than
 //! syntax — most harnesses read a reference inside the value, Codex names inherited variables in a
-//! list of its own. [`entry_value`] answers `None` for the one pair no vendor evidence covers — a
-//! program in Hermes's YAML — and every driver turns that into a refusal rather than a guess.
+//! list of its own. [`entry_value`] answers `None` for the TWO pairs no vendor evidence covers — a
+//! program in LM Studio's `mcp.json` and an ADDRESS in Claude Desktop's config — and every driver
+//! turns that into a refusal rather than a guess.
 
 #[cfg(test)]
 mod breadth;
@@ -579,8 +580,9 @@ pub fn observe_entries(
 /// `httpUrl` or `uri` elsewhere), and an entry a foreign tool wrote uses ITS spelling, not ours.
 ///
 /// An entry that RUNS something instead of dialing something answers with its
-/// [`local_address`] — including the two spellings of a command line the dialects disagree
-/// about: `command` + `args` nearly everywhere, and OpenCode's single `command` array.
+/// [`local_address`] — including the three spellings of a command line the dialects disagree
+/// about: `command` + `args` nearly everywhere, goose's `cmd` for the same field, and OpenCode's
+/// single `command` array.
 pub(crate) fn entry_address(value: &Value) -> Option<String> {
     let obj = value.as_object()?;
     let dialed = ["url", "serverUrl", "httpUrl", "uri"]
@@ -598,10 +600,10 @@ pub(crate) fn entry_address(value: &Value) -> Option<String> {
                 .collect()
         })
     };
-    match obj.get("command") {
+    match obj.get("command").or_else(|| obj.get("cmd")) {
         Some(Value::String(command)) => local_address(command, &strings(obj.get("args"))),
-        Some(Value::Array(_)) => {
-            let argv = strings(obj.get("command"));
+        Some(argv @ Value::Array(_)) => {
+            let argv = strings(Some(argv));
             let (command, args) = argv.split_first()?;
             local_address(command, args)
         }
@@ -806,9 +808,9 @@ fn write_canonical(value: &Value, out: &mut String) {
 /// order so serialization is deterministic under either serde_json map backend. Empty `headers`
 /// (and an empty `env`) are omitted in every dialect.
 ///
-/// `None` means the dialect CANNOT EXPRESS that target — the four pairs no vendor evidence
-/// covers: a program-run server in Hermes's YAML, in Goose's `config.yaml` and in LM Studio's
-/// `mcp.json` (all three documented only in their address form), and an ADDRESS in Claude
+/// `None` means the dialect CANNOT EXPRESS that target — the two pairs no vendor evidence
+/// covers: a program-run server in LM Studio's `mcp.json` (documented only in its address form,
+/// and no build of it probed), and an ADDRESS in Claude
 /// Desktop's config, which reaches a remote server through the bridge and through no key of its
 /// own. It is not an error and never a guess: the
 /// caller withholds the placement and says so, and every driver refuses the whole edit rather than
@@ -1012,14 +1014,60 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
             insert_pairs(&mut m, "environment", &rendered(env, *env_ref));
             m.insert("type".to_owned(), Value::String("local".to_owned()));
         }
-        // The pairs no vendor evidence covers. LM Studio documents an address and only an
+        // Hermes runs a program out of the same one-line flow mapping its addresses live in: the
+        // `command`/`args` pair almost every harness spells that way, `env` beside it when there
+        // is one, and NO transport key of any kind — its config carries none, and the minimal
+        // `{args, command}` entry is what connected against a real Hermes Agent build. `auth`
+        // belongs to an address, so a program-run entry never carries it here either.
+        (
+            McpDialect::HermesYaml,
+            McpTarget::Local {
+                command,
+                args,
+                env,
+                env_ref,
+            },
+        ) => {
+            m.insert(
+                "args".to_owned(),
+                Value::Array(args.iter().map(|a| Value::String(a.clone())).collect()),
+            );
+            m.insert("command".to_owned(), Value::String(command.clone()));
+            insert_pairs(&mut m, "env", &rendered(env, *env_ref));
+        }
+        // Goose's program extension is the other variant of the SAME tagged enum its address one
+        // is — so the discriminator `type: stdio` is required, and the switch and the name it is
+        // filed under ride along exactly as they do on an address. It is also the one dialect that
+        // renames the command line itself: the program is `cmd`, the environment `envs`, and an
+        // entry spelling either the way every other harness does is skipped with an info log and
+        // nothing else. Verified against a real goose build, where the minimal
+        // `{args, cmd, enabled, name, type}` set loads and registers the server's tools (`timeout`
+        // is optional, so it is never written). This is the FINGERPRINT shape; `yaml_splice`
+        // emits the same mapping as one line.
+        (
+            McpDialect::GooseYaml,
+            McpTarget::Local {
+                command,
+                args,
+                env,
+                env_ref,
+            },
+        ) => {
+            m.insert(
+                "args".to_owned(),
+                Value::Array(args.iter().map(|a| Value::String(a.clone())).collect()),
+            );
+            m.insert("cmd".to_owned(), Value::String(command.clone()));
+            m.insert("enabled".to_owned(), Value::Bool(true));
+            insert_pairs(&mut m, "envs", &rendered(env, *env_ref));
+            m.insert("name".to_owned(), Value::String(entry.key.clone()));
+            m.insert("type".to_owned(), Value::String("stdio".to_owned()));
+        }
+        // The two pairs no vendor evidence covers. LM Studio documents an address and only an
         // address; Claude Desktop documents a program and only a program — its remote servers are
         // added in the app, through a flow no config file takes part in, so the bridge is how a
         // shared address reaches it and there is no URL key to invent beside that.
-        (
-            McpDialect::HermesYaml | McpDialect::GooseYaml | McpDialect::LmStudioJson,
-            McpTarget::Local { .. },
-        )
+        (McpDialect::LmStudioJson, McpTarget::Local { .. })
         | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. }) => return None,
     }
     Some(Value::Object(m))
@@ -1039,10 +1087,8 @@ fn all_tools() -> Value {
 pub fn dialect_expresses(dialect: McpDialect, target: &McpTarget) -> bool {
     !matches!(
         (dialect, target),
-        (
-            McpDialect::HermesYaml | McpDialect::GooseYaml | McpDialect::LmStudioJson,
-            McpTarget::Local { .. }
-        ) | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. })
+        (McpDialect::LmStudioJson, McpTarget::Local { .. })
+            | (McpDialect::ClaudeDesktopJson, McpTarget::Remote { .. })
     )
 }
 
@@ -1379,7 +1425,7 @@ mod tests {
     }
 
     /// One entry's rendering in a dialect that HAS one — the test spelling of [`entry_value`],
-    /// which answers `None` only for the pair `hermes_refuses_a_program_it_has_no_grammar_for`
+    /// which answers `None` only for the pairs `lm_studio_refuses_a_program_it_has_no_grammar_for`
     /// covers.
     fn rendered(dialect: McpDialect, e: &McpEntry) -> Value {
         entry_value(dialect, e).unwrap_or_else(|| panic!("{dialect:?} renders this target"))
@@ -1673,17 +1719,78 @@ mod tests {
         );
     }
 
-    /// Hermes's one-line YAML grammar is evidenced for an ADDRESS and nothing else, so a
-    /// program-run server has no spelling there — and the driver refuses the whole edit instead of
-    /// inventing one.
+    /// The two YAML dialects run a program too, each in its own spelling: hermes from the same
+    /// `command`/`args` pair the JSON families write, goose from the `cmd`/`envs` renaming its
+    /// tagged extension enum reads, under the `type: stdio` its enum is tagged on. Both shapes
+    /// connected against a real build before they were written here.
     #[test]
-    fn hermes_refuses_a_program_it_has_no_grammar_for() {
+    fn the_yaml_dialects_render_a_program_in_their_own_spelling() {
+        let program = testutil::local_entry(
+            "topos-x",
+            "npx",
+            &["-y", "@acme/server@1.2.3"],
+            &[("ACME_REGION", "eu")],
+        );
+        let keys = |v: &Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+
+        let hermes = rendered(McpDialect::HermesYaml, &program);
+        assert_eq!(
+            keys(&hermes),
+            ["args", "command", "env"],
+            "hermes: no transport key of any kind"
+        );
+        assert_eq!(hermes["command"], "npx");
+        assert_eq!(
+            hermes["args"],
+            serde_json::json!(["-y", "@acme/server@1.2.3"])
+        );
+        assert_eq!(hermes["env"]["ACME_REGION"], "eu");
+
+        let goose = rendered(McpDialect::GooseYaml, &program);
+        assert_eq!(
+            keys(&goose),
+            ["args", "cmd", "enabled", "envs", "name", "type"],
+            "goose: its own field names, under the tag its enum is discriminated on"
+        );
+        assert_eq!(goose["cmd"], "npx");
+        assert_eq!(goose["enabled"], true);
+        assert_eq!(goose["envs"]["ACME_REGION"], "eu");
+        assert_eq!(
+            goose["name"], "topos-x",
+            "the key, as its own tool writes it"
+        );
+        assert_eq!(goose["type"], "stdio");
+
+        // An empty environment is omitted here exactly as it is everywhere else.
+        let bare = testutil::local_entry("topos-x", "uvx", &["pkg@1.0.0"], &[]);
+        assert_eq!(
+            keys(&rendered(McpDialect::HermesYaml, &bare)),
+            ["args", "command"]
+        );
+        assert_eq!(
+            keys(&rendered(McpDialect::GooseYaml, &bare)),
+            ["args", "cmd", "enabled", "name", "type"]
+        );
+        // …and both answer the SHAPE question before a placement is planned.
+        for dialect in [McpDialect::HermesYaml, McpDialect::GooseYaml] {
+            assert!(dialect_expresses(dialect, &program.target), "{dialect:?}");
+        }
+    }
+
+    /// LM Studio's entry grammar is evidenced for an ADDRESS and nothing else — no documented
+    /// program entry of its own, and no build probed — so a program-run server has no spelling
+    /// there, and the driver refuses the whole edit instead of inventing one.
+    #[test]
+    fn lm_studio_refuses_a_program_it_has_no_grammar_for() {
         let program = testutil::local_entry("topos-x", "npx", &["-y", "pkg@1.0.0"], &[]);
-        assert_eq!(entry_value(McpDialect::HermesYaml, &program), None);
-        assert!(!dialect_expresses(McpDialect::HermesYaml, &program.target));
-        let out = apply(McpDialect::HermesYaml, None, &[program], &BTreeMap::new());
+        assert_eq!(entry_value(McpDialect::LmStudioJson, &program), None);
+        assert!(!dialect_expresses(
+            McpDialect::LmStudioJson,
+            &program.target
+        ));
+        let out = apply(McpDialect::LmStudioJson, None, &[program], &BTreeMap::new());
         let EditPlan::Unprovable(reason) = &out.plan else {
-            panic!("a program in hermes must refuse: {:?}", out.plan);
+            panic!("a program in LM Studio must refuse: {:?}", out.plan);
         };
         assert!(
             reason.contains("cannot describe a server topos runs"),
@@ -1698,6 +1805,8 @@ mod tests {
             McpDialect::OpencodeJson,
             McpDialect::OpenclawJson,
             McpDialect::CodexToml,
+            McpDialect::HermesYaml,
+            McpDialect::GooseYaml,
         ] {
             assert!(
                 dialect_expresses(
@@ -1783,6 +1892,33 @@ mod tests {
         assert_eq!(bridged.address(), dialed);
         assert_eq!(bridged.url(), None);
         assert_eq!(entry("topos-x", "https://mcp.example/x").address(), dialed);
+
+        // An entry READ off a surface answers the same, through each of the three spellings a
+        // command line is written in — including goose's `cmd`, which is the same field under
+        // another name and would otherwise read as an entry pointing nowhere.
+        let observed = |v: serde_json::Value| entry_address(&v);
+        assert_eq!(
+            observed(serde_json::json!({"command": "npx", "args": ["-y", "pkg@1.0.0"]})),
+            plain
+        );
+        assert_eq!(
+            observed(
+                serde_json::json!({"cmd": "npx", "args": ["-y", "pkg@1.0.0"], "type": "stdio"})
+            ),
+            plain
+        );
+        assert_eq!(
+            observed(serde_json::json!({"command": ["npx", "-y", "pkg@1.0.0"]})),
+            plain
+        );
+        // …and a `cmd` bridge unwraps to the URL it bridges, exactly as a `command` one does.
+        assert_eq!(
+            observed(serde_json::json!({
+                "cmd": "npx",
+                "args": ["-y", "mcp-remote@0.1.38", "https://mcp.example/x"],
+            })),
+            dialed
+        );
     }
 
     /// The Windows wrapper: applied only on Windows, only to the shim commands, never twice, and

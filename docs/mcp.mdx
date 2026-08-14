@@ -235,11 +235,11 @@ how you sign in — that stays the agent's own business:
 Each agent's exact config file — and the environment variables that move it — is in
 [Supported agents](/docs/harnesses#mcp-servers).
 
-Twelve of them dial an address and also run a local program. Four are narrower, and Topos says so
+Fourteen of them dial an address and also run a local program. Two are narrower, and Topos says so
 rather than guessing: **Claude Desktop** adds remote servers in the app rather than in this file,
-so a shared address reaches it as a local bridge process instead; **Goose**, **Hermes Agent** and
-**LM Studio** have a confirmed entry grammar for an address only, so a package bundle reports
-`not placed` there rather than being written in a shape nobody has verified.
+so a shared address reaches it as a local bridge process instead; **LM Studio** documents local
+servers but publishes no entry grammar for one, so a package bundle reports `not placed` there
+until the spelling is confirmed against a real build.
 
 By default the entry reaches every one of those agents this machine has. On `topos add`,
 `-a <agent>` (a slug like `cursor`, repeatable) or `--dest <file>` (a config file from that same
