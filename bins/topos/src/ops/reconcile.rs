@@ -3453,6 +3453,15 @@ fn converge_dest_freeze(
     if stale.is_empty() {
         return;
     }
+    // WHERE THE ROW STILL PLACES, read off the same map before the retirement lands — the loss
+    // lead below states what remains, and after the split the folders it names are gone.
+    let still: Vec<String> = map
+        .placements
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !stale.contains(i))
+        .map(|(_, p)| super::inventory::pretty(run_ctx, Path::new(p)))
+        .collect();
     match retire_split(run_ctx, sid, &lock, &map, &stale) {
         Ok(Some(clean)) => {
             let mut row = plain_row(
@@ -3461,6 +3470,24 @@ fn converge_dest_freeze(
                 Some(run.session.workspace_id.clone()),
                 &sc.label,
             );
+            // A NARROWING, not an ending: the row still places somewhere, so the receipt leads
+            // with the folders it stopped reaching. A shared folder names no single agent, so the
+            // surfaces carry the folder alone.
+            row.narrowed = (!still.is_empty() && !clean.removed.is_empty()).then(|| {
+                topos_types::results::Narrowing {
+                    still: still.clone(),
+                    from: clean
+                        .removed
+                        .iter()
+                        .map(|dir| topos_types::results::Surface {
+                            agent: String::new(),
+                            target: Some(dir.clone()),
+                            state: TargetOutcome::Removed,
+                            note: None,
+                        })
+                        .collect(),
+                }
+            });
             row.destinations = clean.removed;
             row.kept = clean.kept;
             sweep.push(row);
@@ -5355,6 +5382,9 @@ fn run_mcp_converge(
         // nothing is a fact, not a byte change: it stays a disclosure line, so the quiet hook
         // never reads a survivor as fresh movement.
         let mut left: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
+        // The AGENT beside each retired file, kept per bundle so the receipt's loss lead can name
+        // both — a config file alone does not say whose agent stopped seeing the server.
+        let mut retired: BTreeMap<String, Vec<topos_types::results::Surface>> = BTreeMap::new();
         for removed in &outcome.removed {
             let entry = left.entry(removed.bundle_id.clone()).or_default();
             let file = removed
@@ -5370,9 +5400,37 @@ fn run_mcp_converge(
             if let Some(file) = file
                 && !list.contains(&file)
             {
+                if removed.state.state != TargetOutcome::Drifted {
+                    retired.entry(removed.bundle_id.clone()).or_default().push(
+                        topos_types::results::Surface {
+                            agent: removed.state.agent.clone(),
+                            target: Some(file.clone()),
+                            state: removed.state.state,
+                            note: None,
+                        },
+                    );
+                }
                 list.push(file);
             }
         }
+        // WHERE THE BUNDLE STILL DELIVERS — read off the same converge, per bundle. A bundle with
+        // nothing standing anywhere was not narrowed, it stopped being delivered, and the rows say
+        // that in their own words.
+        let standing: BTreeMap<String, Vec<String>> = outcome
+            .bundles
+            .iter()
+            .map(|b| {
+                let mut files: Vec<String> = b
+                    .states
+                    .iter()
+                    .filter(|s| s.state.stands())
+                    .filter_map(|s| s.file.as_deref())
+                    .map(|f| super::inventory::pretty(env.ctx, Path::new(f)))
+                    .collect();
+                files.dedup();
+                (b.bundle_id.clone(), files)
+            })
+            .collect();
         for removed in &outcome.removed {
             if removed.state.state != TargetOutcome::Drifted {
                 continue;
@@ -5434,6 +5492,16 @@ fn run_mcp_converge(
             row.display = display;
             row.destinations = files;
             row.kept = kept;
+            // A NARROWING, not an ending: the same converge still has this bundle standing
+            // somewhere, so the receipt leads with what it stopped reaching instead of printing a
+            // bare `removed` row over a server the machine still holds.
+            row.narrowed = standing
+                .get(&bundle_id)
+                .filter(|still| !still.is_empty())
+                .map(|still| topos_types::results::Narrowing {
+                    still: still.clone(),
+                    from: retired.remove(&bundle_id).unwrap_or_default(),
+                });
             sweep.push(row);
         }
         for bundle in outcome.bundles {
@@ -6692,6 +6760,7 @@ fn plain_row(
         harnesses: Vec::new(),
         kind: None,
         draft: false,
+        narrowed: None,
     }
 }
 

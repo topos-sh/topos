@@ -1788,6 +1788,7 @@ mod tests {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
         }
     }
 

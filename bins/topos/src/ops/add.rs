@@ -398,6 +398,7 @@ fn unclaimed_record(
         claim: None,
         unchanged: false,
         machine_copy: None,
+        set_delivery: None,
         display: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
@@ -664,6 +665,7 @@ pub(crate) fn add_with_name(
         claim: None,
         unchanged: false,
         machine_copy: None,
+        set_delivery: None,
         display: None,
     })
 }
@@ -2158,6 +2160,7 @@ pub(crate) fn extend_folder_dest(
         claim: None,
         unchanged: false,
         machine_copy: None,
+        set_delivery: None,
         display: None,
         note: None,
     };

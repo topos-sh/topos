@@ -152,6 +152,17 @@
         }
       ]
     },
+    "set_delivery": {
+      "description": "The SET-DELIVERED add (see [`SetDelivery`]): the scope already delivers this bundle through\na channel or feed row, so no row was written and the invocation converged its placements\ninstead. Absent for every other add. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SetDelivery"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "skill_id": {
       "description": "The local sidecar record this add minted, when it minted one. ABSENT for a row that has no\nbytes of its own here — a feed, a channel, a whole repo: a row-only add mints no version\nhistory, and a zeroed id would claim one.",
       "type": [
@@ -474,6 +485,38 @@
         }
       ]
     },
+    "SetDelivery": {
+      "description": "`add -a`/`--dest` on a bundle a SET already delivers in the invoked scope — the one add that\nrecords NOTHING: the demand stands already, and an explicit row could only narrow what the set\nreaches. The invocation converges the bundle's placements at full reach instead, so the asked\nsurface gets the copy it was missing. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "asked": {
+          "description": "The harness slugs the invocation ASKED for, in the order they were named — what the\nnothing-was-missing answer speaks about.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "description": "WHICH FILE'S set this is — the receipt's word for the reach (\"here\" / \"on this machine\").\nCarried here rather than on the envelope's `scope`, which belongs to a manifest this add\ndeliberately did not write.",
+          "$ref": "#/$defs/ReceiptScope"
+        },
+        "set": {
+          "description": "The set that delivers it, as this scope names it: `channels/<name>` for a channel row, the\nworkspace reference (`<host>/<workspace>`) for the feed row.",
+          "type": "string"
+        },
+        "surfaces": {
+          "description": "Every surface the converge answered for, plus any asked surface it could not reach.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Surface"
+          }
+        }
+      },
+      "required": [
+        "set",
+        "scope"
+      ]
+    },
     "SkillOrigin": {
       "description": "Where an adopted skill was imported FROM, when `add` fetched it from a remote source (a GitHub repo).\nAll fields are public provenance — never a secret — and travel with the adopted skill so the agent (and\na later re-sync) can see the upstream it came from. `None` on `AddData` for a locally-adopted skill.\n**INFERRED** (additive-only).",
       "type": "object",
@@ -513,6 +556,82 @@
       },
       "required": [
         "source"
+      ]
+    },
+    "Surface": {
+      "description": "ONE SURFACE a run answered for, in the vocabulary both target shapes share: the agent that\nreads it, where this bundle's copy lives there, and what the run left. `target` is a config\nfile for a config-placed (`mcp`) bundle and a folder for a skill. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The harness registry slug that reads it (e.g. `opencode`). EMPTY where the destination\nnames no single harness — a folder several agents share.",
+          "type": "string"
+        },
+        "note": {
+          "description": "The short qualifier the outcome carries (why a surface was not placed), when one exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TargetOutcome"
+        },
+        "target": {
+          "description": "The config file or folder the copy lives in, as a receipt spells it. Absent where nothing\nstands and there is no target to name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "state"
+      ]
+    },
+    "TargetOutcome": {
+      "description": "**THE ONE OUTCOME VOCABULARY** — what a single managed TARGET looks like after a run.\n\nA bundle's bytes reach a machine as one of two target shapes: a placement DIRECTORY the bundle\nowns, or an ENTRY it owns inside a config file. They are the same question asked twice (\"what\ndoes the thing topos owns look like now?\"), and they used to answer in two unrelated word sets\n— dirs through the row's action, entries through a free-form per-agent string that a reader\nhad to know by heart. Both now project onto THIS set, and both render from\n[`TargetOutcome::word`], so one outcome cannot be called two things.\n\nEvery variant is DERIVED, never chosen at a render site: from the drift vocabulary the\nownership record is scanned into (absent / clean / modified / foreign / unscannable) plus the\none bit the record cannot hold — whether this run WROTE the target. **INFERRED**, and the value\nset is CLOSED: every consumer matches it exhaustively and there is no unknown arm, so a new\noutcome is a deliberate change that ships with a release — never a value a running client is\nexpected to tolerate.",
+      "oneOf": [
+        {
+          "description": "Nothing was there and this run wrote it — the target's FIRST materialization here.",
+          "type": "string",
+          "const": "created"
+        },
+        {
+          "description": "The target stood at what the record says topos wrote, and this run rewrote it: a version\ncaught up, or a hand-deleted target put back. Never `created` — the distinction is the\nwhole reason a person can tell a new install from a repair.",
+          "type": "string",
+          "const": "refreshed"
+        },
+        {
+          "description": "Found byte-for-byte as recorded; nothing was written.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Changed since topos wrote it — a local edit, left exactly as it is.",
+          "type": "string",
+          "const": "drifted"
+        },
+        {
+          "description": "Content topos holds no record of writing, standing where this bundle's target belongs.\nNever overwritten.",
+          "type": "string",
+          "const": "conflicting"
+        },
+        {
+          "description": "The target could not be read safely, so nothing was decided about it — fail closed.",
+          "type": "string",
+          "const": "unprovable"
+        },
+        {
+          "description": "The target left this run.",
+          "type": "string",
+          "const": "removed"
+        },
+        {
+          "description": "The surface exists but this bundle was deliberately not placed there (no config of that\nkind at this scope, a `dest` that excludes it).",
+          "type": "string",
+          "const": "not-supported"
+        }
       ]
     },
     "TriggerReport": {

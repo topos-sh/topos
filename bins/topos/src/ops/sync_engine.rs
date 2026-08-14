@@ -782,6 +782,7 @@ pub(crate) fn go_back(
         // A go-back RESTORES the recorded bytes over the placement, so nothing of the person's is
         // left unshared in it.
         draft: false,
+        narrowed: None,
     })
 }
 
@@ -2033,6 +2034,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         harnesses: Vec::new(),
         kind: None,
         draft: false,
+        narrowed: None,
     }
 }
 
@@ -2054,6 +2056,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         harnesses: Vec::new(),
         kind: None,
         draft: false,
+        narrowed: None,
     }
 }
 
@@ -2075,5 +2078,6 @@ fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
         harnesses: Vec::new(),
         kind: None,
         draft: false,
+        narrowed: None,
     }
 }

@@ -277,6 +277,29 @@ fn add_workspace(
         data.version_id = Some(p.clone());
         data.bundle_digest = None;
     }
+    // THE SET ALREADY DELIVERS IT HERE. Naming destinations for a bundle a channel or feed row
+    // carries is not a demand — the demand stands — and the row this would write could only
+    // NARROW what the set reaches. So nothing is recorded and the placements converge instead,
+    // which is what actually puts the asked surface's missing copy there. A pinned reference is a
+    // real conversion to machine-local control and writes its row as ever.
+    if !dest_entries.is_empty() && pin.is_none() && resolved.entry.is_some() {
+        let target = if global {
+            medit::global_target(ctx)
+        } else {
+            medit::project_target(ctx)?.ok_or(ClientError::NoManifest)?
+        };
+        if let Some(set) = medit::set_delivering(
+            ctx,
+            &target,
+            &resolved.session.host,
+            &resolved.session.workspace_name,
+            &resolved.name,
+        )? {
+            return Ok(set_delivered_add(
+                ctx, connect, data, &resolved, &target, global, selection, set, mcp_kind,
+            ));
+        }
+    }
 
     if global {
         let target = medit::global_target(ctx);
@@ -379,6 +402,219 @@ fn add_workspace(
     Ok(finish_workspace(
         ctx, connect, data, &resolved, &target, false,
     ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The SET-DELIVERED arm — `-a`/`--dest` on a bundle a channel or feed row already delivers here
+// ---------------------------------------------------------------------------------------------
+
+/// Converge a bundle the invoked scope's SET already delivers, and answer with what the asked
+/// surface got — no row, no undo, nothing recorded.
+///
+/// The converge is the ORDINARY reconcile narrowed to this bundle and this scope: the same code
+/// the sweep runs, at the reach the set's own row resolves (nothing here widens or narrows it).
+/// The add's whole act is to make it happen now instead of at the next sweep.
+#[allow(clippy::too_many_arguments)]
+fn set_delivered_add(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    mut data: AddData,
+    resolved: &Resolved,
+    target: &EditTarget,
+    global: bool,
+    selection: &super::dest_select::Selection,
+    set: String,
+    mcp: bool,
+) -> AddRefOutcome {
+    let kind = if mcp {
+        BundleKind::Mcp
+    } else {
+        BundleKind::Skill
+    };
+    let sid = resolved.entry.as_deref().map(|e| e.skill_id.clone());
+    // The folders standing BEFORE the converge — the one bit the dir plan does not report, and
+    // what tells a copy this invocation created from one that was already there. The config
+    // converge answers for itself.
+    let before = if mcp {
+        Vec::new()
+    } else {
+        placed_dirs(ctx, target, sid.as_deref())
+    };
+    let outcome = super::reconcile::manifest_update(
+        ctx,
+        connect,
+        None,
+        &super::reconcile::ManifestUpdateOpts {
+            targets: vec![resolved.name.clone()],
+            ack_notices: false,
+            scope: if global {
+                super::reconcile::UpdateScope::Machine
+            } else {
+                super::reconcile::UpdateScope::Here
+            },
+            ..Default::default()
+        },
+    );
+    let asked = asked_keys(selection, target.scope, kind);
+    let mut surfaces = if mcp {
+        converged_entries(ctx, target, outcome.as_ref().ok(), resolved)
+    } else {
+        converged_dirs(ctx, target, sid.as_deref(), &before)
+    };
+    // An asked agent the converge said NOTHING about is one this machine does not run: the answer
+    // owes it the same line every other unreachable surface gets, in the same words.
+    for key in &asked {
+        if !surfaces.iter().any(|s| &s.agent == key) {
+            surfaces.push(topos_types::results::Surface {
+                agent: key.clone(),
+                target: None,
+                state: topos_types::results::TargetOutcome::Withheld,
+                note: Some("it is not set up here".to_owned()),
+            });
+        }
+    }
+    data.manifest = None;
+    data.reference = Some(resolved.canonical.clone());
+    data.source = Some(resolved.canonical.clone());
+    data.dest = Vec::new();
+    data.undo = Vec::new();
+    data.set_delivery = Some(topos_types::results::SetDelivery {
+        set,
+        scope: medit::receipt_scope(target),
+        surfaces,
+        asked,
+    });
+    AddRefOutcome::Applied(Box::new(data))
+}
+
+/// The surfaces the invocation ASKED for, keyed the way [`converged_entries`] /
+/// [`converged_dirs`] key theirs: the harness slug where one names the destination, the
+/// destination's own spelling where none does.
+fn asked_keys(
+    selection: &super::dest_select::Selection,
+    scope: ManifestScope,
+    kind: BundleKind,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let keys = selection
+        .agents
+        .iter()
+        .cloned()
+        .chain(selection.dests.iter().map(|dest| {
+            match kind {
+                BundleKind::Mcp => super::dest_select::slug_for_mcp_entry(dest, scope),
+                BundleKind::Skill => super::dest_select::slug_for_skill_entry(dest, scope),
+            }
+            .unwrap_or_else(|| dest.clone())
+        }));
+    for key in keys {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+/// What the converge left in each agent's CONFIG, read off the reconcile's own row for this
+/// bundle. A reload/sign-in note belongs to a surface this run wrote and is already implied by the
+/// word beside it, so only the outcomes that need a REASON carry one.
+fn converged_entries(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    outcome: Option<&super::PullOutcome>,
+    resolved: &Resolved,
+) -> Vec<topos_types::results::Surface> {
+    let dir = spelled_dir(ctx, target);
+    outcome
+        .into_iter()
+        .flat_map(|o| o.data.skills.iter())
+        .filter(|r| {
+            r.skill == resolved.name
+                && r.workspace_id.as_deref() == Some(resolved.session.workspace_id.as_str())
+        })
+        .flat_map(|r| r.harnesses.iter())
+        .map(|h| topos_types::results::Surface {
+            agent: h.agent.clone(),
+            target: h.file.as_deref().map(|f| spell_in(dir.as_deref(), f)),
+            state: h.state,
+            note: (!h.state.wrote()).then(|| h.note.clone()).flatten(),
+        })
+        .collect()
+}
+
+/// What the converge left in each agent's FOLDER: the bundle's placements now, split against the
+/// ones that stood before this invocation ran. A folder several agents share names none of them,
+/// and the folder is then the whole line.
+fn converged_dirs(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    sid: Option<&str>,
+    before: &[String],
+) -> Vec<topos_types::results::Surface> {
+    let dir = spelled_dir(ctx, target);
+    placed_dirs(ctx, target, sid)
+        .into_iter()
+        .map(|placed| {
+            let state = if before.contains(&placed) {
+                topos_types::results::TargetOutcome::Current
+            } else {
+                topos_types::results::TargetOutcome::Created
+            };
+            let shown = spell_in(dir.as_deref(), &placed);
+            let agent = std::path::Path::new(&shown)
+                .parent()
+                .map(|p| p.display().to_string())
+                .and_then(|root| super::dest_select::slug_for_skill_entry(&root, target.scope))
+                .unwrap_or_default();
+            topos_types::results::Surface {
+                agent,
+                target: Some(shown),
+                state,
+                note: None,
+            }
+        })
+        .collect()
+}
+
+/// One bundle's recorded placement folders in the scope's own store, `~`-abbreviated. Empty
+/// wherever the scope has no store, no record, or an unreadable map — all three of which honestly
+/// mean "nothing of it stands here".
+fn placed_dirs(ctx: &Ctx<'_>, target: &EditTarget, sid: Option<&str>) -> Vec<String> {
+    let Some(layout) = medit::mcp_scope_store(ctx, target) else {
+        return Vec::new();
+    };
+    let Some(id) = sid.and_then(|s| crate::id::SkillId::parse(s).ok()) else {
+        return Vec::new();
+    };
+    crate::doc::read_map(ctx.fs, &layout.published(&id).map)
+        .ok()
+        .flatten()
+        .map(|map| {
+            map.placements
+                .iter()
+                .map(|p| super::inventory::pretty(ctx, std::path::Path::new(p)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The folder a PROJECT receipt writes its paths against, in the SAME spelling those paths carry —
+/// a checkout under the home is `~`-abbreviated on both sides or neither, or the prefix never
+/// matches. `None` for the machine scope, whose paths are whole-machine facts and belong that way.
+fn spelled_dir(ctx: &Ctx<'_>, target: &EditTarget) -> Option<String> {
+    match target.scope {
+        ManifestScope::Global => None,
+        ManifestScope::Project => Some(super::inventory::pretty(ctx, &target.dir)),
+    }
+}
+
+/// A path as this receipt spells it: relative to the project folder where it sits inside one — the
+/// same spelling `--dest` takes back — and untouched wherever it does not (an env override that
+/// moved a config file out of the checkout keeps its full path, because that is where it is).
+fn spell_in(dir: Option<&str>, path: &str) -> String {
+    dir.and_then(|d| path.strip_prefix(&format!("{d}/")))
+        .unwrap_or(path)
+        .to_owned()
 }
 
 /// The destination-receipt shaping a `-a`/`--dest` add carries: the row's dest entries (what the
@@ -697,6 +933,7 @@ fn set_data(name: &str) -> AddData {
         claim: None,
         unchanged: false,
         machine_copy: None,
+        set_delivery: None,
         display: None,
     }
 }

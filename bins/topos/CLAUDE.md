@@ -29,7 +29,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   (explicit rows beat sets beat feed; pins never move), per-scope placement over per-scope stores
   (person = `~/.topos/`; project = the checkout's own `.topos/state/<user>/`, every project path
   proven inside the checkout — refused, never redirected), then a snapshot-first clean of what each
-  scope no longer demands and an applied report per session. Forge rows ride their OWN hardcoded
+  scope no longer demands and an applied report per session. A clean that took surfaces a row
+  STOPPED demanding while the bundle keeps delivering is a NARROWING, and the receipt leads with
+  it (`PullSkill::narrowed` — what still stands, then one line per entry or folder that left),
+  instead of a bare `removed` row over a bundle the machine still holds. Forge rows ride their OWN hardcoded
   clock (`forge_check`, machine-scoped, no config surface): a floating row is PROBED (the git ref
   advertisement — outside the REST allowance) and downloaded only on a real change, with a
   per-round circuit breaker and a clock that advances on failure too. `update --quiet` is the
@@ -54,6 +57,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `default_reach_plan`; for an MCP row the token is simply the unnarrowed reach), with named
   entries placed regardless of detection as ever. The normal form sorts `"*"` first, collapses
   duplicates, and spells a row whose only field is `dest = ["*"]` as the plain `"*"` value.
+  A `-a`/`--dest` on a bundle the invoked scope has NO row for and a channel or feed line
+  provably delivers (`manifest_edit::set_delivering`, the proof the collapse asks) writes NO row
+  at all — one could only narrow what the set reaches — and converges that bundle's placements in
+  the same invocation instead, answering with the surfaces the converge wrote and no undo.
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members — a row edit
   uninstalls its copies EAGERLY (one scope reconcile in the same invocation; edited copies kept
   in place) — and `-a`/`--dest` on `remove` SUBTRACT destinations from the row's `dest`

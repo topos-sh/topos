@@ -189,6 +189,51 @@ fn a_dest_shrink_keeps_an_edited_copy_in_place() {
     );
 }
 
+/// The SAME loss lead over FOLDERS. A hand-narrowed skill row retires the copies it stopped
+/// naming, and the receipt says what the bundle still delivers to before it lists them — a shared
+/// folder names no single agent, so the folder IS the line.
+#[test]
+fn a_hand_narrowed_skill_row_leads_the_receipt_with_the_copies_it_retired() {
+    let rig = Rig::new("dest-narrow-lead");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    assert!(rig.home.0.join("dest-a/deploy/SKILL.md").exists());
+    assert!(rig.home.0.join("dest-b/deploy/SKILL.md").exists());
+
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
+    ));
+    let out = sweep(&ctx, &plane, &dir);
+    let receipt = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
+    );
+    assert!(
+        receipt.contains(
+            "deploy now delivers only to ~/dest-b/deploy — removed its copies from:\n  \
+             ~/dest-a/deploy\n"
+        ),
+        "{receipt}"
+    );
+    assert!(
+        !receipt.contains("- @acme/deploy   removed"),
+        "the loss is said once: {receipt}"
+    );
+}
+
 /// A PROJECT-scope dest row places inside the checkout at the named relative folder — the same
 /// dest mechanism that replaced the old path-override seam.
 #[test]

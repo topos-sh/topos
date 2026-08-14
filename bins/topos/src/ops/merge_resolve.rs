@@ -1977,6 +1977,7 @@ fn merged_row(
         harnesses: Vec::new(),
         kind: None,
         draft: false,
+        narrowed: None,
     }
 }
 
@@ -2094,6 +2095,7 @@ fn conflicted_row(
         harnesses: Vec::new(),
         kind: None,
         draft: false,
+        narrowed: None,
     }
 }
 
