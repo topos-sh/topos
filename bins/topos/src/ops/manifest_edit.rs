@@ -2706,6 +2706,81 @@ fn set_covers(
     }))
 }
 
+/// WHICH SET LINE in `target`'s file delivers the workspace bundle `<host>/<workspace>/<bundle>`,
+/// spelled as this scope names it: `channels/<name>` for the channel row it arrives through, the
+/// workspace reference for the FEED row.
+///
+/// `None` whenever the answer is not PROVEN: the file names the bundle explicitly (an explicit row
+/// beats every set, and an `"off"` switch withholds it), no set line covers it, the offline
+/// delivery cache cannot speak for it, or this scope's store holds no record of it. Every caller
+/// here is about to write nothing on the strength of the answer, so an unproven set is no set.
+///
+/// # Errors
+/// A read failure, or a manifest the grammar refuses.
+pub(super) fn set_delivering(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    host: &str,
+    workspace: &str,
+    bundle: &str,
+) -> Result<Option<String>, ClientError> {
+    let plan = plan_for(ctx, target)?;
+    if plan.explicit_claims(host, workspace, bundle)
+        || plan.off_for(host, workspace, bundle).is_some()
+    {
+        return Ok(None);
+    }
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let Some(entry) = cache.workspaces.values().find(|e| {
+        e.host.as_deref() == Some(host) && e.workspace_name.as_deref() == Some(workspace)
+    }) else {
+        return Ok(None);
+    };
+    let Some((sid, delivered)) = entry
+        .delivered
+        .iter()
+        .find(|(_, d)| d.name == bundle && !d.withdrawn)
+    else {
+        return Ok(None);
+    };
+    // THE SCOPE'S OWN STORE has to hold the record: the delivery cache is the machine's, and a
+    // scope that has never taken the bundle has nothing standing to converge.
+    let Some(sctx) = scope_store_ctx(ctx, target) else {
+        return Ok(None);
+    };
+    let Ok(id) = SkillId::parse(sid) else {
+        return Ok(None);
+    };
+    if crate::doc::read_doc::<topos_types::persisted::Lock>(
+        sctx.fs,
+        &sctx.layout.published(&id).lock,
+    )?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    // A CHANNEL ROW answers first, then the feed — the order the resolution reads rows in.
+    let channel = plan.sets.iter().find_map(|set| match &set.shape {
+        KeyShape::Channel {
+            host: h,
+            workspace: w,
+            channel,
+        } if h == host && w == workspace && delivered.via_channels.contains(channel) => {
+            Some(channel.clone())
+        }
+        _ => None,
+    });
+    if let Some(channel) = channel {
+        return Ok(Some(format!("channels/{channel}")));
+    }
+    // The FEED row delivers whatever the workspace serves this person — but a channel-row member
+    // is excluded from everything feed-shaped, exactly as the offline resolution excludes it.
+    if !delivered.via_manifest && plan.has_feed(host, workspace) {
+        return Ok(Some(format!("{host}/{workspace}")));
+    }
+    Ok(None)
+}
+
 /// THE RECORD A ROW NAMES, resolved by the row's own QUALIFIED identity — the id, as a string,
 /// or `None` when nothing in this scope answers for it.
 ///

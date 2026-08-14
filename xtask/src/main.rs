@@ -498,6 +498,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -545,6 +546,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -596,6 +598,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -690,6 +693,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }),
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -856,6 +860,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -914,6 +919,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -959,6 +965,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 harnesses: Vec::new(),
                 kind: None,
                 draft: false,
+                narrowed: None,
             }],
             proposals_awaiting: 0,
         })
@@ -1012,6 +1019,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 harnesses: Vec::new(),
                 kind: None,
                 draft: false,
+                narrowed: None,
             }],
             proposals_awaiting: 0,
         })
@@ -1074,6 +1082,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 harnesses: Vec::new(),
                 kind: None,
                 draft: false,
+                narrowed: None,
             }],
             proposals_awaiting: 0,
         })
@@ -1754,6 +1763,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 harnesses: Vec::new(),
                 kind: None,
                 draft: false,
+                narrowed: None,
             }],
             proposals_awaiting: 1,
             notices: vec![WireNotice {

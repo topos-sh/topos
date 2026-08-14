@@ -325,6 +325,30 @@
         }
       ]
     },
+    "Narrowing": {
+      "description": "A row edit that stopped demanding some of a bundle's surfaces while the bundle itself keeps\ndelivering here — the loss an `update` receipt leads with, so a deliberate narrowing is never\nquieter than the install that preceded it. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The surfaces this run retired — one line each under the lead.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Surface"
+          }
+        },
+        "still": {
+          "description": "Where the bundle STILL delivers, as the receipt spells it. Never empty: a row reaching\nnothing is not a narrowing, and the rows already say that in their own words.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "still",
+        "from"
+      ]
+    },
     "PullAction": {
       "description": "What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the\nsemantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.",
       "oneOf": [
@@ -448,6 +472,17 @@
             }
           ]
         },
+        "narrowed": {
+          "description": "The NARROWING a `removed` row is the loss half of (see [`Narrowing`]) — present only where\nthe run proved the bundle still delivers somewhere in this scope, which is what tells a\ndeliberate narrowing apart from delivery ending. **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Narrowing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "note": {
           "description": "The fact a row states BESIDE its action: the whole thing a `released` row prints (why the\nrecord resolved and where its files stand now — two lines, the second the folders, which a\nhuman renderer indents under the first), or — on any other action — the one line naming\nthe folders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
           "type": [
@@ -493,6 +528,37 @@
         "observed",
         "applied",
         "action"
+      ]
+    },
+    "Surface": {
+      "description": "ONE SURFACE a run answered for, in the vocabulary both target shapes share: the agent that\nreads it, where this bundle's copy lives there, and what the run left. `target` is a config\nfile for a config-placed (`mcp`) bundle and a folder for a skill. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The harness registry slug that reads it (e.g. `opencode`). EMPTY where the destination\nnames no single harness — a folder several agents share.",
+          "type": "string"
+        },
+        "note": {
+          "description": "The short qualifier the outcome carries (why a surface was not placed), when one exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TargetOutcome"
+        },
+        "target": {
+          "description": "The config file or folder the copy lives in, as a receipt spells it. Absent where nothing\nstands and there is no target to name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "state"
       ]
     },
     "TargetOutcome": {

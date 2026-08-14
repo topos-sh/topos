@@ -204,9 +204,19 @@ For an MCP server, `-a` picks whose config file gets the entry.
 The same flags on `add` again **extend**: the destinations already recorded stay, and the new ones
 join them (`added ~/.cursor/skills to deploy-checklist's destinations`). Naming a destination the
 line already has changes nothing, and says so. The first `-a` on a line that reached every agent
-writes out the set it reaches today alongside the new one, so nothing quietly stops arriving where
-it already lands — the receipt lists the whole set. The undo takes back only what that add put
-there.
+keeps that reach — the line becomes `dest = ["*", "~/.cursor/skills"]`, where `"*"` is everything
+the line reached before, answered afresh on every run, so the agent you install next month is
+reached too. The undo takes back only what that add put there.
+
+When a channel or workspace line already delivers the skill and it has no line of its own, there is
+nothing to record: a line written here could only narrow what that channel reaches. The add places
+the copy the agent you named was missing and says which line delivers it:
+
+```
+sentry already reaches every agent here through channels/everyone — no row to record.
+Placed the copy that was missing:
+  opencode: opencode.json — created
+```
 
 The same flags on `remove` **subtract**: only that agent's copy leaves, the line keeps the rest,
 and the receipt says what remains (`removed (~/.codex/skills) — 2 folders remain`). Removing the

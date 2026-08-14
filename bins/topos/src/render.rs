@@ -895,6 +895,12 @@ fn add_claim_tty(data: &AddData, claim: &topos_types::results::ClaimReceipt) -> 
 }
 
 pub(crate) fn add_tty(data: &AddData) -> String {
+    // NOTHING WAS RECORDED, so no line may name a file this act did not write — not the row lead,
+    // not the `source:` line's neighbours, and above all not an undo for a row that does not
+    // exist. The whole answer is what the set already does and what the converge just placed.
+    if let Some(delivery) = &data.set_delivery {
+        return add_set_delivered_tty(data, delivery);
+    }
     // NOTHING CHANGED IS THE WHOLE ANSWER, so it is the whole lead. An `added …` / `+ … installed`
     // headline above a note retracting it announces an act that did not happen, and the reader has
     // to get to the second line to learn the first one was not true. The `source:` line still
@@ -1044,6 +1050,106 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         ));
     }
     out
+}
+
+/// The SET-DELIVERED add's answer: the scope already delivers this bundle through a channel or
+/// feed row, so the receipt leads with THAT — there is no row to name, and none was written — and
+/// then says only what the converge actually did.
+///
+/// Three answers, because three things can be true. A surface that was MISSING its copy gets it
+/// here, and the receipt lists what landed. A run that found the ONE asked destination already
+/// holding it says so about that destination — a sentence about "every agent" would be true and
+/// would answer a question nobody asked — and closes on the ordinary `nothing changed`. And an
+/// asked agent nothing could be placed for reads in the `not placed` vocabulary with its reason,
+/// under the lead, because the sentence about reaching it would be false.
+///
+/// There is no `(undo: …)` on any of them: nothing was recorded, so there is nothing to invert.
+fn add_set_delivered_tty(data: &AddData, delivery: &topos_types::results::SetDelivery) -> String {
+    let reach = match delivery.scope {
+        topos_types::results::ReceiptScope::Project => "here",
+        topos_types::results::ReceiptScope::Machine => "on this machine",
+    };
+    let placed: Vec<&topos_types::results::Surface> = delivery
+        .surfaces
+        .iter()
+        .filter(|s| s.state.wrote())
+        .collect();
+    // The asked surfaces nothing of this bundle stands on — the only ones the lead cannot speak
+    // for, so each says its own state and reason.
+    let unreached: Vec<&topos_types::results::Surface> = delivery
+        .surfaces
+        .iter()
+        .filter(|s| !s.state.stands() && delivery.asked.contains(&s.agent))
+        .collect();
+    let lead = format!(
+        "{} already reaches every agent {reach} through {} — no row to record.",
+        data.name, delivery.set
+    );
+    if placed.is_empty() {
+        let standing = match delivery.asked.as_slice() {
+            [one] => delivery
+                .surfaces
+                .iter()
+                .find(|s| &s.agent == one && s.state.stands()),
+            _ => None,
+        };
+        let mut out = match standing {
+            Some(s) => format!(
+                "{} already reaches {} through {}{}.\n",
+                data.name,
+                s.agent,
+                delivery.set,
+                surface_parenthetical(s)
+            ),
+            None => {
+                let mut head = format!("{lead}\n");
+                for s in &unreached {
+                    head.push_str(&format!("  {}\n", surface_line(s)));
+                }
+                head
+            }
+        };
+        out.push_str("nothing changed");
+        return out;
+    }
+    let mut out = format!("{lead}\n");
+    out.push_str(if placed.len() == 1 {
+        "Placed the copy that was missing:\n"
+    } else {
+        "Placed the copies that were missing:\n"
+    });
+    for s in placed.iter().chain(&unreached) {
+        out.push_str(&format!("  {}\n", surface_line(s)));
+    }
+    out.push_str(&source_line(data));
+    out.trim_end().to_owned()
+}
+
+/// One converged surface as a receipt line — the AGENT first (the person named an agent, not a
+/// path), then where its copy is and what this run left there. A surface no agent claims is its
+/// target alone.
+fn surface_line(s: &topos_types::results::Surface) -> String {
+    let what = match (s.target.as_deref(), s.note.as_deref()) {
+        (Some(t), Some(note)) => format!("{t} — {} — {note}", s.state.word()),
+        (Some(t), None) => format!("{t} — {}", s.state.word()),
+        (None, Some(note)) => format!("{} — {note}", s.state.word()),
+        (None, None) => s.state.word().to_owned(),
+    };
+    if s.agent.is_empty() {
+        return what;
+    }
+    format!("{}: {what}", s.agent)
+}
+
+/// The same facts folded into a sentence's tail — ` (opencode.json — current)`. Empty where
+/// there is nothing provable to put in it.
+fn surface_parenthetical(s: &topos_types::results::Surface) -> String {
+    match (s.target.as_deref(), s.note.as_deref()) {
+        (Some(t), Some(note)) => format!(" ({t} — {} — {note})", s.state.word()),
+        (Some(t), None) => format!(" ({t} — {})", s.state.word()),
+        (None, Some(note)) => format!(" ({} — {note})", s.state.word()),
+        (None, None) => format!(" ({})", s.state.word()),
+    }
 }
 
 /// The destination receipt EVERY `-a`/`--dest` add prints — the same column convention the
@@ -3912,6 +4018,12 @@ pub(crate) fn pull_tty(
             if s.action == PullAction::Removed && s.destinations.is_empty() && !s.kept.is_empty() {
                 return None;
             }
+            // A NARROWED row's loss is the receipt's lead block, which names the same surfaces and
+            // says what the bundle still reaches — a `- … removed (2 config files)` row beneath it
+            // is that list a second time, shorter and without the half that matters.
+            if s.narrowed.is_some() {
+                return None;
+            }
             let lead = match s.action {
                 PullAction::Installed => format!("+ {shown}"),
                 PullAction::Removed => format!("- {shown}"),
@@ -3955,6 +4067,14 @@ pub(crate) fn pull_tty(
     let mut out = String::new();
     if let Some(lead) = scope.lead(PullReceiptScope::moved_anything(&data.skills)) {
         out.push_str(&format!("{lead}\n"));
+    }
+    // THE LOSS LEADS. A row edit that narrowed a bundle's reach took surfaces away from agents
+    // that had them, and that is the one thing on this receipt a person cannot re-derive from the
+    // rows: everything else is an arrival. It prints above the table for the same reason a
+    // removal prints at all.
+    let narrowings: Vec<String> = data.skills.iter().filter_map(narrowing_block).collect();
+    for block in &narrowings {
+        out.push_str(&scope.relative(block));
     }
     let pad = rows.iter().map(|(n, ..)| n.len()).max().unwrap_or(0);
     for (name, line, extra) in &rows {
@@ -4000,7 +4120,12 @@ pub(crate) fn pull_tty(
     tally.failed = failed;
     tally.not_placed = unplaced;
     tally.waiting += decisions.len();
-    if rows.is_empty() && warnings.is_empty() && kept_lines.is_empty() && unplaced == 0 {
+    if rows.is_empty()
+        && warnings.is_empty()
+        && kept_lines.is_empty()
+        && narrowings.is_empty()
+        && unplaced == 0
+    {
         out.push_str(&format!("Checked {total} {noun}: all up to date."));
     } else {
         out.push_str(&format!("Checked {total} {noun}"));
@@ -4219,6 +4344,39 @@ fn mcp_state_settled(h: &topos_types::results::McpAgentState) -> bool {
         TargetOutcome::Withheld => true,
         _ => false,
     }
+}
+
+/// The LOSS a narrowed row cost, as the block that leads the receipt: what the bundle still
+/// delivers to, and every surface its entries (or copies) left. `None` for every row that did not
+/// narrow.
+///
+/// The bundle is named PLAINLY here — the sentence is about a row a person just edited by hand,
+/// and the workspace-qualified spelling belongs to rows that announce an arrival.
+fn narrowing_block(s: &PullSkill) -> Option<String> {
+    let narrowed = s.narrowed.as_ref()?;
+    // The word for what left follows the target shape, the same split every other receipt line
+    // keeps: a config-placed bundle owns ENTRIES inside somebody else's file, a skill owns COPIES
+    // of its own.
+    let noun = if s.kind.as_deref() == Some("mcp") {
+        "entries"
+    } else {
+        "copies"
+    };
+    let mut out = format!(
+        "{} now delivers only to {} — removed its {noun} from:\n",
+        s.skill,
+        narrowed.still.join(", ")
+    );
+    for surface in &narrowed.from {
+        let target = surface.target.as_deref().unwrap_or_default();
+        // A folder several agents share names no single one of them; the folder IS the line.
+        if surface.agent.is_empty() {
+            out.push_str(&format!("  {target}\n"));
+        } else {
+            out.push_str(&format!("  {}: {target}\n", surface.agent));
+        }
+    }
+    Some(out)
 }
 
 /// One MCP config outcome as a receipt sub-line, KEYED BY THE CONFIG FILE the entry lives in
@@ -5260,6 +5418,7 @@ mod tests {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
             // The local source's tell: no workspace qualifies it.
             display: None,
         };
@@ -5423,6 +5582,7 @@ mod tests {
             claim: None,
             unchanged: false,
             machine_copy: None,
+            set_delivery: None,
             display: None,
         };
         // A local folder adopted into this project: the row's own `./…` spelling never surfaces —
@@ -5507,6 +5667,7 @@ mod tests {
             harnesses: Vec::new(),
             kind: None,
             draft: false,
+            narrowed: None,
         }
     }
 
@@ -8459,6 +8620,7 @@ mod tests {
             harnesses: Vec::new(),
             kind: None,
             draft: false,
+            narrowed: None,
         };
         // The final copy, composed by the sweep (`ops::orphan_fact`) exactly as it is asserted
         // there: the reason, then the files.

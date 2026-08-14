@@ -151,6 +151,24 @@ pub struct PullSkill {
     /// is still unshared. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draft: bool,
+    /// The NARROWING a `removed` row is the loss half of (see [`Narrowing`]) — present only where
+    /// the run proved the bundle still delivers somewhere in this scope, which is what tells a
+    /// deliberate narrowing apart from delivery ending. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrowed: Option<Narrowing>,
+}
+
+/// A row edit that stopped demanding some of a bundle's surfaces while the bundle itself keeps
+/// delivering here — the loss an `update` receipt leads with, so a deliberate narrowing is never
+/// quieter than the install that preceded it. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct Narrowing {
+    /// Where the bundle STILL delivers, as the receipt spells it. Never empty: a row reaching
+    /// nothing is not a narrowing, and the rows already say that in their own words.
+    pub still: Vec<String>,
+    /// The surfaces this run retired — one line each under the lead.
+    pub from: Vec<Surface>,
 }
 
 /// **THE ONE OUTCOME VOCABULARY** — what a single managed TARGET looks like after a run.
@@ -253,6 +271,25 @@ pub struct McpAgentState {
     /// it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+}
+
+/// ONE SURFACE a run answered for, in the vocabulary both target shapes share: the agent that
+/// reads it, where this bundle's copy lives there, and what the run left. `target` is a config
+/// file for a config-placed (`mcp`) bundle and a folder for a skill. **INFERRED** (additive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct Surface {
+    /// The harness registry slug that reads it (e.g. `opencode`). EMPTY where the destination
+    /// names no single harness — a folder several agents share.
+    pub agent: String,
+    /// The config file or folder the copy lives in, as a receipt spells it. Absent where nothing
+    /// stands and there is no target to name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub state: TargetOutcome,
+    /// The short qualifier the outcome carries (why a surface was not placed), when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The predicted verdict of a three-way merge that has NOT been run against the placements — a pure
@@ -1187,6 +1224,34 @@ pub struct AddData {
     /// every add that creates no second copy. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_copy: Option<String>,
+    /// The SET-DELIVERED add (see [`SetDelivery`]): the scope already delivers this bundle through
+    /// a channel or feed row, so no row was written and the invocation converged its placements
+    /// instead. Absent for every other add. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_delivery: Option<SetDelivery>,
+}
+
+/// `add -a`/`--dest` on a bundle a SET already delivers in the invoked scope — the one add that
+/// records NOTHING: the demand stands already, and an explicit row could only narrow what the set
+/// reaches. The invocation converges the bundle's placements at full reach instead, so the asked
+/// surface gets the copy it was missing. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct SetDelivery {
+    /// The set that delivers it, as this scope names it: `channels/<name>` for a channel row, the
+    /// workspace reference (`<host>/<workspace>`) for the feed row.
+    pub set: String,
+    /// WHICH FILE'S set this is — the receipt's word for the reach ("here" / "on this machine").
+    /// Carried here rather than on the envelope's `scope`, which belongs to a manifest this add
+    /// deliberately did not write.
+    pub scope: ReceiptScope,
+    /// Every surface the converge answered for, plus any asked surface it could not reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<Surface>,
+    /// The harness slugs the invocation ASKED for, in the order they were named — what the
+    /// nothing-was-missing answer speaks about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<String>,
 }
 
 /// `add <path> --as <bundle>` — the folder is recorded as one of the bundle's places, byte for
@@ -2748,6 +2813,7 @@ mod tests {
                 harnesses: Vec::new(),
                 kind: None,
                 draft: false,
+                narrowed: None,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

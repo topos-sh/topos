@@ -1006,3 +1006,193 @@ fn one_bundles_dest_advisory_never_swallows_anothers_reaches_no_agent() {
         out.warnings
     );
 }
+
+/// AN `add` NEVER NARROWS — and on a bundle a CHANNEL already delivers, the honest row is no row
+/// at all: the demand stands, and an explicit `dest` row would cost the bundle every agent the
+/// channel reaches that the person did not happen to name. So the invocation writes nothing and
+/// converges instead, which is what actually puts the newly installed agent's copy there.
+///
+/// Both answers ride one fixture: a surface that was MISSING the copy gets it, and the destination
+/// that was already current says so and closes on `nothing changed`.
+#[test]
+fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
+    let rig = Rig::new("set-delivered");
+    rig.seed_session();
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    // A checkout UNDER the home, the ordinary shape: the converge's paths come back
+    // `~`-abbreviated, and the receipt still writes them against the folder it is about.
+    let proj = Scratch(rig.home.0.join("work/api"));
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
+    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/sentry").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_sentry", &v);
+    plane.serves(vec![delivered_mcp("s_sentry", "sentry", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_sentry", "sentry", &v)],
+        channels: vec![WireChannelEntry {
+            name: "everyone".into(),
+            mode: "open".into(),
+            builtin: true,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_sentry".into(),
+                name: "sentry".into(),
+            }],
+        }],
+    };
+    rig.write_global("[bundles]\n");
+    let manifest = proj.0.join(crate::manifest::MANIFEST_FILE);
+    let channel_row = format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/everyone\" = \"*\"\n");
+    std::fs::write(&manifest, &channel_row).unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep(&ctx, &plane, &dir);
+    assert!(proj.0.join(".mcp.json").exists());
+    assert!(proj.0.join(".codex/config.toml").exists());
+
+    // A NEW agent is installed after the channel row was written.
+    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    let add = |agent: &str| {
+        let outcome = ops::add_reference(
+            &ctx,
+            &connect(&plane, &dir),
+            None,
+            &format!("{HOST}/{WS_NAME}/sentry"),
+            false,
+            false,
+            &crate::ops::dest_select::Selection::new(&[agent.to_owned()], &[]),
+            None,
+        )
+        .unwrap();
+        let ops::AddRefOutcome::Applied(data) = outcome else {
+            panic!("a set-delivered add applies");
+        };
+        data
+    };
+
+    let data = add("opencode");
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        channel_row,
+        "no row is written — the channel already demands it"
+    );
+    assert_eq!(data.manifest, None);
+    assert!(data.undo.is_empty(), "nothing was recorded to invert");
+    assert_eq!(
+        crate::render::add_tty(&data),
+        format!(
+            "sentry already reaches every agent here through channels/everyone — no row to \
+             record.\nPlaced the copy that was missing:\n  opencode: opencode.json — \
+             created\nsource: {HOST}/{WS_NAME}/sentry"
+        ),
+        "{data:?}"
+    );
+    let placed = std::fs::read_to_string(proj.0.join("opencode.json")).unwrap();
+    assert!(placed.contains("https://mcp.example/sentry"), "{placed}");
+
+    // The destination that already had it: the answer is about THAT agent, and it closes on the
+    // ordinary `nothing changed`.
+    let data = add("claude-code");
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        channel_row,
+        "still no row"
+    );
+    assert_eq!(
+        crate::render::add_tty(&data),
+        "sentry already reaches claude-code through channels/everyone (.mcp.json — \
+         current).\nnothing changed",
+        "{data:?}"
+    );
+    // `--json` rides the ordinary add envelope, carrying the same facts typed.
+    let json = serde_json::to_value(&data).unwrap();
+    assert_eq!(json["set_delivery"]["set"], "channels/everyone");
+    assert_eq!(json["set_delivery"]["asked"][0], "claude-code");
+    assert!(json.get("manifest").is_none(), "{json}");
+
+    // AN AGENT THIS MACHINE DOES NOT RUN gets no row either — and no sentence claiming the bundle
+    // reaches it. The surface reads in the standing `not placed` vocabulary, with its reason.
+    let data = add("cursor");
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        channel_row,
+        "still no row"
+    );
+    assert_eq!(
+        crate::render::add_tty(&data),
+        "sentry already reaches every agent here through channels/everyone — no row to \
+         record.\n  cursor: not placed — it is not set up here\nnothing changed",
+        "{data:?}"
+    );
+}
+
+/// A DELIBERATE NARROWING STAYS LOUD. A row edited by hand to name one config file costs every
+/// other agent its entry, and that is the one thing on an update receipt a person cannot infer
+/// from what arrived. It leads: what the bundle still delivers to, then one `agent: file` line per
+/// entry that left — and the bare `- <name> removed (2 config files)` row goes, because it is the
+/// same list a second time without the half that matters.
+///
+/// Before this, the whole loss read as `removed (2 config files)` under a name, with nothing
+/// saying the server still stood anywhere.
+#[test]
+fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
+    let rig = Rig::new("narrow-lead");
+    rig.seed_session();
+    // PROJECT scope, where every surface is checkout-relative and hermetic: claude-code detects
+    // under the fake home, codex + opencode through their seeded project files.
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    let proj = Scratch::new("narrow-lead-co");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
+    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
+    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/sentry").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_sentry", &v);
+    plane.serves(vec![delivered_mcp("s_sentry", "sentry", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_sentry", "sentry", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global("[bundles]\n");
+    let row = |body: &str| {
+        std::fs::write(
+            proj.0.join(crate::manifest::MANIFEST_FILE),
+            format!("[bundles]\n\"{HOST}/{WS_NAME}/sentry\" = {body}\n"),
+        )
+        .unwrap();
+    };
+    row("\"*\"");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep(&ctx, &plane, &dir);
+    assert!(proj.0.join(".mcp.json").exists());
+    assert!(proj.0.join("opencode.json").exists());
+
+    row("{ dest = [\"opencode.json\"] }");
+    let out = sweep(&ctx, &plane, &dir);
+    let receipt = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
+    );
+    assert!(
+        receipt.contains(
+            "sentry now delivers only to project/opencode.json — removed its entries from:\n  \
+             claude-code: project/.mcp.json\n  codex: project/.codex/config.toml\n"
+        ),
+        "{receipt}"
+    );
+    assert!(
+        !receipt.contains("removed (2 config files)"),
+        "the loss is said once: {receipt}"
+    );
+}

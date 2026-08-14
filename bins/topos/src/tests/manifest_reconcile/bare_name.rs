@@ -486,9 +486,11 @@ fn a_standing_name_with_a_destination_extends_its_row_instead_of_answering_alrea
     );
 
     // THE SET-LINE MEMBER. `alpha` has no row of its own here — the workspace FEED line delivers
-    // it, exactly as a channel line would. There is no row to extend, so the reference arm writes
-    // the member its OWN row carrying the destination: the same move `remove`'s per-agent refusal
-    // teaches, reached without anyone having to be told about it.
+    // it, exactly as a channel line would. A row born here could only NARROW what that line
+    // reaches, so nothing is written at all: the placements converge instead, and the answer names
+    // the line that already carries it.
+    let before =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     let data = applied_dest_add(
         &ctx,
         &plane,
@@ -496,19 +498,17 @@ fn a_standing_name_with_a_destination_extends_its_row_instead_of_answering_alrea
         &format!("{HOST}/{WS_NAME}/alpha"),
         &["~/.cursor/skills"],
     );
-    assert!(
-        data.dest_change.is_none(),
-        "a row born here is not an extend: {:?}",
-        data.dest_change
+    assert!(data.dest_change.is_none(), "{:?}", data.dest_change);
+    assert_eq!(data.manifest, None, "no file was edited: {data:?}");
+    assert!(data.undo.is_empty(), "nothing was recorded to invert");
+    assert_eq!(
+        data.set_delivery.as_ref().map(|d| d.set.as_str()),
+        Some(format!("{HOST}/{WS_NAME}").as_str()),
+        "the feed line is what delivers it: {data:?}"
     );
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
-    assert!(
-        text.contains(&format!(
-            "\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/skills\"] }}"
-        )),
-        "the member gained its own row, frozen to the folder that was named: {text}"
-    );
+    assert_eq!(text, before, "the file is untouched: {text}");
 
     // PROJECT scope: nothing stands in the project, so the name still resolves through the other
     // scope — an ordinary add of that reference, carrying the flags exactly as a spelled-out
