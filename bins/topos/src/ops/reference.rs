@@ -440,6 +440,7 @@ fn add_workspace(
             ctx,
             &mut data,
             &resolved,
+            &target,
             &dest_entries,
             set_line.as_deref(),
         );
@@ -456,6 +457,7 @@ fn add_workspace(
         ctx,
         &mut data,
         &resolved,
+        &target,
         &dest_entries,
         set_line.as_deref(),
     );
@@ -838,6 +840,7 @@ fn shape_dest_receipt(
     ctx: &Ctx<'_>,
     data: &mut AddData,
     resolved: &Resolved,
+    target: &medit::EditTarget,
     dest_entries: &[String],
     set_line: Option<&str>,
 ) {
@@ -870,8 +873,18 @@ fn shape_dest_receipt(
     // byte, whether the inverse drops the whole row (a fresh add) or subtracts just the
     // destinations this add added (an extend). Only a remove: an `add`-shaped restore undo means
     // the row's PRIOR value, and a bare name would resolve to the record now standing instead.
+    // And only where the bare name resolves to ONE removal: a channel line carrying the bundle
+    // makes the bare spelling a chooser (the row plus the member rewrite both answer), so there
+    // the undo keeps the full reference — longer, but runnable as printed.
     if data.undo.get(1).map(String::as_str) == Some("remove")
         && let Some(slot) = data.undo.iter().position(|t| *t == resolved.canonical)
+        && !medit::channel_carries(
+            ctx,
+            target,
+            &resolved.session.host,
+            &resolved.session.workspace_name,
+            &resolved.name,
+        )
     {
         data.undo[slot] = resolved.name.clone();
     }

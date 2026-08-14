@@ -2860,6 +2860,44 @@ pub(super) fn set_delivering(
     Ok(None)
 }
 
+/// Whether a CHANNEL row in this scope's file carries `bundle` as a member. This is the one
+/// condition under which a bare `remove <name>` resolves to a chooser — the explicit row plus the
+/// set line's member rewrite both answer — so a receipt whose undo must run as printed spells the
+/// full reference instead. Unprovable states (an unreadable plan or cache) answer `false`, which
+/// keeps the bare-name spelling: the same state would have failed the surrounding verb first.
+pub(super) fn channel_carries(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    host: &str,
+    workspace: &str,
+    bundle: &str,
+) -> bool {
+    let Ok(plan) = plan_for(ctx, target) else {
+        return false;
+    };
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let Some(entry) = cache.workspaces.values().find(|e| {
+        e.host.as_deref() == Some(host) && e.workspace_name.as_deref() == Some(workspace)
+    }) else {
+        return false;
+    };
+    let Some((_, delivered)) = entry
+        .delivered
+        .iter()
+        .find(|(_, d)| d.name == bundle && !d.withdrawn)
+    else {
+        return false;
+    };
+    plan.sets.iter().any(|set| match &set.shape {
+        KeyShape::Channel {
+            host: h,
+            workspace: w,
+            channel,
+        } => h == host && w == workspace && delivered.via_channels.contains(channel),
+        _ => false,
+    })
+}
+
 /// THE RECORD A ROW NAMES, resolved by the row's own QUALIFIED identity — the id, as a string,
 /// or `None` when nothing in this scope answers for it.
 ///
@@ -4080,12 +4118,23 @@ fn eager_cleanup(
                     // place). Best-effort, like the whole eager contract.
                     if let Some(clean) = retire_subtracted(ctx, target, b, subtract) {
                         // The receipt speaks in the row's own spellings, and only where a copy
-                        // really left: a retire that only KEPT edited copies claims no removal.
-                        let destinations = if clean.removed.is_empty() {
-                            Vec::new()
-                        } else {
-                            subtract.clone()
-                        };
+                        // really left: an entry whose only copy was KEPT (edited in place) makes
+                        // no removal claim, so a mixed retire names exactly the roots that
+                        // emptied and nothing beside them.
+                        // The removed list speaks pretty spellings (`~`-abbreviated), so an entry
+                        // matches through its own spelling first and its resolved root second.
+                        let destinations: Vec<String> = subtract
+                            .iter()
+                            .filter(|entry| {
+                                let root = dest_root(ctx, target, entry);
+                                clean.removed.iter().any(|p| {
+                                    let parent = Path::new(p).parent();
+                                    parent == Some(Path::new(entry.as_str()))
+                                        || (root.is_some() && parent == root.as_deref())
+                                })
+                            })
+                            .cloned()
+                            .collect();
                         out.push(UninstalledBundle {
                             name: b.display.clone(),
                             destinations,
