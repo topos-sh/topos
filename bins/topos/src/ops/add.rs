@@ -1871,6 +1871,13 @@ pub(crate) enum BareAddPlan {
     /// own: its reference goes through [`BareAddPlan::Reference`], where the ordinary row write
     /// extends it.)
     ExtendFolderDest { dir: PathBuf },
+    /// The bundle stands in this scope's STORE with no row of its own: a channel or feed line is
+    /// what delivers it. Nothing is added and nothing is inverted — the answer names the line.
+    SetDelivered {
+        name: String,
+        reference: String,
+        set: String,
+    },
 }
 
 /// What the invocation SAID, beside the name it said it about.
@@ -2229,6 +2236,14 @@ fn plan_from_standing(
             ));
         }
         let standing = named.first();
+        // "ALREADY ADDED" NAMES A FILE, so it may only be said where the file says it. A bundle a
+        // channel or feed line delivers has no row of its own — the answer is that line's, and the
+        // add closes on `nothing changed` instead of failing over a row nobody wrote.
+        if let Some(RecordOrigin::Reference(reference)) = standing.and_then(|r| r.origin.as_ref())
+            && let Some(plan) = set_delivered_standing(ctx, reference, name, global)?
+        {
+            return Ok(Some(plan));
+        }
         return Err(ClientError::AlreadyAdded {
             name: name.to_owned(),
             scope: if global {
@@ -2279,6 +2294,44 @@ fn plan_from_standing(
         },
         several => Err(records_chooser(ctx, name, global, several)),
     }
+}
+
+/// WHICH SET LINE delivers a standing bundle the invoked scope's manifest does not record — the
+/// [`BareAddPlan::SetDelivered`] answer, or `None` for every bundle the file itself spells (an
+/// explicit row, an `"off"` switch) and every source with no set to arrive through.
+///
+/// # Errors
+/// A read failure, or a manifest the grammar refuses.
+fn set_delivered_standing(
+    ctx: &Ctx<'_>,
+    reference: &str,
+    name: &str,
+    global: bool,
+) -> Result<Option<BareAddPlan>, ClientError> {
+    let Ok(crate::manifest::keys::KeyShape::WorkspaceBundle {
+        host,
+        workspace,
+        bundle,
+    }) = crate::manifest::keys::classify_key(reference)
+    else {
+        return Ok(None);
+    };
+    let target = match global {
+        true => super::manifest_edit::global_target(ctx),
+        false => match super::manifest_edit::project_target(ctx)? {
+            Some(target) => target,
+            None => return Ok(None),
+        },
+    };
+    let Some(set) = super::manifest_edit::set_delivering(ctx, &target, &host, &workspace, &bundle)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(BareAddPlan::SetDelivered {
+        name: name.to_owned(),
+        reference: reference.to_owned(),
+        set,
+    }))
 }
 
 /// The DISTINCT sources standing under one name: the records an offered command can actually name,

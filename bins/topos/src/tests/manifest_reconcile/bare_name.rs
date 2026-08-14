@@ -362,6 +362,12 @@ fn standing_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory) {
 #[test]
 fn a_name_this_scope_already_records_answers_already_added_not_ambiguous() {
     let (rig, plane, dir) = standing_rig("standing-here");
+    // THE FILE ITSELF RECORDS IT — an explicit row beside the feed line. That is what makes
+    // "already added (~/.topos/topos.toml)" a true sentence about a file; a bundle the feed line
+    // delivers with no row of its own gets the set's own answer instead (the test below).
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/alpha\" = \"*\"\n"
+    ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let roots = ops::DiscoveryRoots {
         home: rig.home.0.clone(),
@@ -393,6 +399,56 @@ fn a_name_this_scope_already_records_answers_already_added_not_ambiguous() {
              one to adopt: topos add -g <folder> --as {HOST}/{WS_NAME}/alpha"
         )
     );
+}
+
+/// A BARE add of a bundle a SET LINE delivers and the file does not record: "already added
+/// machine-wide (~/.topos/topos.toml)" named a file holding no such row, and failed the command
+/// over it. The answer is the set's — the same lead the destination-carrying arm prints — and it
+/// closes on `nothing changed`, succeeding, converging nothing (no destination was asked about).
+#[test]
+fn a_bare_add_of_a_set_delivered_bundle_names_the_line_instead_of_a_row_that_does_not_exist() {
+    let (rig, plane, dir) = standing_rig("standing-set-bare");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let before = std::fs::read_to_string(&manifest).unwrap();
+    let plan = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    )
+    .unwrap();
+    let ops::BareAddPlan::SetDelivered {
+        name,
+        reference,
+        set,
+    } = plan
+    else {
+        panic!("the feed line is what delivers it: {plan:?}");
+    };
+    assert_eq!(name, "alpha");
+    assert_eq!(reference, format!("{HOST}/{WS_NAME}/alpha"));
+    assert_eq!(set, format!("{HOST}/{WS_NAME}"));
+    // The FINAL answer, byte for byte — and no row was written for it.
+    let data = ops::set_delivered_answer(&name, &reference, set, true);
+    assert_eq!(
+        crate::render::add_tty(&data),
+        format!(
+            "alpha already reaches every agent on this machine through {HOST}/{WS_NAME} — no row \
+             to record.\nnothing changed"
+        )
+    );
+    assert!(data.undo.is_empty(), "nothing was recorded to invert");
+    assert_eq!(data.manifest, None, "no file was edited");
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), before);
 }
 
 #[test]
@@ -463,27 +519,30 @@ fn a_standing_name_with_a_destination_extends_its_row_instead_of_answering_alrea
         }
         other => panic!("the standing row is what gains the destination: {other:?}"),
     }
-    // Without the flags, the same invocation is still the already-added answer.
+    // Without the flags, the same invocation answers with what STANDS — and here that is the feed
+    // line, because this file records no row for `alpha` (see the set-delivered test above).
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let roots = ops::DiscoveryRoots {
         home: rig.home.0.clone(),
         cwd: Some(rig.work.0.clone()),
     };
-    assert_eq!(
-        ops::plan_bare_add(
-            &ctx,
-            &connect(&plane, &dir),
-            &roots,
-            "alpha",
-            ops::BareAdd {
-                global: true,
-                ..bare_opts(true)
-            },
-        )
-        .unwrap_err()
-        .code(),
-        "ALREADY_TRACKED"
-    );
+    match ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    )
+    .unwrap()
+    {
+        ops::BareAddPlan::SetDelivered { set, .. } => {
+            assert_eq!(set, format!("{HOST}/{WS_NAME}"));
+        }
+        other => panic!("no row records it, so no answer may name one: {other:?}"),
+    }
 
     // THE SET-LINE MEMBER. `alpha` has no row of its own here — the workspace FEED line delivers
     // it, exactly as a channel line would. A row born here could only NARROW what that line

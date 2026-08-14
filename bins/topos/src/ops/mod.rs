@@ -96,7 +96,7 @@ pub(crate) use login::{LoginConnectors, login as session_login, logout as sessio
 #[cfg(test)]
 pub(crate) use manifest_edit::AddScope;
 pub(crate) use manifest_edit::{
-    add_scope, dest_for_selected_agents, manifest_host, note_added_path_dest_in,
+    add_scope, clear_unchanged, dest_for_selected_agents, manifest_host, note_added_path_dest_in,
     note_added_path_in, note_added_remote, off_row_for, push_note, reference_shaped, remove_global,
     remove_project,
 };
@@ -124,7 +124,7 @@ pub(crate) use reconcile::{
 pub(crate) use reconcile::orphan_fact;
 pub(crate) use reference::{
     AddManyOutcome, AddRefOutcome, GovernedOutcome, WriteLane, add_forge_selected, add_reference,
-    find_path_line, path_row_kind, resolve_session_lane, rewrite_to_governed,
+    find_path_line, path_row_kind, resolve_session_lane, rewrite_to_governed, set_delivered_answer,
 };
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.

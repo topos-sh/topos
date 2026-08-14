@@ -32,7 +32,8 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   scope no longer demands and an applied report per session. A clean that took surfaces a row
   STOPPED demanding while the bundle keeps delivering is a NARROWING, and the receipt leads with
   it (`PullSkill::narrowed` — what still stands, then one line per entry or folder that left),
-  instead of a bare `removed` row over a bundle the machine still holds. Forge rows ride their OWN hardcoded
+  instead of a bare `removed` row over a bundle the machine still holds; the summary counts that
+  bundle `narrowed`, never `removed`, so the arithmetic and the loss block agree. Forge rows ride their OWN hardcoded
   clock (`forge_check`, machine-scoped, no config surface): a floating row is PROBED (the git ref
   advertisement — outside the REST allowance) and downloaded only on a real change, with a
   per-round circuit breaker and a clock that advances on failure too. Every reconcile CLOSES by
@@ -45,9 +46,11 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   harness into `reloadSkills`) — a registration moves no bundle bytes, so it adds nothing there.
 - **`add`/`remove` are exact file inverses** (property-tested). `add` is source-polymorphic
   (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE
-  NAME resolves STANDING first — a name the invoked scope already records answers `ALREADY_TRACKED`
-  with the record's own source, and one the OTHER scope records is added here from that same source
-  — and only then discovery: the untracked local inventory ∪ the connected workspaces' catalogs,
+  NAME resolves STANDING first — a name the invoked scope's FILE already records answers
+  `ALREADY_TRACKED` with the record's own source (a bundle standing with no row of its own, which
+  a channel or feed line delivers, answers with that line instead and closes on `nothing changed`:
+  the refusal named a file holding no such row), and one the OTHER scope records is added here from
+  that same source — and only then discovery: the untracked local inventory ∪ the connected workspaces' catalogs,
   where exactly one candidate acts and two or more become THE CHOOSER (`AMBIGUOUS_NAME`, one
   runnable `topos add <full-reference>` per candidate on both surfaces). Several FOLDERS of one
   name are the chooser's own shape: the answer lists every folder with what its bytes are against
@@ -68,22 +71,37 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `"*"` value; the token is ROW GRAMMAR alone — `--dest '*'` refuses at the argv and a channel's
   `mcp_dest` refuses it at load.
   A `-a`/`--dest` on a bundle the invoked scope has NO row for and a channel or feed line
-  provably delivers (`manifest_edit::set_delivering`, the proof the collapse asks) writes NO row
+  provably delivers (`manifest_edit::set_delivering`) writes NO row
   at all — one could only narrow what the set reaches — and converges that bundle's placements in
   the same invocation instead, answering with the surfaces the converge wrote and no undo. That
+  holds only while every asked destination is one the set CAN reach (`outside_default_reach`: the
+  bundle's default reach, or any folder/config file a harness row claims — undetected today is
+  reached the day it is installed); a folder no agent owns is reached by nothing but a row, so
+  such an ask BIRTHS one carrying the token (`dest = ["*", <that folder>]`, the in-reach half of
+  the same ask still dropped), converges, and prints the standing-row shape with no undo — the
+  exact inverse (deleting the born row) is no command — closing on the hand edit instead. That
   converge's outcome IS the answer: an error is the add's own, a bundle it failed says so on the
   asked agent's line (never `not placed — it is not set up here`, which is the DETECTION answer)
   and never closes on `nothing changed`, and its warnings ride the add's envelope. Asked agents
-  match the converge's surfaces by FOLDER, so an agent reading a shared skills root is reported
-  against that root instead of missing.
+  match the converge's surfaces by FOLDER — its own root, then the shared one where
+  `topos_harness::coverage` says it reads there, which is the order placement itself answers in
+  (shared-dir-first: a covered agent's copy is in that folder and its own root holds nothing) — so
+  an agent reading a shared skills root is reported against that root instead of missing.
+  Every registration the inline converge made rides the add's own receipt, on all of its answers.
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members — a row edit
   uninstalls its copies EAGERLY (one scope reconcile in the same invocation; edited copies kept
   in place) — and `-a`/`--dest` on `remove` SUBTRACT destinations from the row's `dest`
   (materialized first from the current resolved set on a row naming none of its own, `"*"`
-  included; a remainder still holding the WHOLE default reach collapses back onto the token, and
-  goes entirely where a channel or feed line in the same file provably delivers the bundle — which
-  is what makes an `-a` add and its `remove -a` undo exact inverses; the last subtraction drops
-  the row; a shared-folder-only copy refuses with both ways out). Two-phase
+  included; a remainder still holding the WHOLE default reach collapses back onto the token,
+  written in the normal form's own spelling — the plain `"*"` value row, or the pin — which is
+  what makes an `-a` add and its `remove -a` undo exact inverses. A SUBTRACTION NEVER DROPS A ROW
+  it did not empty: ending a demand is `remove <name>`'s job alone, and a row that predates the
+  add its undo inverts is not the add's to delete; the last of a row's OWN named destinations
+  still takes the row with it; a shared-folder-only copy refuses with both ways out). A subtracted
+  destination's copies retire in that same invocation even where the reconcile keeps them — a row
+  standing for its default reach re-plans every agent-less placement it finds recorded, so the
+  verb retires the de-listed roots itself (`reconcile::clean_dest_roots`, the by-choice rail) and
+  the receipt states the next-sweep path only where nothing could be retired at all. Two-phase
   (describe → `--yes`) for an indeterminate edit scan, a set split, and every git source (the
   listing is the point of the command); everything else applies immediately with an undo-led
   receipt (a dest row's undo reconstructs `-a`/`--dest`).

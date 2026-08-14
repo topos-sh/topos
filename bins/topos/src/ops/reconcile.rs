@@ -6269,6 +6269,50 @@ pub(super) fn clean_by_choice(
     retire_split(ctx, sid, &lock, &map, &targets)
 }
 
+/// [`clean_by_choice`] NARROWED TO SOME ROOTS: retire only the placements sitting directly under
+/// `roots` — the destinations a `remove -a`/`--dest` just subtracted from the row.
+///
+/// The row edit is the person's own decision and it has already landed, so the copies leave in
+/// the same invocation. The sweep cannot always be the one to do it: a row left standing for its
+/// DEFAULT REACH re-adopts every agent-less placement it finds recorded (the prior-stability rule
+/// that keeps an adopted folder), so the folder the subtraction de-listed would be planned again
+/// on every run and never retire. `Ok(None)` when this scope holds no record, nothing under those
+/// roots, or nothing retirable there.
+///
+/// # Errors
+/// A lock, scan, store, or filesystem failure.
+pub(super) fn clean_dest_roots(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    roots: &[PathBuf],
+) -> Result<Option<ByChoiceClean>, ClientError> {
+    let sp = ctx.layout.published(sid);
+    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+    let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
+    let (Some(lock), Some(map)) = (lock, map) else {
+        return Ok(None);
+    };
+    let targets: Vec<usize> = map
+        .placements
+        .iter()
+        .zip(&map.placement_state)
+        .enumerate()
+        .filter(|(_, (p, st))| {
+            st.materialized_sha.is_some()
+                && !st.adopted_source
+                && Path::new(p)
+                    .parent()
+                    .is_some_and(|parent| roots.iter().any(|root| root == parent))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    retire_split(ctx, sid, &lock, &map, &targets)
+}
+
 /// Retire exactly the named placements BY CHOICE, for a caller that already holds the skill's
 /// writer flock and has already decided WHICH — the identity claim's twin retirement, whose
 /// candidate is one duplicate directory it proved clean under that same lock.

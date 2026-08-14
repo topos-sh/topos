@@ -232,6 +232,12 @@ fn a_hand_narrowed_skill_row_leads_the_receipt_with_the_copies_it_retired() {
         !receipt.contains("- @acme/deploy   removed"),
         "the loss is said once: {receipt}"
     );
+    // AND THE SUMMARY AGREES WITH IT: a bundle the lead just said still delivers is `narrowed`,
+    // never `removed` — the count and the three lines above it cannot contradict each other.
+    assert!(
+        receipt.contains("Checked 1 skill: 1 narrowed."),
+        "{receipt}"
+    );
 }
 
 /// A PROJECT-scope dest row places inside the checkout at the named relative folder — the same
@@ -1014,12 +1020,13 @@ fn narrowing_a_no_dest_row_freezes_the_remainder() {
     assert_eq!(u.destinations, vec!["~/.codex/skills".to_owned()]);
 }
 
-/// A row the subtraction leaves standing for nothing but its DEFAULT REACH says exactly what the
-/// set line beside it already says — so it goes, and the file lands back where the `-a` add found
-/// it. Set coverage is PROVEN from the delivery cache; without a set the row survives as the plain
-/// `"*"` row, because dropping the only demand is not a narrowing.
+/// A row the subtraction leaves standing for nothing but its DEFAULT REACH SETTLES to the plain
+/// `"*"` value row — the normal form's own spelling of that reach — so the file lands back exactly
+/// where the `-a` add found it. It is never DROPPED: a row that predates the add is not the add's
+/// to delete, and the printed undo would then destroy a demand somebody else wrote. Holds whether
+/// or not a set line beside it delivers the same bundle.
 #[test]
-fn a_row_left_at_its_default_reach_goes_when_a_set_still_delivers_it_and_stays_when_none_does() {
+fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_and_alone() {
     let rig = Rig::new("dest-collapse");
     rig.seed_session();
     let v = one_file(b"# deploy\n");
@@ -1045,6 +1052,7 @@ fn a_row_left_at_its_default_reach_goes_when_a_set_still_delivers_it_and_stays_w
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
 
+    let beside_set = std::fs::read_to_string(&manifest).unwrap();
     let added = applied_dest_add(
         &ctx,
         &plane,
@@ -1052,11 +1060,19 @@ fn a_row_left_at_its_default_reach_goes_when_a_set_still_delivers_it_and_stays_w
         &format!("{HOST}/{WS_NAME}/deploy"),
         &["~/dest-x"],
     );
-    assert!(added.dest_change.is_some_and(|c| c.default_reach));
+    assert!(
+        added
+            .dest_change
+            .as_ref()
+            .is_some_and(|c| c.default_reach && c.added == vec!["~/dest-x".to_owned()])
+    );
+    // The CANONICAL spelling of that same subtraction: while a channel line carries the bundle
+    // too, a bare name names two removals (the row, and the line's member) and `remove` asks which
+    // — so the undo the receipt prints is spelled out here instead. The exact printed argv is run
+    // where it resolves, in the feed test below.
     let subtract = |ctx: &crate::ctx::Ctx<'_>| match ops::remove_global(
         ctx,
         &connect(&plane, &dir),
-        // The canonical reference: a bare name is ambiguous while the channel also carries it.
         &[format!("{HOST}/{WS_NAME}/deploy")],
         None,
         false,
@@ -1070,91 +1086,131 @@ fn a_row_left_at_its_default_reach_goes_when_a_set_still_delivers_it_and_stays_w
     subtract(&ctx);
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
-        format!("{channel}"),
-        "the redundant row went — the channel line already says what it said"
+        beside_set,
+        "the row settled back onto the plain `\"*\"` spelling — byte for byte what the add found"
     );
 
-    // WITHOUT the set line, the same subtraction keeps the row: it is the only demand there is.
+    // WITHOUT the set line, the same round trip lands the same way: the row is the only demand
+    // there is, and a subtraction is not what ends a demand.
     let alone = format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
     rig.write_global(&alone);
-    applied_dest_add(
+    let added = applied_dest_add(
         &ctx,
         &plane,
         &dir,
         &format!("{HOST}/{WS_NAME}/deploy"),
         &["~/dest-x"],
     );
-    subtract(&ctx);
+    // Here the bare name is the only reading, so the receipt's own argv runs.
+    assert_eq!(
+        added.undo,
+        vec!["topos", "remove", "-g", "deploy", "--dest", "~/dest-x"]
+    );
+    run_printed_undo(&ctx, &plane, &dir, &added.undo);
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         alone,
-        "no set covers it, so the row stays — spelled the way the add found it"
+        "the row stays — spelled the way the add found it"
     );
 }
 
-/// FEED COVERAGE IS THE FEED'S TO PROVE, and a `via_manifest` cache row proves the opposite: it is
-/// written BECAUSE the workspace's feed did not serve the bundle — the explicit row is what
-/// fetched it. Reading it as coverage dropped the only demand there was, and the bundle left the
-/// machine on the next sweep.
+/// Run the `remove` a receipt printed as its undo — the argv itself, token by token, so a test
+/// cannot round-trip through a command the receipt never offered.
+fn run_printed_undo(
+    ctx: &crate::ctx::Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    undo: &[String],
+) -> topos_types::results::RemoveData {
+    assert_eq!(
+        undo.get(..3).map(<[String]>::to_vec),
+        Some(vec![
+            "topos".to_owned(),
+            "remove".to_owned(),
+            "-g".to_owned()
+        ]),
+        "the machine-wide remove is what this helper runs: {undo:?}"
+    );
+    let (mut tokens, mut agents, mut dests) = (Vec::new(), Vec::new(), Vec::new());
+    let mut rest = undo[3..].iter();
+    while let Some(token) = rest.next() {
+        let mut value = |flag: &str| {
+            rest.next()
+                .unwrap_or_else(|| panic!("{flag} takes a value"))
+                .clone()
+        };
+        match token.as_str() {
+            "-a" => agents.push(value("-a")),
+            "--dest" => dests.push(value("--dest")),
+            other => tokens.push(other.to_owned()),
+        }
+    }
+    let selection = ops::Selection { agents, dests };
+    match ops::remove_global(ctx, &connect(plane, dir), &tokens, None, false, &selection).unwrap() {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("the printed undo applies immediately: {other:?}"),
+    }
+}
+
+/// THE ROUND TRIP UNDER A FEED LINE, byte for byte: a bundle the workspace feed delivers AND that
+/// holds its own `= "*"` row, an `add --dest`, then the exact undo the receipt printed. The row
+/// predates the add, so the file has to come back exactly as it was — the copy at the de-listed
+/// folder leaves in that same invocation, and the row keeps every agent it had.
 #[test]
-fn a_collapse_under_a_feed_row_keeps_a_row_the_feed_never_served() {
+fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_byte() {
     let rig = Rig::new("dest-collapse-feed");
     rig.seed_session();
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    // The FEED line stands, and serves NOTHING — the explicit row beside it is what delivers.
     let feed = format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n");
     let both = format!("{feed}\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
-    let subtract = |ctx: &crate::ctx::Ctx<'_>| match ops::remove_global(
-        ctx,
-        &connect(&plane, &dir),
-        &[format!("{HOST}/{WS_NAME}/deploy")],
-        None,
-        false,
-        &sel(&[], &["~/dest-x"]),
-    )
-    .unwrap()
-    {
-        ops::RemoveOutcome::Applied(data) => data,
-        other => panic!("a clean subtraction applies immediately: {other:?}"),
-    };
-
     rig.write_global(&both);
-    plane.serves(Vec::new());
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    applied_dest_add(
+    let native = rig.skills().join("deploy/SKILL.md");
+    assert!(
+        native.exists(),
+        "the premise: the row's default reach stands"
+    );
+
+    let folder = rig.home.0.join("dest-x/deploy");
+    let added = applied_dest_add(
         &ctx,
         &plane,
         &dir,
         &format!("{HOST}/{WS_NAME}/deploy"),
         &["~/dest-x"],
     );
-    subtract(&ctx);
+    assert!(
+        std::fs::read_to_string(&manifest)
+            .unwrap()
+            .contains(r#"dest = ["*", "~/dest-x"]"#)
+    );
+    assert!(folder.join("SKILL.md").exists(), "{added:?}");
+
+    let undone = run_printed_undo(&ctx, &plane, &dir, &added.undo);
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         both,
-        "the feed never served this bundle, so the feed line covers nothing — the row stays"
+        "the printed undo restored the file it found"
     );
-
-    // The SIBLING fact: once the feed itself serves it, the cache row stops saying `via_manifest`
-    // and the same subtraction collapses the redundant row away.
-    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
-    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    applied_dest_add(
-        &ctx,
-        &plane,
-        &dir,
-        &format!("{HOST}/{WS_NAME}/deploy"),
-        &["~/dest-x"],
-    );
-    subtract(&ctx);
+    // THE COPY LEFT WITH THE DESTINATION, in the invocation that de-listed it — the receipt's
+    // claim, and the folder on disk, agree.
+    assert!(!folder.exists(), "the de-listed copy is gone");
+    assert!(native.exists(), "everything the row still reaches stands");
     assert_eq!(
-        std::fs::read_to_string(&manifest).unwrap(),
-        feed,
-        "the feed delivers it now, so the row says nothing the feed line does not"
+        undone.uninstalled.first().map(|u| u.destinations.clone()),
+        Some(vec!["~/dest-x".to_owned()]),
+        "{undone:?}"
+    );
+    let tty = crate::render::remove_applied_tty(&undone);
+    assert!(tty.contains("removed (~/dest-x)"), "{tty}");
+    assert!(
+        !tty.contains("leaves on the next `topos update`"),
+        "nothing is deferred: {tty}"
     );
 }
 
@@ -1212,6 +1268,54 @@ fn an_add_naming_a_destination_the_default_reach_already_holds_changes_nothing()
     let text = std::fs::read_to_string(&manifest).unwrap();
     assert!(text.contains("dest = [\"*\", \"~/dest-x\"]"), "{text}");
     assert!(!text.contains(".claude/skills"), "{text}");
+}
+
+/// ONE VOICE PER RECEIPT. An add whose inline converge really PLACED folders printed the install
+/// line AND, folded into a note, the `nothing changed` sentence about the file — a receipt
+/// contradicting itself, naming one folder while three were written. Bytes landed, so the install
+/// shape is the whole answer, and it speaks for every folder this run wrote.
+#[test]
+fn an_add_whose_converge_placed_folders_says_installed_and_never_nothing_changed() {
+    let (rig, plane, dir, v) = add_rig("dest-two-voices");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    // The row stands for its default reach and has been delivered once — the active agent's folder
+    // holds the copy.
+    let row = format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    rig.write_global(&row);
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(rig.skills().join("deploy/SKILL.md").exists());
+    // TWO MORE AGENTS APPEAR since that sweep — one with its own skills root, one the shared
+    // folder covers. The token answers detection again, so this add's converge has folders to
+    // write while the file has nothing to record.
+    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".cline")).unwrap();
+
+    let data = applied_selected_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["claude-code"],
+        &[],
+    );
+    // The ask was already inside the row's reach, so the FILE is untouched …
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), row);
+    // … and the converge placed the copies, so the answer is the install and nothing else.
+    assert!(!data.unchanged, "{data:?}");
+    // EVERY FOLDER THIS RUN WROTE — the two the new agents needed. The one that already held the
+    // copy is not something this run did, exactly as the update receipt's own column reads it.
+    assert_eq!(
+        data.dest,
+        vec!["~/.agents/skills".to_owned(), "~/.codex/skills".to_owned()],
+    );
+    assert!(rig.home.0.join(".codex/skills/deploy/SKILL.md").exists());
+    assert!(rig.home.0.join(".agents/skills/deploy/SKILL.md").exists());
+    assert_eq!(
+        crate::render::add_tty(&data),
+        format!("+ @{WS_NAME}/deploy   installed (2 folders)\nsource: {HOST}/{WS_NAME}/deploy")
+    );
 }
 
 /// A rig whose CHANNEL line delivers `deploy`, swept once so the scope holds the record a
@@ -1285,6 +1389,126 @@ fn an_asked_agent_that_reads_the_shared_folder_is_not_reported_missing() {
     assert_eq!(
         crate::render::add_tty(&data),
         "deploy already reaches cline through channels/everyone (~/.agents/skills — \
+         current).\nnothing changed",
+        "{data:?}"
+    );
+}
+
+/// A DESTINATION NO AGENT OWNS is reached by nothing but a row: a set line delivers to agents, and
+/// a folder a person named is not one. So `--dest <that folder>` on a set-delivered bundle WRITES
+/// the row — carrying the token, so the set's whole reach rides with it — while an ask the reach
+/// already holds still records nothing. There is no undo: deleting a row is no command, so the
+/// receipt closes on the hand edit that puts the file back.
+#[test]
+fn a_set_delivered_add_naming_a_folder_no_agent_owns_births_the_row_carrying_the_token() {
+    let (rig, plane, dir, _v) = channel_delivered_rig("set-out-of-reach");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let channel_only = std::fs::read_to_string(&manifest).unwrap();
+
+    // IN-REACH ONLY: cline's folder (the shared root) and that same root spelled out — the set
+    // already reaches both, so nothing is recorded and the no-row arm answers.
+    for (agents, dests) in [
+        (&["cline"][..], &[][..]),
+        (&[][..], &["~/.agents/skills"][..]),
+    ] {
+        let data = applied_selected_add(
+            &ctx,
+            &plane,
+            &dir,
+            &format!("{HOST}/{WS_NAME}/deploy"),
+            agents,
+            dests,
+        );
+        assert!(
+            data.set_delivery.is_some(),
+            "the set's own answer: {data:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            channel_only,
+            "an in-reach ask records nothing"
+        );
+    }
+
+    // OUT OF REACH: the row is born, and the in-reach half of the same ask is still dropped.
+    let data = applied_selected_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["cline"],
+        &["~/prompts/skills"],
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        format!(
+            "{channel_only}\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\", \
+             \"~/prompts/skills\"] }}\n"
+        )
+    );
+    assert!(
+        rig.home.0.join("prompts/skills/deploy/SKILL.md").exists(),
+        "the folder only this line demands got its copy: {data:?}"
+    );
+    assert!(
+        rig.home.0.join(".agents/skills/deploy/SKILL.md").exists(),
+        "and the token's own reach still stands"
+    );
+    assert!(data.set_delivery.is_none(), "a row WAS recorded: {data:?}");
+    assert!(data.undo.is_empty(), "no undo deletes a row");
+    // The FINAL receipt copy, byte for byte.
+    assert_eq!(
+        crate::render::add_tty(&data),
+        format!(
+            "added ~/prompts/skills to @{WS_NAME}/deploy's destinations\n(it keeps reaching every \
+             agent — \"*\" holds its default reach)\nsource: {HOST}/{WS_NAME}/deploy\nnote: this \
+             line is new — delete it from the manifest to hand the bundle back to \
+             channels/everyone alone."
+        )
+    );
+}
+
+/// AN ASKED AGENT THE SHARED FOLDER COVERS is reported against THAT folder, whatever its own
+/// skills root is spelled as. Matching the ask only against the agent's own root reported a copy
+/// sitting in the folder that agent reads as `not placed — it is not set up here` — the detection
+/// answer, over an agent that is set up. Placement is shared-dir-first, so for a covered agent the
+/// shared folder is the only folder there is.
+#[test]
+fn an_asked_agent_covered_by_the_shared_folder_is_reported_against_it() {
+    let (rig, plane, dir, _v) = channel_delivered_rig("set-shared-covered");
+    // opencode DETECTED — a covered harness whose OWN skills root is not the shared folder.
+    std::fs::create_dir_all(rig.home.0.join(".config/opencode")).unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    assert!(topos_harness::coverage::shared_dir_support("opencode").covered());
+    assert_ne!(
+        crate::manifest::dest::skills_dest_spelling(
+            "opencode",
+            crate::manifest::document::ManifestScope::Global
+        )
+        .as_deref(),
+        Some("~/.agents/skills"),
+        "the premise: opencode's own root is not the shared folder"
+    );
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let before = std::fs::read_to_string(&manifest).unwrap();
+
+    let data = applied_selected_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["opencode"],
+        &[],
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        before,
+        "no row — the channel already demands it"
+    );
+    assert_eq!(
+        crate::render::add_tty(&data),
+        "deploy already reaches opencode through channels/everyone (~/.agents/skills — \
          current).\nnothing changed",
         "{data:?}"
     );
