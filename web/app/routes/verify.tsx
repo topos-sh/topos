@@ -43,6 +43,7 @@ import {
   CREATE_RATE_LIMITED,
   NAME_REQUIRED,
   SLUG_SHAPE,
+  WORKSPACE_LIMIT,
 } from "@/lib/workspace-create-copy";
 import {
   isWorkspaceNameShape,
@@ -223,11 +224,12 @@ export async function action({ request }: ActionFunctionArgs) {
       throw data(null, { status: 400 });
     }
     if (choice !== null && choice.kind === "create") {
-      // The SAME policy pre-checks /new runs (tenancy + entitlement gate + the per-person
-      // floor), then the field validation — byte-identical refusal strings, then the fence.
-      // Existence FIRST: on single tenancy (or creation switched off) the option does not
-      // exist, so a crafted POST answers the house 404 whatever its fields say.
-      const precheck = await createWorkspacePrecheck(actor);
+      // The SAME surface pre-check /new runs (tenancy + the entitlement gate), then the field
+      // validation — byte-identical refusal strings, then the fence (which owns the counted
+      // per-person floors, under the same advisory lock as /new's transaction). Existence
+      // FIRST: on single tenancy (or creation switched off) the option does not exist, so a
+      // crafted POST answers the house 404 whatever its fields say.
+      const precheck = await createWorkspacePrecheck();
       if (precheck === "off") {
         notFound();
       }
@@ -236,9 +238,6 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       if (!isWorkspaceNameShape(choice.slug)) {
         return await createRefused(userCode, actor, SLUG_SHAPE, choice, 400);
-      }
-      if (precheck === "rate-limited") {
-        return await createRefused(userCode, actor, CREATE_RATE_LIMITED, choice, 429);
       }
     }
     const approved = await approveLoginFlow(
@@ -254,6 +253,14 @@ export async function action({ request }: ActionFunctionArgs) {
       // and surface the typed error on the create form for the retry.
       const choiceCreate = choice as Extract<LoginApproveChoice, { kind: "create" }>;
       return await createRefused(userCode, actor, ADDRESS_TAKEN, choiceCreate, 400);
+    }
+    if (approved.outcome === "rate-limited" || approved.outcome === "owned-limit") {
+      // The create arm's counted floors, refused inside the fence — same re-resolve, the
+      // matching honest string on the form.
+      const choiceCreate = choice as Extract<LoginApproveChoice, { kind: "create" }>;
+      return approved.outcome === "rate-limited"
+        ? await createRefused(userCode, actor, CREATE_RATE_LIMITED, choiceCreate, 429)
+        : await createRefused(userCode, actor, WORKSPACE_LIMIT, choiceCreate, 403);
     }
     if (loopback !== null && device !== null && approved.flowChallenge === device) {
       // The state-bound localhost hand-off — a pure accelerator that wakes the waiting CLI;

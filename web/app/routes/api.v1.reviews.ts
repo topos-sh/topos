@@ -10,7 +10,7 @@ import {
   okReceiptEnvelope,
 } from "@/lib/api/receipts.server";
 import { badRequest, internalError, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { requireSessionActorPreBody } from "@/lib/auth/guards.server";
 import {
   findReceipt,
   inFinalTx,
@@ -41,6 +41,9 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (request.method !== "POST") {
     return uniformNotFound();
   }
+  // AUTH BEFORE THE BODY — the lane-wide order: the credential resolves first (workspace-scoped,
+  // so the session names its one workspace), and the body's workspace is held against it below.
+  const actor = await requireSessionActorPreBody(request);
   const raw = await readCappedBody(request, BODY_CAP, "review body");
   if (raw instanceof Response) {
     return raw;
@@ -72,7 +75,9 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return badRequest("a reject carries its reason back to the author");
   }
 
-  const actor = await requireSessionActor(request, head.workspaceId);
+  if (head.workspaceId !== actor.workspaceId) {
+    return uniformNotFound();
+  }
   const replay = await findReceipt(actor, head.opId, raw);
   if (replay.kind === "replay") {
     return envelopeResponse(replay.outcome);

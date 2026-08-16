@@ -271,7 +271,7 @@ describe("an existing bundle's kind is fixed at birth", () => {
   });
 });
 
-describe("the door refuses an unknown kind — before the credential resolve", () => {
+describe("the door refuses an unknown kind — before any custody call", () => {
   /** The one refusal an out-of-vocabulary kind earns, whatever made it out of vocabulary. */
   const REFUSAL = "unknown kind — known kinds: 'skill', 'mcp'";
 
@@ -297,7 +297,9 @@ describe("the door refuses an unknown kind — before the credential resolve", (
         : await import("@/routes/api.v1.propose");
     const request = new Request(`http://x/api/v1/${route}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      // Authenticated: the door resolves the credential FIRST (auth-before-body), so the kind
+      // refusal is a member's 400 — an unauthenticated caller meets only the uniform 404.
+      headers: { "content-type": "application/json", authorization: "Bearer cs_auth" },
       body: JSON.stringify(body(kind)),
     });
     let res: Response;
@@ -341,10 +343,10 @@ describe("the door refuses an unknown kind — before the credential resolve", (
   });
 
   it("an explicit null is ABSENT, not malformed (the wire's optional spelling)", async () => {
-    // A null reaches the guard rather than the 400 — this body carries no credential, so the
-    // uniform miss is the honest proof that the parse let it through.
+    // A null passes the parse and the op proceeds all the way to a landed publish — the
+    // honest proof that null reads as "no kind declared", never as a malformed value.
     const { status } = await post("publish", null);
-    expect(status).not.toBe(400);
+    expect(status).toBe(200);
   });
 });
 

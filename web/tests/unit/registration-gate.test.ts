@@ -28,6 +28,10 @@ vi.mock("@/composition.server", () => ({
     get tenancy() {
       return tenancyMode;
     },
+    // The allow-all default — the seat-binding leg consults the member cap through it.
+    entitlements: {
+      forWorkspace: async () => ({ allows: () => true, limit: () => null }),
+    },
   },
 }));
 

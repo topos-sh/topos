@@ -24,6 +24,28 @@ export async function storageStats(): Promise<Map<string, number>> {
   return parseStorageStats(body);
 }
 
+/**
+ * ONE workspace's stored bytes, for the publish-ingest quota check — the same vault stat,
+ * filtered app-side (the vault knows numbers, never identity; a workspace with no custody yet
+ * simply has no entry, which is 0). FAIL-OPEN BY DESIGN: a stat failure returns `null` and the
+ * caller allows — the ingest shares the same backend and will fail on a real outage — but the
+ * failure is logged, because a quota that silently stopped being enforced is a fact an
+ * operator needs.
+ */
+export async function workspaceStoredBytes(workspaceId: string): Promise<number | null> {
+  try {
+    const stats = await storageStats();
+    return stats.get(workspaceId) ?? 0;
+  } catch (error) {
+    // The deliberate fail-open trace (message only — storageStats errors are fixed,
+    // credential-free strings).
+    console.error(
+      `storage quota check skipped (stat read failed): ${error instanceof Error ? error.message : "unknown"}`,
+    );
+    return null;
+  }
+}
+
 /** Strict shape parse: `{workspaces: [{workspace_id, stored_bytes}]}`, nothing looser. */
 function parseStorageStats(body: unknown): Map<string, number> {
   if (typeof body !== "object" || body === null || !("workspaces" in body)) {

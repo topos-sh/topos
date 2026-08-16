@@ -1,15 +1,17 @@
 import type { ActionFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
-import { rowOpResponse } from "@/lib/api/row-envelopes.server";
+import { deniedCodeEnvelope, rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneProtectChannel } from "@/lib/db/queries.lane.server";
 
 /**
  * `PUT /api/v1/workspaces/{ws}/channels/{ch}/protection` — set a channel's mode (`curated` |
- * `open`). `{ch}` is the channel NAME. A JSON body `{ level }`; malformed body → 400 before
- * auth, invalid level → 400 unconditionally. An unknown channel is the uniform 404. Tightening
- * to `curated` takes reviewer+; loosening to `open` takes owner.
+ * `open`). `{ch}` is the channel NAME. A JSON body `{ level }`; the credential resolves
+ * BEFORE the body (the lane-wide order — a non-member meets only the uniform 404, and body
+ * validation 400s only an authenticated member). An unknown channel is the uniform 404.
+ * Tightening to `curated` takes reviewer+ AND the reviews entitlement
+ * (`REVIEWS_NOT_AVAILABLE`); loosening to `open` takes owner and is never entitlement-gated.
  */
 const BODY_CAP = 64 * 1024;
 
@@ -26,6 +28,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "PUT") {
     return uniformNotFound();
   }
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const body = await readCappedBody(request, BODY_CAP, "protection body");
   if (body instanceof Response) {
     return body;
@@ -43,8 +46,14 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (level !== "open" && level !== "curated") {
     return badRequest("a channel protection level must be `curated` or `open`");
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
   const status = await laneProtectChannel(actor, params.channel ?? "", level);
+  if (status === "reviews_unavailable") {
+    return deniedCodeEnvelope(
+      "protect",
+      "REVIEWS_NOT_AVAILABLE",
+      "Review protection is not available on this workspace.",
+    );
+  }
   return rowOpResponse("protect", status, { set: "set" }, PROTECT_DENIED);
 }
 

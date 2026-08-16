@@ -4,6 +4,7 @@ import type { MemberActor, OwnerActor, UserActor } from "@/lib/auth/guards.serve
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
+import { reviewsEnableRefused } from "@/lib/db/queries.lane.server";
 import { bundle, proposal, proposalComment, seat, workspace } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
 import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody";
@@ -393,16 +394,21 @@ export async function insertProposalComment(
 
 // ── The review-default knob (a plain workspace column now) ──────────────────────────────────
 
-export type ReviewDefaultOutcome = "set";
+export type ReviewDefaultOutcome = "set" | "reviews_unavailable";
 
 /**
  * Set the workspace's protection DEFAULT (`open`/`reviewed` — what an unpinned bundle
  * inherits). The OwnerActor brand IS the gate; the audit row lands in the same transaction.
+ * ENABLING the reviewed default is entitlement-gated (`allows("reviews")`); switching it back
+ * to open never is.
  */
 export async function setReviewDefault(
   actor: OwnerActor,
   required: boolean,
 ): Promise<ReviewDefaultOutcome> {
+  if (required && (await reviewsEnableRefused(actor.workspaceId))) {
+    return "reviews_unavailable";
+  }
   const value = required ? "reviewed" : "open";
   await getDb().transaction(async (tx) => {
     await tx

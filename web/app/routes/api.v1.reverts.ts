@@ -9,7 +9,7 @@ import {
   okPointerEnvelope,
 } from "@/lib/api/receipts.server";
 import { badRequest, internalError, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { requireSessionActorPreBody } from "@/lib/auth/guards.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import {
   findReceipt,
@@ -17,6 +17,7 @@ import {
   insertReceiptInTx,
   movePointerWithKindPrecondition,
   publishTargetOf,
+  versionOutsideHistoryWindow,
 } from "@/lib/db/queries.custody.server";
 import { revertPointer } from "@/lib/plane/custody.server";
 
@@ -36,6 +37,9 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (request.method !== "POST") {
     return uniformNotFound();
   }
+  // AUTH BEFORE THE BODY — the lane-wide order: the credential resolves first (workspace-scoped,
+  // so the session names its one workspace), and the body's workspace is held against it below.
+  const actor = await requireSessionActorPreBody(request);
   const raw = await readCappedBody(request, BODY_CAP, "revert body");
   if (raw instanceof Response) {
     return raw;
@@ -63,8 +67,10 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (author.length === 0) {
     return badRequest("malformed revert author");
   }
+  if (head.workspaceId !== actor.workspaceId) {
+    return uniformNotFound();
+  }
 
-  const actor = await requireSessionActor(request, head.workspaceId);
   const replay = await findReceipt(actor, head.opId, raw);
   if (replay.kind === "replay") {
     return envelopeResponse(replay.outcome);
@@ -113,6 +119,19 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
       buildReceipt({ ...receiptBase, outcome: "DENIED" }),
     );
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
+    return envelopeResponse(envelope);
+  }
+  // The history window (`history-days`, a no-op without a limit): a target older than the
+  // window refuses typed. NOT persisted as a receipt — the refusal reflects the workspace's
+  // standing window, and the same op under a wider window must re-evaluate, not replay.
+  if (await versionOutsideHistoryWindow(actor, target.bundleId, good)) {
+    const envelope = deniedEnvelope(
+      "revert",
+      "OUTSIDE_HISTORY_WINDOW",
+      target.name,
+      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      { message: "That version is outside this workspace's history window." },
+    );
     return envelopeResponse(envelope);
   }
 

@@ -1,4 +1,5 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { composition } from "@/composition.server";
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
 import { kindEntry } from "@/lib/bundle-base";
 import { claimBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
@@ -13,7 +14,7 @@ import {
   proposal,
   workspace,
 } from "@/lib/db/schema.app";
-import { planeCurrentPointer } from "@/lib/db/schema.custody";
+import { planeCurrentPointer, planeVersion } from "@/lib/db/schema.custody";
 import { serverDocumentOf } from "@/lib/mcp/catalog.server";
 import { type McpGateRefusal, mcpNameTakenRefusal } from "@/lib/mcp/publish-gate.server";
 import { custodyVersionMetaFresh } from "@/lib/plane/reads.server";
@@ -181,6 +182,126 @@ const RESERVED_BUNDLE_NAMES = new Set(["topos", "topos-mcp"]);
 /** Is `name` reserved for the client's own directories? (see [`RESERVED_BUNDLE_NAMES`]) */
 export function isReservedBundleName(name: string): boolean {
   return RESERVED_BUNDLE_NAMES.has(name);
+}
+
+// ── The bundle cap (`bundles`) ──────────────────────────────────────────────────────────────
+
+/** The bundle cap's one refusal — the same shape every genesis door already renders. */
+const BUNDLE_LIMIT_REFUSAL: McpGateRefusal = {
+  code: "BUNDLE_LIMIT_REACHED",
+  message: "This workspace is at its bundle limit.",
+};
+
+async function activeBundleCount(executor: Pick<Tx, "execute">, ws: string): Promise<number> {
+  const rows = await executor.execute(
+    sql`SELECT count(*)::int AS n FROM ${bundle}
+        WHERE workspace_id = ${ws} AND status = 'active'`,
+  );
+  return (rows.rows[0] as { n: number } | undefined)?.n ?? 0;
+}
+
+/**
+ * The bundle cap (`bundles` — active catalog rows), consulted ONLY when a NEW bundle identity
+ * is being created; new versions of existing bundles never come through here. A no-op without
+ * a limit (the OSS default). Two spellings of one check:
+ *  - `bundleCapRefusal` runs BEFORE the vault call — the cheap read that keeps the common
+ *    refusal from leaving ingested bytes behind;
+ *  - `bundleCapRefusalInTx` is the AUTHORITY, inside the registration transaction under an
+ *    advisory lock, so two concurrent geneses at the boundary serialize instead of both
+ *    slipping past the count.
+ */
+export async function bundleCapRefusal(actor: PublishActor): Promise<McpGateRefusal | null> {
+  const entitlements = await composition.entitlements.forWorkspace(actor.workspaceId);
+  const limit = entitlements.limit("bundles");
+  if (limit === null) {
+    return null;
+  }
+  return (await activeBundleCount(getDb(), actor.workspaceId)) >= limit
+    ? BUNDLE_LIMIT_REFUSAL
+    : null;
+}
+
+export async function bundleCapRefusalInTx(
+  tx: Tx,
+  actor: PublishActor,
+): Promise<McpGateRefusal | null> {
+  const entitlements = await composition.entitlements.forWorkspace(actor.workspaceId);
+  const limit = entitlements.limit("bundles");
+  if (limit === null) {
+    return null;
+  }
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`bundles:${actor.workspaceId}`}))`);
+  return (await activeBundleCount(tx, actor.workspaceId)) >= limit ? BUNDLE_LIMIT_REFUSAL : null;
+}
+
+// ── The history window (`history-days`) ─────────────────────────────────────────────────────
+
+/**
+ * The workspace's revert-reach window in days, or null when none is set (the OSS default —
+ * unlimited). Nothing is ever deleted under a window: rows older than the cutoff stay listed
+ * (annotated) and only the REVERT doors refuse them, so a wider window restores access whole.
+ */
+export async function historyWindowDays(workspaceId: string): Promise<number | null> {
+  const entitlements = await composition.entitlements.forWorkspace(workspaceId);
+  return entitlements.limit("history-days");
+}
+
+/**
+ * Whether a revert target sits OUTSIDE the workspace's history window: the version's own
+ * recorded creation time (the custody mirror) against now minus the window. No window, or a
+ * version the mirror does not hold, is `false` — the revert flow's own refusals (unknown
+ * version, purged target) stay the authority on what exists.
+ */
+export async function versionOutsideHistoryWindow(
+  actor: PublishActor,
+  bundleId: string,
+  versionId: string,
+): Promise<boolean> {
+  const days = await historyWindowDays(actor.workspaceId);
+  if (days === null) {
+    return false;
+  }
+  const rows = await getDb()
+    .select({ createdAt: planeVersion.createdAt })
+    .from(planeVersion)
+    .where(
+      and(
+        eq(planeVersion.workspaceId, actor.workspaceId),
+        eq(planeVersion.bundleId, bundleId),
+        eq(planeVersion.versionId, versionId),
+      ),
+    )
+    .limit(1);
+  const createdAt = rows[0]?.createdAt;
+  if (createdAt === undefined) {
+    return false;
+  }
+  return createdAt.getTime() < Date.now() - days * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * The creation times of a set of versions (the history page's lock annotation read) — one
+ * query over the custody mirror; versions the mirror does not hold are simply absent.
+ */
+export async function versionCreatedAtMap(
+  actor: PublishActor,
+  bundleId: string,
+  versionIds: string[],
+): Promise<Map<string, Date>> {
+  if (versionIds.length === 0) {
+    return new Map();
+  }
+  const rows = await getDb()
+    .select({ versionId: planeVersion.versionId, createdAt: planeVersion.createdAt })
+    .from(planeVersion)
+    .where(
+      and(
+        eq(planeVersion.workspaceId, actor.workspaceId),
+        eq(planeVersion.bundleId, bundleId),
+        inArray(planeVersion.versionId, versionIds),
+      ),
+    );
+  return new Map(rows.map((r) => [r.versionId, r.createdAt]));
 }
 
 export interface GenesisRegistration {

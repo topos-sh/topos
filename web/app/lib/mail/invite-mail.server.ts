@@ -3,7 +3,7 @@ import path from "node:path";
 import { serverEnv } from "@/env.server";
 import { kindEntry } from "@/lib/bundle-base";
 import { recordDevMail } from "@/lib/mail/dev-outbox.server";
-import { escapeHtml, mailDelivery, sendMail } from "@/lib/mail/transport.server";
+import { escapeHtml, mailDelivery, sendMail, stripMailControl } from "@/lib/mail/transport.server";
 
 /**
  * The invitation-mail seam. The mail is where the single-use INVITE LINK travels — worth one
@@ -53,29 +53,46 @@ function hintNounFor(kind: string): string {
   return kind === "channel" ? "channel" : kindEntry(kind).noun;
 }
 
+/** How long a user-entered display value may run in the notice (subject lines included). */
+const MAIL_FIELD_MAX = 60;
+
+/**
+ * A user-influenced value, made mail-safe at COMPOSE time: control characters (newlines
+ * included) stripped — our own strip, never a reliance on the mail library's header folding —
+ * and display fields cut to a readable length with an ellipsis, so a 10k-character workspace
+ * name cannot balloon a subject.
+ */
+function mailField(value: string, max = MAIL_FIELD_MAX): string {
+  const stripped = stripMailControl(value);
+  return stripped.length > max ? `${stripped.slice(0, max - 1)}…` : stripped;
+}
+
 /** The notice body — shared by the text mail and the dev recording (user-entered fields escaped
  * only in the HTML mirror). The hint leads: a hinted invitation names its first destination in
  * the subject and the opening line, because that is what the invitee was invited FOR. */
-function inviteLines({
-  workspaceDisplayName,
-  inviteUrl,
-  agentUrl,
-  invitedBy,
-  hint,
-}: InviteEmailInput): {
+function inviteLines(input: InviteEmailInput): {
   subject: string;
   text: string;
   html: string;
 } {
+  const { hint } = input;
+  // EVERY user-influenced value is made mail-safe HERE, at compose time — control characters
+  // (a `\r\n` in a workspace name must never reach the subject) stripped and display fields
+  // cut to length; the URLs are server-built but ride the same strip as a belt.
+  const workspaceDisplayName = mailField(input.workspaceDisplayName);
+  const invitedBy = mailField(input.invitedBy);
+  const hintName = hint === undefined ? "" : mailField(hint.name);
+  const inviteUrl = stripMailControl(input.inviteUrl);
+  const agentUrl = stripMailControl(input.agentUrl);
   // What a person calls the thing this invitation leads with. A hint's `kind` is NOT always a
   // bundle kind — an invitation may lead with a CHANNEL, which the bundle records know nothing
   // about and would silently read as the plain case. Named first, then the records answer.
   const hintNoun = hint === undefined ? "" : hintNounFor(hint.kind);
-  const hintLead = hint === undefined ? "" : ` — starting with the ${hint.name} ${hintNoun}`;
+  const hintLead = hint === undefined ? "" : ` — starting with the ${hintName} ${hintNoun}`;
   const subject = `You're invited to ${workspaceDisplayName} on Topos${hintLead}`;
   const intro =
     `${invitedBy} invited you to ${workspaceDisplayName} on Topos — shared skills for your AI agents.` +
-    (hint === undefined ? "" : ` First up: the ${hint.name} ${hintNoun}.`);
+    (hint === undefined ? "" : ` First up: the ${hintName} ${hintNoun}.`);
   const agentPaste = `Set up Topos for us: fetch ${agentUrl} and follow it. Our invite: ${inviteUrl}`;
   const text =
     `${intro}\n\n` +
@@ -89,7 +106,7 @@ function inviteLines({
     `<p>${escapeHtml(invitedBy)} invited you to <strong>${escapeHtml(workspaceDisplayName)}</strong> on Topos — shared skills for your AI agents.${
       hint === undefined
         ? ""
-        : ` First up: the <strong>${escapeHtml(hint.name)}</strong> ${escapeHtml(hintNoun)}.`
+        : ` First up: the <strong>${escapeHtml(hintName)}</strong> ${escapeHtml(hintNoun)}.`
     }</p>` +
     `<p><a href="${escapeHtml(inviteUrl)}">Accept in your browser</a></p>` +
     `<p>Or ask your agent to join — paste this to it:</p>` +

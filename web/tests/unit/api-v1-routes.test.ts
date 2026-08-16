@@ -628,11 +628,11 @@ const SKILL_LEVEL_MESSAGE = "a skill protection level must be `reviewed` or `ope
 
 const BAD_REQUEST_CASES: BadRequestCase[] = [
   {
-    name: "notices/ack — a non-JSON body is a 400 (before auth)",
+    name: "notices/ack — a non-JSON body is a 400 (authenticated; auth precedes the body)",
     h: noticesAction,
     method: "POST",
     path: "/notices/ack",
-    cred: "unknown",
+    cred: "mem",
     rawBody: "{ not json",
     message: "malformed JSON body",
   },
@@ -653,20 +653,6 @@ const BAD_REQUEST_CASES: BadRequestCase[] = [
     message: SKILL_LEVEL_MESSAGE,
   },
   {
-    ...SKILL_PROT,
-    name: "skill protection — a wrong level is a 400 EVEN with a bad credential (level check precedes auth; a bad level is never a membership signal)",
-    cred: "unknown",
-    body: { level: "bogus" },
-    message: SKILL_LEVEL_MESSAGE,
-  },
-  {
-    ...SKILL_PROT,
-    name: "skill protection — a MALFORMED body with a bad credential is still 400 (body precedes auth)",
-    cred: "unknown",
-    rawBody: "{ not json",
-    message: "malformed JSON body",
-  },
-  {
     name: "channel protection — a wrong level is a 400 with the channel-specific message",
     h: channelProtAction,
     method: "PUT",
@@ -677,20 +663,20 @@ const BAD_REQUEST_CASES: BadRequestCase[] = [
     message: "a channel protection level must be `curated` or `open`",
   },
   {
-    name: "invitations — a body missing `emails` is a 400 (before auth)",
+    name: "invitations — a body missing `emails` is a 400 (authenticated; auth precedes the body)",
     h: invitationsAction,
     method: "POST",
     path: "/invitations",
-    cred: "unknown",
+    cred: "mem",
     body: { channels: [] },
     message: "malformed invitation body: emails",
   },
   {
-    name: "report — a malformed entry is a 400 naming the field (before auth)",
+    name: "report — a malformed entry is a 400 naming the field (authenticated)",
     h: reportAction,
     method: "PUT",
     path: "/report",
-    cred: "unknown",
+    cred: "mem",
     body: { schema_version: 1, applied: [{ skill_id: "s_alpha", version_id: "short" }] },
     message: "malformed report entry: version_id must be 64-char lowercase hex",
   },
@@ -727,6 +713,54 @@ describe("validation 400s", () => {
     );
     expect(token.status).toBe(400);
     expect(await token.json()).toEqual(badRequestBody("malformed login token body"));
+  });
+});
+
+// ── (d′) auth precedes the body — the lane-wide order ────────────────────────────────────────
+
+describe("auth precedes the body (an unknown credential is the uniform 404, whatever the body)", () => {
+  const UNKNOWN_CRED_CASES: LaneCase[] = [
+    {
+      ...SKILL_PROT,
+      name: "skill protection — a wrong level",
+      cred: "unknown",
+      body: { level: "bogus" },
+    },
+    {
+      ...SKILL_PROT,
+      name: "skill protection — a malformed body",
+      cred: "unknown",
+      rawBody: "{ not json",
+    },
+    {
+      name: "invitations — a missing field",
+      h: invitationsAction,
+      method: "POST",
+      path: "/invitations",
+      cred: "unknown",
+      body: { channels: [] },
+    },
+    {
+      name: "report — a malformed entry",
+      h: reportAction,
+      method: "PUT",
+      path: "/report",
+      cred: "unknown",
+      body: { schema_version: 1, applied: [{ skill_id: "s_alpha", version_id: "short" }] },
+    },
+    {
+      name: "notices/ack — a non-JSON body",
+      h: noticesAction,
+      method: "POST",
+      path: "/notices/ack",
+      cred: "unknown",
+      rawBody: "{ not json",
+    },
+  ];
+  it.each(titled(UNKNOWN_CRED_CASES))("%s", async (_name, c) => {
+    const res = await driveCase(c);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(NOT_FOUND_BODY);
   });
 });
 

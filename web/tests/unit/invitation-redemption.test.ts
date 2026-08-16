@@ -29,6 +29,11 @@ beforeAll(async () => {
   db = await createScratchDb("invredeem");
   ws = await bootWorkspace();
   await seedUser(db, INVITER, "Inviter", "inviter@acme.test");
+  // Age the inviter past 48h so this suite's many invites ride the 50/day floor, not the
+  // young-account 10/day one (invite-caps.server.ts — that floor has its own suite).
+  await db.q(`UPDATE web."user" SET created_at = now() - interval '3 days' WHERE id = $1`, [
+    INVITER,
+  ]);
   await seatUser(db, ws, INVITER, "owner");
   await seedBundle(db, ws, "s_deploy", "deploy");
   await placeInDefault(db, ws, "s_deploy");

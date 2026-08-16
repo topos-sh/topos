@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { ActionFunctionArgs } from "react-router";
 import {
   parseBundleKind,
@@ -6,10 +7,10 @@ import {
   receiptNow,
 } from "@/lib/api/candidate.server";
 import { laneGate } from "@/lib/api/compat.server";
-import { publishFlow } from "@/lib/api/publish-flow.server";
+import { publishFlow, storageQuotaRefusal } from "@/lib/api/publish-flow.server";
 import { buildReceipt, deniedEnvelope, envelopeResponse } from "@/lib/api/receipts.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { requireSessionActorPreBody } from "@/lib/auth/guards.server";
 import { findReceipt } from "@/lib/db/queries.custody.server";
 
 /**
@@ -27,6 +28,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (request.method !== "POST") {
     return uniformNotFound();
   }
+  // AUTH BEFORE THE BODY: the credential resolves first (it is workspace-scoped, so the live
+  // session names the one workspace it may act in), so an unauthenticated caller is refused
+  // before this tier buffers anything against the large propose cap. The body's workspace is
+  // then HELD against the session's below — a mismatch is the same uniform 404 the old
+  // workspace-keyed resolve answered.
+  const actor = await requireSessionActorPreBody(request);
   const raw = await readCappedBody(request, BODY_CAP, "propose body");
   if (raw instanceof Response) {
     return raw;
@@ -53,8 +60,10 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (typeof kind === "string") {
     return badRequest(kind);
   }
+  if (head.workspaceId !== actor.workspaceId) {
+    return uniformNotFound();
+  }
 
-  const actor = await requireSessionActor(request, head.workspaceId);
   const replay = await findReceipt(actor, head.opId, raw);
   if (replay.kind === "replay") {
     return envelopeResponse(replay.outcome);
@@ -70,6 +79,13 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
       createdAt: receiptNow(),
     });
     return envelopeResponse(deniedEnvelope("publish", "OP_ID_REUSED", undefined, receipt));
+  }
+
+  // The per-workspace storage quota — after auth and the replay check (a replayed op re-serves
+  // its stored envelope), before any vault ingest. A no-op without a `storage-bytes` limit.
+  const quota = await storageQuotaRefusal(actor, head.opId, "publish", Buffer.byteLength(raw));
+  if (quota !== null) {
+    return quota;
   }
 
   return publishFlow({

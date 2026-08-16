@@ -14,7 +14,12 @@ import {
 import { baseOf, bundleNameOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
-import { movePointerWithKindPrecondition } from "@/lib/db/queries.custody.server";
+import {
+  historyWindowDays,
+  movePointerWithKindPrecondition,
+  versionCreatedAtMap,
+  versionOutsideHistoryWindow,
+} from "@/lib/db/queries.custody.server";
 import { purgeVersion } from "@/lib/db/queries.lifecycle.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
@@ -114,12 +119,32 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       row.versionId,
       { depth: DEPTH, from: resume },
     );
+    // The history window (`history-days`, a no-op without a limit): rows older than the cutoff
+    // are ANNOTATED server-side — nothing is deleted, and the revert action below refuses them
+    // (a wider window restores access whole). Computed from the custody mirror's own recorded
+    // creation times.
+    const windowDays = await historyWindowDays(ws);
+    const locked = new Set<string>();
+    if (windowDays !== null && page.steps.length > 0) {
+      const createdAt = await versionCreatedAtMap(
+        actor,
+        row.skillId,
+        page.steps.map((s) => s.versionId),
+      );
+      const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
+      for (const step of page.steps) {
+        const at = createdAt.get(step.versionId);
+        if (at !== undefined && at.getTime() < cutoff) {
+          locked.add(step.versionId);
+        }
+      }
+    }
     history = {
       published: true,
       head: row.versionId,
       canRevert: actor.role !== "member",
       expectedGeneration: String(row.generation),
-      steps: page.steps,
+      steps: page.steps.map((s) => ({ ...s, locked: locked.has(s.versionId) })),
       cursor: page.cursor,
       truncated: page.truncated,
     };
@@ -199,6 +224,15 @@ async function revertAction(
     return data<RevertActionData>({ status: "error" });
   }
   const short = good.slice(0, 12);
+
+  // The history window (`history-days`, a no-op without a limit): a target older than the
+  // window refuses in the same words the lane's revert door uses.
+  if (await versionOutsideHistoryWindow(actor, row.skillId, good)) {
+    return data<RevertActionData>({
+      status: "denied",
+      reason: "That version is outside this workspace's history window.",
+    });
+  }
 
   const carryForward = () =>
     revertPointer(ws, row.skillId, {

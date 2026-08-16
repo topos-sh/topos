@@ -8,7 +8,8 @@ import { laneAckNotices } from "@/lib/db/queries.lane.server";
 /**
  * `POST /api/v1/workspaces/{ws}/notices/ack` — mark the caller's own notices read by id (the
  * delivery feed carries them unacked; an interactive session acks what it narrated). A JSON
- * body `{ ids }`; a malformed body is a 400 BEFORE the credential resolve. Idempotent (only
+ * body `{ ids }`; the credential resolves BEFORE the body (the lane-wide order — an
+ * unauthenticated caller buffers nothing and meets only the uniform 404). Idempotent (only
  * the person's own unacked rows move); the 200 envelope carries `{ status: "acked" }`.
  */
 const BODY_CAP = 64 * 1024;
@@ -21,6 +22,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "POST") {
     return uniformNotFound();
   }
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const body = await readCappedBody(request, BODY_CAP, "notices ack body");
   if (body instanceof Response) {
     return body;
@@ -40,7 +42,6 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   ) {
     return badRequest("malformed notices ack body");
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
   const status = await laneAckNotices(actor, ids as string[]);
   return rowOpResponse("notices", status, { acked: "acked" }, {});
 }

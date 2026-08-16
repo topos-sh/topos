@@ -917,6 +917,10 @@ export const auditEvent = webSchema.table(
     index("audit_ws_time").on(table.workspaceId, table.createdAt),
     index("audit_actor_user").on(table.actorUserId).where(sql`actor_user_id is not null`),
     index("audit_actor_session").on(table.actorSessionId).where(sql`actor_session_id is not null`),
+    // The per-address invite-cooldown read (server-wide, subject = the invited address).
+    index("audit_invite_subject")
+      .on(table.subject, table.createdAt)
+      .where(sql`kind = 'invitation_created'`),
   ],
 );
 

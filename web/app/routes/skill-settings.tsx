@@ -261,6 +261,12 @@ async function protectionIntent(request: Request, ws: string, skill: string, for
   if (outcome.outcome === "set") {
     return data<SettingsFormError>({ form: "protection", message: "" });
   }
+  if (outcome.outcome === "reviews_unavailable") {
+    return data<SettingsFormError>({
+      form: "protection",
+      message: "Review protection is not available on this workspace.",
+    });
+  }
   return data<SettingsFormError>({ form: "protection", message: "This skill no longer exists." });
 }
 

@@ -115,6 +115,9 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "PUT") {
     return uniformNotFound();
   }
+  // AUTH BEFORE THE BODY — the lane-wide order: only an authenticated session can make this
+  // tier buffer against the report cap (which is sized generously; see above).
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const body = await readCappedBody(request, BODY_CAP, "report body");
   if (body instanceof Response) {
     return body;
@@ -151,7 +154,6 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     }
     applied.push({ skillId: row.skill_id, versionId: row.version_id, harnesses });
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
   const outcome = await reportApplied(actor, applied);
   if (outcome === "session_ended") {
     // The session ended between the guard and the write (a revocation won the race) — the

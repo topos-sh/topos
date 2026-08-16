@@ -5,11 +5,20 @@ import { BusyFields, buttonClasses } from "@/components/ui";
 /** The members route's typed reply for `intent=invite`. */
 interface InviteActionData {
   intent: "invite";
-  status: "invited" | "owner_required" | "mail_unarmed" | "error";
+  status:
+    | "invited"
+    | "owner_required"
+    | "mail_unarmed"
+    | "error"
+    | "too_many"
+    | "invite_limit"
+    | "member_limit";
   /** Echoed on a non-success so the field keeps the typed addresses. */
   submittedEmails?: string;
   /** The addresses invited, on success. */
   invited?: string[];
+  /** Addresses not re-sent — each was already invited recently (server-wide cooldown). */
+  skipped?: string[];
   /** Whether the notice mail went out (the invitation row stands regardless). */
   emailSent?: boolean;
 }
@@ -85,10 +94,20 @@ export function InviteMemberForm({ mailArmed, isOwner }: { mailArmed: boolean; i
       </p>
       {state?.status === "invited" && (
         <p className="text-sm text-dim" role="status">
-          Invited {state.invited?.join(", ") ?? "your teammates"} as members.{" "}
-          {state.emailSent
-            ? "They were emailed the workspace address; each joins by signing up under the invited email."
-            : "The invitation stands, but the mail didn't send — invite the address again to resend."}
+          {(state.invited?.length ?? 0) > 0 && (
+            <>
+              Invited {state.invited?.join(", ")} as members.{" "}
+              {state.emailSent
+                ? "They were emailed the workspace address; each joins by signing up under the invited email."
+                : "The invitation stands, but the mail didn't send — invite the address again to resend."}
+            </>
+          )}
+          {(state.skipped?.length ?? 0) > 0 && (
+            <>
+              {(state.invited?.length ?? 0) > 0 ? " " : ""}
+              Didn&apos;t send to {state.skipped?.join(", ")} — already invited recently.
+            </>
+          )}
         </p>
       )}
       {state?.status === "owner_required" && (
@@ -99,6 +118,21 @@ export function InviteMemberForm({ mailArmed, isOwner }: { mailArmed: boolean; i
       {state?.status === "mail_unarmed" && (
         <p className="text-red-600 text-sm" role="alert">
           Mail isn&apos;t configured on this deployment — set TOPOS_MAIL_SMTP_* to invite.
+        </p>
+      )}
+      {state?.status === "too_many" && (
+        <p className="text-red-600 text-sm" role="alert">
+          Too many addresses at once. Send up to 10 invitations at a time.
+        </p>
+      )}
+      {state?.status === "invite_limit" && (
+        <p className="text-red-600 text-sm" role="alert">
+          Invitation limit reached for today. Try again tomorrow.
+        </p>
+      )}
+      {state?.status === "member_limit" && (
+        <p className="text-red-600 text-sm" role="alert">
+          This workspace is at its member limit.
         </p>
       )}
       {state?.status === "error" && (

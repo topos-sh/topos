@@ -218,8 +218,19 @@ async function inviteToSkillIntent(
     });
     return { intent: "invite" as const, status: "owner_required" as const, submittedEmail: raw };
   }
+  // The invitation caps (invite-caps.server.ts) — typed, honest refusals, the address kept.
+  if (outcome.outcome === "invite_limit") {
+    return { intent: "invite" as const, status: "invite_limit" as const, submittedEmail: raw };
+  }
+  if (outcome.outcome === "member_limit") {
+    return { intent: "invite" as const, status: "member_limit" as const, submittedEmail: raw };
+  }
   if (outcome.outcome !== "invited") {
     return { intent: "invite" as const, status: "error" as const, submittedEmail: raw };
+  }
+  if (outcome.minted.length === 0) {
+    // The one address was on its cooldown — nothing minted, nothing mailed.
+    return { intent: "invite" as const, status: "skipped" as const, invited: folded };
   }
 
   let emailSent = true;

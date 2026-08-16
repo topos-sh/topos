@@ -160,14 +160,18 @@ async function knobIntent<Outcome extends string>(
   return { status: "denied", error: args.deniedError(outcome) };
 }
 
-/** The review-required gate — the workspace's protection DEFAULT, as one switch. */
+/** The review-required gate — the workspace's protection DEFAULT, as one switch. Enabling it
+ * is entitlement-gated (`allows("reviews")`); switching it back off never is. */
 async function reviewRequiredIntent(request: Request, ws: string, formData: FormData) {
   const value = String(formData.get("review_required") ?? "") === "true";
   const result = await knobIntent(request, ws, {
     auditKind: "policy_review_default",
     detail: value ? "reviewed" : "open",
     run: (owner) => setReviewDefault(owner, value),
-    deniedError: () => SERVER_ERROR,
+    deniedError: (outcome) =>
+      outcome === "reviews_unavailable"
+        ? "Review protection is not available on this workspace."
+        : SERVER_ERROR,
   });
   return { intent: "set-review-required" as const, ...result };
 }
