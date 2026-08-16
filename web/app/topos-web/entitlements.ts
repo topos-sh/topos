@@ -8,6 +8,12 @@
  * A downstream provider is also in-process — an interface implementation reading its own
  * tables, never an RPC.
  *
+ * PROVIDER CONTRACT: `forWorkspace` may be called while the caller holds an OPEN DATABASE
+ * TRANSACTION (the cap checks run inside their write transactions, advisory locks held), so a
+ * provider must answer WITHOUT borrowing the web app's connection pool — its own client, or an
+ * in-process cache — or concurrent writes could occupy every pooled connection while each
+ * waits on a provider query that needs one. The OSS default touches no I/O at all.
+ *
  * THE KEYS THE PRODUCT CONSULTS — each named once here, with its scope, its default when the
  * provider answers nothing (`null` / `true`), and where it is enforced. Refusal copy at every
  * enforcement point is neutral ("limit for this workspace") — this seam is the only coupling a

@@ -200,30 +200,53 @@ async function activeBundleCount(executor: Pick<Tx, "execute">, ws: string): Pro
   return (rows.rows[0] as { n: number } | undefined)?.n ?? 0;
 }
 
+/** Whether an ACTIVE row with this id already stands in this workspace — such a "creation"
+ * adds no row (the registration no-ops on the id), so the cap must not refuse its retry. */
+async function activeBundleExists(
+  executor: Pick<Tx, "execute">,
+  ws: string,
+  bundleId: string,
+): Promise<boolean> {
+  const rows = await executor.execute(
+    sql`SELECT 1 FROM ${bundle}
+        WHERE workspace_id = ${ws} AND id = ${bundleId} AND status = 'active' LIMIT 1`,
+  );
+  return rows.rows.length > 0;
+}
+
 /**
- * The bundle cap (`bundles` — active catalog rows), consulted ONLY when a NEW bundle identity
- * is being created; new versions of existing bundles never come through here. A no-op without
- * a limit (the OSS default). Two spellings of one check:
+ * The bundle cap (`bundles` — active catalog rows), consulted ONLY where an ACTIVE row may be
+ * ADDED: a new identity's genesis, and unarchive. New versions of existing bundles never come
+ * through here, and a retry naming an id that already stands ACTIVE here is no growth — the
+ * registration no-ops on it, so refusing would turn a lost-ack retry of a landed publish into
+ * `BUNDLE_LIMIT_REACHED`. A no-op without a limit (the OSS default). Two spellings of one
+ * check:
  *  - `bundleCapRefusal` runs BEFORE the vault call — the cheap read that keeps the common
  *    refusal from leaving ingested bytes behind;
  *  - `bundleCapRefusalInTx` is the AUTHORITY, inside the registration transaction under an
  *    advisory lock, so two concurrent geneses at the boundary serialize instead of both
  *    slipping past the count.
  */
-export async function bundleCapRefusal(actor: PublishActor): Promise<McpGateRefusal | null> {
+export async function bundleCapRefusal(
+  actor: PublishActor,
+  bundleId: string,
+): Promise<McpGateRefusal | null> {
   const entitlements = await composition.entitlements.forWorkspace(actor.workspaceId);
   const limit = entitlements.limit("bundles");
   if (limit === null) {
     return null;
   }
-  return (await activeBundleCount(getDb(), actor.workspaceId)) >= limit
-    ? BUNDLE_LIMIT_REFUSAL
-    : null;
+  const db = getDb();
+  if (await activeBundleExists(db, actor.workspaceId, bundleId)) {
+    return null;
+  }
+  return (await activeBundleCount(db, actor.workspaceId)) >= limit ? BUNDLE_LIMIT_REFUSAL : null;
 }
 
 export async function bundleCapRefusalInTx(
   tx: Tx,
   actor: PublishActor,
+  bundleId: string,
 ): Promise<McpGateRefusal | null> {
   const entitlements = await composition.entitlements.forWorkspace(actor.workspaceId);
   const limit = entitlements.limit("bundles");
@@ -231,6 +254,9 @@ export async function bundleCapRefusalInTx(
     return null;
   }
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`bundles:${actor.workspaceId}`}))`);
+  if (await activeBundleExists(tx, actor.workspaceId, bundleId)) {
+    return null;
+  }
   return (await activeBundleCount(tx, actor.workspaceId)) >= limit ? BUNDLE_LIMIT_REFUSAL : null;
 }
 

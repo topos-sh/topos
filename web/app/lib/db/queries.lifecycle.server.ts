@@ -253,7 +253,7 @@ export async function unarchiveBundle(
     // BEFORE the MCP name claim below, load-bearingly: this typed refusal COMMITS, and a
     // claim already written by then would leave an archived bundle monopolizing a registry
     // name it does not serve — archive keeps meaning the name is released.
-    if ((await bundleCapRefusalInTx(tx, actor)) !== null) {
+    if ((await bundleCapRefusalInTx(tx, actor, bundleId)) !== null) {
       return { outcome: "bundle_limit" } as const;
     }
     // An MCP bundle carries a SECOND name — the registry name inside its document — and that

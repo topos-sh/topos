@@ -25,17 +25,30 @@ export async function storageStats(): Promise<Map<string, number>> {
 }
 
 /**
+ * How long one stat read answers every quota check before the vault is asked again. The
+ * admission is bounded-overshoot by design (storage-quota.server.ts), so a briefly stale
+ * total only widens that bound by what lands within the window — and without it, a
+ * multi-tenant store would pay the vault's whole-store accounting scan on EVERY capped
+ * ingest (twice on a genesis: the route door and the shared genesis door both ask). A
+ * workspace-scoped vault read would retire both the cache and the app-side filter.
+ */
+const STORED_BYTES_TTL_MS = 10_000;
+let statCache: { at: number; stats: Map<string, number> } | null = null;
+
+/**
  * ONE workspace's stored bytes, for the publish-ingest quota check — the same vault stat,
  * filtered app-side (the vault knows numbers, never identity; a workspace with no custody yet
- * simply has no entry, which is 0). FAIL-OPEN BY DESIGN: a stat failure returns `null` and the
- * caller allows — the ingest shares the same backend and will fail on a real outage — but the
- * failure is logged, because a quota that silently stopped being enforced is a fact an
- * operator needs.
+ * simply has no entry, which is 0) and cached for a few seconds (above). FAIL-OPEN BY DESIGN:
+ * a stat failure returns `null` and the caller allows — the ingest shares the same backend and
+ * will fail on a real outage — but the failure is logged, because a quota that silently
+ * stopped being enforced is a fact an operator needs. Failures are never cached.
  */
 export async function workspaceStoredBytes(workspaceId: string): Promise<number | null> {
   try {
-    const stats = await storageStats();
-    return stats.get(workspaceId) ?? 0;
+    if (statCache === null || Date.now() - statCache.at > STORED_BYTES_TTL_MS) {
+      statCache = { at: Date.now(), stats: await storageStats() };
+    }
+    return statCache.stats.get(workspaceId) ?? 0;
   } catch (error) {
     // The deliberate fail-open trace (message only — storageStats errors are fixed,
     // credential-free strings).

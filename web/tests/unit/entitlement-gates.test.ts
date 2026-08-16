@@ -142,6 +142,22 @@ describe("the bundle cap (`bundles`)", () => {
     }
   });
 
+  it("a retry naming an id already ACTIVE here is no growth — never refused at the cap", async () => {
+    const custody = await import("@/lib/db/queries.custody.server");
+    const session = asSession(wsId, "u_owner", "cred_owner", "owner");
+    // ONE active bundle (b_guarded) at a limit of 1: a duplicated/lost-ack retry of THAT
+    // bundle's genesis registers nothing new and must not read BUNDLE_LIMIT_REACHED…
+    seam.limits.bundles = 1;
+    try {
+      expect(await custody.bundleCapRefusal(session, "b_guarded")).toBeNull();
+      // …while a genuinely new identity still refuses.
+      const fresh = await custody.bundleCapRefusal(session, "b_new_identity");
+      expect(fresh?.code).toBe("BUNDLE_LIMIT_REACHED");
+    } finally {
+      delete seam.limits.bundles;
+    }
+  });
+
   it("archived bundles do not count against the cap (active rows only)", async () => {
     const custody = await import("@/lib/db/queries.custody.server");
     await db.q(
@@ -150,9 +166,9 @@ describe("the bundle cap (`bundles`)", () => {
     try {
       seam.limits.bundles = 1;
       const session = asSession(wsId, "u_owner", "cred_owner", "owner");
-      expect(await custody.bundleCapRefusal(session)).toBeNull();
+      expect(await custody.bundleCapRefusal(session, "b_fresh")).toBeNull();
       seam.limits.bundles = 0;
-      const refused = await custody.bundleCapRefusal(session);
+      const refused = await custody.bundleCapRefusal(session, "b_fresh");
       expect(refused?.code).toBe("BUNDLE_LIMIT_REACHED");
     } finally {
       delete seam.limits.bundles;
