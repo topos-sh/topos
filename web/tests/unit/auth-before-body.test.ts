@@ -238,8 +238,38 @@ describe("the storage quota (`storage-bytes`)", () => {
     }
   });
 
+  it("the SHARED GENESIS PATH meets the quota too — the web import doors cannot ingest around it", async () => {
+    const { publishGenesisBundle } = await import("@/lib/api/genesis.server");
+    const { asSession } = await import("./helpers/scratch-db");
+    seam.storedBytes = 8;
+    seam.limits["storage-bytes"] = 10;
+    try {
+      const landed = await publishGenesisBundle({
+        actor: asSession(wsId, "u_owner", "cred_owner", "owner"),
+        kind: "skill",
+        candidate: {
+          // "hello" — 5 decoded bytes: 8 + 5 > 10. No vault runs in this suite, so the typed
+          // refusal PROVES the quota answered before any custody call.
+          files: [{ path: "SKILL.md", mode: "100644", content_base64: "aGVsbG8=" }],
+          attribution: "Owner",
+          message: "genesis",
+        },
+        displayName: "capped-by-storage",
+        destination: null,
+      });
+      expect(landed.kind).toBe("refused");
+      if (landed.kind === "refused") {
+        expect(landed.refusal.code).toBe("STORAGE_LIMIT_REACHED");
+        expect(landed.refusal.message).toBe("Storage limit reached for this workspace.");
+      }
+    } finally {
+      delete seam.limits["storage-bytes"];
+      seam.storedBytes = 0;
+    }
+  });
+
   it("candidateStoredBytes prices the decoded tree, arithmetically", async () => {
-    const { candidateStoredBytes } = await import("@/lib/api/publish-flow.server");
+    const { candidateStoredBytes } = await import("@/lib/api/storage-quota.server");
     const candidate = (contents: string[]) => ({
       files: contents.map((content_base64, i) => ({
         path: `f${i}`,
@@ -259,7 +289,7 @@ describe("the storage quota (`storage-bytes`)", () => {
   });
 
   it("a failed stat read ALLOWS (fail-open); an absent limit never reads the stat at all", async () => {
-    const { storageQuotaRefusal } = await import("@/lib/api/publish-flow.server");
+    const { storageQuotaRefusal } = await import("@/lib/api/storage-quota.server");
     const { asSession } = await import("./helpers/scratch-db");
     const actor = asSession(wsId, "u_owner", "cred_owner", "owner");
     // Stat failure under a tight limit: allow (the ingest shares the backend and fails there).

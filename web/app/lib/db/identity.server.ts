@@ -5,7 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { type Db, getDb, isUniqueViolation } from "./index.server";
-import { memberCapReachedInTx } from "./invite-caps.server";
+import { lockMemberCapInTx, memberCapReachedInTx } from "./invite-caps.server";
 import {
   assignment,
   auditEvent,
@@ -914,7 +914,12 @@ export type LoginApproveOutcome =
   /** The create arm's per-person floors (counted inside the birth fence, exactly as /new's) —
    * typed, honest, and the flow stays pending. */
   | { outcome: "rate-limited" }
-  | { outcome: "owned-limit" };
+  | { outcome: "owned-limit" }
+  /** An invitation-bound approval met the workspace's member limit: BOTH the flow and the
+   * invitation stay pending (nothing consumed; the same approval works once there is room),
+   * and the refusal is reported rather than folded into "gone" — or worse, fallen through to
+   * a workspace the invitation never named. */
+  | { outcome: "workspace-full" };
 
 /** The in-transaction abort sentinel: an approval that cannot complete must ROLL BACK any
  * invitation accept or workspace birth it already made (a bare `return null` from a Drizzle
@@ -926,6 +931,8 @@ const APPROVE_TAKEN = Symbol("login-approve-taken");
 /** The create arm's floor rollbacks — the same discipline, surfaced typed like `taken`. */
 const APPROVE_RATE_LIMITED = Symbol("login-approve-rate-limited");
 const APPROVE_OWNED_LIMIT = Symbol("login-approve-owned-limit");
+/** The invitation arms' member-limit rollback — typed; the flow and invitation stay pending. */
+const APPROVE_WORKSPACE_FULL = Symbol("login-approve-workspace-full");
 
 /**
  * FENCE 2 — the login-flow approve, one FOR UPDATE transaction: lock the pending row by
@@ -982,10 +989,9 @@ export async function approveLoginFlow(
       // the exchange later re-reads. The fences answer wrong_account/unverified BEFORE any
       // write, so falling through to the posted choice commits nothing of the invitation.
       if (row.invite_token_sha256 !== null) {
-        const inv = await lockPendingInvitationTx(
-          tx,
-          sql`i.token_sha256 = ${row.invite_token_sha256}`,
-        );
+        const byToken = sql`i.token_sha256 = ${row.invite_token_sha256}`;
+        await lockMemberCapForInvitationTx(tx, byToken);
+        const inv = await lockPendingInvitationTx(tx, byToken);
         if (inv !== null) {
           const outcome = await acceptInvitationTx(tx, inv, await sessionAccountTx(tx, approver), {
             mailboxProven: false,
@@ -993,6 +999,11 @@ export async function approveLoginFlow(
           if (outcome.outcome === "accepted") {
             chosenWorkspaceId = outcome.workspaceId;
             via = "invite-token";
+          } else if (outcome.outcome === "workspace_full") {
+            // The token BINDS this flow to its one workspace: a member-limit refusal must
+            // never fall through to the posted choice and connect somewhere the invitation
+            // never named. Typed rollback — flow and invitation both stay pending.
+            throw APPROVE_WORKSPACE_FULL;
           }
         }
       }
@@ -1013,13 +1024,20 @@ export async function approveLoginFlow(
         } else if (choice.kind === "invitation") {
           // The approver's OWN pending invitation, by id — the same accept fences as the token
           // weave (addressee + verified mailbox), so a guessed id buys nothing.
-          const inv = await lockPendingInvitationTx(tx, sql`i.id = ${choice.id}`);
+          const byId = sql`i.id = ${choice.id}`;
+          await lockMemberCapForInvitationTx(tx, byId);
+          const inv = await lockPendingInvitationTx(tx, byId);
           if (inv === null) {
             throw APPROVE_ABORT;
           }
           const outcome = await acceptInvitationTx(tx, inv, await sessionAccountTx(tx, approver), {
             mailboxProven: false,
           });
+          if (outcome.outcome === "workspace_full") {
+            // Typed, not folded into "gone": the flow and the invitation both remain pending,
+            // and the approver deserves the actual refusal.
+            throw APPROVE_WORKSPACE_FULL;
+          }
           if (outcome.outcome !== "accepted") {
             throw APPROVE_ABORT;
           }
@@ -1098,6 +1116,9 @@ export async function approveLoginFlow(
     }
     if (error === APPROVE_OWNED_LIMIT) {
       return { outcome: "owned-limit" };
+    }
+    if (error === APPROVE_WORKSPACE_FULL) {
+      return { outcome: "workspace-full" };
     }
     throw error;
   }
@@ -1677,6 +1698,22 @@ export async function bindInvitedSeats(
 ): Promise<number> {
   const lowered = email.trim().toLowerCase();
   return await getDb().transaction(async (tx) => {
+    // The members-cap advisory locks come BEFORE the row locks (the one lock order every
+    // ceremony follows — the invite door holds the same advisory key while it upserts these
+    // rows, so taking rows first would invert into a deadlock). A workspace's id never moves
+    // between rows, so the unlocked peek is stable; sorted, so two concurrent bindings with
+    // overlapping sets queue instead of cycling. A no-op per workspace without a limit.
+    const peek = await tx.execute(
+      sql`SELECT DISTINCT workspace_id FROM web.invitation
+          WHERE email = ${lowered} AND status = 'pending'
+            AND (expires_at IS NULL OR expires_at > now())`,
+    );
+    const workspaceIds = (peek.rows as { workspace_id: string }[])
+      .map((r) => r.workspace_id)
+      .sort();
+    for (const wsId of workspaceIds) {
+      await lockMemberCapInTx(tx, wsId);
+    }
     const rows = await tx.execute(
       sql`SELECT id, workspace_id, role, invited_by FROM web.invitation
           WHERE email = ${lowered} AND status = 'pending'
@@ -1914,6 +1951,27 @@ interface LockedInvitation {
   hintChannelId: string | null;
 }
 
+/**
+ * Peek the workspace a live invitation names (NO lock) and take the members-cap advisory lock
+ * for it — called BEFORE `lockPendingInvitationTx`, so the one lock order every ceremony
+ * follows (members advisory → invitation row) holds here too: the invite door holds the same
+ * advisory key while it upserts invitation rows, so an accept that locked its row first would
+ * invert into a deadlock. The workspace id of an invitation row never changes, so the unlocked
+ * peek is stable; a dead token peeks nothing and locks nothing; a no-op without a `members`
+ * limit (the OSS default).
+ */
+async function lockMemberCapForInvitationTx(tx: Tx, cond: ReturnType<typeof sql>): Promise<void> {
+  const rows = await tx.execute(
+    sql`SELECT i.workspace_id FROM web.invitation i
+        WHERE ${cond} AND i.status = 'pending'
+          AND (i.expires_at IS NULL OR i.expires_at > now())`,
+  );
+  const ws = (rows.rows[0] as { workspace_id: string } | undefined)?.workspace_id;
+  if (ws !== undefined) {
+    await lockMemberCapInTx(tx, ws);
+  }
+}
+
 /** Lock ONE live (pending, unexpired) invitation row by an arbitrary predicate — the shared
  * FOR-UPDATE fence of accept, decline, and the login-approval weave. */
 async function lockPendingInvitationTx(
@@ -2096,7 +2154,9 @@ export async function acceptInvitationByToken(
   opts: { mailboxProven: boolean },
 ): Promise<InviteAcceptOutcome> {
   return await getDb().transaction(async (tx) => {
-    const inv = await lockPendingInvitationTx(tx, sql`i.token_sha256 = ${sha256OfText(token)}`);
+    const byToken = sql`i.token_sha256 = ${sha256OfText(token)}`;
+    await lockMemberCapForInvitationTx(tx, byToken);
+    const inv = await lockPendingInvitationTx(tx, byToken);
     if (inv === null) {
       return { outcome: "gone" };
     }

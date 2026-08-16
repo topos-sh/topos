@@ -4,7 +4,11 @@ import { kindEntry } from "@/lib/bundle-base";
 import { releaseBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
-import { claimCurrentNameInTx, isReservedBundleName } from "@/lib/db/queries.custody.server";
+import {
+  bundleCapRefusalInTx,
+  claimCurrentNameInTx,
+  isReservedBundleName,
+} from "@/lib/db/queries.custody.server";
 import { reviewsEnableRefused } from "@/lib/db/queries.lane.server";
 import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
 import { deleteBundleBytes, purgeVersionBytes } from "@/lib/plane/custody.server";
@@ -210,7 +214,10 @@ export type UnarchiveOutcome =
   | { outcome: "mcp_name_taken" }
   | { outcome: "mcp_document_unreadable" }
   | { outcome: "not_archived" }
-  | { outcome: "unknown_skill" };
+  | { outcome: "unknown_skill" }
+  /** The workspace's bundle limit (`bundles` — ACTIVE rows) is reached: restoring would step
+   * over the same cap a genesis meets, so it refuses under the same lock. */
+  | { outcome: "bundle_limit" };
 
 /** Unarchive — renames back if the base name is still free, else a typed refusal. Channel
  * placements are NOT restored (curation moved on); re-entitled detach records heal. */
@@ -259,6 +266,12 @@ export async function unarchiveBundle(
       if (claim === "taken") {
         return { outcome: "mcp_name_taken" } as const;
       }
+    }
+    // The bundle cap counts ACTIVE rows, so archived→active is the same step past it a
+    // genesis takes — checked here under the same advisory lock (a no-op without a limit),
+    // or archive-then-replace-then-unarchive would mint one active bundle over the cap.
+    if ((await bundleCapRefusalInTx(tx, actor)) !== null) {
+      return { outcome: "bundle_limit" } as const;
     }
     await tx
       .update(bundle)

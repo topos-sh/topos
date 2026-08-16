@@ -174,3 +174,39 @@ describe("bindInvitedSeats under a members limit", () => {
     }
   });
 });
+
+describe("approveLoginFlow at a full workspace", () => {
+  it("an invitation-bound approval answers `workspace-full` typed — flow AND invitation stay pending", async () => {
+    const id = await identity();
+    await seedUser(db, "u_eve", "Eve", "eve@example.com");
+    await db.q(`UPDATE web."user" SET email_verified = true WHERE id = 'u_eve'`);
+    await seedInvitation("eve@example.com");
+    const invRows = await db.q<{ id: string }>(
+      `SELECT id FROM web.invitation WHERE email = 'eve@example.com' AND status = 'pending'`,
+    );
+    const invId = invRows[0]?.id ?? "";
+    const flow = await id.startLoginFlow("eve-box", null);
+    // Seats stand at 4 (owner, Bea, Cal, Dee) — a limit of 4 is full.
+    seam.limits.members = 4;
+    try {
+      const refused = await id.approveLoginFlow(
+        flow.userCode,
+        { userId: "u_eve", display: "Eve" },
+        { kind: "invitation", id: invId },
+      );
+      expect(refused).toEqual({ outcome: "workspace-full" });
+      expect(await invitationStatus("eve@example.com")).toBe("pending");
+      expect((await id.pollLoginFlow(flow.flowCode)).status).toBe("pending");
+      // Room opens: the SAME approval completes.
+      seam.limits.members = 10;
+      const approved = await id.approveLoginFlow(
+        flow.userCode,
+        { userId: "u_eve", display: "Eve" },
+        { kind: "invitation", id: invId },
+      );
+      expect(approved?.outcome).toBe("approved");
+    } finally {
+      delete seam.limits.members;
+    }
+  });
+});

@@ -1,3 +1,4 @@
+import { candidateStoredBytes, storageCapRefusalForIngest } from "@/lib/api/storage-quota.server";
 import { type BundleKind, kindEntry } from "@/lib/bundle-base";
 import { claimBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { mintBundleId } from "@/lib/db/identity.server";
@@ -147,6 +148,14 @@ export async function publishGenesisBundle<T = undefined>(
   const capped = await bundleCapRefusal(args.actor);
   if (capped !== null) {
     return { kind: "refused", refusal: capped };
+  }
+
+  // THE STORAGE QUOTA (`storage-bytes`), HERE so every genesis door meets it — the web
+  // creation pages call this path directly, never the lane routes' own check — and before any
+  // custody call, so a refusal leaves no ingested bytes (a no-op without a limit).
+  const overQuota = await storageCapRefusalForIngest(ws, candidateStoredBytes(args.candidate));
+  if (overQuota !== null) {
+    return { kind: "refused", refusal: overQuota };
   }
 
   // THE KIND'S GATE, before any custody call — a refused candidate must leave no ingested bytes
