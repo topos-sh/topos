@@ -4,4 +4,4 @@
  */
 
 /** The release version of the build serving this app — what the protocol card declares. */
-export const SERVER_RELEASE_VERSION = "0.1.40";
+export const SERVER_RELEASE_VERSION = "0.1.41";
