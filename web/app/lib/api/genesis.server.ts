@@ -145,7 +145,7 @@ export async function publishGenesisBundle<T = undefined>(
   // ingest bytes it will never register (a no-op without a limit; the in-transaction check
   // below stays the race-fenced authority). New versions of existing bundles never run this
   // path at all.
-  const capped = await bundleCapRefusal(args.actor);
+  const capped = await bundleCapRefusal(args.actor, bundleId);
   if (capped !== null) {
     return { kind: "refused", refusal: capped };
   }
@@ -197,7 +197,7 @@ export async function publishGenesisBundle<T = undefined>(
       // The bundle cap's AUTHORITY — re-checked in this transaction under the advisory lock,
       // so two concurrent geneses at the boundary serialize (the pre-vault read above only
       // keeps the common refusal byte-free). A refusal rolls the whole registration back.
-      const stillCapped = await bundleCapRefusalInTx(tx, args.actor);
+      const stillCapped = await bundleCapRefusalInTx(tx, args.actor, bundleId);
       if (stillCapped !== null) {
         refuse(stillCapped);
       }

@@ -3298,10 +3298,14 @@ pub(crate) fn invite_tty(data: &InvitationData) -> String {
     if data.mailed {
         out.push_str("\nInvitation email sent.");
     }
-    out.push_str(&format!(
-        "\nThey join at {} — ask them to run `topos login {}` and sign in with their invited email.",
-        data.address, data.address,
-    ));
+    // The join line belongs to the addresses actually INVITED: an all-skipped receipt minted no
+    // claim to join with, so offering login directions there would point at nothing.
+    if !data.invited.is_empty() {
+        out.push_str(&format!(
+            "\nThey join at {} — ask them to run `topos login {}` and sign in with their invited email.",
+            data.address, data.address,
+        ));
+    }
     out
 }
 

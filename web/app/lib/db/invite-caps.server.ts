@@ -63,12 +63,14 @@ export async function inviteCapRefusalInTx(
   tx: Tx,
   args: { workspaceId: string; actorUserId: string; emails: string[] },
 ): Promise<InviteCapRefusal | null> {
-  // The per-inviter lock FIRST — the daily counter always has a floor, so every submission
+  // Entitlements resolve BEFORE any lock is taken (see the provider contract in
+  // topos-web/entitlements.ts) — a provider answer must never extend how long a lock is held.
+  const entitlements = await composition.entitlements.forWorkspace(args.workspaceId);
+  // The per-inviter lock next — the daily counter always has a floor, so every submission
   // takes it: two concurrent submissions from one account serialize here, and the second
   // reads the first's committed audit rows (held to commit; per-account, so different
   // inviters never queue behind each other).
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`invites:${args.actorUserId}`}))`);
-  const entitlements = await composition.entitlements.forWorkspace(args.workspaceId);
   const distinct = [...new Set(args.emails)];
 
   const memberLimit = entitlements.limit("members");
