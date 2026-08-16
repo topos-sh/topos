@@ -3287,6 +3287,14 @@ pub(crate) fn invite_tty(data: &InvitationData) -> String {
     } else {
         format!("Invited: {}", data.invited.join(", "))
     };
+    // Addresses the server SKIPPED rather than re-sent (a cooldown) — named per address in the
+    // server's own words, so "No new invitations." never reads as a silent failure.
+    for skip in &data.skipped {
+        out.push_str(&format!(
+            "\nDidn't send to {} — {}.",
+            skip.email, skip.reason
+        ));
+    }
     if data.mailed {
         out.push_str("\nInvitation email sent.");
     }

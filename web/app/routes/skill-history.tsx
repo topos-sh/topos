@@ -226,8 +226,15 @@ async function revertAction(
   const short = good.slice(0, 12);
 
   // The history window (`history-days`, a no-op without a limit): a target older than the
-  // window refuses in the same words the lane's revert door uses.
+  // window refuses in the same words the lane's revert door uses. The attempt still lands its
+  // admin_event row — every ceremony attempt does, denials included.
   if (await versionOutsideHistoryWindow(actor, row.skillId, good)) {
+    await recordAdminEvent(actor, {
+      kind: "revert",
+      subject: row.skillId,
+      detail: short,
+      outcome: "denied",
+    });
     return data<RevertActionData>({
       status: "denied",
       reason: "That version is outside this workspace's history window.",

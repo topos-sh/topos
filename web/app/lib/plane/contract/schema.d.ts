@@ -548,6 +548,12 @@ export interface components {
             invited: string[];
             /** @description Whether invitation mail was sent server-side (`true` only when the server can send mail). */
             mailed: boolean;
+            /**
+             * @description Addresses NOT re-sent this time — each was invited repeatedly and sits on a server-side
+             *     cooldown; `reason` is the server's own wording (display text). Omitted when empty and
+             *     defaulted on the way in, so the field is additive across releases in both directions.
+             */
+            skipped?: components["schemas"]["SkippedInvitation"][];
         };
         /**
          * @description `POST /v1/workspaces/{ws}/invitations` body — invitation as an INVITATION-ROW write: each email
@@ -1143,6 +1149,16 @@ export interface components {
              *     word the line uses and whether the command that shares it carries `-g`.
              */
             machine: boolean;
+        };
+        /**
+         * @description One address an invitation submission SKIPPED rather than re-sent
+         *     ([`InvitationData::skipped`]) — not an error: the rest of the submission landed.
+         */
+        SkippedInvitation: {
+            /** @description The folded address that was skipped. */
+            email: string;
+            /** @description Why, in the server's words (display text, e.g. `already invited recently`). */
+            reason: string;
         };
         /**
          * @description The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.

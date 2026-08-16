@@ -106,6 +106,13 @@ describe("acceptInvitationByToken under a members limit", () => {
       expect(await seatCount()).toBe(2);
       // NOTHING consumed: the invitation stands, so a wider limit admits the SAME link.
       expect(await invitationStatus("cal@example.com")).toBe("pending");
+      // The MAILBOX PROOF survives the refusal: possession of the mailed token proved the
+      // address whatever the seat count says, so the account is not a verification
+      // round-trip poorer when it comes back.
+      const verified = await db.q<{ email_verified: boolean }>(
+        `SELECT email_verified FROM web."user" WHERE id = 'u_cal'`,
+      );
+      expect(verified[0]?.email_verified).toBe(true);
       seam.limits.members = 3;
       const admittedLater = await (await identity()).acceptInvitationByToken(
         tokenCal,

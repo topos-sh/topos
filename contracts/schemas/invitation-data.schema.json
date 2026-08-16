@@ -18,11 +18,38 @@
     "mailed": {
       "description": "Whether invitation mail was sent server-side (`true` only when the server can send mail).",
       "type": "boolean"
+    },
+    "skipped": {
+      "description": "Addresses NOT re-sent this time — each was invited repeatedly and sits on a server-side\ncooldown; `reason` is the server's own wording (display text). Omitted when empty and\ndefaulted on the way in, so the field is additive across releases in both directions.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkippedInvitation"
+      }
     }
   },
   "required": [
     "address",
     "invited",
     "mailed"
-  ]
+  ],
+  "$defs": {
+    "SkippedInvitation": {
+      "description": "One address an invitation submission SKIPPED rather than re-sent\n([`InvitationData::skipped`]) — not an error: the rest of the submission landed.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "description": "The folded address that was skipped.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why, in the server's words (display text, e.g. `already invited recently`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "reason"
+      ]
+    }
+  }
 }

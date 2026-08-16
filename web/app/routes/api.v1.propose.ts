@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import type { ActionFunctionArgs } from "react-router";
 import {
   parseBundleKind,
@@ -7,7 +6,11 @@ import {
   receiptNow,
 } from "@/lib/api/candidate.server";
 import { laneGate } from "@/lib/api/compat.server";
-import { publishFlow, storageQuotaRefusal } from "@/lib/api/publish-flow.server";
+import {
+  candidateStoredBytes,
+  publishFlow,
+  storageQuotaRefusal,
+} from "@/lib/api/publish-flow.server";
 import { buildReceipt, deniedEnvelope, envelopeResponse } from "@/lib/api/receipts.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActorPreBody } from "@/lib/auth/guards.server";
@@ -82,8 +85,15 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   }
 
   // The per-workspace storage quota — after auth and the replay check (a replayed op re-serves
-  // its stored envelope), before any vault ingest. A no-op without a `storage-bytes` limit.
-  const quota = await storageQuotaRefusal(actor, head.opId, "publish", Buffer.byteLength(raw));
+  // its stored envelope), before any vault ingest; charged at the candidate's DECODED bytes
+  // (what custody could at most grow by), never the wire's base64/JSON framing. A no-op
+  // without a `storage-bytes` limit.
+  const quota = await storageQuotaRefusal(
+    actor,
+    head.opId,
+    "publish",
+    candidateStoredBytes(candidate),
+  );
   if (quota !== null) {
     return quota;
   }
