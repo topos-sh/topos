@@ -291,7 +291,7 @@ export function RoutingStar() {
         <g ref={chipLayer} />
       </svg>
       <p className="mt-2 text-center text-[12.5px] text-faint">
-        Verified by Topos, then delivered to the whole team.
+        Delivered exactly as published, then kept up to date.
       </p>
     </div>
   );

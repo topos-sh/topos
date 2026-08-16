@@ -59,14 +59,7 @@ test.describe("the public landing page", () => {
     // Verified unsupported — the page must claim no Claude-app delivery anywhere.
     await expect(page.getByText("Claude app")).toHaveCount(0);
 
-    // 3 — the four team cards, each with its agent-app badge and its bundle chips.
-    for (const team of ["Marketing", "Sales", "Support", "Engineering"]) {
-      await expect(page.getByText(team, { exact: true }).first()).toBeVisible();
-    }
-    await expect(page.getByText("brand-voice", { exact: false }).first()).toBeVisible();
-    await expect(page.getByText("client-history", { exact: false }).first()).toBeVisible();
-
-    // 4 — the loop: the three numbered steps and the chat scene with its receipt.
+    // 3 — the loop: the three numbered steps and the chat scene with its receipt.
     const loop = page.locator("#demo");
     await expect(loop).toContainText("Publish");
     await expect(loop).toContainText("Delivered automatically");
@@ -74,7 +67,7 @@ test.describe("the public landing page", () => {
     await expect(loop).toContainText("customer-lookup");
     await expect(loop).toContainText("Published: delivered to Support, Sales, and Engineering");
 
-    // 5 — the schematic review component: address bar, proposer, diff, and the real button copy.
+    // 4 — the schematic review component: address bar, proposer, diff, and the real button copy.
     // Asserted as TEXT, not by role: the loop bands' static variant draws the approve control as an
     // inert block, so the copy is the only thing both variants share.
     await expect(page.getByText("topos.sh/acme/skills/brand-voice/proposals")).toBeVisible();
@@ -84,7 +77,7 @@ test.describe("the public landing page", () => {
       page.getByText("Use sentence case for headings. No exclamation points."),
     ).toBeVisible();
 
-    // 6 — the pricing band: three tiers, the seat definition, and the one accent CTA. The tier
+    // 5 — the pricing band: three tiers, the seat definition, and the one accent CTA. The tier
     // figures are asserted as text because the hierarchy between the three cards is carried by the
     // neutral ramp, which the DOM does not spell.
     const pricing = page.locator("#pricing");
@@ -95,19 +88,25 @@ test.describe("the public landing page", () => {
     await expect(pricing).toContainText("Enterprise");
     await expect(pricing).toContainText("$40");
     await expect(pricing).toContainText("A seat is anyone who works with an AI agent");
+    // The Team card's hosted-tier lines say only what is true today, in plain words.
+    await expect(pricing).toContainText("Hosted by us, backed up daily");
+    await expect(pricing).toContainText("Zero-downtime updates");
+    await expect(pricing.getByText("Fleet visibility and one-click revert")).toHaveCount(0);
     await expect(pricing.getByRole("link", { name: "Talk to us" })).toHaveAttribute(
       "href",
       "#contact",
     );
 
-    // 7 — the founder band, the pricing band's "Talk to us" destination. It sits directly under
+    // 6 — the founder band, the pricing band's "Talk to us" destination. It sits directly under
     // pricing and opens on its heading: no micro-label above it.
     const contact = page.locator("#contact");
     await expect(contact).toHaveCount(1);
     await expect(
       page.getByRole("heading", { name: "Setting this up for a team? Email me." }),
     ).toBeVisible();
+    await expect(contact).toContainText("I set up the first teams personally.");
     await expect(contact.getByText("Design partners")).toHaveCount(0);
+    await expect(contact.getByText(/closed beta/i)).toHaveCount(0);
     // The order is the contract, not an accident of authoring: the band that answers the pricing
     // CTA is the page's last word, so the button never jumps the reader past anything.
     const contactIsLastBand = await page.evaluate(() => {
@@ -118,7 +117,7 @@ test.describe("the public landing page", () => {
     });
     expect(contactIsLastBand).toBe(true);
 
-    // 8 — the footer: the browser-path button leads its link row; no security link, no address.
+    // 7 — the footer: the browser-path button leads its link row; no security link, no address.
     const footer = page.locator("footer");
     // Two matches are legitimate in single tenancy: the primary button (/login) plus the plain
     // "Sign in" link (/app). The button is the first — assert it specifically.
@@ -138,11 +137,14 @@ test.describe("the public landing page", () => {
 
   test("the retired bands are gone", async ({ page }) => {
     await page.goto("/");
-    // The git-comparison band, the verb-card band, and the FAQ all left; what the nav still points
-    // at has to resolve to a band that is actually on the page.
+    // The git-comparison band, the verb-card band, the FAQ, and the team scene cards all left;
+    // what the nav still points at has to resolve to a band that is actually on the page.
     await expect(page.locator("#vs")).toHaveCount(0);
     await expect(page.locator("#agent")).toHaveCount(0);
     await expect(page.locator("#faq")).toHaveCount(0);
+    await expect(
+      page.getByText("Give every team an agent that already knows how your company works."),
+    ).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Why Topos" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "FAQ" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Pricing" })).toHaveAttribute("href", "#pricing");

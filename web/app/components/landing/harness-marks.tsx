@@ -116,14 +116,6 @@ const MARKS: Record<string, (className: string) => ReactElement> = {
 };
 
 /**
- * Whether this app publishes a mark at all — so a caller can lay out the tile that would hold it
- * without rendering an empty one for an app the map above deliberately omits.
- */
-export function hasHarnessMark(name: string): boolean {
-  return name in MARKS;
-}
-
-/**
  * The app's mark, or null when its owner publishes none — the badge around it decides what to do
  * with nothing (it keeps the name, which was always the real label).
  */

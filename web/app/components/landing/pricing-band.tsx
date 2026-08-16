@@ -45,8 +45,8 @@ const TIERS: Tier[] = [
     desc: "Hosted by us. Nothing to run, nothing to keep patched.",
     feats: [
       "Everything in self-hosted",
-      "Hosted plane, backed up",
-      "Fleet visibility and one-click revert",
+      "Hosted by us, backed up daily",
+      "Zero-downtime updates",
       "Email support",
     ],
     surface: "lead",

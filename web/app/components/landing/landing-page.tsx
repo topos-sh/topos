@@ -1,9 +1,9 @@
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router";
 import { CopyButton } from "@/components/copy-button";
 import { FounderAddressBlock } from "@/components/landing/founder-email";
-import { HarnessMark, hasHarnessMark } from "@/components/landing/harness-marks";
-import { MicroLabel, SectionHeading, WRAP } from "@/components/landing/landing-kit";
+import { HarnessMark } from "@/components/landing/harness-marks";
+import { SectionHeading, WRAP } from "@/components/landing/landing-kit";
 import { LoopBands } from "@/components/landing/loop-bands";
 import { PricingBand } from "@/components/landing/pricing-band";
 import { RoutingStar } from "@/components/landing/routing-star";
@@ -149,101 +149,6 @@ function HeroPaths({ tenancy }: { tenancy: "single" | "multi" }) {
 /** The agent apps Topos delivers to or reads alongside — no Claude app: there is no adapter for it. */
 const WORKS_WITH = ["Claude Code", "OpenClaw", "Hermes", "Codex", "Cursor"];
 
-/** Weight-500 ink emphasis — the system's only emphasis (never bold). */
-function Em({ children }: { children: ReactNode }) {
-  return <b className="font-medium">{children}</b>;
-}
-
-/**
- * The agent app a team's people run: the app's own logomark on a quiet inset tile beside its name —
- * and the name alone for an app whose owner publishes no mark (see `harness-marks.tsx`). The name
- * is plain text, not a chip: nothing on these cards carries a border, and the tile is the only
- * field. A card naming two apps joins them in one label beside their tiles, as one line.
- */
-function AgentBadge({ apps }: { apps: string[] }) {
-  return (
-    <span className="flex min-w-0 items-center gap-[7px]">
-      {/* Two tiles sit closer to each other than to the label, so a pair reads as one object and
-          the label keeps the width it needs. */}
-      <span className="flex flex-none items-center gap-[3px]">
-        {apps.filter(hasHarnessMark).map((app) => (
-          <span
-            key={app}
-            className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] bg-panel2"
-          >
-            <HarnessMark name={app} className="h-4 w-4" />
-          </span>
-        ))}
-      </span>
-      {/* One line on every real screen; on a very narrow one the label wraps rather than
-          pushing the card wider than the page. */}
-      <span className="text-right font-mono text-[11px] text-dim">{apps.join(" · ")}</span>
-    </span>
-  );
-}
-
-/**
- * One plain sentence a first-timer reads cold, on the same "once — every" rhythm, so cause and
- * effect live inside ordinary grammar. The bundle names sit beneath as quiet chips: a skimmer can
- * ignore them, a curious reader learns that Topos carries skills, memories, and docs alike.
- */
-const TEAMS: {
-  team: string;
-  apps: string[];
-  scene: ReactNode;
-  bundles: { name: string; kind: string }[];
-}[] = [
-  {
-    team: "Marketing",
-    apps: ["OpenClaw"],
-    scene: (
-      <>
-        Update the brand voice <Em>once</Em>. <Em>Every</Em> teammate’s drafts follow it.
-      </>
-    ),
-    bundles: [
-      { name: "brand-voice", kind: "skill" },
-      { name: "campaign-facts", kind: "docs" },
-    ],
-  },
-  {
-    team: "Sales",
-    apps: ["Hermes"],
-    scene: (
-      <>
-        A client talks to <Em>one</Em> rep. <Em>Every</Em> rep’s agent remembers the conversation.
-      </>
-    ),
-    bundles: [{ name: "client-history", kind: "memory" }],
-  },
-  {
-    team: "Support",
-    apps: ["OpenClaw"],
-    scene: (
-      <>
-        Change a policy <Em>once</Em>. <Em>Every</Em> answer follows it, even a new hire’s.
-      </>
-    ),
-    bundles: [
-      { name: "product-docs", kind: "docs" },
-      { name: "escalation-rules", kind: "skill" },
-    ],
-  },
-  {
-    team: "Engineering",
-    apps: ["Claude Code", "Codex"],
-    scene: (
-      <>
-        Fix the deploy process <Em>once</Em>. <Em>Every</Em> agent deploys the new way.
-      </>
-    ),
-    bundles: [
-      { name: "deploy", kind: "skill" },
-      { name: "incident-runbook", kind: "docs" },
-    ],
-  },
-];
-
 /**
  * The unclaimed-install band: shown ONLY while a single-tenant install still awaits its first
  * owner. The claim rides the one-time link the server printed at boot — machine control is the
@@ -344,8 +249,8 @@ export function LandingPage({
               your company up to date.
             </h1>
             <p className="mt-4 max-w-[54ch] text-[16px] text-dim">
-              Topos syncs skills, memory files, and context across your team’s agents (Claude Code,
-              Codex, Cursor, and more), and anyone can{" "}
+              Topos syncs skills and MCP servers across your team’s agents (Claude Code, Codex,
+              Cursor, and more), and anyone can{" "}
               <strong className="font-medium text-ink">contribute improvements back</strong>.
             </p>
             <HeroPaths tenancy={tenancy} />
@@ -388,43 +293,6 @@ export function LandingPage({
         </div>
       </section>
 
-      <section className="pt-[52px] lg:pt-[72px]">
-        <div className={WRAP}>
-          <MicroLabel>Every team, every agent app</MicroLabel>
-          <SectionHeading className="max-w-[44ch]">
-            Give every team an agent that already knows how your company works.
-          </SectionHeading>
-          <div className="mt-6 grid gap-3 sm:grid-cols-2">
-            {TEAMS.map((team) => (
-              <div
-                key={team.team}
-                className="flex flex-col rounded-lg border border-line-soft bg-panel px-[18px] pt-[15px] pb-[14px] shadow-card"
-              >
-                {/* The header holds the mark tile's height whether or not a tile is there, so
-                    every card's sentence starts on the same line. */}
-                <div className="mb-2.5 flex min-h-[26px] items-center justify-between gap-2.5">
-                  <span className="font-display font-semibold text-[14px] text-ink tracking-[-0.01em]">
-                    {team.team}
-                  </span>
-                  <AgentBadge apps={team.apps} />
-                </div>
-                <p className="text-[14px] text-ink leading-[1.55]">{team.scene}</p>
-                <div className="mt-[13px] flex flex-wrap gap-1.5 border-line-soft border-t pt-[11px]">
-                  {team.bundles.map((bundle) => (
-                    <span
-                      key={bundle.name}
-                      className="whitespace-nowrap rounded-full bg-panel2 px-[9px] py-0.5 font-mono text-[10px] text-dim"
-                    >
-                      {bundle.name} {"·"} <span className="text-faint">{bundle.kind}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
       <LoopBands rail={FLEET_RAIL} />
 
       <PricingBand ctaTo={ctaTo} ctaLabel={ctaLabel} docsHref={DOCS} />
@@ -436,9 +304,8 @@ export function LandingPage({
         <div className={WRAP}>
           <SectionHeading>Setting this up for a team? Email me.</SectionHeading>
           <p className="mt-4 max-w-[62ch] text-dim">
-            Topos is in closed beta and I set up the first teams personally. Tell me how your team
-            works with agents and I’ll get your first shared skills flowing, and your feedback
-            shapes what gets built next.
+            I set up the first teams personally. Tell me how your team works with agents and I’ll
+            get your first shared skills flowing. Your feedback shapes what gets built next.
           </p>
           <p className="mt-3 text-[13px] text-faint">Robert, founder</p>
           <div className="mt-5">
