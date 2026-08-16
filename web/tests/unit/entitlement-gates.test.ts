@@ -163,6 +163,36 @@ describe("the bundle cap (`bundles`)", () => {
   });
 });
 
+describe("the bundle cap covers UNARCHIVE (archived→active is the same step past it)", () => {
+  it("restoring at the cap refuses typed; a wider limit restores", async () => {
+    const lifecycle = await import("@/lib/db/queries.lifecycle.server");
+    const owner = asOwner(wsId, "u_owner");
+    // Archive b_guarded by rows (the archive ceremony's resulting shape), then stand up a
+    // replacement — the archive-then-replace-then-unarchive shuffle the cap must refuse.
+    await db.q(
+      `UPDATE web.bundle
+       SET status = 'archived', archived_at = now(), base_name = name,
+           name = name || '-archived-2026-01-01'
+       WHERE id = 'b_guarded'`,
+    );
+    await seedBundle(db, wsId, "b_replacement", "replacement");
+    seam.limits.bundles = 1;
+    try {
+      const refused = await lifecycle.unarchiveBundle(owner, "b_guarded");
+      expect(refused.outcome).toBe("bundle_limit");
+      const rows = await db.q<{ status: string }>(
+        `SELECT status FROM web.bundle WHERE id = 'b_guarded'`,
+      );
+      expect(rows[0]?.status).toBe("archived");
+      seam.limits.bundles = 2;
+      const restored = await lifecycle.unarchiveBundle(owner, "b_guarded");
+      expect(restored.outcome).toBe("unarchived");
+    } finally {
+      delete seam.limits.bundles;
+    }
+  });
+});
+
 describe("the history window (`history-days`)", () => {
   it("older-than-window reads outside; inside and absent-limit do not; unknown versions never do", async () => {
     const custody = await import("@/lib/db/queries.custody.server");

@@ -39,6 +39,8 @@ export function unarchiveDeniedCopy(outcome: string): string {
       return "This skill isn't archived.";
     case "unknown_skill":
       return "This skill no longer exists.";
+    case "bundle_limit":
+      return "This workspace is at its bundle limit.";
     default:
       return "The server declined this unarchive.";
   }

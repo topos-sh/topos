@@ -1,6 +1,7 @@
-import { sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import type { getDb } from "./index.server";
+import { invitation } from "./schema.app";
 
 /**
  * The invitation caps — ONE spelling shared by both invitation doors (the members page's
@@ -50,15 +51,17 @@ export function submissionCapRefusal(addressCount: number): "too_many_addresses"
  * The stateful caps, INSIDE the caller's transaction AND serialized by advisory transaction
  * locks — a count read in a transaction is still a check-then-act race without one (two
  * concurrent submissions would both read the same audit total and both commit past the cap).
- * Lock ORDER is fixed everywhere (inviter → workspace members → addresses, sorted) so
- * concurrent submissions can never deadlock. `null` clears both caps. The daily count is
- * prospective (existing rows + this submission), so a submission can never step over the cap;
- * the member count follows the at/over form, and the seat-mint check backstops any pending
- * overshoot.
+ * Lock ORDER is fixed everywhere (inviter → workspace members → addresses, sorted; the accept
+ * ceremonies take their members lock BEFORE any invitation-row lock for the same reason) so
+ * concurrent transactions can never deadlock. `null` clears both caps. BOTH counts are
+ * PROSPECTIVE — what stands plus what THIS submission adds — so a batch can never step over a
+ * cap that its first address alone would have cleared: the member count adds the submission's
+ * distinct addresses that do not already hold a live pending row (a re-invite adds nothing, so
+ * resending at the limit still works), and the daily count adds the whole submission.
  */
 export async function inviteCapRefusalInTx(
   tx: Tx,
-  args: { workspaceId: string; actorUserId: string; addressCount: number },
+  args: { workspaceId: string; actorUserId: string; emails: string[] },
 ): Promise<InviteCapRefusal | null> {
   // The per-inviter lock FIRST — the daily counter always has a floor, so every submission
   // takes it: two concurrent submissions from one account serialize here, and the second
@@ -66,20 +69,37 @@ export async function inviteCapRefusalInTx(
   // inviters never queue behind each other).
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`invites:${args.actorUserId}`}))`);
   const entitlements = await composition.entitlements.forWorkspace(args.workspaceId);
+  const distinct = [...new Set(args.emails)];
 
   const memberLimit = entitlements.limit("members");
   if (memberLimit !== null) {
     // The SAME key the seat-mint backstop takes (`members:<ws>`), so invite-time and
     // accept-time counts serialize with each other, not only with themselves.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`members:${args.workspaceId}`}))`);
-    const rows = await tx.execute(
+    const standingRows = await tx.execute(
       sql`SELECT
             (SELECT count(*)::int FROM web.seat WHERE workspace_id = ${args.workspaceId})
           + (SELECT count(*)::int FROM web.invitation
               WHERE workspace_id = ${args.workspaceId} AND status = 'pending'
                 AND (expires_at IS NULL OR expires_at > now())) AS n`,
     );
-    if (((rows.rows[0] as { n: number } | undefined)?.n ?? 0) >= memberLimit) {
+    const standing = (standingRows.rows[0] as { n: number } | undefined)?.n ?? 0;
+    // What this submission ADDS: its distinct addresses minus those already live-pending here
+    // (the upsert re-arms those rows without adding one). Cooldown skips are not subtracted —
+    // they are decided later, so the check stays conservative.
+    const alreadyPending = await tx
+      .select({ email: invitation.email })
+      .from(invitation)
+      .where(
+        and(
+          eq(invitation.workspaceId, args.workspaceId),
+          eq(invitation.status, "pending"),
+          inArray(invitation.email, distinct),
+          sql`(${invitation.expiresAt} IS NULL OR ${invitation.expiresAt} > now())`,
+        ),
+      );
+    const adds = distinct.length - new Set(alreadyPending.map((r) => r.email)).size;
+    if (standing + adds > memberLimit) {
       return "member_limit";
     }
   }
@@ -102,18 +122,34 @@ export async function inviteCapRefusalInTx(
           AND created_at > now() - interval '24 hours'`,
   );
   const sent = (recent.rows[0] as { n: number } | undefined)?.n ?? 0;
-  if (sent + args.addressCount > dailyCap) {
+  if (sent + args.emails.length > dailyCap) {
     return "invite_limit";
   }
   return null;
 }
 
 /**
+ * Take the members-cap advisory lock ALONE — no count. The accept ceremonies call this BEFORE
+ * locking their invitation row, so the one lock order (members advisory → invitation row)
+ * holds against the invite door, which takes the same advisory key and then upserts rows: an
+ * accept that locked its row first while an invite held the advisory key and waited on that
+ * row would be a deadlock. A no-op when no `members` limit exists (the OSS default), exactly
+ * like the count itself; re-acquiring inside the same transaction later is free.
+ */
+export async function lockMemberCapInTx(tx: Tx, workspaceId: string): Promise<void> {
+  const entitlements = await composition.entitlements.forWorkspace(workspaceId);
+  if (entitlements.limit("members") === null) {
+    return;
+  }
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`members:${workspaceId}`}))`);
+}
+
+/**
  * The member cap at SEAT MINT — the backstop behind the invite-time check, inside the accept
  * ceremony's transaction. A no-op when no `members` limit exists (the OSS default). When one
  * does: an advisory transaction lock serializes concurrent accepts against the same workspace
- * (each ceremony locks only its own invitation row, so two different invitations would
- * otherwise both read the same seat count), a user already seated is never refused (the seat
+ * (taken BEFORE the ceremony's invitation-row lock via `lockMemberCapInTx`; re-acquired here
+ * for callers with no row lock at all), a user already seated is never refused (the seat
  * insert is idempotent — nothing grows), and a full workspace refuses. The workspace-birth
  * owner seat never comes through here — it is exempt by construction.
  */

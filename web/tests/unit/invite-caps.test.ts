@@ -181,6 +181,38 @@ describe("the member cap at invite creation (seats + live pending invitations)",
   });
 });
 
+describe("the member cap is PROSPECTIVE — batches and resends", () => {
+  it("a batch larger than the remaining room refuses whole; a resend at the limit still works", async () => {
+    // Standing at this point: 1 seat + 12 live pending (ten0–9, eleventh, roomy) = 13.
+    seam.limits.members = 14;
+    try {
+      // Two NEW addresses into one remaining slot: 13 + 2 > 14 → the whole batch refuses.
+      const batch = await (await roster()).createInvitations(asOwner(wsId, "u_owner"), [
+        "batch-a@example.com",
+        "batch-b@example.com",
+      ]);
+      expect(batch.outcome).toBe("member_limit");
+      // One new address fills the last slot exactly.
+      const one = await (await roster()).createInvitations(asOwner(wsId, "u_owner"), [
+        "batch-a@example.com",
+      ]);
+      expect(one.outcome).toBe("invited");
+      // AT the limit, a RE-invite adds no live-pending row — resending still works.
+      const resend = await (await roster()).createInvitations(asOwner(wsId, "u_owner"), [
+        "batch-a@example.com",
+      ]);
+      expect(resend.outcome).toBe("invited");
+      // …while a new address is now over.
+      const over = await (await roster()).createInvitations(asOwner(wsId, "u_owner"), [
+        "batch-c@example.com",
+      ]);
+      expect(over.outcome).toBe("member_limit");
+    } finally {
+      delete seam.limits.members;
+    }
+  });
+});
+
 describe("the per-address cooldown (3 invites in 7 days, server-wide → skip)", () => {
   it("skips the address without failing the submission; no row, no audit line", async () => {
     const target = "hammered@example.com";

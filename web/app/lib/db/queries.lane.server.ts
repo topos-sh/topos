@@ -668,7 +668,7 @@ export async function laneInvite(
     const refusal = await inviteCapRefusalInTx(tx, {
       workspaceId: ws,
       actorUserId: actor.userId,
-      addressCount: folded.length,
+      emails: folded,
     });
     if (refusal !== null) {
       return { outcome: refusal };

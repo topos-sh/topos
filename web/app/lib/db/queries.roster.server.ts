@@ -162,7 +162,7 @@ export async function createInvitations(
     const refusal = await inviteCapRefusalInTx(tx, {
       workspaceId: actor.workspaceId,
       actorUserId: actor.userId,
-      addressCount: folded.length,
+      emails: folded,
     });
     if (refusal !== null) {
       return refusal;

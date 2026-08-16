@@ -1,5 +1,6 @@
 import { gunzipSync } from "node:zlib";
 import { sql } from "drizzle-orm";
+import { storageCapExceeded } from "@/lib/api/storage-quota.server";
 import { getDb } from "@/lib/db/index.server";
 import { validateCandidateFiles } from "@/lib/mcp/validate.server";
 import { commitVersion } from "@/lib/plane/custody.server";
@@ -471,6 +472,19 @@ export async function checkBundleUpstream(
     if (!validated.ok) {
       return { outcome: "error", message: validated.message };
     }
+  }
+
+  // THE STORAGE QUOTA (`storage-bytes`) covers this ingest door too — the checker imports
+  // bytes nobody pasted, so an uncapped lane here would grow custody around the limit. A
+  // no-op without a limit; on a full workspace the check is SKIPPED as a typed error (the
+  // stamp is not written, so the same commit is re-considered once there is room).
+  if (
+    await storageCapExceeded(
+      row.workspace_id,
+      tree.files.reduce((n, f) => n + f.bytes.length, 0),
+    )
+  ) {
+    return { outcome: "error", message: "Storage limit reached for this workspace." };
   }
 
   // Import as a CANDIDATE (commit-only — `current` never moves from here). The vault rehashes;

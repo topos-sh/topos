@@ -262,6 +262,14 @@ export async function action({ request }: ActionFunctionArgs) {
         ? await createRefused(userCode, actor, CREATE_RATE_LIMITED, choiceCreate, 429)
         : await createRefused(userCode, actor, WORKSPACE_LIMIT, choiceCreate, 403);
     }
+    if (approved.outcome === "workspace-full") {
+      // An invitation-bound approval met the member limit: the flow AND the invitation stay
+      // pending (approving again works once there is room), and the card says the real reason.
+      return data(
+        { kind: "refused" as const, error: "This workspace is at its member limit." },
+        { status: 409 },
+      );
+    }
     if (loopback !== null && device !== null && approved.flowChallenge === device) {
       // The state-bound localhost hand-off — a pure accelerator that wakes the waiting CLI;
       // its poll (the one completion mechanism) then runs the exchange that mints. Fired
