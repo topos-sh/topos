@@ -247,6 +247,15 @@ export async function unarchiveBundle(
     if (taken.length > 0) {
       return { outcome: "name_taken" } as const;
     }
+    // The bundle cap counts ACTIVE rows, so archived→active is the same step past it a
+    // genesis takes — checked here under the same advisory lock (a no-op without a limit),
+    // or archive-then-replace-then-unarchive would mint one active bundle over the cap.
+    // BEFORE the MCP name claim below, load-bearingly: this typed refusal COMMITS, and a
+    // claim already written by then would leave an archived bundle monopolizing a registry
+    // name it does not serve — archive keeps meaning the name is released.
+    if ((await bundleCapRefusalInTx(tx, actor)) !== null) {
+      return { outcome: "bundle_limit" } as const;
+    }
     // An MCP bundle carries a SECOND name — the registry name inside its document — and that
     // one is unique across the workspace's active catalog, which is what keeps the registry
     // read lane's `…/servers/{name}` unambiguous. Archiving freed it, so restoring is a claim
@@ -266,12 +275,6 @@ export async function unarchiveBundle(
       if (claim === "taken") {
         return { outcome: "mcp_name_taken" } as const;
       }
-    }
-    // The bundle cap counts ACTIVE rows, so archived→active is the same step past it a
-    // genesis takes — checked here under the same advisory lock (a no-op without a limit),
-    // or archive-then-replace-then-unarchive would mint one active bundle over the cap.
-    if ((await bundleCapRefusalInTx(tx, actor)) !== null) {
-      return { outcome: "bundle_limit" } as const;
     }
     await tx
       .update(bundle)

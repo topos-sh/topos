@@ -191,6 +191,30 @@ describe("the bundle cap covers UNARCHIVE (archived→active is the same step pa
       delete seam.limits.bundles;
     }
   });
+
+  it("refuses BEFORE the MCP name claim — a capped restore never re-occupies a registry name", async () => {
+    const lifecycle = await import("@/lib/db/queries.lifecycle.server");
+    const owner = asOwner(wsId, "u_owner");
+    await seedBundle(db, wsId, "b_mcp_arch", "held-archived-2026-01-01", {
+      kind: "mcp",
+      status: "archived",
+      baseName: "held",
+    });
+    seam.limits.bundles = 2;
+    try {
+      // The cap answers FIRST: were the claim attempted, this vault-less suite would have
+      // answered `mcp_document_unreadable` instead — and a claim row would have committed
+      // alongside the refusal, an archived bundle monopolizing a name it does not serve.
+      const refused = await lifecycle.unarchiveBundle(owner, "b_mcp_arch");
+      expect(refused.outcome).toBe("bundle_limit");
+      const claims = await db.q<{ n: number }>(
+        `SELECT count(*)::int AS n FROM web.bundle_identity WHERE bundle_id = 'b_mcp_arch'`,
+      );
+      expect(claims[0]?.n).toBe(0);
+    } finally {
+      delete seam.limits.bundles;
+    }
+  });
 });
 
 describe("the history window (`history-days`)", () => {
