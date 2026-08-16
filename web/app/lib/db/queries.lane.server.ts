@@ -14,6 +14,7 @@ import { getDb } from "@/lib/db/index.server";
 import {
   inviteCapRefusalInTx,
   inviteCooldownActiveInTx,
+  lockInviteAddressesInTx,
   submissionCapRefusal,
 } from "@/lib/db/invite-caps.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
@@ -707,6 +708,7 @@ export async function laneInvite(
     const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
     const minted: { email: string; token: string }[] = [];
     const skipped: string[] = [];
+    await lockInviteAddressesInTx(tx, folded);
     for (const email of folded) {
       if (await inviteCooldownActiveInTx(tx, email)) {
         skipped.push(email);

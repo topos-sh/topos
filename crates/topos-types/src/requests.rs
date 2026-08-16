@@ -827,6 +827,25 @@ pub struct InvitationData {
     pub invited: Vec<String>,
     /// Whether invitation mail was sent server-side (`true` only when the server can send mail).
     pub mailed: bool,
+    /// Addresses NOT re-sent this time — each was invited repeatedly and sits on a server-side
+    /// cooldown; `reason` is the server's own wording (display text). Omitted when empty and
+    /// defaulted on the way in, so the field is additive across releases in both directions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedInvitation>,
+}
+
+/// One address an invitation submission SKIPPED rather than re-sent
+/// ([`InvitationData::skipped`]) — not an error: the rest of the submission landed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct SkippedInvitation {
+    /// The folded address that was skipped.
+    pub email: String,
+    /// Why, in the server's words (display text, e.g. `already invited recently`).
+    pub reason: String,
 }
 
 // =================================================================================================
@@ -1452,10 +1471,25 @@ mod tests {
             address: "https://topos.example/acme".to_owned(),
             invited: vec!["alice@acme.com".to_owned()],
             mailed: false,
+            skipped: Vec::new(),
         };
         let v = serde_json::to_value(&data).unwrap();
         assert_eq!(v["address"], "https://topos.example/acme");
         assert_eq!(v["mailed"], false);
+        // `skipped` omits when empty and defaults on the way in — additive both ways, so an
+        // older server's answer (no field) and an older client's parse both keep working.
+        assert!(v.get("skipped").is_none());
+        let back: InvitationData = serde_json::from_value(v).unwrap();
+        assert!(back.skipped.is_empty());
+        let with: InvitationData = serde_json::from_value(serde_json::json!({
+            "address": "https://topos.example/acme",
+            "invited": [],
+            "mailed": false,
+            "skipped": [{ "email": "bob@acme.com", "reason": "already invited recently" }],
+        }))
+        .unwrap();
+        assert_eq!(with.skipped[0].email, "bob@acme.com");
+        assert_eq!(with.skipped[0].reason, "already invited recently");
     }
 
     #[test]

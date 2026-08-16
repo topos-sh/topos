@@ -2568,6 +2568,7 @@ mod tests {
                 address: "https://acme.topos.test/acme".to_owned(),
                 invited: vec!["alice@acme.com".to_owned()],
                 mailed: false,
+                skipped: Vec::new(),
             })
             .unwrap(),
             warnings: Vec::new(),

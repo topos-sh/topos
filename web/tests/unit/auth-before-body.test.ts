@@ -211,7 +211,9 @@ describe("the workspace bind behind the credential-first resolve", () => {
 describe("the storage quota (`storage-bytes`)", () => {
   it("refuses typed after auth, before any vault call (no vault runs in this suite)", async () => {
     const { action } = await import("@/routes/api.v1.publish");
-    seam.storedBytes = 90;
+    // The charge is the candidate's DECODED bytes ("aGVsbG8=" → 5), never the wire framing:
+    // 96 stored + 5 > 100 refuses, while raw-request accounting would refuse far earlier.
+    seam.storedBytes = 96;
     seam.limits["storage-bytes"] = 100;
     try {
       const res = await drive(
@@ -234,6 +236,26 @@ describe("the storage quota (`storage-bytes`)", () => {
       delete seam.limits["storage-bytes"];
       seam.storedBytes = 0;
     }
+  });
+
+  it("candidateStoredBytes prices the decoded tree, arithmetically", async () => {
+    const { candidateStoredBytes } = await import("@/lib/api/publish-flow.server");
+    const candidate = (contents: string[]) => ({
+      files: contents.map((content_base64, i) => ({
+        path: `f${i}`,
+        mode: "100644",
+        content_base64,
+      })),
+      parents: [],
+      author: "a",
+      message: "m",
+    });
+    expect(candidateStoredBytes(candidate([]))).toBe(0);
+    expect(candidateStoredBytes(candidate(["YQ=="]))).toBe(1); // "a"
+    expect(candidateStoredBytes(candidate(["YWI="]))).toBe(2); // "ab"
+    expect(candidateStoredBytes(candidate(["YWJj"]))).toBe(3); // "abc"
+    expect(candidateStoredBytes(candidate(["aGVsbG8="]))).toBe(5); // "hello"
+    expect(candidateStoredBytes(candidate(["YWJj", "aGVsbG8="]))).toBe(8);
   });
 
   it("a failed stat read ALLOWS (fail-open); an absent limit never reads the stat at all", async () => {

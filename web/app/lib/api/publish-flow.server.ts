@@ -118,13 +118,38 @@ async function recordUpstreamInTx(
 }
 
 /**
+ * What a candidate would add to custody AT MOST: the decoded size of every file it carries,
+ * computed arithmetically off the base64 lengths (never by materializing the bytes — the
+ * publish cap is large). This is the honest admission charge: the quota is defined over
+ * STORED custody bytes, so the wire's base64 expansion and JSON framing must not count
+ * against it. Still conservative — content-addressed dedup only ever stores less than this
+ * (an unchanged file adds nothing), and only the vault could price that exactly.
+ */
+export function candidateStoredBytes(candidate: WireCandidate): number {
+  let total = 0;
+  for (const file of candidate.files) {
+    const b64 = file.content_base64;
+    const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+    total += Math.max(0, Math.floor((b64.length / 4) * 3) - padding);
+  }
+  return total;
+}
+
+/**
  * The per-workspace STORAGE quota (`storage-bytes`), consulted by both ingest doors (publish +
  * propose) after auth and before any vault call. A no-op without a limit (the OSS default —
- * the stat is not even read). With one: stored + this request's bytes over the limit refuses
- * with the house DENIED envelope; a failed stat read ALLOWS (fail-open — the ingest shares the
- * same backend and fails on a real outage; the skip is logged in storage.server.ts). The
- * refusal is deliberately NOT persisted as an op receipt: it reflects the workspace's standing
- * limit, and the same op retried under a wider limit must re-evaluate, not replay.
+ * the stat is not even read). With one: stored + the candidate's decoded bytes over the limit
+ * refuses with the house DENIED envelope; a failed stat read ALLOWS (fail-open — the ingest
+ * shares the same backend and fails on a real outage; the skip is logged in
+ * storage.server.ts). The refusal is deliberately NOT persisted as an op receipt: it reflects
+ * the workspace's standing limit, and the same op retried under a wider limit must
+ * re-evaluate, not replay.
+ *
+ * ADMISSION, not accounting: the stat is a pre-ingest read, so concurrent publishes that all
+ * pass it can overshoot the limit by at most the sum of their in-flight candidates — bounded
+ * by the body cap per request — and the very next stat read enforces again. An exact
+ * reservation would have to live inside the vault's ingest itself; the vault is deliberately
+ * policy-free, so this tier holds the line at bounded-overshoot admission.
  */
 export async function storageQuotaRefusal(
   actor: SessionActor,

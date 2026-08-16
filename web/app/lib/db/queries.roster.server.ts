@@ -10,6 +10,7 @@ import { getDb } from "@/lib/db/index.server";
 import {
   inviteCapRefusalInTx,
   inviteCooldownActiveInTx,
+  lockInviteAddressesInTx,
   submissionCapRefusal,
 } from "@/lib/db/invite-caps.server";
 import { personDisplaySql } from "@/lib/db/person-display.server";
@@ -166,6 +167,7 @@ export async function createInvitations(
     if (refusal !== null) {
       return refusal;
     }
+    await lockInviteAddressesInTx(tx, folded);
     for (const email of folded) {
       if (await inviteCooldownActiveInTx(tx, email)) {
         skipped.push(email);

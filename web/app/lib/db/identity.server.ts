@@ -2000,14 +2000,18 @@ async function acceptInvitationTx(
   if (!account.emailVerified && !opts.mailboxProven) {
     return { outcome: "unverified" };
   }
-  // The member cap's seat-mint backstop (a no-op without a `members` limit): a full workspace
-  // refuses BEFORE anything is written — the invitation stays pending, and an accepter who
-  // already holds a seat is never refused (the insert below no-ops for them anyway).
-  if (await memberCapReachedInTx(tx, inv.workspaceId, account.userId)) {
-    return { outcome: "workspace_full" };
-  }
   if (opts.mailboxProven && !account.emailVerified) {
     await tx.execute(sql`UPDATE web."user" SET email_verified = true WHERE id = ${account.userId}`);
+  }
+  // The member cap's seat-mint backstop (a no-op without a `members` limit): a full workspace
+  // refuses with the invitation UNCONSUMED — it stays pending, so the same link admits once
+  // there is room — and an accepter who already holds a seat is never refused (the insert
+  // below no-ops for them anyway). AFTER the mailbox-proof flip above, deliberately: the
+  // typed refusal COMMITS (it is an answer, not a fault), and possession of the mailed token
+  // proved the mailbox whatever the seat count says — an account-minting accept refused here
+  // must not come back a second verification round-trip poorer.
+  if (await memberCapReachedInTx(tx, inv.workspaceId, account.userId)) {
+    return { outcome: "workspace_full" };
   }
   await tx.execute(
     sql`UPDATE web.invitation

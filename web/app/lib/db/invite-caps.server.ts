@@ -47,19 +47,31 @@ export function submissionCapRefusal(addressCount: number): "too_many_addresses"
 }
 
 /**
- * The stateful caps, INSIDE the caller's transaction: the member cap, then the daily cap.
- * `null` clears both. The daily count is prospective (existing rows + this submission), so a
- * submission can never step over the cap; the member count follows the brief's simple form —
- * at/over refuses, and the seat-mint check backstops any pending overshoot.
+ * The stateful caps, INSIDE the caller's transaction AND serialized by advisory transaction
+ * locks — a count read in a transaction is still a check-then-act race without one (two
+ * concurrent submissions would both read the same audit total and both commit past the cap).
+ * Lock ORDER is fixed everywhere (inviter → workspace members → addresses, sorted) so
+ * concurrent submissions can never deadlock. `null` clears both caps. The daily count is
+ * prospective (existing rows + this submission), so a submission can never step over the cap;
+ * the member count follows the at/over form, and the seat-mint check backstops any pending
+ * overshoot.
  */
 export async function inviteCapRefusalInTx(
   tx: Tx,
   args: { workspaceId: string; actorUserId: string; addressCount: number },
 ): Promise<InviteCapRefusal | null> {
+  // The per-inviter lock FIRST — the daily counter always has a floor, so every submission
+  // takes it: two concurrent submissions from one account serialize here, and the second
+  // reads the first's committed audit rows (held to commit; per-account, so different
+  // inviters never queue behind each other).
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`invites:${args.actorUserId}`}))`);
   const entitlements = await composition.entitlements.forWorkspace(args.workspaceId);
 
   const memberLimit = entitlements.limit("members");
   if (memberLimit !== null) {
+    // The SAME key the seat-mint backstop takes (`members:<ws>`), so invite-time and
+    // accept-time counts serialize with each other, not only with themselves.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`members:${args.workspaceId}`}))`);
     const rows = await tx.execute(
       sql`SELECT
             (SELECT count(*)::int FROM web.seat WHERE workspace_id = ${args.workspaceId})
@@ -130,9 +142,23 @@ export async function memberCapReachedInTx(
 }
 
 /**
- * The per-address cooldown, inside the caller's transaction: whether THIS address was invited
- * COOLDOWN_MAX_INVITES times or more in the window, server-wide. True = skip the address (not
- * a submission error); the caller reports it as `already invited recently`.
+ * Serialize this submission's ADDRESSES against every concurrent submission touching any of
+ * them — taken once, before a door's mint loop, in SORTED unique order (the fixed global
+ * order is what makes two overlapping submissions queue instead of deadlock). Without these
+ * locks, two concurrent submissions to the same address could both read a cooldown count of
+ * COOLDOWN_MAX_INVITES − 1 and both send.
+ */
+export async function lockInviteAddressesInTx(tx: Tx, emails: string[]): Promise<void> {
+  for (const email of [...new Set(emails)].sort()) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`invite-addr:${email}`}))`);
+  }
+}
+
+/**
+ * The per-address cooldown, inside the caller's transaction and behind
+ * `lockInviteAddressesInTx`: whether THIS address was invited COOLDOWN_MAX_INVITES times or
+ * more in the window, server-wide. True = skip the address (not a submission error); the
+ * caller reports it as `already invited recently`.
  */
 export async function inviteCooldownActiveInTx(tx: Tx, email: string): Promise<boolean> {
   const rows = await tx.execute(
