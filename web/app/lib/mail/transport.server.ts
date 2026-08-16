@@ -99,7 +99,9 @@ export async function sendMail(message: MailMessage): Promise<void> {
     await transporter(settings).sendMail({
       from: settings.from,
       to: message.to,
-      subject: message.subject,
+      // The transport-level belt behind the compose-time strip: no subject leaves this module
+      // carrying a control character, whatever a caller composed.
+      subject: stripMailControl(message.subject),
       text: message.text,
       ...(message.html === undefined ? {} : { html: message.html }),
     });
@@ -120,4 +122,15 @@ export function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+/**
+ * Strip control characters (newlines included) from a user-influenced string headed into a
+ * mail — OUR OWN strip, not a reliance on the mail library's internal header folding: a `\r\n`
+ * smuggled through a workspace name must never reach a subject line, where it would open a
+ * header-injection seam. Runs of control characters collapse to one space so words stay apart.
+ */
+export function stripMailControl(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the control range IS the strip.
+  return value.replace(/[\x00-\x1f\x7f]+/g, " ");
 }

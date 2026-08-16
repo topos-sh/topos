@@ -149,6 +149,16 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
     });
     return { intent: "invite" as const, status: "owner_required" as const, submittedEmails: raw };
   }
+  // The invitation caps (invite-caps.server.ts) — typed, honest refusals, the addresses kept.
+  if (outcome.outcome === "too_many_addresses") {
+    return { intent: "invite" as const, status: "too_many" as const, submittedEmails: raw };
+  }
+  if (outcome.outcome === "invite_limit") {
+    return { intent: "invite" as const, status: "invite_limit" as const, submittedEmails: raw };
+  }
+  if (outcome.outcome === "member_limit") {
+    return { intent: "invite" as const, status: "member_limit" as const, submittedEmails: raw };
+  }
   if (outcome.outcome !== "invited") {
     return { intent: "invite" as const, status: "error" as const, submittedEmails: raw };
   }
@@ -172,7 +182,14 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
   } catch {
     emailSent = false;
   }
-  return { intent: "invite" as const, status: "invited" as const, invited: emails, emailSent };
+  return {
+    intent: "invite" as const,
+    status: "invited" as const,
+    // What actually went out: cooldown-skipped addresses minted nothing and got no mail.
+    invited: outcome.minted.map((m) => m.email),
+    skipped: outcome.skipped,
+    emailSent,
+  };
 }
 
 /**

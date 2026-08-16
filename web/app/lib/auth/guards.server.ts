@@ -1,7 +1,13 @@
 import { data, redirect } from "react-router";
 import { composition } from "@/composition.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
-import { seatOf, sessionActor, theWorkspace, workspaceByName } from "@/lib/db/identity.server";
+import {
+  seatOf,
+  sessionActor,
+  sessionActorByCredential,
+  theWorkspace,
+  workspaceByName,
+} from "@/lib/db/identity.server";
 import { personDisplay } from "@/lib/person-display";
 import { publicOrigin } from "@/lib/plane/public-base.server";
 import { getAuth } from "./server";
@@ -349,6 +355,36 @@ export async function requireSessionActor(
     userId: row.userId,
     display: row.userDisplay,
     workspaceId,
+    sessionId: row.sessionId,
+    role: row.role,
+    sessionStatus: row.sessionStatus,
+  } as SessionActor;
+}
+
+/**
+ * The session lane's front door for routes whose workspace rides in the BODY (the publish
+ * family): the SAME resolve as `requireSessionActor`, keyed by the credential alone — the
+ * credential is workspace-scoped and hash-unique, so at most one live session answers, and
+ * its row names the one workspace it may act in. This lets the route authenticate BEFORE
+ * reading the request body, so an unauthenticated caller can never make this tier buffer a
+ * publish-sized body. The route MUST then hold the parsed body's workspace against
+ * `actor.workspaceId` (fold a mismatch to the uniform 404) — the same answer the
+ * workspace-keyed lookup gave a foreign-workspace body. ACTIVE sessions only; every miss is
+ * the ONE uniform wire 404.
+ */
+export async function requireSessionActorPreBody(request: Request): Promise<SessionActor> {
+  const credential = bearerToken(request);
+  if (credential === null) {
+    throw uniformNotFound();
+  }
+  const row = await sessionActorByCredential(credential);
+  if (row === null || row.sessionStatus !== "active") {
+    throw uniformNotFound();
+  }
+  return {
+    userId: row.userId,
+    display: row.userDisplay,
+    workspaceId: row.workspaceId,
     sessionId: row.sessionId,
     role: row.role,
     sessionStatus: row.sessionStatus,

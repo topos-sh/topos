@@ -25,6 +25,7 @@ import {
   CREATE_RATE_LIMITED,
   NAME_REQUIRED,
   SLUG_SHAPE,
+  WORKSPACE_LIMIT,
 } from "@/lib/workspace-create-copy";
 import {
   isWorkspaceNameShape,
@@ -114,6 +115,10 @@ export async function action({ request }: ActionFunctionArgs) {
   if (result.outcome === "rate-limited") {
     // Honest and disclosed, unlike `taken` — a floor is not a secret.
     return data<ActionData>({ error: CREATE_RATE_LIMITED, displayName, slug }, { status: 429 });
+  }
+  if (result.outcome === "owned-limit") {
+    // The same honest family: the standing owned-workspaces cap, disclosed outright.
+    return data<ActionData>({ error: WORKSPACE_LIMIT, displayName, slug }, { status: 403 });
   }
   throw redirect(next ?? wsPathServer(result.name));
 }

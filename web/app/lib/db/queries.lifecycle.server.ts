@@ -5,6 +5,7 @@ import { releaseBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { claimCurrentNameInTx, isReservedBundleName } from "@/lib/db/queries.custody.server";
+import { reviewsEnableRefused } from "@/lib/db/queries.lane.server";
 import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
 import { deleteBundleBytes, purgeVersionBytes } from "@/lib/plane/custody.server";
 
@@ -377,18 +378,26 @@ export async function purgeVersion(
   return { outcome: "purged" };
 }
 
-export type ProtectionOutcome = { outcome: "set" } | { outcome: "unknown_skill" };
+export type ProtectionOutcome =
+  | { outcome: "set" }
+  | { outcome: "unknown_skill" }
+  /** ENABLING review protection is not available to this workspace (`allows("reviews")`). */
+  | { outcome: "reviews_unavailable" };
 
 /**
  * Pin (or unpin) ONE bundle's protection: 'open'/'reviewed' overrides the workspace default,
  * null returns the bundle to inheriting it. The OwnerActor brand is the gate (the route re-guards
  * as owner); the publish gate and the review four-eyes check both read the resolved cascade.
+ * ENABLING `reviewed` is entitlement-gated; loosening and unpinning never are.
  */
 export async function setBundleProtection(
   actor: OwnerActor,
   bundleId: string,
   protection: "open" | "reviewed" | null,
 ): Promise<ProtectionOutcome> {
+  if (protection === "reviewed" && (await reviewsEnableRefused(actor.workspaceId))) {
+    return { outcome: "reviews_unavailable" };
+  }
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
     const rows = await tx

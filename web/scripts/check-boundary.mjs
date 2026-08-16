@@ -345,7 +345,7 @@ const SESSIONLESS_ROUTES = new Set([
 // membership-or-404 resolution the face modules call on their signed-in arm (their anonymous
 // arm resolves the session itself, teaser-or-404, so the require* wrappers cannot front them).
 const GUARD_CALL =
-  /\b(?:require(?:SessionActor|Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer)|memberInScope)\s*\(/;
+  /\b(?:require(?:SessionActorPreBody|SessionActor|Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer)|memberInScope)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;
 for (const { rel, text, base } of files) {
   if (!rel.startsWith(ROUTES_DIR)) {

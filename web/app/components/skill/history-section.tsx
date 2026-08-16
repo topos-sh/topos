@@ -21,6 +21,12 @@ export interface HistoryStepView {
    */
   parents: string[];
   fileCount: number;
+  /**
+   * Server-computed: the row sits outside the workspace's history window. Still listed —
+   * nothing is deleted under a window — but the roll-back affordance is withheld (the action
+   * refuses it regardless), and the row says why.
+   */
+  locked?: boolean;
 }
 
 /**
@@ -91,7 +97,12 @@ export function HistorySection({ skill, data }: { skill: string; data: HistorySe
                 <span className="text-xs text-faint">
                   {step.fileCount === 1 ? "1 file" : `${step.fileCount} files`}
                 </span>
-                {data.canRevert && step.versionId !== data.head && (
+                {step.locked === true && (
+                  <span className="rounded border border-line-soft px-1.5 py-0.5 text-[11px] text-faint">
+                    Outside history window
+                  </span>
+                )}
+                {data.canRevert && step.versionId !== data.head && step.locked !== true && (
                   <div className="w-full">
                     <RevertControl
                       good={step.versionId}

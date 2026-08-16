@@ -132,7 +132,7 @@ describe("the sessions reads carry the block", () => {
   });
 });
 
-describe("the report door shape-checks the block — before the credential resolve", () => {
+describe("the report door shape-checks the block — an authenticated member's 400", () => {
   // The door checks the version spelling too — a REAL 64-hex id, so the harness block is what
   // each case is actually testing.
   const VERSION = "a1".repeat(32);
@@ -141,7 +141,10 @@ describe("the report door shape-checks the block — before the credential resol
     const route = await import("@/routes/api.v1.report");
     const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
       method: "PUT",
-      headers: { "content-type": "application/json" },
+      // Authenticated: the door resolves the credential FIRST (auth-before-body), so the
+      // shape 400s below are a member's answers — an unauthenticated caller meets only the
+      // uniform 404 and never makes the tier buffer a body.
+      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
       body: JSON.stringify({
         schema_version: 1,
         applied: [{ skill_id: "s_srv", version_id: VERSION, harnesses }],
@@ -191,11 +194,9 @@ describe("the report door shape-checks the block — before the credential resol
     expect(await put(harnesses)).toEqual({ status: 400, message });
   });
 
-  it("a well-shaped block passes the door — the refusal that follows is the guard's, not the parser's", async () => {
-    // No credential rides this request, so a shape-valid body reaches `requireSessionActor` and
-    // gets its uniform miss: proof the parse let the block through.
+  it("a well-shaped block passes the door — the snapshot lands", async () => {
     const { status } = await put([{ slug: "claude-code", state: "current" }]);
-    expect(status).not.toBe(400);
+    expect(status).toBe(204);
   });
 
   /**

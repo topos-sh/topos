@@ -2,6 +2,8 @@ import { type BundleKind, kindEntry } from "@/lib/bundle-base";
 import { claimBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { mintBundleId } from "@/lib/db/identity.server";
 import {
+  bundleCapRefusal,
+  bundleCapRefusalInTx,
   type FinalTx,
   type GenesisDestination,
   type GenesisRegistration,
@@ -138,6 +140,15 @@ export async function publishGenesisBundle<T = undefined>(
   const bundleId = args.bundleId ?? mintBundleId();
   const ws = args.actor.workspaceId;
 
+  // THE BUNDLE CAP (`bundles`), before any custody call — a NEW identity at the cap must not
+  // ingest bytes it will never register (a no-op without a limit; the in-transaction check
+  // below stays the race-fenced authority). New versions of existing bundles never run this
+  // path at all.
+  const capped = await bundleCapRefusal(args.actor);
+  if (capped !== null) {
+    return { kind: "refused", refusal: capped };
+  }
+
   // THE KIND'S GATE, before any custody call — a refused candidate must leave no ingested bytes
   // behind. A kind with no content gate passes straight through.
   let identity: string | null = null;
@@ -174,6 +185,13 @@ export async function publishGenesisBundle<T = undefined>(
 
   const landed = await inFinalTxOrRefusal<{ landing: GenesisLanding; extra: T }, McpGateRefusal>(
     async (tx, refuse) => {
+      // The bundle cap's AUTHORITY — re-checked in this transaction under the advisory lock,
+      // so two concurrent geneses at the boundary serialize (the pre-vault read above only
+      // keeps the common refusal byte-free). A refusal rolls the whole registration back.
+      const stillCapped = await bundleCapRefusalInTx(tx, args.actor);
+      if (stillCapped !== null) {
+        refuse(stillCapped);
+      }
       const registration = await registerGenesisBundleInTx(
         tx,
         args.actor,

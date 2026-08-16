@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import {
   type ActionFunctionArgs,
+  data,
   Form,
   Link,
   type LoaderFunctionArgs,
@@ -174,6 +175,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 
 const CREATE_FAILED = "Couldn't finish accepting the invitation. Try the link again.";
+const MEMBER_LIMIT = "This workspace is at its member limit.";
 
 export async function action({ request, params }: ActionFunctionArgs) {
   requireBelt(request);
@@ -229,6 +231,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
       { userId: actor.userId, display: actor.display },
       { mailboxProven: false },
     );
+    if (result.outcome === "workspace_full") {
+      // The member limit — the invitation stays pending, so the same link works once the
+      // workspace has room; a bare redirect would re-render the accept card with no answer.
+      return { kind: "error" as const, message: MEMBER_LIMIT };
+    }
     if (result.outcome !== "accepted") {
       // The loader recomputes the honest state for every refusal (gone → the constant page,
       // wrong account → the switch page, unverified → the round-trip prompt).
@@ -317,6 +324,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
       { userId, display },
       { mailboxProven: true },
     );
+    if (accepted.outcome === "workspace_full") {
+      // The member limit — the fresh account stands (its session cookies still land; it
+      // admits nothing) and the invitation stays pending for when the workspace has room.
+      return data({ kind: "error" as const, message: MEMBER_LIMIT }, { headers: cookieHeaders });
+    }
     if (accepted.outcome !== "accepted") {
       // A race consumed the token between the resolve and the accept: the account stands (a
       // harmless orphan that can sign in and admits nothing); the page answers constantly.

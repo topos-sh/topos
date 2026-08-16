@@ -5,10 +5,18 @@ import { BusyFields, buttonClasses, Card } from "@/components/ui";
 /** The skill route's typed reply for `intent=invite` (mirrors the action's return union). */
 interface SkillInviteReply {
   intent: "invite";
-  status: "invited" | "owner_required" | "mail_unarmed" | "error";
+  status:
+    | "invited"
+    | "owner_required"
+    | "mail_unarmed"
+    | "error"
+    | "invite_limit"
+    | "member_limit"
+    /** The address was on its cooldown — nothing minted, nothing mailed. */
+    | "skipped";
   /** Echoed on a non-success so the field keeps the typed address through the re-render. */
   submittedEmail?: string;
-  /** The address invited, on success. */
+  /** The address invited (or, on `skipped`, the address not re-sent). */
   invited?: string;
   /** Whether the notice mail went out (the invitation row stands regardless). */
   emailSent?: boolean;
@@ -124,6 +132,21 @@ export function SkillInviteAffordance({
           {state.emailSent
             ? `They were emailed the invite; accepting puts this ${noun} in front of them first.`
             : "The invitation stands, but the mail didn't send — invite the address again to resend."}
+        </p>
+      )}
+      {state?.status === "skipped" && (
+        <p className="text-dim text-sm" role="status">
+          Didn&apos;t send to {state.invited} — already invited recently.
+        </p>
+      )}
+      {state?.status === "invite_limit" && (
+        <p className="text-red-600 text-sm" role="alert">
+          Invitation limit reached for today. Try again tomorrow.
+        </p>
+      )}
+      {state?.status === "member_limit" && (
+        <p className="text-red-600 text-sm" role="alert">
+          This workspace is at its member limit.
         </p>
       )}
       {state?.status === "owner_required" && (

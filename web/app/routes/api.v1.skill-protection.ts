@@ -1,17 +1,18 @@
 import type { ActionFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
-import { rowOpResponse } from "@/lib/api/row-envelopes.server";
+import { deniedCodeEnvelope, rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneProtectBundle } from "@/lib/db/queries.lane.server";
 
 /**
  * `PUT /api/v1/workspaces/{ws}/skills/{skill}/protection` — set a bundle's protection level
- * (`reviewed` | `open`). `{skill}` is the immutable id. A JSON body `{ level }`. A malformed
- * body AND an invalid LEVEL are both a 400 BEFORE the credential resolve, so a bad level is a
- * 400 unconditionally — never a membership signal a non-member could read off. Tightening to
- * `reviewed` takes reviewer+ (`REVIEWER_ROLE_REQUIRED`); loosening to `open` takes owner
- * (`OWNER_ROLE_REQUIRED`).
+ * (`reviewed` | `open`). `{skill}` is the immutable id. A JSON body `{ level }`. The
+ * credential resolves BEFORE the body (the lane-wide order): a non-member meets only the
+ * uniform 404 whatever the body says, and body validation 400s only an authenticated member.
+ * Tightening to `reviewed` takes reviewer+ (`REVIEWER_ROLE_REQUIRED`) AND the reviews
+ * entitlement (`REVIEWS_NOT_AVAILABLE` with its way back); loosening to `open` takes owner
+ * (`OWNER_ROLE_REQUIRED`) and is never entitlement-gated.
  */
 const BODY_CAP = 64 * 1024;
 
@@ -28,6 +29,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "PUT") {
     return uniformNotFound();
   }
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const body = await readCappedBody(request, BODY_CAP, "protection body");
   if (body instanceof Response) {
     return body;
@@ -45,8 +47,14 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (level !== "open" && level !== "reviewed") {
     return badRequest("a skill protection level must be `reviewed` or `open`");
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
   const status = await laneProtectBundle(actor, params.skill ?? "", level);
+  if (status === "reviews_unavailable") {
+    return deniedCodeEnvelope(
+      "protect",
+      "REVIEWS_NOT_AVAILABLE",
+      "Review protection is not available on this workspace.",
+    );
+  }
   return rowOpResponse("protect", status, { set: "set" }, PROTECT_DENIED);
 }
 

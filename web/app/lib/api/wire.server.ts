@@ -180,8 +180,9 @@ export async function readCappedBody(
   // The declared length is only a HINT — a caller may omit it entirely (chunked transfer), and
   // then a plain `request.text()` would buffer the whole stream before anything could object.
   // So the cap is enforced AS the body arrives: the read is abandoned the moment it is exceeded,
-  // and the connection is cancelled rather than drained. This matters most on the publish-family
-  // routes, whose cap is large by necessity and whose credential check comes after the body.
+  // and the connection is cancelled rather than drained. Every authenticated lane route also
+  // resolves its credential BEFORE reading the body, so this cap bounds what an AUTHENTICATED
+  // caller can make the tier buffer — an unauthenticated one buffers nothing.
   const body = request.body;
   if (body === null) {
     return "";

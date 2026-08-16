@@ -272,6 +272,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
         `);
       },
     });
+    if (landed.kind === "refused") {
+      // A typed refusal (the bundle cap — a skill has no content gate) surfaces in its own
+      // words rather than folding into the retry line: retrying cannot change the answer.
+      return data<PublishError>(
+        { form: "publish", error: landed.refusal.message },
+        { status: 400 },
+      );
+    }
     if (landed.kind !== "ok") {
       return data<PublishError>(
         { form: "publish", error: "The publish did not land — try again." },

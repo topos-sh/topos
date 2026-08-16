@@ -1,5 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { composition } from "@/composition.server";
 import type { SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
@@ -10,6 +11,11 @@ import {
   supersedeDeclinedInvitationTx,
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import {
+  inviteCapRefusalInTx,
+  inviteCooldownActiveInTx,
+  submissionCapRefusal,
+} from "@/lib/db/invite-caps.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
@@ -489,15 +495,30 @@ function protectionRoleGate(
   return role === "owner" ? null : "owner_role_required";
 }
 
+/**
+ * Whether ENABLING review protection is available to this workspace (`allows("reviews")`,
+ * OSS default: open). The gate is on enabling only — loosening back to `open` is never gated,
+ * and bundles already protected keep working (no retroactive strip).
+ */
+export async function reviewsEnableRefused(workspaceId: string): Promise<boolean> {
+  const entitlements = await composition.entitlements.forWorkspace(workspaceId);
+  return !entitlements.allows("reviews");
+}
+
 /** Pin a bundle's protection level (`open` | `reviewed`; the route validated the value). */
 export async function laneProtectBundle(
   actor: SessionActor,
   bundleId: string,
   level: "open" | "reviewed",
-): Promise<"set" | "unknown_skill" | "owner_role_required" | "reviewer_role_required"> {
+): Promise<
+  "set" | "unknown_skill" | "owner_role_required" | "reviewer_role_required" | "reviews_unavailable"
+> {
   const gate = protectionRoleGate(actor.role, level === "reviewed");
   if (gate !== null) {
     return gate;
+  }
+  if (level === "reviewed" && (await reviewsEnableRefused(actor.workspaceId))) {
+    return "reviews_unavailable";
   }
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
@@ -526,10 +547,19 @@ export async function laneProtectChannel(
   actor: SessionActor,
   channelName: string,
   mode: "open" | "curated",
-): Promise<"set" | "unknown_channel" | "owner_role_required" | "reviewer_role_required"> {
+): Promise<
+  | "set"
+  | "unknown_channel"
+  | "owner_role_required"
+  | "reviewer_role_required"
+  | "reviews_unavailable"
+> {
   const gate = protectionRoleGate(actor.role, mode === "curated");
   if (gate !== null) {
     return gate;
+  }
+  if (mode === "curated" && (await reviewsEnableRefused(actor.workspaceId))) {
+    return "reviews_unavailable";
   }
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
@@ -581,6 +611,9 @@ export type LaneInviteOutcome =
   | {
       outcome: "invited";
       minted: { email: string; token: string }[];
+      /** Addresses on a cooldown (invited repeatedly, server-wide) — no row written, no mail;
+       * the receipt reports each as `already invited recently`. */
+      skipped: string[];
       /**
        * The RESOLVED first destination — the bundle's own catalog kind ('skill' or 'mcp') or
        * 'channel', read from the row the hint resolved to rather than assumed from which field
@@ -592,7 +625,13 @@ export type LaneInviteOutcome =
   | { outcome: "owner_role_required" }
   | { outcome: "unknown_skill" }
   | { outcome: "unknown_channel" }
-  | { outcome: "bad_email" };
+  | { outcome: "bad_email" }
+  /** Over the per-submission address cap — the whole submission refuses. */
+  | { outcome: "too_many_addresses" }
+  /** The workspace's member limit (seats + pending invitations) is reached. */
+  | { outcome: "member_limit" }
+  /** The inviter's rolling-day cap is reached. */
+  | { outcome: "invite_limit" };
 
 /**
  * The session lane's invitation write. Inviting is OWNER-ONLY — the gate runs against the
@@ -619,7 +658,20 @@ export async function laneInvite(
   if (actor.role !== "owner") {
     return { outcome: "owner_role_required" };
   }
+  if (submissionCapRefusal(folded.length) !== null) {
+    return { outcome: "too_many_addresses" };
+  }
   return await getDb().transaction(async (tx) => {
+    // The stateful caps (member limit + the rolling-day cap), counted INSIDE this transaction —
+    // the same hard-cap discipline as the members-page door (invite-caps.server.ts).
+    const refusal = await inviteCapRefusalInTx(tx, {
+      workspaceId: ws,
+      actorUserId: actor.userId,
+      addressCount: folded.length,
+    });
+    if (refusal !== null) {
+      return { outcome: refusal };
+    }
     let hintBundleId: string | null = null;
     let hintChannelId: string | null = null;
     // The destination as RESOLVED. The lane's `skill` field names any bundle in the catalog,
@@ -654,7 +706,12 @@ export async function laneInvite(
     }
     const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
     const minted: { email: string; token: string }[] = [];
+    const skipped: string[] = [];
     for (const email of folded) {
+      if (await inviteCooldownActiveInTx(tx, email)) {
+        skipped.push(email);
+        continue;
+      }
       const token = mintInviteToken();
       await supersedeDeclinedInvitationTx(tx, ws, email);
       await tx.execute(sql`
@@ -684,6 +741,7 @@ export async function laneInvite(
     return {
       outcome: "invited",
       minted,
+      skipped,
       ...(resolvedHint === undefined ? {} : { hint: resolvedHint }),
     };
   });

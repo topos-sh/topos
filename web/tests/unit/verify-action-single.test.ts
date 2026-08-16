@@ -105,8 +105,7 @@ describe("single tenancy refuses the create arm — route and fence alike", () =
 
   it("the shared precheck reads OFF here — one spelling for /new and this page", async () => {
     const { createWorkspacePrecheck } = await import("@/lib/db/workspace-create.server");
-    const { asUser } = await import("./helpers/scratch-db");
-    expect(await createWorkspacePrecheck(asUser("u_own"))).toBe("off");
+    expect(await createWorkspacePrecheck()).toBe("off");
   });
 
   it("the fence aborts a create choice on its own terms — the uniform null, no row", async () => {

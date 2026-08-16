@@ -5,6 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { type Db, getDb, isUniqueViolation } from "./index.server";
+import { memberCapReachedInTx } from "./invite-caps.server";
 import {
   assignment,
   auditEvent,
@@ -909,7 +910,11 @@ export type LoginApproveOutcome =
     }
   /** The create arm's typed refusal: the slug is reserved or taken (indistinguishable, like
    * /new); the whole transaction rolled back and the flow stays pending for a retry. */
-  | { outcome: "taken" };
+  | { outcome: "taken" }
+  /** The create arm's per-person floors (counted inside the birth fence, exactly as /new's) —
+   * typed, honest, and the flow stays pending. */
+  | { outcome: "rate-limited" }
+  | { outcome: "owned-limit" };
 
 /** The in-transaction abort sentinel: an approval that cannot complete must ROLL BACK any
  * invitation accept or workspace birth it already made (a bare `return null` from a Drizzle
@@ -918,6 +923,9 @@ export type LoginApproveOutcome =
 const APPROVE_ABORT = Symbol("login-approve-abort");
 /** The create arm's typed rollback: same discipline, surfaced as `taken` instead of null. */
 const APPROVE_TAKEN = Symbol("login-approve-taken");
+/** The create arm's floor rollbacks — the same discipline, surfaced typed like `taken`. */
+const APPROVE_RATE_LIMITED = Symbol("login-approve-rate-limited");
+const APPROVE_OWNED_LIMIT = Symbol("login-approve-owned-limit");
 
 /**
  * FENCE 2 — the login-flow approve, one FOR UPDATE transaction: lock the pending row by
@@ -1025,9 +1033,10 @@ export async function approveLoginFlow(
             throw APPROVE_ABORT;
           }
           // The workspace birth runs INSIDE this fence — the identical one-transaction birth
-          // /new runs (the shared tx body). The route ran the policy pre-checks (entitlement
-          // gate + the per-person floor) before calling; a reserved slug answers the typed
-          // rollback here, and a create-race unique violation surfaces at the boundary below.
+          // /new runs (the shared tx body, per-person advisory lock + counted floors
+          // included). The route ran the surface pre-check (tenancy + the entitlement gate)
+          // before calling; a reserved slug and the floors answer their typed rollbacks here,
+          // and a create-race unique violation surfaces at the boundary below.
           const born = await createWorkspaceTx(
             tx,
             approver,
@@ -1036,6 +1045,12 @@ export async function approveLoginFlow(
           );
           if (born.outcome === "taken") {
             throw APPROVE_TAKEN;
+          }
+          if (born.outcome === "rate-limited") {
+            throw APPROVE_RATE_LIMITED;
+          }
+          if (born.outcome === "owned-limit") {
+            throw APPROVE_OWNED_LIMIT;
           }
           chosenWorkspaceId = born.workspaceId;
           via = "create";
@@ -1077,6 +1092,12 @@ export async function approveLoginFlow(
     }
     if (error === APPROVE_TAKEN || (choice?.kind === "create" && isUniqueViolation(error))) {
       return { outcome: "taken" };
+    }
+    if (error === APPROVE_RATE_LIMITED) {
+      return { outcome: "rate-limited" };
+    }
+    if (error === APPROVE_OWNED_LIMIT) {
+      return { outcome: "owned-limit" };
     }
     throw error;
   }
@@ -1595,6 +1616,54 @@ export async function sessionActor(
 }
 
 /**
+ * The credential-FIRST resolve for routes whose workspace rides in the BODY (the publish
+ * family): the same live-session → seat chain as `sessionActor`, keyed by the credential alone
+ * — it is workspace-scoped and hash-unique, so at most one session answers, and the session
+ * row itself names the one workspace it may act in. The caller authenticates BEFORE reading
+ * the request body (so an unauthenticated caller never makes this tier buffer a large body),
+ * then binds the parsed body's workspace against `workspaceId` — a mismatch is the same
+ * uniform 404 the old workspace-keyed lookup answered.
+ */
+export async function sessionActorByCredential(
+  credential: string,
+): Promise<(SessionActorRow & { workspaceId: string }) | null> {
+  const rows = await getDb().execute(
+    sql`UPDATE web.cli_session cs SET last_seen_at = now()
+        FROM ${seat} s, web."user" u, ${workspace} w
+        WHERE cs.credential_sha256 = ${sha256OfText(credential)}
+          AND w.id = cs.workspace_id
+          AND ${sessionUnexpiredSql("cs", "w")}
+          AND u.id = cs.user_id
+          AND s.user_id = cs.user_id AND s.workspace_id = cs.workspace_id
+        RETURNING cs.id AS session_id, cs.workspace_id, cs.user_id,
+          -- The display rule (app/lib/person-display.ts): a blank name falls back to the email.
+          COALESCE(NULLIF(btrim(u.name), ''), u.email) AS user_display, s.role,
+          cs.status AS session_status`,
+  );
+  const row = rows.rows[0] as
+    | {
+        session_id: string;
+        workspace_id: string;
+        user_id: string;
+        user_display: string;
+        role: SessionActorRow["role"];
+        session_status: SessionStatus;
+      }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  return {
+    sessionId: row.session_id,
+    workspaceId: row.workspace_id,
+    userId: row.user_id,
+    userDisplay: row.user_display,
+    role: row.role,
+    sessionStatus: row.session_status,
+  };
+}
+
+/**
  * The invited sign-up's binding leg: convert every pending, unexpired invitation for this
  * (verified) address into a seat, atomically per run. Called from the auth layer's
  * after-verification hook — the mailbox round-trip IS the identity rung, so this is the one
@@ -1622,6 +1691,12 @@ export async function bindInvitedSeats(
         role: string;
         invited_by: string | null;
       };
+      // The member cap's seat-mint backstop (a no-op without a `members` limit): a full
+      // workspace is SKIPPED — its invitation stays pending, so a wider limit later binds it
+      // on the next verification pass or through the accept ceremony.
+      if (await memberCapReachedInTx(tx, inv.workspace_id, userId)) {
+        continue;
+      }
       await tx.execute(
         sql`UPDATE web.invitation
             SET status = 'accepted', accepted_by = ${userId}, accepted_at = now()
@@ -1894,7 +1969,10 @@ export type InviteAcceptOutcome =
   | { outcome: "wrong_account" }
   /** The invited address's account never proved its mailbox — one round-trip first (the true
    * owner passes; a squatter cannot). */
-  | { outcome: "unverified" };
+  | { outcome: "unverified" }
+  /** The workspace's member limit is reached — the invitation stays pending (a wider limit
+   * lets the same link succeed later); nothing is consumed. */
+  | { outcome: "workspace_full" };
 
 /**
  * FENCE — the invitation accept, ONE transaction beside bindInvitedSeats: the email-binding
@@ -1921,6 +1999,12 @@ async function acceptInvitationTx(
   }
   if (!account.emailVerified && !opts.mailboxProven) {
     return { outcome: "unverified" };
+  }
+  // The member cap's seat-mint backstop (a no-op without a `members` limit): a full workspace
+  // refuses BEFORE anything is written — the invitation stays pending, and an accepter who
+  // already holds a seat is never refused (the insert below no-ops for them anyway).
+  if (await memberCapReachedInTx(tx, inv.workspaceId, account.userId)) {
+    return { outcome: "workspace_full" };
   }
   if (opts.mailboxProven && !account.emailVerified) {
     await tx.execute(sql`UPDATE web."user" SET email_verified = true WHERE id = ${account.userId}`);

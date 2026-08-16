@@ -7,6 +7,11 @@ import {
   supersedeDeclinedInvitationTx,
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import {
+  inviteCapRefusalInTx,
+  inviteCooldownActiveInTx,
+  submissionCapRefusal,
+} from "@/lib/db/invite-caps.server";
 import { personDisplaySql } from "@/lib/db/person-display.server";
 import { invitation, seat } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
@@ -90,9 +95,21 @@ export interface InviteHintRef {
 }
 
 export type InviteOutcome =
-  | { outcome: "invited"; minted: MintedInvitation[] }
+  | {
+      outcome: "invited";
+      minted: MintedInvitation[];
+      /** Addresses on a cooldown (invited repeatedly, server-wide) — no row written, no mail;
+       * the receipt reports each as `already invited recently`. */
+      skipped: string[];
+    }
   | { outcome: "owner_role_required" }
-  | { outcome: "bad_email" };
+  | { outcome: "bad_email" }
+  /** Over the per-submission address cap — the whole submission refuses. */
+  | { outcome: "too_many_addresses" }
+  /** The workspace's member limit (seats + pending invitations) is reached. */
+  | { outcome: "member_limit" }
+  /** The inviter's rolling-day cap is reached. */
+  | { outcome: "invite_limit" };
 
 const MAX_EMAIL_LEN = 128;
 /** Path-safe + the mailbox specials — the same closed charset the wire folds. */
@@ -113,7 +130,10 @@ export function foldInviteEmail(email: string): string | null {
  * token — the old link dies with its hash). A prior DECLINED row for the address is superseded
  * (deleted; the audit trail keeps the record). The OWNER gate runs HERE against the actor's
  * role (inviting is owner-only, like revoking); the mail-armed gate and the notice send run in
- * the route. Every write lands its audit row in the same transaction.
+ * the route. Every write lands its audit row in the same transaction — and so do the
+ * invitation CAPS (invite-caps.server.ts): the member limit and the rolling-day cap are
+ * counted inside the transaction (hard caps, not pre-check throttles), and a repeatedly
+ * invited address is skipped rather than re-mailed.
  */
 export async function createInvitations(
   actor: MemberActor,
@@ -131,10 +151,26 @@ export async function createInvitations(
     }
     folded.push(canonical);
   }
+  if (submissionCapRefusal(folded.length) !== null) {
+    return { outcome: "too_many_addresses" };
+  }
   const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
   const minted: MintedInvitation[] = [];
-  await getDb().transaction(async (tx) => {
+  const skipped: string[] = [];
+  const capped = await getDb().transaction(async (tx) => {
+    const refusal = await inviteCapRefusalInTx(tx, {
+      workspaceId: actor.workspaceId,
+      actorUserId: actor.userId,
+      addressCount: folded.length,
+    });
+    if (refusal !== null) {
+      return refusal;
+    }
     for (const email of folded) {
+      if (await inviteCooldownActiveInTx(tx, email)) {
+        skipped.push(email);
+        continue;
+      }
       const token = mintInviteToken();
       await supersedeDeclinedInvitationTx(tx, actor.workspaceId, email);
       await tx.execute(sql`
@@ -160,8 +196,12 @@ export async function createInvitations(
       });
       minted.push({ email, token });
     }
+    return null;
   });
-  return { outcome: "invited", minted };
+  if (capped !== null) {
+    return { outcome: capped };
+  }
+  return { outcome: "invited", minted, skipped };
 }
 
 export type RevokeInvitationOutcome = "revoked" | "missing";

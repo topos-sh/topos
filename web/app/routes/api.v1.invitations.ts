@@ -17,8 +17,11 @@ import { agentDocUrl, inviteUrl, workspaceAddress } from "@/lib/ws-url.server";
  *
  * INVITING REQUIRES ARMED MAIL: the mailbox is where the tokened link travels, so on an
  * unarmed deployment the op refuses TYPED (`MAIL_NOT_CONFIGURED`) — an invitation nobody could
- * receive would mislead the inviter. ORDERING mirrors the door's posture: a malformed body is
- * a 400 BEFORE the credential resolve; a malformed email is a 400 AFTER auth.
+ * receive would mislead the inviter. ORDERING is the lane-wide auth-before-body: the
+ * credential resolves first (an unauthenticated caller buffers nothing and learns nothing —
+ * every answer is the uniform 404), and body validation 400s only an authenticated member.
+ * The invitation CAPS (per-submission, member limit, the rolling-day cap, the per-address
+ * cooldown) are enforced in the DAL, inside the write transaction.
  */
 const BODY_CAP = 64 * 1024;
 
@@ -30,6 +33,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "POST") {
     return uniformNotFound();
   }
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const raw = await readCappedBody(request, BODY_CAP, "invitation body");
   if (raw instanceof Response) {
     return raw;
@@ -57,7 +61,6 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     return badRequest("an invitation carries at most one first destination — skill OR channel");
   }
 
-  const actor = await requireSessionActor(request, params.ws ?? "");
   if (!inviteMailDelivery().canSend) {
     return deniedCodeEnvelope("invite", "MAIL_NOT_CONFIGURED");
   }
@@ -94,7 +97,17 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     return okDataEnvelope("invite", {
       address,
       invited: outcome.minted.map((m) => m.email),
-      mailed: true,
+      // Honest: an all-skipped submission (every address on its cooldown) sent nothing.
+      mailed: outcome.minted.length > 0,
+      // Addresses on a cooldown (invited repeatedly) — not re-sent, reported per address.
+      ...(outcome.skipped.length === 0
+        ? {}
+        : {
+            skipped: outcome.skipped.map((email) => ({
+              email,
+              reason: "already invited recently",
+            })),
+          }),
     });
   }
   if (outcome.outcome === "owner_role_required") {
@@ -105,6 +118,27 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   }
   if (outcome.outcome === "unknown_channel") {
     return deniedCodeEnvelope("invite", "UNKNOWN_CHANNEL");
+  }
+  if (outcome.outcome === "too_many_addresses") {
+    return deniedCodeEnvelope(
+      "invite",
+      "TOO_MANY_ADDRESSES",
+      "Too many addresses at once. Send up to 10 invitations at a time.",
+    );
+  }
+  if (outcome.outcome === "invite_limit") {
+    return deniedCodeEnvelope(
+      "invite",
+      "INVITE_LIMIT_REACHED",
+      "Invitation limit reached for today. Try again tomorrow.",
+    );
+  }
+  if (outcome.outcome === "member_limit") {
+    return deniedCodeEnvelope(
+      "invite",
+      "MEMBER_LIMIT_REACHED",
+      "This workspace is at its member limit.",
+    );
   }
   return internalError();
 }
