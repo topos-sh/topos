@@ -127,6 +127,20 @@
       "when": 1787107549626,
       "tag": "0017_mcp-servers",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787107620530,
+      "tag": "0018_mcp-catalog-seed",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787107653209,
+      "tag": "0019_mcp-proposals-retired",
+      "breakpoints": true
     }
   ]
 }
