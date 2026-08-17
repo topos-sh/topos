@@ -29,24 +29,20 @@ caller.
   (the whole delivery predicate: assigned to you or to everyone, minus your declines — one
   positive row per provenance with a `self` flag, one negative per person per bundle; the
   baseline everyone-row is unassignable at the data layer), upstream provenance
-  (`bundle_upstream`/`version_upstream`), `bundle_identity` (a bundle's SECOND name, when its
-  kind has one — the key that refuses a duplicate), `mcp_probe` (one advisory probe result per
-  published MCP version — a report, never a gate), notices, proposals + comments, op receipts,
-  `audit_event`, `mail_event`.
+  (`bundle_upstream`/`version_upstream`), the MCP SERVER CATALOG (`mcp_server` +
+  `mcp_server_revision` + `bundle_mcp` — see the MCP lane below), notices, proposals + comments,
+  op receipts, `audit_event`, `mail_event`.
 - **The DAL** (`app/lib/db/queries*.server.ts`) is the one sanctioned door to `web` AND the
   read-only `plane` custody mirror. Every function REQUIRES a branded actor as its first
   argument; mutating ops emit their audit row in the SAME transaction. One named exception: the
   mail transport's metadata-only `mail_event` send log is a system write with no actor. Policy is
   TypeScript here — no guarded SQL functions, no plane row-writes.
 - **Publishing a BRAND-NEW bundle happens once** (`app/lib/api/genesis.server.ts`): the session
-  lane's publish, add-from-GitHub and add-an-MCP-server all run one sequence — the kind's content
-  gate → the vault call → ONE transaction holding the registration, the identity claim, and
-  whatever that door adds (upstream rows, an import audit line, the op receipt). The content gate
-  comes from the kind's record (the same bytes are the same bytes at every door); the
-  DESTINATION does not — it is a required argument each door states outright, because where a new
-  bundle reaches is the door's ruling, not the kind's. The registration precedes the claim (its
-  key points at the bundle row) and a refused claim rolls both back, so a refusal still means no
-  catalog row was written.
+  lane's publish and add-from-GitHub run one sequence — the vault call → ONE transaction holding
+  the registration and whatever that door adds (upstream rows, an import audit line, the op
+  receipt). A kind whose bundles are NOT files refuses there, ahead of every cap and every custody
+  call. The DESTINATION is a required argument each door states outright, because where a new
+  bundle reaches is the door's ruling, not the kind's.
 - **Auth guards fail closed** (`app/lib/auth/guards.server.ts` — the only minters of branded
   actors: `requireSession → requireMember → requireWorkspaceOwner`/`requireReviewer`,
   `requireSessionActor`); the brand symbol is module-private. **Misses render 404, never 403.**
@@ -121,54 +117,54 @@ caller.
   remark/rehype chain; closed component set; nav.json must match disk; the CLI reference page
   splices the generated `docs/cli.md`). Edit the MDX → `bun run gen:docs` → commit; `check:docs`
   fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index.
-- **The MCP lane:** `kind: 'mcp'` bundles carry `server.json` (required; an optional `README.md`
-  is the only allowed sibling — both files' bytes run the credential scan), gated by
-  `app/lib/mcp/` — SOMETHING TO RUN (a remote `streamable-http` endpoint over https, or
+- **The MCP lane — a CATALOG, not bytes:** a `kind: 'mcp'` bundle holds no files. It NAMES a
+  server (`web.bundle_mcp`, one connection per server per workspace, unique-enforced), the server
+  holds its version history (`web.mcp_server` + `mcp_server_revision`, append-only, a `current`
+  pointer moved in the same fenced transaction as the revision that earns it), and delivery
+  resolves the document from there — a pin exactly, revoked or not, else the server's current.
+  Global rows (`workspace_id IS NULL`) are the install's curated catalog; a workspace's own rows
+  are private and exported nowhere. `auth_mode` is VERIFIED truth (`null` = nobody established
+  it, never rendered as `none`; a `manual` row publishes only with the one line saying what a
+  person must do first). The whole data layer is `app/lib/db/queries.mcp-catalog.server.ts`;
+  `KNOWN_MCP_SCHEMA_VERSIONS` there is the fail-closed `$schema` vocabulary.
+  **The document gate** (`app/lib/mcp/validate.server.ts`) still decides what may enter the
+  catalog at every door: SOMETHING TO RUN (a remote `streamable-http` endpoint over https, or
   `packages[]`, or both; neither refuses), every package PINNED to one immutable thing (exact
   version · OCI tag-or-digest · `fileSha256`; `latest` and version ranges refuse), no
   `{placeholder}` in the endpoint, no credential (the shapes live in the repo-root
   `tests/fixtures/mcp/`, compiled into `secret-patterns.generated.ts`; a package env/flag may
-  NAME a credential slot — the machine fills it — but never arrive with the value in it), and an
-  embedded registry name no other bundle here claims. `registryType` is open-world: what a given
-  machine can set up is the client's answer at render time, not a refusal for everyone. The rules
-  are mirrored in `bins/topos/src/mcp_validate.rs` and pinned by the shared vectors, so a change
-  here without a vector fails both suites. **The advisory probe** (`app/lib/mcp/probe.server.ts`)
-  runs strictly AFTER a publish transaction commits, over the same SSRF-guarded transport (POST
-  `initialize`, bounded JSON/SSE read, no redirect followed): 401/403 = sign-in-required and
-  healthy (outranks the body) · silence/5xx/429 = not responding, never a protocol verdict ·
-  a private or unresolvable address = "not verifiable from cloud" (NEUTRAL — internal servers are
-  first-class). It records one row per version (`web.mcp_probe`, its OWN four-word vocabulary) and
-  can never block, roll back, or slow a publish; a version with no row reads "not checked yet".
-  Hooked at the genesis path (all three doors), the re-publish arm and the propose arm; NOT at the
-  upstream checker's import (a system act with no actor to scope the row) and not at a pointer move
-  (review approve · revert · unarchive create no version).
-  Every publish door runs the same gate before any custody call: the session lane's
-  publish/propose and the `mcp/new` page — the MCP section's own way in (built-in list ·
-  registry name · SSRF-guarded URL — the guard DIALS the addresses it vetted (`https.request`
-  with our own `lookup`, so nothing resolves a second time) · paste). The built-in list is
-  committed data the loader ships whole, documents included, so picking one opens its confirm
-  dialog with no round trip; the publish re-derives those bytes from the list. The three typed
-  sources keep their server-side preview. The embedded name is a CLAIMED ROW
-  (`web.bundle_identity`, keyed `(workspace, kind, identity)`): every door that MOVES a pointer
-  onto an mcp version claims it in the same transaction as the move — publish, re-publish,
-  unarchive, review approve, revert, all through `movePointerWithKindPrecondition` — and the
-  key's conflict IS the refusal, worded once (`mcpNameTakenRefusal`) pointing at the bundle
-  already holding it. Archiving and deleting release it. Names that predate the row are recorded
-  by an idempotent boot backfill (the bytes live in the vault, so no migration can read them);
-  a document it cannot read gets no row and is NAMED in the log, never skipped silently.
-  `mcp/new` mints a NEW bundle per import and its destination field RESTS ON NO CHANNEL — an
-  import lands catalog-only and reaches nobody until a channel is chosen, here or later. That is
-  this PAGE's resting state (`NO_CHANNEL`, distinct from the default-channel `null`), read from
-  the kind's record; every channel INCLUDING the default is an ordinary named option, so no empty
-  value stands in for one. It is the FORM's ruling and scoped to it: the session lane keeps the
-  wire's own semantics, where an absent channel means the workspace default for every kind — an
-  agent's `topos publish` reaches the team, MCP servers included. When a channel IS chosen the page discloses what the publish did
-  to the REACH: a curated channel withholds a member's placement, and the bundle face says so.
-  `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
-  official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.
+  NAME a credential slot — the machine fills it — but never arrive with the value in it).
+  `registryType` is open-world: what a given machine can set up is the client's answer at render
+  time, not a refusal for everyone.
+  **Bytes are refused for the kind**: a publish or a proposal naming it answers `KIND_HAS_NO_FILES`
+  before any custody call, and the file pages (history · proposals · a version's tree) mount for
+  file kinds only.
+  **The advisory probe** (`app/lib/mcp/probe.server.ts`) runs strictly AFTER the revision is
+  durable, over the SSRF-guarded transport (POST `initialize`, bounded JSON/SSE read, no redirect
+  followed): 401/403 = sign-in-required and healthy (outranks the body) · silence/5xx/429 = not
+  responding, never a protocol verdict · a private or unresolvable address = "not verifiable from
+  cloud" (NEUTRAL — internal servers are first-class). It writes onto the revision and can never
+  block or slow the act it follows; a revision with no answer reads "not checked yet".
+  **`mcp/new`** offers the catalog and CONNECTS (any member), or — for an owner — takes a registry
+  name · an SSRF-guarded URL (the guard DIALS the addresses it vetted, so nothing resolves a
+  second time) · a pasted document and writes the workspace's OWN server down. Its destination
+  field RESTS ON NO CHANNEL (`NO_CHANNEL`, distinct from the default-channel `null`, read from the
+  kind's record): adding a server reaches nobody until a channel is chosen, here or later, and
+  every channel INCLUDING the default is an ordinary named option. That is the FORM's ruling and
+  scoped to it. When a channel IS chosen the page discloses what happened to the REACH: a curated
+  channel withholds a member's placement, and the server's face says so.
+  **Two read lanes, one serializer** (`app/lib/mcp/registry-api.server.ts`, the official read-API
+  shape; curation rides `_meta["sh.topos/catalog"]` and never the official registry's namespace):
+  `…/registry/v0.1/servers[/{name}/versions[/{version}]]` serves what THIS WORKSPACE runs,
+  member-gated by cookie OR bearer, uniform-404 otherwise; `/mcp-catalog/v0.1/servers…` is the
+  public feed of the install's GLOBAL PUBLISHED rows, off unless `TOPOS_MCP_CATALOG_FEED=on`.
+  A boot backfill (`app/lib/db/mcp-backfill.server.ts`) connects every MCP bundle written before
+  the catalog existed — the name lives in the vault's bytes, so it runs where bytes are readable,
+  before the first request; what it cannot read is NAMED in the log, never skipped silently.
 - **Signed-in:** dashboard (skills and MCP servers as separate sections) · bundle browser +
-  lifecycle ceremonies (tabs: Current · Proposals · History · owner Settings; `skills/import`
-  add-from-GitHub + the Upstream panel) · the rendered
+  lifecycle ceremonies (a skill's tabs: Current · Proposals · History · owner Settings; a server's
+  face carries the server, what this workspace receives, and its revisions instead, and mounts
+  Settings alone beside it; `skills/import` add-from-GitHub + the Upstream panel) · the rendered
   review UI (diff, approve/reject, comments, revert) · `/profile` (Mine grouped by provenance +
   Library) · `/visibility` · channel pages (tabs: Skills/curation · Members · History ·
   Settings) · roster · workspace Settings (General policy knobs · whole-catalog export ·

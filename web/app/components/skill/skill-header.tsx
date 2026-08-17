@@ -1,4 +1,5 @@
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
+import { kindEntry } from "@/lib/bundle-base";
 
 /**
  * The shared title block every skill tab page renders (Current / Proposals / History): the
@@ -8,6 +9,10 @@ import { Breadcrumbs } from "@/components/shell/breadcrumbs";
  * and probed. `currentShort` is the current version's 12-char short hash sliced from the catalog
  * row; it is ABSENT when the catalog entry has no current pointer yet (nothing published), which
  * the locator states honestly instead of assuming a version.
+ *
+ * A kind with no file bytes has no pointer to report and says nothing here: what a connected
+ * server delivers is on the page below, and "nothing published yet" would be a claim about a
+ * version history it does not have.
  */
 export function SkillHeader({
   ws,
@@ -34,7 +39,11 @@ export function SkillHeader({
       <p className="mt-0.5 font-mono text-xs text-faint">
         {ws} / {skill}
         {kind ? ` · ${kind}` : ""}
-        {currentShort ? ` · current ${currentShort}` : " · nothing published yet"}
+        {currentShort
+          ? ` · current ${currentShort}`
+          : kindEntry(kind).isFileBundle
+            ? " · nothing published yet"
+            : ""}
       </p>
     </div>
   );

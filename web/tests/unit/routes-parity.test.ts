@@ -115,10 +115,19 @@ describe("the route table's addressable surface", () => {
  */
 const BUNDLE_URLS: [skills: string, mcp: string, module: string][] = [
   ["/skills/alpha", "/mcp/alpha", "skill-current.tsx"],
+  ["/skills/alpha/settings", "/mcp/alpha/settings", "skill-settings.tsx"],
+];
+
+/**
+ * The FILE pages, which one kind has and the other does not. A server's versions live in the
+ * server catalog and are read on its face, so these paths exist under the skills base ALONE —
+ * and under the MCP base they must fall through to the house 404 rather than to a page that
+ * would try to read a version history out of the vault.
+ */
+const FILE_PAGE_URLS: [skills: string, mcp: string, module: string][] = [
   ["/skills/alpha/history", "/mcp/alpha/history", "skill-history.tsx"],
   ["/skills/alpha/proposals", "/mcp/alpha/proposals", "skill-proposals.tsx"],
   ["/skills/alpha/proposals/v1", "/mcp/alpha/proposals/v1", "proposal-review.tsx"],
-  ["/skills/alpha/settings", "/mcp/alpha/settings", "skill-settings.tsx"],
   ["/skills/alpha/versions/v1", "/mcp/alpha/versions/v1", "version-files.tsx"],
   [
     "/skills/alpha/versions/v1/files/a/b.md",
@@ -136,6 +145,19 @@ describe("every bundle URL resolves to its page module, under both bases", () =>
     it(`multi: /acme${skillUrl} and /acme${mcpUrl} → ${module}`, () => {
       expect(moduleFor(`/acme${skillUrl}`, "multi")).toBe(module);
       expect(moduleFor(`/acme${mcpUrl}`, "multi")).toBe(module);
+    });
+  }
+});
+
+describe("the file pages mount for the kind that has files, and for no other", () => {
+  for (const [skillUrl, mcpUrl, module] of FILE_PAGE_URLS) {
+    it(`single: ${skillUrl} → ${module}, ${mcpUrl} → the catch-all`, () => {
+      expect(moduleFor(skillUrl, "single")).toBe(module);
+      expect(moduleFor(mcpUrl, "single")).toBe("catch-all.tsx");
+    });
+    it(`multi: /acme${skillUrl} → ${module}, /acme${mcpUrl} → the catch-all`, () => {
+      expect(moduleFor(`/acme${skillUrl}`, "multi")).toBe(module);
+      expect(moduleFor(`/acme${mcpUrl}`, "multi")).toBe("catch-all.tsx");
     });
   }
 });

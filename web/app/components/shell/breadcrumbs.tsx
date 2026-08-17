@@ -149,19 +149,23 @@ const bundleFile: CrumbBuilder = ({ data, params }) => {
  * Neither section has an index page, so the head each builder emits is an unlinked segment.
  */
 function bundleRegistrations(): Record<string, CrumbBuilder> {
-  /** The page modules that mount per kind: the file's derived id stem, and its trail builder. */
-  const pages: [stem: string, page: string, build: CrumbBuilder][] = [
+  /** The page modules that mount per kind: the file's derived id stem, its trail builder, and
+   *  whether the page is about a bundle's FILES — those mount only for a kind that has them. */
+  const pages: [stem: string, page: string, build: CrumbBuilder, files?: true][] = [
     ["skill-current", "current", bundleCurrent],
-    ["skill-history", "history", bundleHistory],
-    ["skill-proposals", "proposals", bundleProposals],
+    ["skill-history", "history", bundleHistory, true],
+    ["skill-proposals", "proposals", bundleProposals, true],
     ["skill-settings", "settings", bundleSettings],
-    ["proposal-review", "proposal-review", bundleReview],
-    ["version-files", "versions", bundleVersion],
-    ["file-view", "file-view", bundleFile],
+    ["proposal-review", "proposal-review", bundleReview, true],
+    ["version-files", "versions", bundleVersion, true],
+    ["file-view", "file-view", bundleFile, true],
   ];
   const out: Record<string, CrumbBuilder> = {};
-  for (const [stem, page, build] of pages) {
+  for (const [stem, page, build, files] of pages) {
     for (const kind of BUNDLE_KINDS) {
+      if (files === true && !kind.isFileBundle) {
+        continue;
+      }
       // A `null` prefix marks the mount that keeps React Router's file-derived id; every other
       // mount carries the explicit id the table gave it.
       out[kind.routeIdPrefix === null ? `routes/${stem}` : `${kind.routeIdPrefix}-${page}`] = build;

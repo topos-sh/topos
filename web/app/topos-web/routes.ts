@@ -198,6 +198,10 @@ interface BundlePage {
   /** Appended to `<base>/:<param>`; empty for the face itself. */
   tail: string;
   file: string;
+  /** A page about a bundle's FILES — its history, a version's tree, the proposals against it.
+   *  Mounted only for a kind whose bundles are files: a server's versions live in the server
+   *  catalog and are read on its face, so these paths exist for nobody. */
+  files?: true;
 }
 
 /** The shareable FACE — the bundle's canonical page, mounted under face-shell.tsx. */
@@ -207,19 +211,25 @@ const BUNDLE_FACE: readonly BundlePage[] = [
 
 /** The member-only sub-pages, one mount per kind. */
 const BUNDLE_SUBPAGES: readonly BundlePage[] = [
-  { page: "history", tail: "/history", file: "skill-history.tsx" },
-  { page: "proposals", tail: "/proposals", file: "skill-proposals.tsx" },
-  { page: "proposal-review", tail: "/proposals/:versionId", file: "proposal-review.tsx" },
+  { page: "history", tail: "/history", file: "skill-history.tsx", files: true },
+  { page: "proposals", tail: "/proposals", file: "skill-proposals.tsx", files: true },
+  {
+    page: "proposal-review",
+    tail: "/proposals/:versionId",
+    file: "proposal-review.tsx",
+    files: true,
+  },
   { page: "settings", tail: "/settings", file: "skill-settings.tsx" },
-  { page: "versions", tail: "/versions/:versionId", file: "version-files.tsx" },
-  { page: "file-view", tail: "/versions/:versionId/files/*", file: "file-view.tsx" },
+  { page: "versions", tail: "/versions/:versionId", file: "version-files.tsx", files: true },
+  { page: "file-view", tail: "/versions/:versionId/files/*", file: "file-view.tsx", files: true },
 ];
 
 /**
  * Mount each page once PER KIND: `<base>/:<param><tail>`, in the registry's order (skills, then
- * MCP). The first kind's mount keeps React Router's file-derived id; every further mount of the
- * same module needs an explicit one, which the kind's record supplies — those strings are chrome
- * keys (the breadcrumb registry looks a match up by id), so they are named data, not incidental.
+ * MCP) — except the FILE pages, which mount only for a kind whose bundles are files. The first
+ * kind's mount keeps React Router's file-derived id; every further mount of the same module needs
+ * an explicit one, which the kind's record supplies — those strings are chrome keys (the
+ * breadcrumb registry looks a match up by id), so they are named data, not incidental.
  *
  * `at` roots each path for the tree it is going into: the faces carry their own `:ws` segment in
  * multi tenancy, while the member children are prefixed wholesale further down.
@@ -230,12 +240,14 @@ function bundleMounts(
   at: (sub: string) => string,
 ): RouteConfigEntry[] {
   return BUNDLE_KINDS.flatMap((kind) =>
-    pages.map((page) => {
-      const path = at(`${kind.base}/:${kind.paramName}${page.tail}`);
-      return kind.routeIdPrefix === null
-        ? route(path, file(page.file))
-        : route(path, file(page.file), { id: `${kind.routeIdPrefix}-${page.page}` });
-    }),
+    pages
+      .filter((page) => page.files !== true || kind.isFileBundle)
+      .map((page) => {
+        const path = at(`${kind.base}/:${kind.paramName}${page.tail}`);
+        return kind.routeIdPrefix === null
+          ? route(path, file(page.file))
+          : route(path, file(page.file), { id: `${kind.routeIdPrefix}-${page.page}` });
+      }),
   );
 }
 

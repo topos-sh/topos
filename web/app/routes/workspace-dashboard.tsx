@@ -12,7 +12,7 @@ import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { actorFromSession, memberInScope } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import { BUNDLE_KINDS, baseForKind, bundlePath } from "@/lib/bundle-base";
+import { BUNDLE_KINDS, baseForKind, bundlePath, kindEntry } from "@/lib/bundle-base";
 import { theWorkspace } from "@/lib/db/identity.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
 import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
@@ -278,7 +278,12 @@ function CatalogRow({ row }: { row: SkillIndexRow }) {
           )}
         </div>
         {row.versionId === null ? (
-          <div className="text-faint text-xs">Nothing published yet</div>
+          // A kind with no file bytes has no pointer to be missing: what a connected server
+          // delivers is on its own page, and "nothing published yet" would be a claim about a
+          // version history it does not have.
+          kindEntry(row.kind).isFileBundle ? (
+            <div className="text-faint text-xs">Nothing published yet</div>
+          ) : null
         ) : (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-faint text-xs">
             <ShortId value={row.versionId} />

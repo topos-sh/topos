@@ -269,57 +269,6 @@ describe("checkBundleUpstream — external changes ALWAYS propose", () => {
     // The CURRENT version carries no upstream commit (locally published) — divergence readable.
     expect(view?.currentCommit).toBeNull();
   });
-
-  /**
-   * An `mcp` bundle's upstream is candidate bytes like any other, so it meets the SAME gate
-   * every publish door does — and it meets it BEFORE the custody call, which is the load-bearing
-   * half: bytes an MCP bundle may not hold must never be ingested, and the refusal must name the
-   * real cause instead of arriving later from a name claim that says the name is taken.
-   */
-  it("refuses an mcp upstream its document gate rejects — before any custody call", async () => {
-    const upstream = await import("@/lib/db/upstream.server");
-    await seedBundle(db, wsId, "s_mcp_bad", "mcp-bad", { kind: "mcp" });
-    await db.q(
-      `INSERT INTO web.bundle_upstream (bundle_id, workspace_id, host, repo, path, last_seen_commit)
-       VALUES ('s_mcp_bad', $1, 'github.com', 'owner/mcp', '', NULL)`,
-      [wsId],
-    );
-    // Valid JSON, valid registry shape — and a package pinned to `latest`, which is not a
-    // version at all. Only the real document gate refuses this, so passing proves the gate ran.
-    const unpinned = JSON.stringify({
-      name: "io.github.owner/floating",
-      description: "Installed from whatever the registry serves today.",
-      version: "1.0.0",
-      packages: [
-        {
-          registryType: "npm",
-          identifier: "floating-mcp",
-          version: "latest",
-          transport: { type: "stdio" },
-        },
-      ],
-    });
-    const before = committedBodies.length;
-    const gz = fixtureTarball("e".repeat(40), { "server.json": unpinned });
-    const refused = await upstream.checkBundleUpstream(wsId, "s_mcp_bad", async () => gz);
-    expect(refused.outcome).toBe("error");
-    expect(refused.outcome === "error" && refused.message).toMatch(/latest/i);
-    // NOTHING crossed the custody boundary, and no proposal opened against the refusal.
-    expect(committedBodies).toHaveLength(before);
-    expect(await db.q(`SELECT 1 FROM web.proposal WHERE bundle_id = 's_mcp_bad'`)).toHaveLength(0);
-
-    // The same bundle with a document the gate accepts proposes exactly like a skill's would.
-    const remote = JSON.stringify({
-      name: "io.github.owner/remote",
-      description: "A remote server.",
-      version: "1.0.0",
-      remotes: [{ type: "streamable-http", url: "https://mcp.owner.example/mcp" }],
-    });
-    const good = fixtureTarball("f".repeat(40), { "server.json": remote });
-    const proposed = await upstream.checkBundleUpstream(wsId, "s_mcp_bad", async () => good);
-    expect(proposed.outcome).toBe("proposed");
-    expect(await db.q(`SELECT 1 FROM web.proposal WHERE bundle_id = 's_mcp_bad'`)).toHaveLength(1);
-  });
 });
 
 describe("governedCopiesOf — the import preview's dedup lookup", () => {
