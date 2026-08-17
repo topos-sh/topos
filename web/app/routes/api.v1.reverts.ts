@@ -15,7 +15,6 @@ import {
   findReceipt,
   inFinalTx,
   insertReceiptInTx,
-  movePointerWithKindPrecondition,
   publishTargetOf,
   versionOutsideHistoryWindow,
 } from "@/lib/db/queries.custody.server";
@@ -140,35 +139,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   // names exactly that version, so the custody lane records the wire's author + message
   // verbatim (a substituted display string would derive a different id and the client would
   // refuse the OK).
-  const carryForward = () =>
-    revertPointer(actor.workspaceId, target.bundleId, {
-      to_version_id: good,
-      expected_generation: head.expected,
-      attribution: author,
-      message,
-    });
-  // Whatever this bundle's KIND requires before its `current` may move happens first, in the same
-  // transaction as the move (an MCP server's tree carries a registry name forward, and that name
-  // must be no other active bundle's).
-  const claimed = await movePointerWithKindPrecondition({
-    kind: target.kind,
-    actor,
-    bundleId: target.bundleId,
-    versionId: good,
-    move: carryForward,
+  const reverted = await revertPointer(actor.workspaceId, target.bundleId, {
+    to_version_id: good,
+    expected_generation: head.expected,
+    attribution: author,
+    message,
   });
-  if (claimed.refusal !== null) {
-    const envelope = deniedEnvelope(
-      "revert",
-      claimed.refusal.code,
-      target.name,
-      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
-      { message: claimed.refusal.message },
-    );
-    await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
-    return envelopeResponse(envelope);
-  }
-  const reverted = claimed.moved;
   if (reverted.kind === "conflict") {
     const receipt = buildReceipt({
       ...receiptBase,

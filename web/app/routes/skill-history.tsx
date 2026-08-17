@@ -16,7 +16,6 @@ import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   historyWindowDays,
-  movePointerWithKindPrecondition,
   versionCreatedAtMap,
   versionOutsideHistoryWindow,
 } from "@/lib/db/queries.custody.server";
@@ -241,35 +240,14 @@ async function revertAction(
     });
   }
 
-  const carryForward = () =>
-    revertPointer(ws, row.skillId, {
-      to_version_id: good,
-      expected_generation: expected,
-      attribution: actor.display,
-      // The browser ceremony composes its own frame (no device pre-derives this id) — a
-      // deterministic message keeps a double-submit's retry converging on the same commit.
-      message: `Revert to ${good}`,
-    });
-  // Whatever this bundle's KIND requires before its `current` may move happens first, in the same
-  // transaction as the move (an MCP server's tree carries a registry name forward, and that name
-  // must be no other active bundle's).
-  const claimed = await movePointerWithKindPrecondition({
-    kind: row.kind,
-    actor,
-    bundleId: row.skillId,
-    versionId: good,
-    move: carryForward,
+  const outcome = await revertPointer(ws, row.skillId, {
+    to_version_id: good,
+    expected_generation: expected,
+    attribution: actor.display,
+    // The browser ceremony composes its own frame (no device pre-derives this id) — a
+    // deterministic message keeps a double-submit's retry converging on the same commit.
+    message: `Revert to ${good}`,
   });
-  if (claimed.refusal !== null) {
-    await recordAdminEvent(actor, {
-      kind: "revert",
-      subject: row.skillId,
-      detail: short,
-      outcome: "denied",
-    });
-    return data<RevertActionData>({ status: "denied", reason: claimed.refusal.message });
-  }
-  const outcome = claimed.moved;
   if (outcome.kind === "fault") {
     await recordAdminEvent(actor, {
       kind: "revert",

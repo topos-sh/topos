@@ -1,8 +1,6 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
-import { kindEntry } from "@/lib/bundle-base";
-import { claimBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { auditInTx, mintProposalId } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import {
@@ -14,10 +12,8 @@ import {
   proposal,
   workspace,
 } from "@/lib/db/schema.app";
-import { planeCurrentPointer, planeVersion } from "@/lib/db/schema.custody";
-import { serverDocumentOf } from "@/lib/mcp/catalog.server";
-import { type McpGateRefusal, mcpNameTakenRefusal } from "@/lib/mcp/publish-gate.server";
-import { custodyVersionMetaFresh } from "@/lib/plane/reads.server";
+import { planeVersion } from "@/lib/db/schema.custody";
+import type { McpGateRefusal } from "@/lib/mcp/publish-gate.server";
 
 /**
  * The custody-op ORCHESTRATION's data half — everything the publish/propose/review/revert
@@ -682,165 +678,4 @@ export async function inFinalTxOrRefusal<T, A>(
     }
     throw error;
   }
-}
-
-/**
- * THE EMBEDDED-NAME CLAIM A POINTER MOVE MAKES. An `mcp` bundle carries a SECOND name — the
- * registry name inside the version its `current` points at — and that name is unique across the
- * workspace's active catalog, which is what keeps `…/servers/{name}` single-valued. Publishing,
- * re-publishing and unarchiving all re-claim it; MOVING the pointer is the same claim by another
- * route (an approve promotes a candidate that may rename the server; a revert carries an older
- * name forward), so it asks the same question about the version that is ABOUT to become current
- * and records the answer in the same row.
- *
- * Called inside the transaction that then performs the move: the claim and the move commit
- * together, so a publish racing this one is refused by the identity key rather than slipped
- * between a check and a write.
- *
- * `null` is "claimed". Anything else is the refusal to answer with, in the words every other
- * door uses. A version whose document this tier cannot read end to end refuses too: not provably
- * free is not free.
- */
-async function mcpNameClaimRefusalInTx(
-  tx: Tx,
-  actor: MemberActor | SessionActor,
-  bundleId: string,
-  versionId: string,
-): Promise<McpGateRefusal | null> {
-  // A version the vault does not hold at all is not this check's business — it cannot become
-  // `current`, and the move that follows answers it in its own words (unknown / purged). The
-  // read is the cache-bypassing one: retention moves even though bytes do not. Every OTHER way
-  // of being unreadable IS this check's business and fails closed below.
-  const meta = await custodyVersionMetaFresh(actor.workspaceId, bundleId, versionId);
-  if (!meta.ok && meta.kind === "not_found") {
-    return null;
-  }
-  const document = await serverDocumentOf(actor.workspaceId, bundleId, versionId);
-  const serverName = typeof document?.name === "string" ? document.name : null;
-  if (serverName === null) {
-    return {
-      code: "MCP_NAME_TAKEN",
-      message:
-        "this version's server.json could not be read here, so the registry name it claims cannot be confirmed free",
-    };
-  }
-  const claimed = await claimBundleIdentityInTx(tx, actor.workspaceId, bundleId, "mcp", serverName);
-  return claimed.ok || claimed.heldBy === null
-    ? null
-    : mcpNameTakenRefusal(serverName, claimed.heldBy);
-}
-
-/**
- * THE SAME CLAIM, ASKED OF A BUNDLE'S EXISTING `current` — what a RESTORE needs rather than a
- * move. Archiving freed the bundle's registry name, so unarchiving claims it all over again;
- * there is no incoming version to ask about, so the question is put to whatever the bundle
- * already points at. Runs inside the caller's transaction (it is one step of a larger row
- * ceremony), so the claim commits with the restore or not at all.
- *
- * THREE answers, because a caller deciding whether a name can be claimed must tell them apart:
- *
- *  · `claimed`    — free (or nothing to claim); proceed.
- *  · `no_current` — no `current` pointer at all. Nothing is served for this bundle under any
- *                   registry name, so there is no claim to make and nothing to be ambiguous
- *                   with. Absence of a name, not an unreadable one — and NOT a refusal, or a
- *                   never-published bundle would be stranded in the archive by a name it never
- *                   had.
- *  · `unreadable` — a live `current` whose document this tier cannot read end to end. It proves
- *                   nothing about what would be served, so the caller fails closed on it — and
- *                   says THAT, not that some name is taken.
- *  · `taken`      — another active bundle already holds the name.
- */
-export type CurrentNameClaim = "claimed" | "no_current" | "unreadable" | "taken";
-
-export async function claimCurrentNameInTx(
-  tx: Tx,
-  actor: MemberActor | SessionActor,
-  bundleId: string,
-): Promise<CurrentNameClaim> {
-  const pointer = await tx
-    .select({ versionId: planeCurrentPointer.versionId })
-    .from(planeCurrentPointer)
-    .where(
-      and(
-        eq(planeCurrentPointer.workspaceId, actor.workspaceId),
-        eq(planeCurrentPointer.bundleId, bundleId),
-      ),
-    )
-    .limit(1);
-  const versionId = pointer[0]?.versionId;
-  if (versionId === undefined) {
-    return "no_current";
-  }
-  const document = await serverDocumentOf(actor.workspaceId, bundleId, versionId);
-  if (typeof document?.name !== "string") {
-    return "unreadable";
-  }
-  const claimed = await claimBundleIdentityInTx(
-    tx,
-    actor.workspaceId,
-    bundleId,
-    "mcp",
-    document.name,
-  );
-  return claimed.ok ? "claimed" : "taken";
-}
-
-/** What a guarded move answered: the mover's own result, or the refusal to say instead. */
-export type GuardedMove<T> = { refusal: null; moved: T } | { refusal: McpGateRefusal };
-
-/**
- * MOVE A BUNDLE'S `current`, SUBJECT TO WHATEVER ITS KIND REQUIRES FIRST — the one place that
- * pairing is written.
- *
- * Five doors move a pointer onto a version: the session lane's review-approve and revert, the
- * browser's proposal-review and skill-history revert, and (through its own arm) unarchive. Each
- * of them used to carry its own copy of the same three-line dance, which is three lines each to
- * get subtly wrong and five places to forget when a kind arrives with a precondition of its own.
- * They all call THIS instead, and the precondition is looked up from the bundle's kind record
- * (`hasContentGate`) rather than asked about by name.
- *
- * What the precondition IS, for an MCP server: the version about to become current carries a
- * registry name, that name is the workspace's `…/servers/{name}` key, and it must be no other
- * active bundle's. An approve promotes a candidate that may rename the server; a revert carries
- * an older name forward — both are the same claim by another route.
- *
- * The claim and the move ride ONE transaction, which is what makes check-then-move atomic
- * against a publish claiming the name in between. A kind with no precondition moves the pointer
- * with no transaction at all, exactly as it did before.
- *
- * A MOVE THAT DID NOT LAND TAKES THE CLAIM DOWN WITH IT. The custody call answers routine
- * failures with a TYPED outcome rather than a throw — a generation conflict above all, which is
- * what a reviewer meets when someone published while they were deciding. Committing on that path
- * would record a claim for a pointer that never moved: the bundle's OLD name released while it is
- * still being served, and the freed name available to the next publish while the registry lane
- * still answers to it. So anything but `ok` rolls the transaction back and is handed to the
- * caller unchanged — the caller still branches on exactly the outcome custody gave it.
- */
-export async function movePointerWithKindPrecondition<T extends { kind: string }>(args: {
-  /** The bundle's catalog kind — the authority on what must be checked first. */
-  kind: string;
-  actor: MemberActor | SessionActor;
-  bundleId: string;
-  /** The version about to become `current` — what the precondition is asked about. */
-  versionId: string;
-  /** The custody call that actually moves the pointer. */
-  move: () => Promise<T>;
-}): Promise<GuardedMove<T>> {
-  if (!kindEntry(args.kind).hasContentGate) {
-    return { refusal: null, moved: await args.move() };
-  }
-  const landed = await inFinalTxOrRefusal<GuardedMove<T>, GuardedMove<T>>(async (tx, abort) => {
-    const refusal = await mcpNameClaimRefusalInTx(tx, args.actor, args.bundleId, args.versionId);
-    if (refusal !== null) {
-      abort({ refusal });
-    }
-    const moved = await args.move();
-    if (moved.kind !== "ok") {
-      // Nothing moved, so nothing may be claimed — but this is an ANSWER, not a fault, and it
-      // travels out intact.
-      abort({ refusal: null, moved });
-    }
-    return { refusal: null, moved };
-  });
-  return landed.refused !== null ? landed.refused : landed.value;
 }

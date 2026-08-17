@@ -16,7 +16,6 @@ import {
   inFinalTx,
   insertReceiptInTx,
   lockOpenProposalInTx,
-  movePointerWithKindPrecondition,
   publishTargetOf,
   resolveProposalInTx,
 } from "@/lib/db/queries.custody.server";
@@ -144,34 +143,11 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
       await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
       return envelopeResponse(envelope);
     }
-    const promote = () =>
-      movePointer(actor.workspaceId, target.bundleId, {
-        version_id: proposalId,
-        expected_generation: head.expected,
-        attribution: actor.display,
-      });
-    // Whatever this bundle's KIND requires before its `current` may move happens first, in the
-    // same transaction as the move (promoting an MCP candidate makes the registry name inside it
-    // this workspace's, and that name must be no other active bundle's).
-    const claimed = await movePointerWithKindPrecondition({
-      kind: target.kind,
-      actor,
-      bundleId: target.bundleId,
-      versionId: proposalId,
-      move: promote,
+    const moved = await movePointer(actor.workspaceId, target.bundleId, {
+      version_id: proposalId,
+      expected_generation: head.expected,
+      attribution: actor.display,
     });
-    if (claimed.refusal !== null) {
-      const envelope = deniedEnvelope(
-        "review",
-        claimed.refusal.code,
-        target.name,
-        buildReceipt({ ...receiptBase, outcome: "DENIED" }),
-        { message: claimed.refusal.message },
-      );
-      await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
-      return envelopeResponse(envelope);
-    }
-    const moved = claimed.moved;
     if (moved.kind === "not_found") {
       // The candidate's bytes are gone (purged/reclaimed) — the proposal cannot promote.
       const envelope = deniedEnvelope(

@@ -1,14 +1,8 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
-import { kindEntry } from "@/lib/bundle-base";
-import { releaseBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
-import {
-  bundleCapRefusalInTx,
-  claimCurrentNameInTx,
-  isReservedBundleName,
-} from "@/lib/db/queries.custody.server";
+import { bundleCapRefusalInTx, isReservedBundleName } from "@/lib/db/queries.custody.server";
 import { reviewsEnableRefused } from "@/lib/db/queries.lane.server";
 import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
 import { deleteBundleBytes, purgeVersionBytes } from "@/lib/plane/custody.server";
@@ -185,10 +179,6 @@ export async function archiveBundle(actor: OwnerActor, bundleId: string): Promis
     await tx
       .delete(channelBundle)
       .where(and(eq(channelBundle.workspaceId, ws), eq(channelBundle.bundleId, bundleId)));
-    // …and FREES its second name, the way the rename above frees its catalog name: an archived
-    // server serves nothing, so the registry name it held is another bundle's to take. Unarchive
-    // claims it back, and refuses if someone did.
-    await releaseBundleIdentityInTx(tx, ws, bundleId);
     await closeOpenProposalsInTx(
       tx,
       ws,
@@ -211,8 +201,6 @@ export async function archiveBundle(actor: OwnerActor, bundleId: string): Promis
 export type UnarchiveOutcome =
   | { outcome: "unarchived"; name: string }
   | { outcome: "name_taken" }
-  | { outcome: "mcp_name_taken" }
-  | { outcome: "mcp_document_unreadable" }
   | { outcome: "not_archived" }
   | { outcome: "unknown_skill" }
   /** The workspace's bundle limit (`bundles` — ACTIVE rows) is reached: restoring would step
@@ -250,31 +238,8 @@ export async function unarchiveBundle(
     // The bundle cap counts ACTIVE rows, so archived→active is the same step past it a
     // genesis takes — checked here under the same advisory lock (a no-op without a limit),
     // or archive-then-replace-then-unarchive would mint one active bundle over the cap.
-    // BEFORE the MCP name claim below, load-bearingly: this typed refusal COMMITS, and a
-    // claim already written by then would leave an archived bundle monopolizing a registry
-    // name it does not serve — archive keeps meaning the name is released.
     if ((await bundleCapRefusalInTx(tx, actor, bundleId)) !== null) {
       return { outcome: "bundle_limit" } as const;
-    }
-    // An MCP bundle carries a SECOND name — the registry name inside its document — and that
-    // one is unique across the workspace's active catalog, which is what keeps the registry
-    // read lane's `…/servers/{name}` unambiguous. Archiving freed it, so restoring is a claim
-    // on it all over again: the scan re-runs here under the same lock a publish takes, and an
-    // answer that is not provably free refuses rather than resurrect an ambiguity an agent's
-    // lookup would then resolve by accident.
-    //
-    // A bundle with NO `current` is the third case and NOT a refusal: it serves no document, so
-    // it claims no registry name and can collide with nothing. Refusing it would strand a
-    // never-published MCP bundle in the archive with no way out — the name it cannot claim is
-    // one it never had.
-    if (kindEntry(row.kind).hasContentGate) {
-      const claim = await claimCurrentNameInTx(tx, actor, bundleId);
-      if (claim === "unreadable") {
-        return { outcome: "mcp_document_unreadable" } as const;
-      }
-      if (claim === "taken") {
-        return { outcome: "mcp_name_taken" } as const;
-      }
     }
     await tx
       .update(bundle)
@@ -325,9 +290,6 @@ export async function deleteBundle(
       .update(bundle)
       .set({ status: "deleted", deletedAt: new Date() })
       .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)));
-    // The row survives as a tombstone, so the FK cascade never fires — release the name here.
-    // (Archive already did; a delete of something archived out-of-band still ends up correct.)
-    await releaseBundleIdentityInTx(tx, ws, bundleId);
     await auditInTx(tx, {
       workspaceId: ws,
       actor: { userId: actor.userId, display: actor.display },

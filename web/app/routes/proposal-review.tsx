@@ -29,7 +29,6 @@ import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import {
   inFinalTx,
   lockOpenProposalInTx,
-  movePointerWithKindPrecondition,
   resolveProposalInTx,
 } from "@/lib/db/queries.custody.server";
 import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
@@ -412,26 +411,11 @@ async function approveAction(
     // The pointer moved since the reviewer's render — their diff no longer shows the change.
     return data<ReviewFormState>({ status: "conflict" });
   }
-  const promote = () =>
-    movePointer(ws, row.skillId, {
-      version_id: versionId,
-      expected_generation: current.data.generation,
-      attribution: actor.display,
-    });
-  // Whatever this bundle's KIND requires before its `current` may move happens first, in the same
-  // transaction as the move (promoting an MCP candidate makes the registry name inside it this
-  // workspace's, and that name must be no other active bundle's).
-  const claimed = await movePointerWithKindPrecondition({
-    kind: row.kind,
-    actor,
-    bundleId: row.skillId,
-    versionId,
-    move: promote,
+  const moved = await movePointer(ws, row.skillId, {
+    version_id: versionId,
+    expected_generation: current.data.generation,
+    attribution: actor.display,
   });
-  if (claimed.refusal !== null) {
-    return data<ReviewFormState>({ status: "denied", message: claimed.refusal.message });
-  }
-  const moved = claimed.moved;
   if (moved.kind === "fault" || moved.kind === "rejected") {
     return data<ReviewFormState>({ status: "error" });
   }
