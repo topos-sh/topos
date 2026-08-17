@@ -31,14 +31,14 @@ CREATE TABLE "web"."mcp_server" (
 	"description" text,
 	"website_url" text,
 	"icon" text,
-	"auth_mode" text NOT NULL,
+	"auth_mode" text,
 	"auth_note" text,
 	"scope_menu" jsonb,
 	"status" text DEFAULT 'candidate' NOT NULL,
 	"current_revision_id" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_server_auth_mode_check" CHECK ("web"."mcp_server"."auth_mode" in ('none', 'oauth', 'manual')),
+	CONSTRAINT "mcp_server_auth_mode_check" CHECK ("web"."mcp_server"."auth_mode" is null or "web"."mcp_server"."auth_mode" in ('none', 'oauth', 'manual')),
 	CONSTRAINT "mcp_server_status_check" CHECK ("web"."mcp_server"."status" in ('candidate', 'active', 'delisted')),
 	CONSTRAINT "mcp_server_registry_name_check" CHECK ("web"."mcp_server"."registry_name" is null or "web"."mcp_server"."registry_name" ~ '^[^/]+/[^/]+$')
 );

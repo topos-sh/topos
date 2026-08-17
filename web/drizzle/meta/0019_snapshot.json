@@ -1,6 +1,6 @@
 {
-  "id": "5f826890-a0f4-46f8-a8e2-ee6dcef888f8",
-  "prevId": "f7a18e83-8764-4707-979d-629144a496d2",
+  "id": "e1ea197e-c99d-417c-a9e3-5bb1d5b04783",
+  "prevId": "3940dd2f-6c69-4c5d-b002-e1b870a883b9",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2657,7 +2657,7 @@
           "name": "auth_mode",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "auth_note": {
           "name": "auth_note",
@@ -2770,7 +2770,7 @@
       "checkConstraints": {
         "mcp_server_auth_mode_check": {
           "name": "mcp_server_auth_mode_check",
-          "value": "\"web\".\"mcp_server\".\"auth_mode\" in ('none', 'oauth', 'manual')"
+          "value": "\"web\".\"mcp_server\".\"auth_mode\" is null or \"web\".\"mcp_server\".\"auth_mode\" in ('none', 'oauth', 'manual')"
         },
         "mcp_server_status_check": {
           "name": "mcp_server_status_check",

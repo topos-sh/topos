@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
   bigint,
   boolean,
@@ -570,9 +571,11 @@ export const mcpProbe = webSchema.table(
  * `auth_mode` is STAFF-VERIFIED TRUTH, never a vendor's claim: `oauth` means the endpoint's own
  * discovery chain was walked and its authorization server advertises dynamic client
  * registration, so an agent finishes the sign-in alone. `manual` means it costs a person a
- * one-time step per machine, and `auth_note` is the one line saying what that step is.
- * `scope_menu` records the scope options that verification found — data this release, enforced
- * by nothing yet.
+ * one-time step per machine, and `auth_note` is the one line saying what that step is. NULL is
+ * the honest fourth state — nobody has established it yet, which is what a swept-in candidate
+ * and a document that declared nothing both are — and a global row carrying it is not
+ * publishable. `scope_menu` records the scope options that verification found — data this
+ * release, enforced by nothing yet.
  *
  * `current_revision_id` is the pointer people receive. It is moved in the SAME transaction as
  * the revision insert that earns it, under a FOR UPDATE lock on this row — the fenced-invariant
@@ -594,7 +597,13 @@ export const mcpServer = webSchema.table(
     websiteUrl: text("website_url"),
     /** The brand mark this row flies, by KEY — never an image, never a remote URL. */
     icon: text("icon"),
-    authMode: text("auth_mode").notNull(),
+    /**
+     * The sign-in tier somebody ESTABLISHED, or NULL for a server where nobody has yet — a
+     * candidate a sweep pulled in, a document that declared nothing. Null is never rendered as
+     * `none`: "the publisher said nothing" and "this server asks for nothing" are different
+     * claims, and only one of them was made.
+     */
+    authMode: text("auth_mode"),
     /** What the person must do first, for a `manual` row — the whole reason such a row may
      *  stand in a catalog people receive from. */
     authNote: text("auth_note"),
@@ -616,7 +625,10 @@ export const mcpServer = webSchema.table(
       .on(table.registryName)
       .where(sql`workspace_id is null`),
     index("mcp_server_workspace_idx").on(table.workspaceId),
-    check("mcp_server_auth_mode_check", sql`${table.authMode} in ('none', 'oauth', 'manual')`),
+    check(
+      "mcp_server_auth_mode_check",
+      sql`${table.authMode} is null or ${table.authMode} in ('none', 'oauth', 'manual')`,
+    ),
     check("mcp_server_status_check", sql`${table.status} in ('candidate', 'active', 'delisted')`),
     // A registry name is `namespace/name` — the shape the official format requires, as a
     // tripwire (the document gate is where a name is really judged).
@@ -660,9 +672,12 @@ export const mcpServerRevision = webSchema.table(
   "mcp_server_revision",
   {
     id: text("id").primaryKey(),
+    // The reference is ANNOTATED because these two tables name each other: a server points at
+    // its current revision and a revision belongs to a server, which is a cycle the type
+    // inference cannot walk on its own.
     serverId: text("server_id")
       .notNull()
-      .references(() => mcpServer.id, { onDelete: "cascade" }),
+      .references((): AnyPgColumn => mcpServer.id, { onDelete: "cascade" }),
     /** Monotonic per server, from 1 — the history's reading order, minted under the row lock. */
     seq: integer("seq").notNull(),
     status: text("status").default("candidate").notNull(),
