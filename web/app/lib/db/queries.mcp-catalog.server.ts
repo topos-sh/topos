@@ -951,6 +951,176 @@ export interface McpCatalogRow {
   upstreamVersion: string;
 }
 
+// ── The registry reads: one server, one document, one page of them ──────────────────────────
+
+/**
+ * One server as a REGISTRY ANSWER: the document, plus the facts this catalog adds to it. Both
+ * lanes read the same shape — what differs is which rows they may see, never how a row is told.
+ */
+export interface McpRegistryRow {
+  serverId: string;
+  registryName: string;
+  authMode: string | null;
+  authNote: string | null;
+  scopeMenu: unknown;
+  revisionId: string;
+  document: Record<string, unknown>;
+  /** `published`, or `revoked` for a pin still being honored. */
+  status: string;
+  publishedAt: Date | null;
+  /** Whether this revision is the one the server currently offers. */
+  isLatest: boolean;
+}
+
+/** One page of registry rows: what was asked for, plus the cursor to ask again with. */
+export interface McpRegistryPage {
+  rows: McpRegistryRow[];
+  /** The opaque cursor a caller passes back for the next page, or null at the end. */
+  nextCursor: string | null;
+}
+
+/** How many rows one page carries when the caller names no size, and the ceiling on asking. */
+export const MCP_REGISTRY_PAGE_DEFAULT = 50;
+export const MCP_REGISTRY_PAGE_MAX = 100;
+
+/** The page size a caller's `limit` really gets — a garbage value reads as none given. */
+export function mcpRegistryLimit(raw: string | null): number {
+  const asked = Number(raw);
+  if (!Number.isInteger(asked) || asked < 1) {
+    return MCP_REGISTRY_PAGE_DEFAULT;
+  }
+  return Math.min(asked, MCP_REGISTRY_PAGE_MAX);
+}
+
+function registryRowsOf(rows: Record<string, unknown>[]): McpRegistryRow[] {
+  return rows.map((row) => ({
+    serverId: row.server_id as string,
+    registryName: row.registry_name as string,
+    authMode: (row.auth_mode as string | null) ?? null,
+    authNote: (row.auth_note as string | null) ?? null,
+    scopeMenu: row.scope_menu ?? null,
+    revisionId: row.revision_id as string,
+    document: row.document as Record<string, unknown>,
+    status: row.status as string,
+    publishedAt: row.published_at === null ? null : new Date(row.published_at as string),
+    isLatest: row.is_latest === true,
+  }));
+}
+
+/** Cut one over-read page down to size and say whether there is more. */
+function paged(rows: McpRegistryRow[], limit: number): McpRegistryPage {
+  const more = rows.length > limit;
+  const page = more ? rows.slice(0, limit) : rows;
+  return { rows: page, nextCursor: more ? (page.at(-1)?.serverId ?? null) : null };
+}
+
+/**
+ * THE PUBLIC FEED'S ROWS — the global catalog's published servers, and nothing else.
+ *
+ * A private server is nobody else's business and is not here; neither is a candidate, a delisted
+ * row, or a revision staff pulled back. What this returns is exactly what this install stands
+ * behind, which is the only thing another install should be able to sync.
+ */
+export async function publishedCatalogServers(page: {
+  cursor?: string | null;
+  limit?: number;
+}): Promise<McpRegistryPage> {
+  const limit = page.limit ?? MCP_REGISTRY_PAGE_DEFAULT;
+  const cursor = page.cursor ?? null;
+  const rows = await getDb().execute(sql`
+    SELECT ms.id AS server_id, ms.registry_name, ms.auth_mode, ms.auth_note, ms.scope_menu,
+           r.id AS revision_id, r.document, r.status, r.published_at, true AS is_latest
+    FROM web.mcp_server ms
+    JOIN web.mcp_server_revision r ON r.id = ms.current_revision_id
+    WHERE ms.workspace_id IS NULL AND ms.status = 'active'
+      AND ms.registry_name IS NOT NULL AND r.status = 'published'
+      AND (${cursor}::text IS NULL OR ms.id > ${cursor})
+    ORDER BY ms.id
+    LIMIT ${limit + 1}
+  `);
+  return paged(registryRowsOf(rows.rows as Record<string, unknown>[]), limit);
+}
+
+/**
+ * ONE GLOBAL SERVER'S PUBLISHED HISTORY, newest first — the feed's versions answer. A revision
+ * that was rejected, never decided, or pulled back is absent: the feed lists what is on offer.
+ */
+export async function publishedCatalogVersions(registryName: string): Promise<McpRegistryRow[]> {
+  const rows = await getDb().execute(sql`
+    SELECT ms.id AS server_id, ms.registry_name, ms.auth_mode, ms.auth_note, ms.scope_menu,
+           r.id AS revision_id, r.document, r.status, r.published_at,
+           (r.id = ms.current_revision_id) AS is_latest
+    FROM web.mcp_server ms
+    JOIN web.mcp_server_revision r ON r.server_id = ms.id
+    WHERE ms.workspace_id IS NULL AND ms.status = 'active'
+      AND ms.registry_name = ${registryName} AND r.status = 'published'
+    ORDER BY r.seq DESC
+  `);
+  return registryRowsOf(rows.rows as Record<string, unknown>[]);
+}
+
+/**
+ * WHAT ONE WORKSPACE RUNS — its live connections, each resolved exactly as delivery resolves it
+ * (a pin, else the server's current), plus its own private servers.
+ *
+ * The two overlap by design: a private server is normally connected, and the connection's
+ * resolution wins there, so a workspace reading this lane sees the document its machines are
+ * actually being handed rather than a second opinion about it.
+ */
+export async function workspaceRegistryServers(
+  actor: MemberActor | SessionActor,
+  page: { cursor?: string | null; limit?: number },
+): Promise<McpRegistryPage> {
+  const limit = page.limit ?? MCP_REGISTRY_PAGE_DEFAULT;
+  const cursor = page.cursor ?? null;
+  const rows = await getDb().execute(sql`
+    ${workspaceRegistrySelect(actor.workspaceId)}
+      AND (${cursor}::text IS NULL OR ms.id > ${cursor})
+    ORDER BY ms.id
+    LIMIT ${limit + 1}
+  `);
+  return paged(registryRowsOf(rows.rows as Record<string, unknown>[]), limit);
+}
+
+/**
+ * The same read for ONE embedded name. A workspace's OWN server outranks a global one carrying
+ * the same name: inside a workspace, the workspace's answer is the answer.
+ */
+export async function workspaceRegistryServer(
+  actor: MemberActor | SessionActor,
+  registryName: string,
+): Promise<McpRegistryRow | null> {
+  const rows = await getDb().execute(sql`
+    ${workspaceRegistrySelect(actor.workspaceId)}
+      AND ms.registry_name = ${registryName}
+    ORDER BY (ms.workspace_id IS NULL), ms.id
+    LIMIT 1
+  `);
+  return registryRowsOf(rows.rows as Record<string, unknown>[])[0] ?? null;
+}
+
+/** The workspace lane's one FROM/WHERE, written once for the list and the single read. */
+function workspaceRegistrySelect(workspaceId: string) {
+  return sql`
+    SELECT ms.id AS server_id, ms.registry_name, ms.auth_mode, ms.auth_note, ms.scope_menu,
+           r.id AS revision_id, r.document, r.status, r.published_at,
+           (r.id = ms.current_revision_id) AS is_latest
+    FROM web.mcp_server ms
+    LEFT JOIN (
+      SELECT bm.server_id, bm.pinned_revision_id
+      FROM web.bundle_mcp bm
+      JOIN web.bundle b
+        ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id AND b.status = 'active'
+      WHERE bm.workspace_id = ${workspaceId}
+    ) conn ON conn.server_id = ms.id
+    JOIN web.mcp_server_revision r
+      ON r.id = COALESCE(conn.pinned_revision_id, ms.current_revision_id)
+    WHERE ms.registry_name IS NOT NULL
+      AND (conn.server_id IS NOT NULL
+           OR (ms.workspace_id = ${workspaceId} AND ms.status = 'active'))
+  `;
+}
+
 /**
  * WHAT A WORKSPACE MAY CONNECT: the global catalog's active servers plus its own private ones,
  * each with the document its `current` names. The order is the one a person scans — display name,

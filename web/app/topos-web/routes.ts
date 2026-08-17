@@ -170,6 +170,10 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // NAME carries a percent-encoded slash, so the module parses the raw path rather than a
     // decoded param.
     route(faceSub(tenancy, "registry/v0.1/*"), file("mcp-registry.ts")),
+    // THE PUBLIC CATALOG FEED — the same read API over this DEPLOYMENT's global MCP catalog, for
+    // another install to sync from. Deployment-scoped, so origin-rooted in both grammars, and
+    // served only where the deployment turned it on.
+    route("mcp-catalog/v0.1/*", file("mcp-catalog-feed.ts")),
     // The door into the product (a bare `/app`), then the two signed-in layouts.
     route("app", file("app-entry.tsx")),
     layout(file("face-shell.tsx"), faceChildren),

@@ -33,6 +33,8 @@ export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
   "install.sh",
   "llms.txt",
   "login",
+  // The public MCP catalog feed — a deployment-scoped read API, origin-rooted in both grammars.
+  "mcp-catalog",
   "new",
   "recovery",
   "verify",
