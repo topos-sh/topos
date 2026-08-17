@@ -120,6 +120,13 @@
       "when": 1786900889478,
       "tag": "0016_invite-cooldown-index",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787107549626,
+      "tag": "0017_mcp-servers",
+      "breakpoints": true
     }
   ]
 }

@@ -6,6 +6,7 @@ import {
   customType,
   foreignKey,
   index,
+  integer,
   jsonb,
   primaryKey,
   text,
@@ -541,6 +542,255 @@ export const mcpProbe = webSchema.table(
       "mcp_probe_outcome_check",
       sql`${table.outcome} IN ('responding', 'sign_in_required', 'not_verifiable', 'not_responding')`,
     ),
+  ],
+);
+
+// ── MCP servers — the catalog, its revisions, and what a workspace connects to ──────────────
+
+/**
+ * ONE ROW PER MCP SERVER — the catalog this install keeps, modeled as a subregistry of the
+ * official MCP registry.
+ *
+ * A server is not a folder of files, so it is not a bundle of bytes: it is a name, an address,
+ * and the facts somebody VERIFIED about it. Those facts are rows, which is what makes them
+ * queryable, correctable, and shared — a sign-in tier learned by walking a vendor's discovery
+ * chain belongs to everyone who connects that server, not to whichever workspace happened to
+ * publish it first.
+ *
+ * GLOBAL AND PRIVATE ARE ONE TABLE, told apart by `workspace_id`:
+ *
+ *  · NULL — the global catalog. Staff-curated, staff-published, and the only rows the feed
+ *    exports. Their `registry_name` is unique among them (the partial index below), because
+ *    that name is what the read API keys on and a second claimant would make a lookup a coin
+ *    flip.
+ *  · SET — private to that workspace, created and edited by its owners, never exported. Two
+ *    workspaces may hold the same `registry_name` privately: neither is addressed by anyone
+ *    else, so neither can shadow the other.
+ *
+ * `auth_mode` is STAFF-VERIFIED TRUTH, never a vendor's claim: `oauth` means the endpoint's own
+ * discovery chain was walked and its authorization server advertises dynamic client
+ * registration, so an agent finishes the sign-in alone. `manual` means it costs a person a
+ * one-time step per machine, and `auth_note` is the one line saying what that step is.
+ * `scope_menu` records the scope options that verification found — data this release, enforced
+ * by nothing yet.
+ *
+ * `current_revision_id` is the pointer people receive. It is moved in the SAME transaction as
+ * the revision insert that earns it, under a FOR UPDATE lock on this row — the fenced-invariant
+ * pattern the rest of this schema uses. The composite key below pins the pointer to a revision
+ * OF THIS SERVER; that it also points at a PUBLISHED one is the transaction's rule, because
+ * Postgres has no foreign key to a partial index.
+ */
+export const mcpServer = webSchema.table(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    /** NULL = the global catalog; set = private to that workspace. */
+    workspaceId: text("workspace_id").references(() => workspace.id, { onDelete: "cascade" }),
+    /** The official registry identity (`io.github.acme/foo`) — set wherever the server exists
+     *  upstream, and the key the read API resolves. */
+    registryName: text("registry_name"),
+    displayName: text("display_name").notNull(),
+    description: text("description"),
+    websiteUrl: text("website_url"),
+    /** The brand mark this row flies, by KEY — never an image, never a remote URL. */
+    icon: text("icon"),
+    authMode: text("auth_mode").notNull(),
+    /** What the person must do first, for a `manual` row — the whole reason such a row may
+     *  stand in a catalog people receive from. */
+    authNote: text("auth_note"),
+    scopeMenu: jsonb("scope_menu"),
+    /** `candidate` is pulled in for evaluation and published to nobody. */
+    status: text("status").default("candidate").notNull(),
+    currentRevisionId: text("current_revision_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    // THE GLOBAL NAMESPACE, as an index: one global row per registry name. Partial, so a
+    // workspace's private server never collides with the catalog's or with another
+    // workspace's — nobody addresses a private row by that name but its own workspace.
+    uniqueIndex("mcp_server_global_registry_name")
+      .on(table.registryName)
+      .where(sql`workspace_id is null`),
+    index("mcp_server_workspace_idx").on(table.workspaceId),
+    check("mcp_server_auth_mode_check", sql`${table.authMode} in ('none', 'oauth', 'manual')`),
+    check("mcp_server_status_check", sql`${table.status} in ('candidate', 'active', 'delisted')`),
+    // A registry name is `namespace/name` — the shape the official format requires, as a
+    // tripwire (the document gate is where a name is really judged).
+    check(
+      "mcp_server_registry_name_check",
+      sql`${table.registryName} is null or ${table.registryName} ~ '^[^/]+/[^/]+$'`,
+    ),
+    foreignKey({
+      name: "mcp_server_current_revision_fk",
+      columns: [table.currentRevisionId, table.id],
+      foreignColumns: [mcpServerRevision.id, mcpServerRevision.serverId],
+    }),
+  ],
+);
+
+/**
+ * A SERVER'S VERSION HISTORY — append-only, immutable once written, one stream per server.
+ *
+ * Maturity is a STATUS, not a branch: a sweep lands `candidate` rows, staff turn one into
+ * `published` (and only a published revision is ever pointed at), a `rejected` one records that
+ * the decision was made and what it was, and `revoked` is the pull-back of something that was
+ * published — pinned connections are flagged in the UI rather than silently moved off it.
+ *
+ * `upstream_version` is the version string inside the document, and its uniqueness is PARTIAL —
+ * `source = 'registry'` only. Upstream promises one document per version and a second one under
+ * the same number is upstream contradicting itself, which this refuses; a staff correction or an
+ * owner's edit of a private server is a NEW revision of the same version string by design, and
+ * would have nothing to gain from a fresh number nobody upstream would recognize.
+ *
+ * `schema_version` is the document's own `$schema`. The vocabulary of the ones this tier
+ * understands lives in CODE, not in a CHECK here, and deliberately: supporting a newer schema is
+ * reading its rules and writing the code that honors them, which no table migration can stand in
+ * for. The write path refuses one it does not know (app/lib/db/queries.mcp-catalog.server.ts).
+ *
+ * `transport` and `url` are EXTRACTED from the document for querying — the same remote the
+ * client would place, so a surface can show the address without parsing the document again.
+ * They are null together for a server that offers only packages, which is a server a machine
+ * installs rather than dials.
+ */
+export const mcpServerRevision = webSchema.table(
+  "mcp_server_revision",
+  {
+    id: text("id").primaryKey(),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => mcpServer.id, { onDelete: "cascade" }),
+    /** Monotonic per server, from 1 — the history's reading order, minted under the row lock. */
+    seq: integer("seq").notNull(),
+    status: text("status").default("candidate").notNull(),
+    /** The `version` inside the document (never this row's own numbering). */
+    upstreamVersion: text("upstream_version").notNull(),
+    schemaVersion: text("schema_version"),
+    /** The `server.json` verbatim, in the official registry format. */
+    document: jsonb("document").notNull(),
+    transport: text("transport"),
+    url: text("url"),
+    /** What this plane saw when it asked — the probe's own four-word vocabulary. */
+    probeOutcome: text("probe_outcome"),
+    probedAt: timestamp("probed_at", { withTimezone: true }),
+    /** The protocol versions the endpoint answered with — an internal fact, never a surface. */
+    protocolVersions: jsonb("protocol_versions"),
+    /** What automatic verification concluded: the format gate's result and the auth reprobe,
+     *  including the whole OAuth discovery-chain walk that a claim of `oauth` rests on. */
+    verification: jsonb("verification"),
+    source: text("source").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    /** Attribution as display text — the catalog outlives whichever account acted. */
+    publishedBy: text("published_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decidedBy: text("decided_by"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => [
+    unique("mcp_server_revision_seq_unique").on(table.serverId, table.seq),
+    // Composite-FK target: a pointer or a pin names a revision OF THE SERVER it belongs to.
+    unique("mcp_server_revision_id_server_unique").on(table.id, table.serverId),
+    // One document per upstream version — for documents that came from upstream. See above.
+    uniqueIndex("mcp_server_revision_upstream_version")
+      .on(table.serverId, table.upstreamVersion)
+      .where(sql`source = 'registry'`),
+    index("mcp_server_revision_server_idx").on(table.serverId, table.status),
+    check(
+      "mcp_server_revision_status_check",
+      sql`${table.status} in ('candidate', 'published', 'rejected', 'revoked')`,
+    ),
+    check(
+      "mcp_server_revision_source_check",
+      sql`${table.source} in ('registry', 'staff', 'owner', 'seed')`,
+    ),
+    check("mcp_server_revision_seq_check", sql`${table.seq} >= 1`),
+    // The probe's vocabulary, shared with the delivery-independent report it has always been.
+    check(
+      "mcp_server_revision_probe_outcome_check",
+      sql`${table.probeOutcome} is null or ${table.probeOutcome} in ('responding', 'sign_in_required', 'not_verifiable', 'not_responding')`,
+    ),
+    check(
+      "mcp_server_revision_probed_check",
+      sql`(${table.probeOutcome} is null) = (${table.probedAt} is null)`,
+    ),
+    // A placed remote is an address AND the transport it speaks, or neither.
+    check(
+      "mcp_server_revision_remote_check",
+      sql`(${table.url} is null) = (${table.transport} is null)`,
+    ),
+    check("mcp_server_revision_url_check", sql`${table.url} is null or ${table.url} ~ '^https://'`),
+    // Published-ness is a fact with a time on it: a revocation PULLS BACK something that was
+    // published, so it keeps the timestamp that says it once was.
+    check(
+      "mcp_server_revision_published_check",
+      sql`(${table.status} in ('published', 'revoked')) = (${table.publishedAt} is not null)`,
+    ),
+    check(
+      "mcp_server_revision_published_by_check",
+      sql`(${table.publishedAt} is null) = (${table.publishedBy} is null)`,
+    ),
+    check(
+      "mcp_server_revision_rejected_check",
+      sql`(${table.status} = 'rejected') = (${table.decidedAt} is not null)`,
+    ),
+    check(
+      "mcp_server_revision_decided_by_check",
+      sql`(${table.decidedAt} is null) = (${table.decidedBy} is null)`,
+    ),
+    check(
+      "mcp_server_revision_revoked_check",
+      sql`(${table.status} = 'revoked') = (${table.revokedAt} is not null)`,
+    ),
+  ],
+);
+
+/**
+ * THE CONNECTION — one workspace's use of one server, 1:1 with the `kind: 'mcp'` bundle row that
+ * carries it.
+ *
+ * The bundle stays the anchor everything else already keys on: channels curate it, assignments
+ * aim it, declines refuse it, a manifest references it by name. What the bundle no longer holds
+ * is the DOCUMENT — this row names the server instead, and delivery resolves the bytes from it.
+ *
+ * `pinned_revision_id` NULL is the ordinary case: follow the server's `current_revision_id` and
+ * receive corrections as they are published. A pin is the opposite promise, and the composite key
+ * below is what keeps it a promise about THIS server's history rather than someone else's.
+ *
+ * `workspace_id` is denormalized off the bundle so the unique below can exist at all: ONE
+ * connection per server per workspace, refused by the database rather than by a scan.
+ */
+export const bundleMcp = webSchema.table(
+  "bundle_mcp",
+  {
+    bundleId: text("bundle_id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => mcpServer.id),
+    pinnedRevisionId: text("pinned_revision_id"),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("bundle_mcp_workspace_server_unique").on(table.workspaceId, table.serverId),
+    index("bundle_mcp_server_idx").on(table.serverId),
+    foreignKey({
+      name: "bundle_mcp_bundle_fk",
+      columns: [table.bundleId, table.workspaceId],
+      foreignColumns: [bundle.id, bundle.workspaceId],
+    }).onDelete("cascade"),
+    // NO CASCADE from the server: a catalog row that workspaces are connected to is not
+    // something a delete may quietly take their connections down with. The reference simply
+    // stands in the way until the connections are gone.
+    foreignKey({
+      name: "bundle_mcp_pinned_revision_fk",
+      columns: [table.pinnedRevisionId, table.serverId],
+      foreignColumns: [mcpServerRevision.id, mcpServerRevision.serverId],
+    }),
   ],
 );
 
