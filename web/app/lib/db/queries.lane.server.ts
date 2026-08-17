@@ -2,6 +2,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { composition } from "@/composition.server";
 import type { SessionActor } from "@/lib/auth/guards.server";
+import { CATALOG_BUNDLE_KINDS } from "@/lib/bundle-base";
 import {
   auditInTx,
   feedDemandSql,
@@ -80,6 +81,35 @@ export interface DeliverySkill {
   via: { channels: string[]; direct: boolean; assigned_by?: string; picked?: true };
 }
 
+/**
+ * One connected MCP server in the feed — the DOCUMENT ITSELF, not a pointer to bytes.
+ *
+ * A `kind: 'mcp'` bundle names a row in the server catalog; there is nothing content-addressed to
+ * fetch and no second round trip to make, so the document rides the delivery it belongs to and the
+ * machine caches it beside its revision id. `revision_id` is what a device reports back as the
+ * thing it holds — the catalog's version handle, where a file bundle reports a commit.
+ */
+export interface DeliveryMcpServer {
+  skill_id: string;
+  name: string;
+  kind: string;
+  display_name?: string;
+  /** The revision this connection resolves to — a pin, else the server's `current`. */
+  revision_id: string;
+  /** The `server.json` verbatim, in the official registry format. */
+  document: Record<string, unknown>;
+  /** This connection follows ONE revision rather than the server's `current`. OMITTED when it
+   *  does not — the wire spells absence by absence, never by `false`. */
+  pinned?: true;
+  /** The resolved revision was pulled back after publication. It is STILL SERVED — a pin is a
+   *  promise — and the client discloses it. Omitted when it stands. */
+  revoked?: true;
+  /** When the resolved revision was published (epoch milliseconds). */
+  updated_at: number;
+  /** Why the feed carries it — the same attribution a skill row carries. */
+  via: { channels: string[]; direct: boolean; assigned_by?: string; picked?: true };
+}
+
 /** One declined bundle of the caller's — identity + name, so a client can narrate the stance. */
 export interface DeliveryDecline {
   skill_id: string;
@@ -106,6 +136,8 @@ export interface DeliveryBody {
   /** The session's status; "pending" delivers NOTHING (the empty body below). */
   session_status: "active" | "pending";
   skills: DeliverySkill[];
+  /** The connected MCP servers, documents inline — always present, possibly empty. */
+  mcp_servers: DeliveryMcpServer[];
   /** The caller's standing declines (live bundles only), name-sorted — always present. */
   declined: DeliveryDecline[];
   notices: DeliveryNotice[];
@@ -129,6 +161,7 @@ export async function emptyDeliveryFor(actor: SessionActor): Promise<DeliveryBod
     workspace_id: actor.workspaceId,
     session_status: "pending",
     skills: [],
+    mcp_servers: [],
     declined: [],
     notices: [],
     proposals_awaiting: 0,
@@ -147,17 +180,27 @@ function isoSeconds(date: Date): string {
  * resolved protection, plus the caller's standing declines by name, the unacked notices, the
  * open-proposal count over the same set, and the ONE staleness clock. Every delivered skill is served at the workspace's `current` —
  * the server holds no version pins; a machine that wants an older version pins it locally.
+ *
+ * ONE READ, TWO LISTS, because the feed is one question and a bundle's KIND decides only what an
+ * entitled row is made of. A file bundle carries a pointer into the vault; a connected MCP server
+ * carries its document inline, resolved from the catalog (a pin, else the server's `current`) —
+ * and a connection is the one thing that decides which list a row lands in, so the `via`
+ * attribution, the ordering and the snapshot are shared rather than asked for twice.
  */
 export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
-      const skillRows = await tx.execute(sql`
+      const rows = await tx.execute(sql`
         SELECT b.id AS skill_id, b.name, b.kind, b.display_name,
                COALESCE(b.protection, w.protection_default, 'open') AS protection,
                cp.version_id AS current_version_id, cp.generation,
                (extract(epoch from cp.moved_at) * 1000)::bigint AS updated_at,
                vd.bundle_digest AS current_digest,
+               -- The catalog half: the revision this connection resolves to, and its document.
+               r.id AS revision_id, r.document AS document, r.status AS revision_status,
+               (bm.pinned_revision_id IS NOT NULL) AS pinned,
+               (extract(epoch from r.published_at) * 1000)::bigint AS revision_at,
                COALESCE((
                  SELECT array_agg(DISTINCT ch.name ORDER BY ch.name)
                  FROM web.channel_bundle cb
@@ -196,31 +239,62 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
         FROM (${feedDemandSql(actor.userId, ws)}) e
         JOIN web.bundle b ON b.id = e.bundle_id
         JOIN web.workspace w ON w.id = ${ws}
-        JOIN plane.current_pointer cp ON cp.workspace_id = ${ws} AND cp.bundle_id = b.id
+        LEFT JOIN plane.current_pointer cp ON cp.workspace_id = ${ws} AND cp.bundle_id = b.id
         LEFT JOIN plane.version_digest vd
           ON vd.workspace_id = ${ws} AND vd.bundle_id = b.id AND vd.version_id = cp.version_id
+        -- THE CONNECTION AND WHAT IT RESOLVES TO: a pin is followed exactly, revoked or not (a
+        -- pin is a promise); everything else follows the server's own current revision.
+        LEFT JOIN web.bundle_mcp bm ON bm.workspace_id = ${ws} AND bm.bundle_id = b.id
+        LEFT JOIN web.mcp_server ms ON ms.id = bm.server_id
+        LEFT JOIN web.mcp_server_revision r
+          ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
+        -- A bundle delivers what its KIND delivers: bytes for a file bundle, a resolved document
+        -- for a connected server. A connection whose server has nothing published resolves to
+        -- nothing and is simply absent, as is a file bundle that never published.
+        WHERE (r.id IS NOT NULL)
+           OR (cp.version_id IS NOT NULL AND b.kind <> ALL(${pgTextArray([...CATALOG_BUNDLE_KINDS])}))
         ORDER BY b.name
       `);
-      const skills: DeliverySkill[] = (skillRows.rows as Record<string, unknown>[]).map((r) => ({
-        skill_id: r.skill_id as string,
-        name: r.name as string,
-        kind: r.kind as string,
-        ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
-        protection: r.protection as string,
-        version_id: r.current_version_id as string,
-        // A pointer without its digest row is a custody fault; serve the honest empty string
-        // rather than fail the whole delivery (the client's re-hash will refuse the bundle).
-        bundle_digest: (r.current_digest as string | null) ?? "",
-        generation: Number(r.generation),
-        updated_at: Number(r.updated_at),
-        via: {
-          channels: r.via_channels as string[],
-          direct: r.direct as boolean,
-          // Optional attribution facts — OMITTED when absent, never null/false on the wire.
-          ...(r.assigned_by === null ? {} : { assigned_by: r.assigned_by as string }),
-          ...(r.picked === true ? { picked: true as const } : {}),
-        },
-      }));
+      const via = (r: Record<string, unknown>): DeliverySkill["via"] => ({
+        channels: r.via_channels as string[],
+        direct: r.direct as boolean,
+        // Optional attribution facts — OMITTED when absent, never null/false on the wire.
+        ...(r.assigned_by === null ? {} : { assigned_by: r.assigned_by as string }),
+        ...(r.picked === true ? { picked: true as const } : {}),
+      });
+      const skills: DeliverySkill[] = [];
+      const mcpServers: DeliveryMcpServer[] = [];
+      for (const r of rows.rows as Record<string, unknown>[]) {
+        const common = {
+          skill_id: r.skill_id as string,
+          name: r.name as string,
+          kind: r.kind as string,
+          ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
+        };
+        if (r.revision_id !== null) {
+          mcpServers.push({
+            ...common,
+            revision_id: r.revision_id as string,
+            document: r.document as Record<string, unknown>,
+            ...(r.pinned === true ? { pinned: true as const } : {}),
+            ...(r.revision_status === "revoked" ? { revoked: true as const } : {}),
+            updated_at: Number(r.revision_at),
+            via: via(r),
+          });
+          continue;
+        }
+        skills.push({
+          ...common,
+          protection: r.protection as string,
+          version_id: r.current_version_id as string,
+          // A pointer without its digest row is a custody fault; serve the honest empty string
+          // rather than fail the whole delivery (the client's re-hash will refuse the bundle).
+          bundle_digest: (r.current_digest as string | null) ?? "",
+          generation: Number(r.generation),
+          updated_at: Number(r.updated_at),
+          via: via(r),
+        });
+      }
 
       // The caller's standing declines — live bundles only, name-sorted for determinism. The
       // stance is served WITH delivery so a client can narrate "off by your choice" without a
@@ -296,6 +370,7 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
         workspace_id: ws,
         session_status: "active",
         skills,
+        mcp_servers: mcpServers,
         declined,
         notices,
         proposals_awaiting: proposalsAwaiting,
@@ -769,7 +844,23 @@ export interface LaneSkillIndexEntry {
   upstream_path?: string;
 }
 
-/** The workspace catalog — every bundle holding a `current`, ordered by id. */
+/** One connected MCP server in the workspace catalog — the document, resolved as delivery
+ *  resolves it, so a project reference to a server this caller does not follow still renders. */
+export interface LaneMcpIndexEntry {
+  skill_id: string;
+  name: string;
+  kind: string;
+  status: string;
+  display_name?: string;
+  revision_id: string;
+  document: Record<string, unknown>;
+  pinned?: true;
+  revoked?: true;
+  updated_at: number;
+}
+
+/** The workspace catalog — every FILE bundle holding a `current`, ordered by id. A connected
+ *  server holds no pointer and is served by `laneMcpServersIndex` below. */
 export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillIndexEntry[]> {
   const ws = actor.workspaceId;
   const rows = await getDb()
@@ -814,7 +905,13 @@ export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillInd
         eq(planeVersionDigest.versionId, planeCurrentPointer.versionId),
       ),
     )
-    .where(and(eq(bundle.workspaceId, ws), sql`${bundle.status} <> 'deleted'`))
+    .where(
+      and(
+        eq(bundle.workspaceId, ws),
+        sql`${bundle.status} <> 'deleted'`,
+        sql`${bundle.kind} <> ALL(${pgTextArray([...CATALOG_BUNDLE_KINDS])})`,
+      ),
+    )
     .orderBy(asc(bundle.id));
   return rows.map((r) => ({
     skill_id: r.skillId,
@@ -834,6 +931,41 @@ export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillInd
           upstream_repo: r.upstreamRepo,
           upstream_path: r.upstreamPath ?? "",
         }),
+  }));
+}
+
+/**
+ * The catalog's OTHER half: every connected MCP server, each resolved to the document a machine
+ * would receive. It carries the document for the same reason delivery does — a project that
+ * references a server nobody in the room follows still has to render its config, and there is no
+ * second lane to fetch bytes from.
+ */
+export async function laneMcpServersIndex(actor: SessionActor): Promise<LaneMcpIndexEntry[]> {
+  const ws = actor.workspaceId;
+  const rows = await getDb().execute(sql`
+    SELECT b.id AS skill_id, b.name, b.kind, b.status, b.display_name,
+           r.id AS revision_id, r.document, r.status AS revision_status,
+           (bm.pinned_revision_id IS NOT NULL) AS pinned,
+           (extract(epoch from r.published_at) * 1000)::bigint AS revision_at
+    FROM web.bundle_mcp bm
+    JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
+    JOIN web.mcp_server ms ON ms.id = bm.server_id
+    JOIN web.mcp_server_revision r
+      ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
+    WHERE bm.workspace_id = ${ws} AND b.status <> 'deleted'
+    ORDER BY b.id
+  `);
+  return (rows.rows as Record<string, unknown>[]).map((r) => ({
+    skill_id: r.skill_id as string,
+    name: r.name as string,
+    kind: r.kind as string,
+    status: r.status as string,
+    ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
+    revision_id: r.revision_id as string,
+    document: r.document as Record<string, unknown>,
+    ...(r.pinned === true ? { pinned: true as const } : {}),
+    ...(r.revision_status === "revoked" ? { revoked: true as const } : {}),
+    updated_at: Number(r.revision_at),
   }));
 }
 

@@ -72,6 +72,14 @@ export interface BundleKindEntry {
   webNewDefaultDestination: WebNewDefault;
   /** Whether a candidate's BYTES are gated before custody (the MCP server-document gate). */
   hasContentGate: boolean;
+  /**
+   * WHETHER THIS KIND IS FILES. A skill is a bundle of bytes in the vault, content-addressed, with
+   * a version history made of commits. An MCP server is a row in the server catalog: the bundle
+   * names a server and delivery resolves the document from it, so there are no bytes to publish,
+   * no pointer to move, and no file pages to mount. Every surface that has to tell the two apart
+   * asks this rather than comparing the tag to `'mcp'`.
+   */
+  isFileBundle: boolean;
   /** What the rail says when this section holds nothing yet. Both sections render when empty:
    *  the header carries the only `+`, and a section that hides until it has something in it
    *  hides the way to put the first thing in it. */
@@ -115,6 +123,7 @@ export const BUNDLE_KINDS: readonly BundleKindEntry[] = [
     indexNote: "Published skills appear here automatically.",
     webNewDefaultDestination: "default-channel",
     hasContentGate: false,
+    isFileBundle: true,
     railEmptyNote: "No skills yet.",
     newActionLabel: "Publish a skill from your agent",
     railNewAction: "publish-dialog",
@@ -134,6 +143,7 @@ export const BUNDLE_KINDS: readonly BundleKindEntry[] = [
     indexNote: "Delivered as a tool endpoint in each member's agent configs.",
     webNewDefaultDestination: "no-channel",
     hasContentGate: true,
+    isFileBundle: false,
     railEmptyNote: "No MCP servers yet.",
     newActionLabel: "Add an MCP server",
     railNewAction: "new-page",
@@ -154,6 +164,12 @@ const SKILL_ENTRY = BUNDLE_KINDS[0] as BundleKindEntry;
 export function kindEntry(kind: string | null | undefined): BundleKindEntry {
   return BUNDLE_KINDS.find((entry) => entry.kind === kind) ?? SKILL_ENTRY;
 }
+
+/** The kinds whose bundles are NOT files — the ones a server catalog delivers (see
+ *  `isFileBundle`). Every query that has to leave them out of a byte-shaped read reads this. */
+export const CATALOG_BUNDLE_KINDS: readonly string[] = BUNDLE_KINDS.filter(
+  (entry) => !entry.isFileBundle,
+).map((entry) => entry.kind);
 
 /** The record for a URL base. */
 export function baseEntry(base: BundleBase): BundleKindEntry {
