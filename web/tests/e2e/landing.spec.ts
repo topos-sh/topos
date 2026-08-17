@@ -81,18 +81,25 @@ test.describe("the public landing page", () => {
     // figures are asserted as text because the hierarchy between the three cards is carried by the
     // neutral ramp, which the DOM does not spell.
     const pricing = page.locator("#pricing");
-    await expect(pricing).toContainText("Self-hosted");
+    await expect(pricing).toContainText("Free");
     await expect(pricing).toContainText("$0");
     await expect(pricing).toContainText("Team");
     await expect(pricing).toContainText("$20");
     await expect(pricing).toContainText("Enterprise");
     await expect(pricing).toContainText("$40");
     await expect(pricing).toContainText("A seat is anyone who works with an AI agent");
-    // The Team card's hosted-tier lines say only what is true today, in plain words.
-    await expect(pricing).toContainText("Hosted by us, backed up daily");
-    await expect(pricing).toContainText("Zero-downtime updates");
-    await expect(pricing.getByText("Fleet visibility and one-click revert")).toHaveCount(0);
-    await expect(pricing.getByRole("link", { name: "Talk to us" })).toHaveAttribute(
+    // The Free card promises only what the hosted free plan enforces, in plain words.
+    await expect(pricing).toContainText("Up to 3 people, unlimited agents and machines");
+    await expect(pricing).toContainText("30 days of version history");
+    // The Team card's lines say only what is true today.
+    await expect(pricing).toContainText("Unlimited people");
+    await expect(pricing).toContainText("Unlimited version history");
+    await expect(pricing).toContainText("Review and approval workflow");
+    // Self-hosting is the one line under the card row, not a tier.
+    await expect(pricing.getByText("Self-hosted")).toHaveCount(0);
+    await expect(pricing).toContainText("Topos is Apache-2.0, and self-hosting is free");
+    await expect(pricing.getByRole("link", { name: "Read the install guide" })).toBeVisible();
+    await expect(pricing.getByRole("link", { name: "Talk to us" }).first()).toHaveAttribute(
       "href",
       "#contact",
     );
@@ -104,7 +111,7 @@ test.describe("the public landing page", () => {
     await expect(
       page.getByRole("heading", { name: "Setting this up for a team? Email me." }),
     ).toBeVisible();
-    await expect(contact).toContainText("I set up the first teams personally.");
+    await expect(contact).toContainText("love to hear how your team works with agents");
     await expect(contact.getByText("Design partners")).toHaveCount(0);
     await expect(contact.getByText(/closed beta/i)).toHaveCount(0);
     // The order is the contract, not an accident of authoring: the band that answers the pricing

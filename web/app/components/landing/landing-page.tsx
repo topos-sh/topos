@@ -304,8 +304,8 @@ export function LandingPage({
         <div className={WRAP}>
           <SectionHeading>Setting this up for a team? Email me.</SectionHeading>
           <p className="mt-4 max-w-[62ch] text-dim">
-            I set up the first teams personally. Tell me how your team works with agents and I’ll
-            get your first shared skills flowing. Your feedback shapes what gets built next.
+            I’d love to hear how your team works with agents, and I’m happy to help with the setup.
+            Your feedback shapes what gets built next.
           </p>
           <p className="mt-3 text-[13px] text-faint">Robert, founder</p>
           <div className="mt-5">
