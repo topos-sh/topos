@@ -59,6 +59,12 @@ export function mintInvitationId(): string {
 export function mintProposalId(): string {
   return `p_${randomBytes(16).toString("hex")}`;
 }
+export function mintMcpServerId(): string {
+  return `mcps_${randomBytes(16).toString("hex")}`;
+}
+export function mintMcpRevisionId(): string {
+  return `mcpr_${randomBytes(16).toString("hex")}`;
+}
 
 /** A high-entropy single-use secret (claim codes, login-flow codes): 32 random bytes, base64url. */
 function mintSecret(): string {
