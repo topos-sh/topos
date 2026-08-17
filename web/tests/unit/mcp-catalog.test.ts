@@ -4,6 +4,7 @@ import { validateCandidateFiles } from "@/lib/mcp/validate.server";
 import {
   asMember,
   asOwner,
+  asSession,
   bootWorkspace,
   createScratchDb,
   type ScratchDb,
@@ -629,9 +630,21 @@ describe("connecting a server to a workspace", () => {
   });
 });
 
+/**
+ * WHAT A MACHINE RECEIVES — driven through the read a real caller uses (the workspace catalog's
+ * server half), because the resolution is one expression shared by every lane and asserting it
+ * anywhere else would be asserting a copy of it.
+ */
 describe("what a machine receives", () => {
+  /** The resolved row for one connected bundle, as the lanes read it. */
+  async function receivedFor(workspaceId: string, bundleId: string) {
+    const { laneMcpServersIndex } = await import("@/lib/db/queries.lane.server");
+    const rows = await laneMcpServersIndex(asSession(workspaceId, "u_mem", "cs_mem", "member"));
+    return rows.find((row) => row.skill_id === bundleId);
+  }
+
   it("follows the catalog's current, and moves with it", async () => {
-    const { connectMcpServer, mcpServerForDelivery } = await catalog();
+    const { connectMcpServer } = await catalog();
     const serverId = await seedGlobalServer("mcps_deliver", "com.example/deliver");
     const first = await addRevision(serverId, {
       document: serverDocument("com.example/deliver", "1.0.0"),
@@ -651,9 +664,9 @@ describe("what a machine receives", () => {
       throw new Error(connected.refusal.message);
     }
     const bundleId = connected.registration.bundleId;
-    const before = await mcpServerForDelivery(member, bundleId);
-    expect(before?.revisionId).toBe(first.revisionId);
-    expect(before?.pinned).toBe(false);
+    const before = await receivedFor(wsId, bundleId);
+    expect(before?.revision_id).toBe(first.revisionId);
+    expect(before?.pinned).toBeUndefined();
     expect(before?.document.version).toBe("1.0.0");
 
     const second = await addRevision(serverId, {
@@ -664,13 +677,13 @@ describe("what a machine receives", () => {
     if (second.refusal !== null) {
       throw new Error(second.refusal.message);
     }
-    const after = await mcpServerForDelivery(member, bundleId);
-    expect(after?.revisionId).toBe(second.revisionId);
+    const after = await receivedFor(wsId, bundleId);
+    expect(after?.revision_id).toBe(second.revisionId);
     expect(after?.document.version).toBe("2.0.0");
   });
 
   it("a pin is kept — a revocation is reported, never quietly stepped off", async () => {
-    const { connectMcpServer, mcpServerForDelivery, revokeMcpRevision } = await catalog();
+    const { connectMcpServer, revokeMcpRevision } = await catalog();
     const serverId = await seedGlobalServer("mcps_pinstay", "com.example/pinstay");
     const pinnedRevision = await addRevision(serverId, {
       document: serverDocument("com.example/pinstay", "1.0.0"),
@@ -695,21 +708,21 @@ describe("what a machine receives", () => {
     if (connected.refusal !== null) {
       throw new Error(connected.refusal.message);
     }
-    const held = await mcpServerForDelivery(member, connected.registration.bundleId);
-    expect(held?.revisionId).toBe(pinnedRevision.revisionId);
+    const held = await receivedFor(wsId, connected.registration.bundleId);
+    expect(held?.revision_id).toBe(pinnedRevision.revisionId);
     expect(held?.pinned).toBe(true);
-    expect(held?.revoked).toBe(false);
+    expect(held?.revoked).toBeUndefined();
 
     expect(
       (await revokeMcpRevision({ display: "Staff" }, pinnedRevision.revisionId)).refusal,
     ).toBeNull();
-    const pulled = await mcpServerForDelivery(member, connected.registration.bundleId);
-    expect(pulled?.revisionId).toBe(pinnedRevision.revisionId);
+    const pulled = await receivedFor(wsId, connected.registration.bundleId);
+    expect(pulled?.revision_id).toBe(pinnedRevision.revisionId);
     expect(pulled?.revoked).toBe(true);
   });
 
   it("a workspace's own server delivers its own document", async () => {
-    const { connectMcpServer, createPrivateMcpServer, mcpServerForDelivery } = await catalog();
+    const { connectMcpServer, createPrivateMcpServer } = await catalog();
     const created = await createPrivateMcpServer(
       asOwner(wsId, "u_owner", "Owner"),
       { displayName: "Internal", authMode: "manual", authNote: "Ask ops for a token." },
@@ -727,21 +740,17 @@ describe("what a machine receives", () => {
     if (connected.refusal !== null) {
       throw new Error(connected.refusal.message);
     }
-    const delivered = await mcpServerForDelivery(member, connected.registration.bundleId);
+    const delivered = await receivedFor(wsId, connected.registration.bundleId);
     expect(delivered?.document.version).toBe("9.9.9");
-    expect(delivered?.serverId).toBe(created.serverId);
+    expect(delivered?.document.name).toBe("com.example/internal-delivery");
   });
 
   it("a bundle another workspace connected is not this workspace's to resolve", async () => {
-    const { mcpServersForDelivery } = await catalog();
     const rows = await db.q<{ bundle_id: string }>(
       `SELECT bundle_id FROM web.bundle_mcp WHERE workspace_id = $1 LIMIT 1`,
       [wsId],
     );
-    const stranger = await mcpServersForDelivery(asMember(otherWsId, "u_owner", "owner", "Owner"), [
-      rows[0]?.bundle_id ?? "",
-    ]);
-    expect(stranger.size).toBe(0);
+    expect(await receivedFor(otherWsId, rows[0]?.bundle_id ?? "")).toBeUndefined();
   });
 });
 

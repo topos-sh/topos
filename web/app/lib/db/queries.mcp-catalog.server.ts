@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor, SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
@@ -562,82 +562,22 @@ export async function connectMcpServer(
 
 // ── Delivery: which document a connected bundle actually hands a machine ────────────────────
 
-/** One connected server, resolved to the exact document a machine receives. */
-export interface McpDeliveredServer {
-  bundleId: string;
-  serverId: string;
-  revisionId: string;
-  /** The connection follows ONE revision rather than the server's `current`. */
-  pinned: boolean;
-  /** The resolved revision has been pulled back — say so; never move somebody off a pin. */
-  revoked: boolean;
-  document: Record<string, unknown>;
-}
-
 /**
- * THE DELIVERY READ — for a set of connected bundles, the document each one resolves to.
+ * THE RESOLUTION, WRITTEN ONCE — a connection's pin exactly, else the server's `current`.
  *
- * THREE WAYS a document is reached, and the row says which:
+ * THREE WAYS a document is reached, and one expression decides between them:
  *  · the workspace's OWN server — a private row, whose current revision is whatever its owner
  *    last saved;
  *  · a PIN — this connection follows one revision and keeps following it, revoked or not (a pin
  *    is a promise, and quietly moving somebody off one is the opposite of keeping it);
  *  · the catalog's CURRENT — the ordinary case, where corrections arrive as they are published.
  *
- * A bundle whose server has nothing published resolves to nothing and is simply absent: delivery
- * serves what exists, and there is no half-answer to give for a server with no document.
+ * Every read that has to answer "which revision does this workspace receive" spells THIS, which
+ * is why they all alias the connection row `bm` and the server row `ms`. A second spelling
+ * somewhere would be a second answer, and delivery, the catalog index, the registry lane and the
+ * server's own page would drift apart one query at a time.
  */
-export async function mcpServersForDelivery(
-  actor: MemberActor | SessionActor,
-  bundleIds: string[],
-): Promise<Map<string, McpDeliveredServer>> {
-  if (bundleIds.length === 0) {
-    return new Map();
-  }
-  const rows = await getDb()
-    .select({
-      bundleId: bundleMcp.bundleId,
-      serverId: bundleMcp.serverId,
-      pinnedRevisionId: bundleMcp.pinnedRevisionId,
-      revisionId: mcpServerRevision.id,
-      status: mcpServerRevision.status,
-      document: mcpServerRevision.document,
-    })
-    .from(bundleMcp)
-    .innerJoin(mcpServer, eq(mcpServer.id, bundleMcp.serverId))
-    .innerJoin(
-      mcpServerRevision,
-      eq(
-        mcpServerRevision.id,
-        sql`coalesce(${bundleMcp.pinnedRevisionId}, ${mcpServer.currentRevisionId})`,
-      ),
-    )
-    .where(
-      and(eq(bundleMcp.workspaceId, actor.workspaceId), inArray(bundleMcp.bundleId, bundleIds)),
-    );
-  return new Map(
-    rows.map((row) => [
-      row.bundleId,
-      {
-        bundleId: row.bundleId,
-        serverId: row.serverId,
-        revisionId: row.revisionId,
-        pinned: row.pinnedRevisionId !== null,
-        revoked: row.status === "revoked",
-        document: row.document as Record<string, unknown>,
-      },
-    ]),
-  );
-}
-
-/** The same resolution for ONE bundle — null when it connects nothing a machine could receive. */
-export async function mcpServerForDelivery(
-  actor: MemberActor | SessionActor,
-  bundleId: string,
-): Promise<McpDeliveredServer | null> {
-  const resolved = await mcpServersForDelivery(actor, [bundleId]);
-  return resolved.get(bundleId) ?? null;
-}
+export const MCP_RESOLVED_REVISION = sql`COALESCE(bm.pinned_revision_id, ms.current_revision_id)`;
 
 // ── Staff decisions on the global catalog ────────────────────────────────────────────────────
 
@@ -1034,8 +974,7 @@ export async function mcpServerFace(
            r.probe_outcome, r.probed_at, r.verification
     FROM web.bundle_mcp bm
     JOIN web.mcp_server ms ON ms.id = bm.server_id
-    LEFT JOIN web.mcp_server_revision r
-      ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
+    LEFT JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
     WHERE bm.workspace_id = ${actor.workspaceId} AND bm.bundle_id = ${bundleId}
     LIMIT 1
   `);
@@ -1252,16 +1191,15 @@ function workspaceRegistrySelect(workspaceId: string) {
            (r.id = ms.current_revision_id) AS is_latest
     FROM web.mcp_server ms
     LEFT JOIN (
-      SELECT bm.server_id, bm.pinned_revision_id
-      FROM web.bundle_mcp bm
+      SELECT c.server_id, c.pinned_revision_id
+      FROM web.bundle_mcp c
       JOIN web.bundle b
-        ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id AND b.status = 'active'
-      WHERE bm.workspace_id = ${workspaceId}
-    ) conn ON conn.server_id = ms.id
-    JOIN web.mcp_server_revision r
-      ON r.id = COALESCE(conn.pinned_revision_id, ms.current_revision_id)
+        ON b.id = c.bundle_id AND b.workspace_id = c.workspace_id AND b.status = 'active'
+      WHERE c.workspace_id = ${workspaceId}
+    ) bm ON bm.server_id = ms.id
+    JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
     WHERE ms.registry_name IS NOT NULL
-      AND (conn.server_id IS NOT NULL
+      AND (bm.server_id IS NOT NULL
            OR (ms.workspace_id = ${workspaceId} AND ms.status = 'active'))
   `;
 }

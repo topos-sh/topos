@@ -19,6 +19,7 @@ import {
   submissionCapRefusal,
 } from "@/lib/db/invite-caps.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
+import { MCP_RESOLVED_REVISION } from "@/lib/db/queries.mcp-catalog.server";
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
   bundle,
@@ -246,8 +247,7 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
         -- pin is a promise); everything else follows the server's own current revision.
         LEFT JOIN web.bundle_mcp bm ON bm.workspace_id = ${ws} AND bm.bundle_id = b.id
         LEFT JOIN web.mcp_server ms ON ms.id = bm.server_id
-        LEFT JOIN web.mcp_server_revision r
-          ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
+        LEFT JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
         -- A bundle delivers what its KIND delivers: bytes for a file bundle, a resolved document
         -- for a connected server. A connection whose server has nothing published resolves to
         -- nothing and is simply absent, as is a file bundle that never published.
@@ -950,8 +950,7 @@ export async function laneMcpServersIndex(actor: SessionActor): Promise<LaneMcpI
     FROM web.bundle_mcp bm
     JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
     JOIN web.mcp_server ms ON ms.id = bm.server_id
-    JOIN web.mcp_server_revision r
-      ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
+    JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
     WHERE bm.workspace_id = ${ws} AND b.status <> 'deleted'
     ORDER BY b.id
   `);

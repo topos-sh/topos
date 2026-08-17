@@ -59,7 +59,19 @@ test.beforeEach(async () => {
        and workspace_id in (select id from web.workspace)`,
     [`${CATALOG_NAME}%`],
   );
-  await adminQuery(`delete from web.mcp_server where workspace_id is not null`);
+  // Only this suite's OWN private server: another suite's is connected to a bundle, and the
+  // catalog row a connection points at is deliberately not deletable out from under it.
+  await adminQuery(
+    `delete from web.bundle where id in (
+       select bm.bundle_id from web.bundle_mcp bm
+       join web.mcp_server ms on ms.id = bm.server_id
+       where ms.registry_name = $1)`,
+    [SERVER_NAME],
+  );
+  await adminQuery(
+    `delete from web.mcp_server where workspace_id is not null and registry_name = $1`,
+    [SERVER_NAME],
+  );
 });
 
 test("choosing a server opens its dialog with no request, and adding it connects", async ({
