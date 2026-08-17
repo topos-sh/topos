@@ -1,6 +1,5 @@
 import { candidateStoredBytes, storageCapRefusalForIngest } from "@/lib/api/storage-quota.server";
 import { type BundleKind, kindEntry } from "@/lib/bundle-base";
-import { claimBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { mintBundleId } from "@/lib/db/identity.server";
 import {
   bundleCapRefusal,
@@ -13,47 +12,37 @@ import {
   type PublishActor,
   registerGenesisBundleInTx,
 } from "@/lib/db/queries.custody.server";
-import { schedulePublishProbe } from "@/lib/mcp/probe.server";
-import {
-  type McpGateRefusal,
-  mcpCandidateRefusal,
-  mcpNameTakenRefusal,
-} from "@/lib/mcp/publish-gate.server";
+import type { McpGateRefusal } from "@/lib/mcp/publish-gate.server";
 import { publishVersion } from "@/lib/plane/custody.server";
 import type { LaneFile } from "@/lib/plane/wire";
 
 /**
  * PUBLISHING A BRAND-NEW BUNDLE — the sequence, written once.
  *
- * Three doors put a bundle into a workspace for the first time: the session lane's publish (an
- * agent's `topos publish`), add-from-GitHub, and add-an-MCP-server. They differ in where the
- * bytes came from and what each records ALONGSIDE the new bundle — upstream provenance, an
- * import audit line, an op receipt — and in nothing else. What they must NOT differ in is the
- * bundle they produce: the same id, the same minted catalog name, the same birth kind, the same
- * placement rules, the same identity claim, the same audit. This is that shared middle:
+ * Two doors put a bundle into a workspace for the first time: the session lane's publish (an
+ * agent's `topos publish`) and add-from-GitHub. They differ in where the bytes came from and what
+ * each records ALONGSIDE the new bundle — upstream provenance, an import audit line, an op
+ * receipt — and in nothing else. What they must NOT differ in is the bundle they produce: the
+ * same id, the same minted catalog name, the same birth kind, the same placement rules, the same
+ * audit. This is that shared middle:
  *
- *   the kind's own candidate gate → the vault call → ONE transaction holding the registration,
- *   the identity claim, and whatever the door adds → one typed outcome.
+ *   the vault call → ONE transaction holding the registration and whatever the door adds → one
+ *   typed outcome.
  *
  * The `alsoInTx` hook runs in THAT transaction, which is where a door's op receipt belongs: a
  * receipt written afterwards, in a second transaction, leaves a crash window in which the bundle
  * exists with no replay record — and the op's retry then stops being a replay and becomes a
  * second publish against a bundle that now exists, reported as a generation conflict.
  *
- * ONE THING COMES FROM THE KIND'S RECORD rather than from the caller: `hasContentGate` picks the
- * gate a candidate's BYTES must pass before any custody call (an MCP server's `server.json`
- * rules; a skill has none). That one is a property of the KIND — the same bytes are the same
- * bytes at every door.
+ * WHAT CANNOT COME THROUGH HERE AT ALL: a kind whose bundles are not files. An MCP server is a
+ * row in the server catalog — the workspace connects to one, and the document lives there — so a
+ * publish naming that kind is describing something this door cannot make, and is refused before
+ * anything is ingested rather than turned into a bundle of bytes nobody will ever be served.
  *
- * WHERE A NEW BUNDLE REACHES IS NOT. It is a property of the DOOR: the session lane carries the
- * wire's semantics for every kind (an absent channel means the workspace default, which is what
- * makes a published bundle arrive on the team's machines), while a web creation page carries
- * whatever its own form rests on. So `destination` is a required argument, never a default read
- * from a record here.
- *
- * ORDER INSIDE THE TRANSACTION IS LOAD-BEARING: the registration comes first because the
- * identity claim's foreign key points at the bundle row, and a refused claim rolls the whole
- * thing back — so "refused" keeps meaning that no catalog row was written.
+ * WHERE A NEW BUNDLE REACHES is a property of the DOOR: the session lane carries the wire's
+ * semantics (an absent channel means the workspace default, which is what makes a published
+ * bundle arrive on the team's machines), while a web creation page carries whatever its own form
+ * rests on. So `destination` is a required argument, never a default read from a record here.
  */
 
 /** The bytes a genesis publish carries, in the shape the custody lane takes them. */
@@ -108,7 +97,7 @@ export interface GenesisLanding {
 
 export type GenesisPublishOutcome<T> =
   | ({ kind: "ok"; extra: T } & GenesisLanding)
-  /** The kind's gate, or the identity claim, said no — nothing was registered. */
+  /** A cap, a quota, or the kind itself said no — nothing was registered. */
   | { kind: "refused"; refusal: McpGateRefusal }
   /** The vault refused the candidate itself (a malformed tree). */
   | { kind: "rejected"; message: string | null }
@@ -134,12 +123,31 @@ export function webNewDestination(kind: BundleKind, chosenChannel: string): Gene
   return kindEntry(kind).webNewDefaultDestination === "no-channel" ? NO_CHANNEL : null;
 }
 
+/**
+ * A KIND THAT IS NOT FILES refuses bytes, in the same words at every door. The sentence names
+ * where the act really belongs, because the person meeting it wanted a server and is not helped
+ * by being told what a publish is not.
+ */
+export function noFilesRefusal(kind: BundleKind): McpGateRefusal {
+  const record = kindEntry(kind);
+  return {
+    code: "KIND_HAS_NO_FILES",
+    message: `${record.sectionLabel} are catalog entries, not bundles of files — add one on the ${record.sectionLabel} page`,
+  };
+}
+
 export async function publishGenesisBundle<T = undefined>(
   args: GenesisPublishArgs<T>,
 ): Promise<GenesisPublishOutcome<T>> {
   const record = kindEntry(args.kind);
   const bundleId = args.bundleId ?? mintBundleId();
   const ws = args.actor.workspaceId;
+
+  // THE KIND, before anything else: a bundle whose document lives in the server catalog has no
+  // bytes to publish, so this refuses ahead of every cap, quota and custody call.
+  if (!record.isFileBundle) {
+    return { kind: "refused", refusal: noFilesRefusal(args.kind) };
+  }
 
   // THE BUNDLE CAP (`bundles`), before any custody call — a NEW identity at the cap must not
   // ingest bytes it will never register (a no-op without a limit; the in-transaction check
@@ -156,21 +164,6 @@ export async function publishGenesisBundle<T = undefined>(
   const overQuota = await storageCapRefusalForIngest(ws, candidateStoredBytes(args.candidate));
   if (overQuota !== null) {
     return { kind: "refused", refusal: overQuota };
-  }
-
-  // THE KIND'S GATE, before any custody call — a refused candidate must leave no ingested bytes
-  // behind. A kind with no content gate passes straight through.
-  let identity: string | null = null;
-  // The address the gate read out of the document, kept for the advisory probe below rather than
-  // parsed a second time out of the vault.
-  let endpoint: string | null = null;
-  if (record.hasContentGate) {
-    const gate = await mcpCandidateRefusal(args.actor, args.candidate.files, bundleId);
-    if (gate.refusal !== null) {
-      return { kind: "refused", refusal: gate.refusal };
-    }
-    identity = gate.serverName;
-    endpoint = gate.endpoint;
   }
 
   const published = await publishVersion(ws, bundleId, {
@@ -217,31 +210,12 @@ export async function publishGenesisBundle<T = undefined>(
         generation: published.value.pointer.generation,
         placement: registration.placement,
       };
-      // The claim comes AFTER the row it points at, and a refusal rolls both back.
-      if (identity !== null) {
-        const claimed = await claimBundleIdentityInTx(tx, ws, bundleId, args.kind, identity);
-        if (!claimed.ok && claimed.heldBy !== null) {
-          refuse(mcpNameTakenRefusal(identity, claimed.heldBy));
-        }
-      }
       const extra = (await args.alsoInTx?.(tx, landing)) as T;
       return { landing, extra };
     },
   );
   if (landed.refused !== null) {
     return { kind: "refused", refusal: landed.refused };
-  }
-  // THE ADVISORY PROBE, and only now: the bundle is registered, the pointer has moved, and this
-  // call cannot change any of it. It asks the server the document names whether anything answers
-  // there, records the answer beside the version, and is not waited on — a report about somebody
-  // else's uptime must not lengthen the act that produced it, and its failure must not be visible
-  // at all. All three genesis doors ride this one line.
-  if (record.hasContentGate) {
-    schedulePublishProbe(args.actor, {
-      bundleId,
-      versionId: landed.value.landing.versionId,
-      endpoint,
-    });
   }
   return { kind: "ok", ...landed.value.landing, extra: landed.value.extra };
 }

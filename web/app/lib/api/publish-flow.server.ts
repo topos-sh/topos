@@ -1,6 +1,6 @@
 import type { WireCandidate } from "@/lib/api/candidate.server";
 import { receiptNow } from "@/lib/api/candidate.server";
-import { publishGenesisBundle } from "@/lib/api/genesis.server";
+import { noFilesRefusal, publishGenesisBundle } from "@/lib/api/genesis.server";
 import {
   buildReceipt,
   conflictEnvelope,
@@ -12,23 +12,15 @@ import {
 import { badRequest, internalError, uniformNotFound } from "@/lib/api/wire.server";
 import type { SessionActor } from "@/lib/auth/guards.server";
 import { type BundleKind, kindEntry } from "@/lib/bundle-base";
-import { claimBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import {
   bundleIdHeldElsewhere,
   inFinalTx,
-  inFinalTxOrRefusal,
   insertReceiptInTx,
   openProposalInTx,
   placeIntoChannelInTx,
   publishTargetOf,
   registerGenesisBundleInTx,
 } from "@/lib/db/queries.custody.server";
-import { schedulePublishProbe } from "@/lib/mcp/probe.server";
-import {
-  type McpGateRefusal,
-  mcpCandidateRefusal,
-  mcpNameTakenRefusal,
-} from "@/lib/mcp/publish-gate.server";
 import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
 
 /**
@@ -168,41 +160,27 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     return envelopeResponse(envelope);
   }
 
-  // THE KIND'S CONTENT GATE: when the bundle IS an MCP server, the candidate's `server.json`
-  // decides whether it may land at all — a remote https endpoint, no per-installation template,
-  // no credential, and an embedded registry name no other bundle here already claims. Placed
-  // beside the kind gate and for the same reason: a refusal must leave no ingested bytes behind,
-  // so it answers BEFORE any custody call.
-  //
-  // A GENESIS publish does not run it here: it runs the shared genesis path below, which owns
-  // the gate for every door (a call site is the wrong place to decide which gate a kind needs).
-  const effectiveKind = target?.kind ?? args.kind ?? "skill";
-  // The name this candidate's document claims, once the gate has accepted it — carried down to
-  // the final transaction, where the claim itself is made.
-  let mcpServerName: string | null = null;
-  // …and the address it places, carried down to the advisory probe that runs once the version is
-  // durable. Null for a package-only document, which has no address for this plane to ask.
-  let mcpEndpoint: string | null = null;
-  if (!isGenesis && kindEntry(effectiveKind).hasContentGate) {
-    const gate = await mcpCandidateRefusal(actor, candidate.files, target?.bundleId ?? skillId);
-    if (gate.refusal !== null) {
-      const receipt = buildReceipt({
-        opId,
-        command,
-        outcome: "DENIED",
-        workspaceId: actor.workspaceId,
-        skillId: target?.bundleId ?? skillId,
-        expectedGeneration: expected,
-        createdAt,
-      });
-      const envelope = deniedEnvelope(command, gate.refusal.code, skillName, receipt, {
-        message: gate.refusal.message,
-      });
-      await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
-      return envelopeResponse(envelope);
-    }
-    mcpServerName = gate.serverName;
-    mcpEndpoint = gate.endpoint;
+  // A KIND THAT IS NOT FILES: an MCP server's document lives in the server catalog, so there is
+  // nothing for a publish or a proposal to carry. Refused here, BEFORE any custody call, so no
+  // bytes are ingested against a bundle that will never serve them. (A GENESIS publish naming the
+  // kind meets the same refusal on the shared path below, in the same words.)
+  const effectiveKind = (target?.kind ?? args.kind ?? "skill") as BundleKind;
+  if (!isGenesis && !kindEntry(effectiveKind).isFileBundle) {
+    const refusal = noFilesRefusal(effectiveKind);
+    const receipt = buildReceipt({
+      opId,
+      command,
+      outcome: "DENIED",
+      workspaceId: actor.workspaceId,
+      skillId: target?.bundleId ?? skillId,
+      expectedGeneration: expected,
+      createdAt,
+    });
+    const envelope = deniedEnvelope(command, refusal.code, skillName, receipt, {
+      message: refusal.message,
+    });
+    await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
+    return envelopeResponse(envelope);
   }
 
   // I-COMMIT-PARITY: the commit frame's author + message are the WIRE's — the device derived
@@ -265,16 +243,6 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       await insertReceiptInTx(tx, actor, opId, raw, env);
       return env;
     });
-    // A PROPOSED version's bytes are as final as a published one's — they are just not `current`
-    // yet — so it is probed here, at the moment it exists. Approving it later moves a pointer and
-    // creates no new version, so nothing to probe happens then.
-    if (mcpServerName !== null) {
-      schedulePublishProbe(actor, {
-        bundleId: target.bundleId,
-        versionId: committed.value.version_id,
-        endpoint: mcpEndpoint,
-      });
-    }
     return envelopeResponse(envelope);
   }
 
@@ -429,123 +397,57 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
   }
 
   const details: Record<string, unknown> = {};
-  const landed = await inFinalTxOrRefusal<Record<string, unknown>, McpGateRefusal>(
-    async (tx, refuse) => {
-      // THE CLAIM ITSELF. The gate above answered before the custody call — that pre-check is what
-      // makes the COMMON case refuse before any byte moves; being a read, it is not the last word.
-      // This is: the identity row's key admits exactly one claimant, so a concurrent publish of the
-      // same name is refused here by the database rather than by a comparison. What it can and
-      // cannot do, plainly: the vault call has ALREADY landed by here — a genesis loser leaves
-      // bytes with no catalog row, and a re-publish that renames itself into a collision has
-      // already moved that bundle's `current`. Un-moving a pointer is not in this step's reach
-      // (publish-then-register is the pre-existing sequencing). NAMED RESIDUAL: the loser of two
-      // concurrent RE-publishes carries a live pointer (its version IS current) alongside a DENIED
-      // receipt — the catalog stays unambiguous (one recorded claimant, so the registry lane's
-      // answer is single-valued), but that bundle's own `current` serves a name it was refused.
-      // REGISTRATION FIRST, then the claim: the claim's key points AT the bundle row, so on a
-      // genesis publish there is nothing to claim against until the row exists. A refusal then
-      // rolls the registration back — which is what keeps "refused" meaning no catalog row was
-      // written, exactly as it did when the claim came first.
-      if (isGenesis) {
-        const registration = await registerGenesisBundleInTx(
-          tx,
-          actor,
-          bundleId,
-          displayName,
-          channel,
-          args.kind ?? null,
-        );
-        if (registration.placement !== undefined) {
-          details.placement = registration.placement;
-        }
-      } else if (channel !== null) {
-        details.placement = await placeIntoChannelInTx(tx, actor, bundleId, channel);
-      }
-      if (mcpServerName !== null) {
-        const claimed = await claimBundleIdentityInTx(
-          tx,
-          actor.workspaceId,
-          bundleId,
-          "mcp",
-          mcpServerName,
-        );
-        if (!claimed.ok && claimed.heldBy !== null) {
-          refuse(mcpNameTakenRefusal(mcpServerName, claimed.heldBy));
-        }
-      }
-      if (args.upstream != null) {
-        await recordUpstreamInTx(
-          tx,
-          actor.workspaceId,
-          bundleId,
-          published.value.version_id,
-          args.upstream,
-        );
-      }
-      const receipt = buildReceipt({
-        opId,
-        command,
-        outcome: "OK",
-        workspaceId: actor.workspaceId,
-        skillId: bundleId,
-        versionId: published.value.version_id,
-        bundleDigest: published.value.bundle_digest,
-        ...(isGenesis ? {} : { expectedGeneration: expected }),
-        currentGeneration: published.value.pointer.generation,
-        createdAt,
-        ...(Object.keys(details).length > 0 ? { details } : {}),
-      });
-      // The pointer MOVED — the envelope's data carries the current record (the client's
-      // read-your-writes advance requires it and scope-checks it).
-      const built = okPointerEnvelope(
-        command,
-        receipt,
-        { workspaceId: actor.workspaceId, skillId: bundleId },
-        {
-          versionId: published.value.version_id,
-          generation: published.value.pointer.generation,
-        },
+  const landed = await inFinalTx(async (tx) => {
+    if (isGenesis) {
+      const registration = await registerGenesisBundleInTx(
+        tx,
+        actor,
+        bundleId,
+        displayName,
+        channel,
+        args.kind ?? null,
       );
-      await insertReceiptInTx(tx, actor, opId, raw, built);
-      return built;
-    },
-  );
-  // THE ADVISORY PROBE for a re-publish, once the pointer has moved and the receipt is durable.
-  // Not waited on, and it can change nothing above it (app/lib/mcp/probe.server.ts).
-  //
-  // NOT PROBED, named rather than left to be discovered:
-  //
-  //  · THE UPSTREAM CHECKER'S IMPORTS (app/lib/db/upstream.server.ts). It commits versions for any
-  //    kind, an MCP bundle with an upstream row included — but it runs as a SYSTEM act with no
-  //    actor at all, and a probe row is scoped by the actor's workspace. A version born there
-  //    therefore reads "not checked yet" until someone publishes over it, which is exactly true.
-  //  · EVERY PATH THAT MOVES A POINTER WITHOUT CREATING A VERSION — review approval, revert,
-  //    unarchive. Nothing new exists to ask about; the version already carries the answer from
-  //    when it was made.
-  if (landed.refused === null && mcpServerName !== null) {
-    schedulePublishProbe(actor, {
-      bundleId,
-      versionId: published.value.version_id,
-      endpoint: mcpEndpoint,
-    });
-  }
-  if (landed.refused !== null) {
-    // The claim refused and its transaction rolled back — nothing was registered, nothing placed.
-    // The receipt is the one thing that must still land, so it gets its own transaction.
+      if (registration.placement !== undefined) {
+        details.placement = registration.placement;
+      }
+    } else if (channel !== null) {
+      details.placement = await placeIntoChannelInTx(tx, actor, bundleId, channel);
+    }
+    if (args.upstream != null) {
+      await recordUpstreamInTx(
+        tx,
+        actor.workspaceId,
+        bundleId,
+        published.value.version_id,
+        args.upstream,
+      );
+    }
     const receipt = buildReceipt({
       opId,
       command,
-      outcome: "DENIED",
+      outcome: "OK",
       workspaceId: actor.workspaceId,
       skillId: bundleId,
-      expectedGeneration: expected,
+      versionId: published.value.version_id,
+      bundleDigest: published.value.bundle_digest,
+      ...(isGenesis ? {} : { expectedGeneration: expected }),
+      currentGeneration: published.value.pointer.generation,
       createdAt,
+      ...(Object.keys(details).length > 0 ? { details } : {}),
     });
-    const denied = deniedEnvelope(command, landed.refused.code, skillName, receipt, {
-      message: landed.refused.message,
-    });
-    await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, denied));
-    return envelopeResponse(denied);
-  }
-  return envelopeResponse(landed.value);
+    // The pointer MOVED — the envelope's data carries the current record (the client's
+    // read-your-writes advance requires it and scope-checks it).
+    const built = okPointerEnvelope(
+      command,
+      receipt,
+      { workspaceId: actor.workspaceId, skillId: bundleId },
+      {
+        versionId: published.value.version_id,
+        generation: published.value.pointer.generation,
+      },
+    );
+    await insertReceiptInTx(tx, actor, opId, raw, built);
+    return built;
+  });
+  return envelopeResponse(landed);
 }

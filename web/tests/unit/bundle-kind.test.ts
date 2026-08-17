@@ -170,10 +170,14 @@ beforeEach(() => {
 });
 
 describe("genesis mints the declared kind", () => {
-  it("a publish declaring 'mcp' is born 'mcp'", async () => {
+  it("a publish declaring 'mcp' is REFUSED — that kind is not made of files", async () => {
     const envelope = await runFlow({ skillId: "s_born_mcp", kind: "mcp", mcpCandidate: true });
-    expect(envelope.ok).toBe(true);
-    expect(await kindOf("s_born_mcp")).toBe("mcp");
+    expect(envelope.ok).toBe(false);
+    expect((envelope.error as { code: string }).code).toBe("KIND_HAS_NO_FILES");
+    // Refused before any custody call, so no bytes were ingested against a bundle that will
+    // never serve them — and no catalog row was written.
+    expect(vault.publish).toEqual([]);
+    expect(await kindOf("s_born_mcp")).toBeUndefined();
   });
 
   it("a publish declaring nothing is born 'skill' — the unchanged default", async () => {
@@ -182,19 +186,17 @@ describe("genesis mints the declared kind", () => {
     expect(await kindOf("s_born_bare")).toBe("skill");
   });
 
-  it("genesis by PROPOSAL carries the kind identically (it still lands directly)", async () => {
+  it("genesis by PROPOSAL refuses the same kind identically", async () => {
     const envelope = await runFlow({
       skillId: "s_born_prop",
       kind: "mcp",
       forceProposal: true,
       mcpCandidate: true,
     });
-    expect(envelope.ok).toBe(true);
-    // No base to review against: the forced proposal takes the direct arm, so the kind rides
-    // the same ONE registration.
+    expect((envelope.error as { code: string }).code).toBe("KIND_HAS_NO_FILES");
     expect(vault.commit).toEqual([]);
-    expect(vault.publish).toEqual([{ ws: wsId, bundleId: "s_born_prop" }]);
-    expect(await kindOf("s_born_prop")).toBe("mcp");
+    expect(vault.publish).toEqual([]);
+    expect(await kindOf("s_born_prop")).toBeUndefined();
   });
 });
 
@@ -251,22 +253,22 @@ describe("an existing bundle's kind is fixed at birth", () => {
     expect(vault.commit).toEqual([]);
   });
 
-  it("RE-ASSERTING the stored kind is a no-op — the publish proceeds", async () => {
+  it("RE-ASSERTING the stored kind still refuses the BYTES — that kind has none", async () => {
     const envelope = await runFlow({
       skillId: "s_srv",
       kind: "mcp",
       expected: 1,
       mcpCandidate: true,
     });
-    expect(envelope.ok).toBe(true);
-    expect(vault.publish).toEqual([{ ws: wsId, bundleId: "s_srv" }]);
+    expect((envelope.error as { code: string }).code).toBe("KIND_HAS_NO_FILES");
+    expect(vault.publish).toEqual([]);
     expect(await kindOf("s_srv")).toBe("mcp");
   });
 
-  it("naming NO kind leaves the stored one alone", async () => {
+  it("naming NO kind reads the STORED one, and refuses on it", async () => {
     const envelope = await runFlow({ skillId: "s_srv", expected: 1, mcpCandidate: true });
-    expect(envelope.ok).toBe(true);
-    expect(vault.publish).toEqual([{ ws: wsId, bundleId: "s_srv" }]);
+    expect((envelope.error as { code: string }).code).toBe("KIND_HAS_NO_FILES");
+    expect(vault.publish).toEqual([]);
     expect(await kindOf("s_srv")).toBe("mcp");
   });
 });
