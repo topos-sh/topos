@@ -9,6 +9,7 @@ import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import { cardResponse } from "@/lib/card.server";
 import { backfillBundleIdentitiesAtBoot } from "@/lib/db/bundle-identity.server";
 import { ensureSetup } from "@/lib/db/identity.server";
+import { backfillMcpConnectionsAtBoot } from "@/lib/db/mcp-backfill.server";
 import { runMigrations } from "@/lib/db/migrate.server";
 import { armUpstreamChecker } from "@/lib/db/upstream.server";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
@@ -81,6 +82,10 @@ await runMigrations();
 // can read — so it runs here, still BEFORE the first request, so no publish can claim a name a
 // live server is already answering to. Idempotent; a settled database does one query.
 await backfillBundleIdentitiesAtBoot();
+// The other step that needs bytes rather than statements: connecting every MCP bundle that
+// already exists to the server it names. Same reason, same place in the order — a bundle without
+// its connection row delivers nothing, so this runs before anything is served.
+await backfillMcpConnectionsAtBoot();
 // The upstream sweep (external changes ALWAYS propose) — one process-wide interval.
 armUpstreamChecker();
 
