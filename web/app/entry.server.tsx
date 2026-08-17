@@ -7,7 +7,6 @@ import { ServerRouter } from "react-router";
 import { composition } from "@/composition.server";
 import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import { cardResponse } from "@/lib/card.server";
-import { backfillBundleIdentitiesAtBoot } from "@/lib/db/bundle-identity.server";
 import { ensureSetup } from "@/lib/db/identity.server";
 import { backfillMcpConnectionsAtBoot } from "@/lib/db/mcp-backfill.server";
 import { runMigrations } from "@/lib/db/migrate.server";
@@ -77,14 +76,10 @@ export const handleError = Sentry.createSentryHandleError({ logErrors: true });
  * first request 500'd (`relation "web.workspace" does not exist`) before the gate ever ran.
  */
 await runMigrations();
-// The one step the migrations above cannot do themselves: recording the registry name each
-// already-published MCP server serves. Those names live in the vault's bytes, which no statement
-// can read — so it runs here, still BEFORE the first request, so no publish can claim a name a
-// live server is already answering to. Idempotent; a settled database does one query.
-await backfillBundleIdentitiesAtBoot();
-// The other step that needs bytes rather than statements: connecting every MCP bundle that
-// already exists to the server it names. Same reason, same place in the order — a bundle without
-// its connection row delivers nothing, so this runs before anything is served.
+// The one step the migrations above cannot do themselves: connecting every MCP bundle that
+// already exists to the server it names. The name lives inside the vault's bytes, which no
+// statement can read — so it runs here, still BEFORE the first request, because a bundle without
+// its connection row delivers nothing. Idempotent; a settled database does one query.
 await backfillMcpConnectionsAtBoot();
 // The upstream sweep (external changes ALWAYS propose) — one process-wide interval.
 armUpstreamChecker();

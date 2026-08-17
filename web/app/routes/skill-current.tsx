@@ -11,6 +11,7 @@ import {
 import { VersionFiles } from "@/components/browse/version-files";
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime } from "@/components/format";
+import { McpServerPanel, type McpServerView } from "@/components/skill/mcp-server";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillInviteAffordance } from "@/components/skill/skill-invite";
 import { SkillTabs } from "@/components/skill/skill-tabs";
@@ -26,19 +27,28 @@ import {
 } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
-import { baseOf, bundleNameOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import {
+  baseOf,
+  bundleNameOf,
+  bundleNoun,
+  bundlePath,
+  kindEntry,
+  useBundleBase,
+} from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { channelsCarrying } from "@/lib/db/queries.channels.server";
 import { assignBundle, assignedToEveryone, unassign } from "@/lib/db/queries.feed.server";
-import { mcpProbeFor } from "@/lib/db/queries.mcp.server";
+import { editPrivateMcpServer, mcpServerFace } from "@/lib/db/queries.mcp-catalog.server";
 import { createInvitations, foldInviteEmail } from "@/lib/db/queries.roster.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { type AppliedOnSession, yourSessionsApplying } from "@/lib/db/queries.sessions.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
-import { probeStateLine } from "@/lib/mcp/probe-state";
+import { canonicalServerJson } from "@/lib/mcp/fetch.server";
+import { scheduleRevisionProbe } from "@/lib/mcp/probe.server";
+import { validateServerJson } from "@/lib/mcp/validate.server";
 import { useWsPath } from "@/lib/ws-path";
 import { agentDocUrl, inviteUrl, wsPathServer } from "@/lib/ws-url.server";
 
@@ -84,8 +94,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // A member who addressed it under the other kind's base lands on the canonical page.
   requireCanonicalBase({ wsName: workspace.name, base, kind: row.kind, name: skill });
 
-  const [versionFiles, channels, yourSessions, everyoneAssigned, probe] = await Promise.all([
-    row.versionId !== null
+  const isServer = !kindEntry(row.kind).isFileBundle;
+  const [versionFiles, channels, yourSessions, everyoneAssigned, server] = await Promise.all([
+    row.versionId !== null && !isServer
       ? loadVersionFilesData(memberActor, row.skillId, row.versionId)
       : Promise.resolve(null),
     // Where the bundle goes and where it landed — the two halves of "who has this", read
@@ -93,12 +104,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     channelsCarrying(memberActor, row.skillId),
     yourSessionsApplying(memberActor, row.skillId),
     assignedToEveryone(memberActor, { bundleId: row.skillId }),
-    // WHAT THE PLANE SAW when it last asked this server. MCP only — a skill has nothing to ask —
-    // and advisory throughout: a version nobody probed reads "not checked yet", which says
-    // something about this plane and nothing about the server.
-    row.kind === "mcp" && row.versionId !== null
-      ? mcpProbeFor(memberActor, row.skillId, row.versionId)
-      : Promise.resolve(null),
+    // THE SERVER a `kind: 'mcp'` bundle connects to — the whole face for that kind, and nothing a
+    // skill has any use for.
+    isServer ? mcpServerFace(memberActor, row.skillId) : Promise.resolve(null),
   ]);
 
   return {
@@ -112,16 +120,60 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     openProposals: row.openProposals,
     versionId: row.versionId,
     versionFiles,
+    /** The server view, for a bundle whose document lives in the catalog. */
+    server: server === null ? null : serverViewOf(server),
     channels,
     yourSessions,
     everyoneAssigned,
-    /** The probe line, resolved server-side: this kind has one, or it does not. */
-    probeLine: row.kind === "mcp" && row.versionId !== null ? probeStateLine(probe) : null,
     // The invite affordance's gates, resolved once here and never re-read client-side: armed mail
     // is the invitation's identity rung, and inviting is owner-only — the same two facts the
     // members page surfaces.
     mailArmed: mailDelivery().canSend,
     isOwner: memberActor.role === "owner",
+  };
+}
+
+/**
+ * The server, as the page renders it: dates and the document flattened to strings, because a
+ * loader's answer crosses to the browser and a Date does not survive that trip meaning what it
+ * meant. The document goes across as the canonical text an owner edits, not as an object.
+ */
+function serverViewOf(
+  server: NonNullable<Awaited<ReturnType<typeof mcpServerFace>>>,
+): McpServerView {
+  return {
+    serverId: server.serverId,
+    isPrivate: server.isPrivate,
+    registryName: server.registryName,
+    displayName: server.displayName,
+    description: server.description,
+    websiteUrl: server.websiteUrl,
+    icon: server.icon,
+    authMode: server.authMode as McpServerView["authMode"],
+    authNote: server.authNote,
+    pinnedRevisionId: server.pinnedRevisionId,
+    currentRevisionId: server.currentRevisionId,
+    resolved:
+      server.resolved === null
+        ? null
+        : {
+            revisionId: server.resolved.revisionId,
+            upstreamVersion: server.resolved.upstreamVersion,
+            status: server.resolved.status,
+            url: server.resolved.url,
+            transport: server.resolved.transport,
+            document: canonicalServerJson(server.resolved.document),
+            probe: server.resolved.probe,
+          },
+    revisions: server.revisions.map((revision) => ({
+      revisionId: revision.revisionId,
+      seq: revision.seq,
+      upstreamVersion: revision.upstreamVersion,
+      status: revision.status,
+      source: revision.source,
+      publishedAt: revision.publishedAt === null ? null : revision.publishedAt.toISOString(),
+      publishedBy: revision.publishedBy,
+    })),
   };
 }
 
@@ -143,6 +195,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "assign-everyone" || intent === "unassign-everyone") {
     return assignEveryoneIntent(request, workspace.id, intent, formData);
+  }
+  if (intent === "edit-mcp-server") {
+    return editServerIntent(request, workspace.id, actor, bundleNameOf(params), formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -175,6 +230,67 @@ async function assignEveryoneIntent(
     await recordAdminEvent(owner, { kind: "assigned", subject: bundleId, outcome: "error" });
     return data({ intent, status: "error" as const }, { status: 500 });
   }
+}
+
+/**
+ * SAVE A NEW VERSION of a server this workspace wrote down itself. Owner-only (the roster's own
+ * gate, whose refusal is the uniform 404), and only for a PRIVATE row — a catalog server belongs
+ * to whoever curates the catalog, and the query layer answers "no such server" for it rather than
+ * confirming that it exists somewhere else.
+ *
+ * Nothing already delivered is rewritten: the save is a new revision and a pointer move, which is
+ * the same mechanism the catalog itself uses.
+ */
+async function editServerIntent(
+  request: Request,
+  ws: string,
+  actor: MemberActor,
+  bundleName: string,
+  formData: FormData,
+) {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const row = await skillIndexRow(actor, bundleName);
+  if (row === undefined) {
+    notFound();
+  }
+  const server = await mcpServerFace(owner, row.skillId);
+  if (server === null || !server.isPrivate) {
+    notFound();
+  }
+  const posted = String(formData.get("document") ?? "");
+  const validated = validateServerJson(posted);
+  if (!validated.ok) {
+    return data(
+      { intent: "edit-mcp-server" as const, status: "error" as const, message: validated.message },
+      { status: 400 },
+    );
+  }
+  const saved = await editPrivateMcpServer(
+    owner,
+    server.serverId,
+    {
+      displayName: server.displayName,
+      description: validated.summary.description,
+      websiteUrl: server.websiteUrl,
+      icon: server.icon,
+      authMode: server.authMode as "none" | "oauth" | "manual" | null,
+      authNote: server.authNote,
+    },
+    JSON.parse(posted) as Record<string, unknown>,
+  );
+  if (saved.refusal !== null) {
+    return data(
+      {
+        intent: "edit-mcp-server" as const,
+        status: "error" as const,
+        message: saved.refusal.message,
+      },
+      { status: 400 },
+    );
+  }
+  // The advisory probe, once the revision is durable and this call can change nothing above it.
+  scheduleRevisionProbe({ revisionId: saved.revisionId, endpoint: validated.summary.url });
+  return { intent: "edit-mcp-server" as const, status: "saved" as const };
 }
 
 /**
@@ -269,7 +385,7 @@ function SkillCurrentContent({
   channels,
   yourSessions,
   everyoneAssigned,
-  probeLine,
+  server,
   mailArmed,
   isOwner,
 }: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
@@ -290,14 +406,12 @@ function SkillCurrentContent({
         active="current"
         openProposals={openProposals}
         showSettings={isOwner}
+        fileHistory={kindEntry(kind).isFileBundle}
       />
       <PlacementNote />
-      {probeLine !== null && (
-        <p data-testid="mcp-probe" className="text-dim text-sm">
-          {probeLine}
-        </p>
-      )}
-      {versionId !== null && versionFiles !== null ? (
+      {server !== null ? (
+        <McpServerPanel server={server} isOwner={isOwner} />
+      ) : versionId !== null && versionFiles !== null ? (
         <VersionFiles skill={skill} versionId={versionId} currentChip {...versionFiles} />
       ) : (
         <Card className="px-4 py-3">

@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import { useId, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
@@ -11,16 +10,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { publishGenesisBundle, webNewDestination } from "@/lib/api/genesis.server";
-import { requireMemberInScope } from "@/lib/auth/guards.server";
+import { webNewDestination } from "@/lib/api/genesis.server";
+import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { bundlePath } from "@/lib/bundle-base";
-import { auditInTx } from "@/lib/db/identity.server";
 import { channelsOf } from "@/lib/db/queries.channels.server";
 import {
-  type CuratedMcpRow,
-  curatedDocumentFor,
-  curatedServerRows,
-} from "@/lib/mcp/curated.server";
+  connectableMcpServers,
+  connectMcpServer,
+  createPrivateMcpServer,
+} from "@/lib/db/queries.mcp-catalog.server";
 import {
   canonicalServerJson,
   fetchesUpstream,
@@ -29,7 +27,8 @@ import {
   type McpSourceKind,
   unwrapServerDocument,
 } from "@/lib/mcp/fetch.server";
-import { type McpGateRefusal, SERVER_JSON } from "@/lib/mcp/publish-gate.server";
+import { scheduleRevisionProbe } from "@/lib/mcp/probe.server";
+import type { McpGateRefusal } from "@/lib/mcp/publish-gate.server";
 import { type McpSummary, suggestedNameFor, validateServerJson } from "@/lib/mcp/validate.server";
 import { useSubmittingIntent } from "@/lib/pending";
 import { allowUpstreamFetch } from "@/lib/rate-limit.server";
@@ -41,44 +40,64 @@ export function meta() {
 }
 
 /**
- * ADD AN MCP SERVER — the web way in for a `kind: 'mcp'` bundle. FOUR ways to name a server,
- * ONE publish:
+ * ADD AN MCP SERVER — the web way in for a `kind: 'mcp'` bundle. TWO acts, and they are genuinely
+ * different:
  *
- *  · a PICK from the built-in list of popular servers (app/lib/mcp/curated.server.ts) — the
- *    page's resting state, because knowing an address by heart is the rare case;
- *  · a REGISTRY NAME — the server document as the official registry serves it today;
- *  · a DIRECT URL to a server.json — SSRF-guarded, https-only, redirect-refusing;
- *  · a PASTED document — no fetch at all, which is the safe path for a server that lives
- *    inside the network this process runs in.
+ *  · CONNECT one from the catalog — the page's resting state. The server already exists as a row
+ *    somebody verified; connecting is this workspace saying "we use that one", and from then on it
+ *    receives what the catalog publishes. Any member may.
+ *  · WRITE ONE DOWN that the catalog does not carry — a server inside your own network, or one
+ *    nobody has curated yet. It becomes the workspace's OWN row, exported nowhere, and an owner is
+ *    the one who may create it, because it is the workspace speaking for a server nobody checked.
  *
- * The three CUSTOM arms need this tier to read bytes nobody here has seen, so they keep their
- * preview round trip. The PICKER does not: every built-in row's document is committed data the
- * loader ships with the page, so choosing one opens a dialog on the click itself — what would
- * land, the exact bytes, the name it would publish under — with no request made and nothing on
- * the page put out of reach while it opens. Cancelling changes nothing.
+ * A custom server still needs a document nobody here has seen, so that arm keeps its preview round
+ * trip — a registry name, a URL, or the document pasted in. The picker takes none: what a catalog
+ * row is, is already on the page, so choosing one opens its confirm dialog on the click itself.
  *
- * Whichever arm asked, the publish is one act running the same gate every publish passes
- * (app/lib/mcp/validate.server.ts) before any custody call. A picked row gets no shortcut past
- * it; it only saves the typing. A picked row's BYTES are re-derived from the list on this side
- * rather than read back off the form — a form is a client, and a client's word is not the
- * document.
- *
- * The published bundle is EXACTLY one file, `server.json`, holding those canonical bytes.
+ * Whichever act it was, the document passes the same gate (app/lib/mcp/validate.server.ts) before
+ * anything is written.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
-  const channels = await channelsOf(actor);
+  const [channels, servers] = await Promise.all([channelsOf(actor), connectableMcpServers(actor)]);
   return {
     wsName: workspace.name,
     channels: channels.map((c) => ({ name: c.name, isDefault: c.isDefault, mode: c.mode })),
-    // The viewer's own role, because a CURATED channel takes a member's placement away and the
-    // picker must say so BEFORE the publish rather than after it (see `channelOptionLabel`).
+    // The viewer's own role: a CURATED channel takes a member's placement away and the picker must
+    // say so BEFORE the act rather than after it (see `channelOptionLabel`), and writing a server
+    // down is an owner's.
     role: actor.role,
-    // The whole built-in list, documents included — see `CuratedMcpRow` for why the bytes ride
-    // along instead of being fetched on click.
-    curated: curatedServerRows(),
+    servers: servers.map((server) => ({
+      serverId: server.serverId,
+      registryName: server.registryName,
+      displayName: server.displayName,
+      description: server.description,
+      icon: server.icon,
+      authMode: server.authMode as "oauth" | "none" | "manual" | null,
+      authNote: server.authNote,
+      url: server.url,
+      transport: server.transport,
+      host: hostOf(server.url),
+      suggestedName: suggestedNameFor(server.registryName ?? server.displayName),
+      connectedAs: server.connectedAs,
+    })),
   };
 }
+
+/** The address a row shows under its name — the host alone, which is what a reader scans. */
+function hostOf(url: string | null): string {
+  if (url === null) {
+    return "";
+  }
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/** One catalog row as this page renders it. */
+type ServerRow = Awaited<ReturnType<typeof loader>>["servers"][number];
 
 const SOURCE_KINDS: McpSourceKind[] = ["registry", "url", "paste"];
 /** A pasted document is bounded the same way a fetched one is (the gate's own ceiling). */
@@ -86,36 +105,31 @@ const MAX_PASTE_CHARS = 256 * 1024;
 
 interface PreviewData {
   form: "preview";
-  /** Where the bytes came from, echoed so the publish arm's copy can say it. */
+  /** Where the bytes came from, echoed so the next step's copy can say it. */
   origin: string;
   summary: McpSummary;
   suggestedName: string;
-  /** The canonical bytes the bundle would store — the publish arm's payload, verbatim. */
+  /** The canonical document the server would be created with — the next step's payload. */
   document: string;
 }
 
 interface Refusal {
   /**
-   * WHERE THE ANSWER BELONGS. `preview` and `publish` are the custom arm's and render on the
-   * page; `pick` is the dialog's and renders inside it, carrying the row it answers about so a
-   * stale refusal can never attach itself to a different server.
+   * WHERE THE ANSWER BELONGS. `preview` and `create` are the custom arm's and render on the page;
+   * `pick` is the dialog's, and carries the row it answers about so a stale refusal can never
+   * attach itself to a different server.
    */
-  form: "preview" | "publish" | "pick";
+  form: "preview" | "create" | "pick";
   error: string;
-  /** The typed refusal code, when the gate produced one — shown as a quiet chip. */
+  /** The typed refusal code, when a gate produced one — shown as a quiet chip. */
   code?: string;
-  /**
-   * The in-workspace path the refusal points at — the server already holding the name. Carried
-   * so the note can render it as a real link instead of a path to retype.
-   */
+  /** The in-workspace path the refusal points at, when there is one. */
   at?: string;
   /** The picked row a `pick` refusal answers about. */
   server?: string;
   /**
-   * THE STAGED DOCUMENT, HANDED BACK. A refused publish on the custom arm must not cost the
-   * person the bytes they staged: the preview card renders from this echo, so the retry is one
-   * click and not a re-paste. Absent when the posted bytes no longer preview at all (a doctored
-   * form), where there is nothing honest to render.
+   * THE STAGED DOCUMENT, HANDED BACK. A refused create must not cost the person the document they
+   * staged: the preview card renders from this echo, so the retry is one click and not a re-paste.
    */
   preview?: PreviewData;
 }
@@ -125,12 +139,11 @@ function refusal(form: Refusal["form"], error: string, code?: string, status = 4
 }
 
 /**
- * The bytes a bundle would store, from whatever arrived. A registry answer wraps the document
- * in `{ server, _meta }`; a URL or a paste is the document itself. Canonicalizing BOTH (and
- * again on the way back through the form) is what makes the preview and the published bundle
- * the same bytes, and what makes two people importing the same server converge on one version
- * id. Text that is not a JSON object passes through untouched, so the gate — not this — gets
- * to word the refusal.
+ * The document a server would be created with, from whatever arrived. A registry answer wraps it
+ * in `{ server, _meta }`; a URL or a paste is the document itself. Canonicalizing BOTH (and again
+ * on the way back through the form) is what makes the preview and the stored document the same
+ * bytes. Text that is not a JSON object passes through untouched, so the gate — not this — gets to
+ * word the refusal.
  */
 function canonicalize(text: string): string {
   const unwrapped = unwrapServerDocument(text);
@@ -199,162 +212,137 @@ export async function action({ request, params }: ActionFunctionArgs) {
     });
   }
 
-  if (intent === "publish") {
+  // CONNECT — the picker's act. The server is a row that already exists; this workspace gets the
+  // bundle that names it, and every machine the bundle reaches receives the document the catalog
+  // publishes for it.
+  if (intent === "connect") {
+    const serverId = String(formData.get("server_id") ?? "").trim();
     const picked = String(formData.get("server") ?? "").trim();
     const name = String(formData.get("name") ?? "").trim();
     const channel = String(formData.get("channel") ?? "").trim();
-    // The custom arm's staged bytes, echoed back with whatever this arm refuses so the card
-    // stays on the page and the retry costs nothing. It is filled the moment the document is in
-    // hand — a refusal before that has no bytes to hand back, which is honest.
-    let staged: PreviewData | undefined;
-    // A refusal from this arm goes back where the act was: into the dialog for a picked row,
-    // onto the page for the custom arm's preview card.
-    const refuseHere = (message: string, code?: string, status = 400, at?: string) =>
-      picked.length === 0
-        ? data<Refusal>(
-            {
-              form: "publish",
-              error: message,
-              ...(code === undefined ? {} : { code }),
-              ...(at === undefined ? {} : { at }),
-              ...(staged === undefined ? {} : { preview: staged }),
-            },
-            { status },
-          )
-        : data<Refusal>(
-            {
-              form: "pick",
-              error: message,
-              server: picked,
-              ...(code === undefined ? {} : { code }),
-              ...(at === undefined ? {} : { at }),
-            },
-            { status },
-          );
-    /** A gate answer, whole — its pointer home included, wherever the refusal renders. */
-    const refuseGate = (r: McpGateRefusal) => refuseHere(r.message, r.code, 400, r.at);
-
-    let document: string;
-    if (picked.length > 0) {
-      // Looked up, never taken from the form: the browser posts an id, and an id the built-in
-      // list does not hold is refused here rather than turned into a document.
-      const bytes = curatedDocumentFor(picked);
-      if (bytes === null) {
-        return refuseHere("That is not one of the servers on this list.");
-      }
-      document = bytes;
-    } else {
-      const posted = String(formData.get("document") ?? "");
-      if (posted.length === 0 || posted.length > MAX_PASTE_CHARS) {
-        return refuseHere("Nothing to publish — run the preview again.");
-      }
-      // Canonicalized AGAIN rather than stored as posted: a form field round-trips through
-      // multipart encoding, which normalizes line endings, so trusting the bytes back would make
-      // the published version id depend on the browser rather than on the document.
-      document = canonicalize(posted);
-      const restaged = validateServerJson(document);
-      if (restaged.ok) {
-        staged = {
-          form: "preview",
-          // The provenance line the card already showed, carried back with the bytes; a client
-          // may say anything here, so it is bounded and only ever rendered to its own author.
-          origin: String(formData.get("origin") ?? "").slice(0, 300),
-          summary: restaged.summary,
-          suggestedName: name.length > 0 ? name : suggestedNameFor(restaged.summary.name),
-          document,
-        };
-      }
-    }
-    const files = [
-      {
-        path: SERVER_JSON,
-        mode: "100644",
-        content_base64: Buffer.from(document, "utf8").toString("base64"),
-      },
-    ];
-    const validated = validateServerJson(document);
-    if (!validated.ok) {
-      return refuseHere(validated.message, validated.code);
-    }
-    // THE ORDINARY GENESIS PUBLISH — the same sequence the session lane and add-from-GitHub run
-    // (kind gate → vault → registration + identity claim in one transaction). This door's only
-    // additions are its own audit line and the birth name: the document's tail segment, or
-    // whatever the member typed over it, folded through the catalog's own mint.
-    //
-    // AN EMPTY DESTINATION IS A DESTINATION. Importing a server is not the same act as handing
-    // it to people, and nothing arriving without a channel may be read as consent to reach the
-    // whole workspace — so the empty value means NO channel, which is also what this kind's
-    // record says a genesis publish defaults to. It never means the default channel.
-    const landed = await publishGenesisBundle({
-      actor,
-      kind: "mcp",
-      candidate: {
-        files,
-        attribution: actor.display,
-        message: `imported MCP server ${validated.summary.name}`,
-      },
-      displayName: name.length > 0 ? name : suggestedNameFor(validated.summary.name),
-      destination: webNewDestination("mcp", channel),
-      alsoInTx: async (tx, registered) => {
-        await auditInTx(tx, {
-          workspaceId: workspace.id,
-          actor: { userId: actor.userId, display: actor.display },
-          kind: "mcp_imported",
-          subject: registered.bundleId,
-          outcome: "ok",
-          details: {
-            server: validated.summary.name,
-            version: validated.summary.version,
-            // WHAT LANDED, as the document actually spells it: an address, or the packages a
-            // machine installs. A `url: null` in the audit trail would record neither.
-            ...(validated.summary.url === null
-              ? {
-                  packages: validated.summary.packages.map(
-                    (pkg) => `${pkg.registryType}:${pkg.identifier}`,
-                  ),
-                }
-              : { url: validated.summary.url }),
-          },
-        });
-      },
+    const connected = await connectMcpServer(actor, {
+      serverId,
+      displayName: name.length > 0 ? name : null,
+      to: webNewDestination("mcp", channel),
     });
-    if (landed.kind === "refused") {
-      return refuseGate(landed.refusal);
+    if (connected.refusal !== null) {
+      return data<Refusal>(
+        {
+          form: "pick",
+          error: connected.refusal.message,
+          server: picked,
+          code: connected.refusal.code,
+          ...(connected.refusal.at === undefined ? {} : { at: connected.refusal.at }),
+        },
+        { status: 400 },
+      );
     }
-    if (landed.kind !== "ok") {
-      return refuseHere("The publish did not land — try again.", undefined, 500);
-    }
-    const registered = landed;
-    // WHAT ACTUALLY HAPPENED TO THE REACH. The publish landed; the PLACEMENT is a separate
-    // outcome and may have been withheld (a curated channel takes a member's placement) or found
-    // nothing to place into. The dialog promised that a chosen channel's agents get that address,
-    // so a withheld placement must be said out loud on the page the redirect lands on rather than
-    // read as a silent success. Choosing NO channel produces no outcome at all — nothing was
-    // promised, and the server's own page already says it is in no channel.
-    const path = wsPathServer(workspace.name, bundlePath("mcp", registered.name));
-    if (registered.placement === undefined || registered.placement === "placed") {
-      throw redirect(path);
-    }
-    // Only a NAMED channel can be withheld now, so the note's subject is the one on the form.
-    const query = new URLSearchParams({ placement: registered.placement, channel });
-    throw redirect(`${path}?${query.toString()}`);
+    throw redirect(landingFor(workspace.name, connected.registration, channel));
   }
 
-  return refusal("publish", "Unknown action.");
+  // CREATE — the custom arm's act, and an OWNER's: a private server is this workspace speaking for
+  // an endpoint nobody outside it has checked, so the roster's own gate decides who may (its
+  // refusal is the uniform 404 every owner-only act answers with).
+  if (intent === "create") {
+    const owner = await requireWorkspaceOwner(request, workspace.id);
+    const name = String(formData.get("name") ?? "").trim();
+    const channel = String(formData.get("channel") ?? "").trim();
+    const posted = String(formData.get("document") ?? "");
+    if (posted.length === 0 || posted.length > MAX_PASTE_CHARS) {
+      return refusal("create", "Nothing to add — run the preview again.");
+    }
+    // Canonicalized AGAIN rather than stored as posted: a form field round-trips through multipart
+    // encoding, which normalizes line endings, so trusting the bytes back would make what is
+    // stored depend on the browser rather than on the document.
+    const document = canonicalize(posted);
+    const validated = validateServerJson(document);
+    if (!validated.ok) {
+      return refusal("create", validated.message, validated.code);
+    }
+    const staged: PreviewData = {
+      form: "preview",
+      // The provenance line the card already showed, carried back with the document; a client may
+      // say anything here, so it is bounded and only ever rendered to its own author.
+      origin: String(formData.get("origin") ?? "").slice(0, 300),
+      summary: validated.summary,
+      suggestedName: name.length > 0 ? name : suggestedNameFor(validated.summary.name),
+      document,
+    };
+    const refuseCreate = (gate: McpGateRefusal) =>
+      data<Refusal>(
+        {
+          form: "create",
+          error: gate.message,
+          code: gate.code,
+          ...(gate.at === undefined ? {} : { at: gate.at }),
+          preview: staged,
+        },
+        { status: 400 },
+      );
+    const created = await createPrivateMcpServer(
+      owner,
+      {
+        displayName: name.length > 0 ? name : validated.summary.name,
+        description: validated.summary.description,
+        // NOTHING IS CLAIMED ABOUT THE SIGN-IN. A tier is something somebody establishes by
+        // checking; a document's own word for it is a claim, and this row makes none.
+        authMode: null,
+      },
+      JSON.parse(document) as Record<string, unknown>,
+    );
+    if (created.refusal !== null) {
+      return refuseCreate(created.refusal);
+    }
+    const connected = await connectMcpServer(owner, {
+      serverId: created.serverId,
+      displayName: name.length > 0 ? name : null,
+      to: webNewDestination("mcp", channel),
+    });
+    if (connected.refusal !== null) {
+      // The server row stands — it is this workspace's own and now on the list above, so the
+      // connection is one click away rather than a lost document.
+      return refuseCreate(connected.refusal);
+    }
+    // THE ADVISORY PROBE, and only now: the revision is durable and this call cannot change it.
+    // Not waited on — a report about somebody else's uptime must not lengthen the act.
+    scheduleRevisionProbe({ revisionId: created.revisionId, endpoint: validated.summary.url });
+    throw redirect(landingFor(workspace.name, connected.registration, channel));
+  }
+
+  return refusal("create", "Unknown action.");
+}
+
+/**
+ * WHERE THE ACT LANDS, and WHAT IT DID TO THE REACH. The bundle exists; the PLACEMENT is a
+ * separate outcome and may have been withheld (a curated channel takes a member's placement) or
+ * found nothing to place into. The dialog promised that a chosen channel's agents get this
+ * server, so a withheld placement is said out loud on the page the redirect lands on rather than
+ * read as a silent success. Choosing NO channel promises nothing and says nothing.
+ */
+function landingFor(
+  wsName: string,
+  registration: { name: string; placement?: string },
+  channel: string,
+): string {
+  const path = wsPathServer(wsName, bundlePath("mcp", registration.name));
+  if (registration.placement === undefined || registration.placement === "placed") {
+    return path;
+  }
+  return `${path}?${new URLSearchParams({ placement: registration.placement, channel })}`;
 }
 
 export default function McpNew() {
-  const { curated } = useLoaderData<typeof loader>();
+  const { servers, role } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const wsPath = useWsPath();
   const flying = useSubmittingIntent();
   const busy = flying !== null;
   // The row whose dialog is open — plain local state, set by a click and cleared by Cancel or
-  // Escape. It is the only thing choosing a server changes until the publish button is pressed.
-  const [picked, setPicked] = useState<CuratedMcpRow | null>(null);
+  // Escape. It is the only thing choosing a server changes until the button is pressed.
+  const [picked, setPicked] = useState<ServerRow | null>(null);
   const error = actionData !== undefined && "error" in actionData ? actionData : undefined;
-  // The card renders from a fresh preview OR from the one a refused publish handed back — the
-  // staged bytes survive the refusal, so a retry is a click rather than a re-paste.
+  // The card renders from a fresh preview OR from the one a refused create handed back — the
+  // staged document survives the refusal, so a retry is a click rather than a re-paste.
   const preview =
     actionData !== undefined && actionData.form === "preview" && !("error" in actionData)
       ? actionData
@@ -372,12 +360,11 @@ export default function McpNew() {
         }
       />
       <p className="max-w-3xl text-dim text-sm leading-relaxed">
-        An MCP server shared here is one <code className="font-mono text-[13px]">server.json</code>,
-        the same bytes everywhere — a remote address every agent on the team can reach, or a package
-        pinned to one version that each machine installs. Nothing carrying a key: a credential
-        belongs on the machine that uses it, never in something the whole team receives.
+        A server here is one address every agent on the team calls, delivered into each machine's
+        own MCP config. Connecting one shares the address, never a credential: signing in happens on
+        the machine that uses it.
       </p>
-      <ServerPicker servers={curated} onPick={setPicked} />
+      <ServerPicker servers={servers} onPick={setPicked} />
       {picked !== null && (
         <AddServerDialog
           server={picked}
@@ -385,7 +372,7 @@ export default function McpNew() {
           onClose={() => setPicked(null)}
         />
       )}
-      <CustomSource busy={busy} flying={flying} />
+      {role === "owner" && <CustomSource busy={busy} flying={flying} />}
       {pageError !== undefined && (
         <RefusalNote error={pageError.error} code={pageError.code} at={pageError.at} />
       )}
@@ -394,23 +381,20 @@ export default function McpNew() {
   );
 }
 
-/** Does this row match what someone typed? Title, blurb, host and registry name all count. */
-function matches(server: CuratedMcpRow, query: string): boolean {
+/** Does this row match what someone typed? Name, blurb, host and registry name all count. */
+function matches(server: ServerRow, query: string): boolean {
   const needle = query.trim().toLowerCase();
   if (needle.length === 0) {
     return true;
   }
-  return `${server.title} ${server.description} ${server.host} ${server.name}`
+  return `${server.displayName} ${server.description ?? ""} ${server.host} ${server.registryName ?? ""}`
     .toLowerCase()
     .includes(needle);
 }
 
 /**
- * The auth chip — the one thing about a server worth knowing before choosing it. ONE component
- * for both doors: a picked row and a previewed document say how a person gets in with the same
- * words, because they are answering the same question about the same field
- * (`_meta["sh.topos/auth"]`). A document that DECLARES nothing gets no chip: silence is the
- * honest answer there, not "no sign-in".
+ * The auth chip — the one thing about a server worth knowing before choosing it. A row where
+ * nobody established a tier gets no chip: silence is the honest answer there, not "no sign-in".
  *
  * THREE WORDS, TWO WORLDS. `oauth` and `no sign-in` are both "nothing to prepare"; `manual setup`
  * is the one that costs somebody an errand, so it takes the amber tone the rest of the app spends
@@ -431,28 +415,29 @@ export function AuthChip({ auth }: { auth: "oauth" | "none" | "manual" | null })
 }
 
 /**
- * THE PICKER — the popular servers in a dense grid, narrowed by one text box. Each card is a
- * plain button that opens the dialog: no form, no submit, no navigation, so the grid neither
- * reloads nor goes inert while the answer appears. The density is the point — the list being
- * chosen from should be visible at once rather than scrolled through two at a time.
+ * THE PICKER — the catalog in a dense grid, narrowed by one text box. Each card is a plain button
+ * that opens the dialog: no form, no submit, no navigation, so the grid neither reloads nor goes
+ * inert while the answer appears. The density is the point — the list being chosen from should be
+ * visible at once rather than scrolled through two at a time.
  *
- * The filter is the one piece of state here, and it is purely local — the list is small, ships
- * with the page, and never needs a round trip to narrow.
+ * A server this workspace ALREADY runs is not offered again: one connection per server is the
+ * database's rule, so the row links to the bundle instead of asking for a second one.
  */
 function ServerPicker({
   servers,
   onPick,
 }: {
-  servers: CuratedMcpRow[];
-  onPick: (server: CuratedMcpRow) => void;
+  servers: ServerRow[];
+  onPick: (server: ServerRow) => void;
 }) {
+  const wsPath = useWsPath();
   const [query, setQuery] = useState("");
   const visible = servers.filter((server) => matches(server, query));
   return (
     <section aria-labelledby="mcp-picker-heading" className="space-y-3" data-testid="mcp-picker">
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <SectionHeading>
-          <span id="mcp-picker-heading">Popular servers</span>
+          <span id="mcp-picker-heading">Servers you can add</span>
         </SectionHeading>
         <label className="block">
           <span className="sr-only">Search these servers</span>
@@ -467,35 +452,28 @@ function ServerPicker({
         </label>
       </div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {visible.map((server) => (
-          <button
-            key={server.name}
-            type="button"
-            onClick={() => onPick(server)}
-            data-testid="mcp-picker-option"
-            className="flex items-start gap-2 rounded-lg border border-line-soft bg-panel px-3 py-2.5 text-left transition-colors hover:border-line hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-          >
-            {/* Leading, never stacked: the mark rides beside the three lines rather than above
-                them, so a row costs the same height it did before anyone had a logo. */}
-            <McpMark logo={server.logo} className="mt-0.5" />
-            <span className="flex min-w-0 flex-1 flex-col items-stretch gap-0.5">
-              <span className="flex items-center gap-1.5">
-                <span className="min-w-0 flex-1 truncate font-medium text-ink text-sm">
-                  {server.title}
-                </span>
-                <span className="shrink-0">
-                  <AuthChip auth={server.auth} />
-                </span>
-              </span>
-              <span className="w-full truncate text-dim text-xs leading-snug">
-                {server.description}
-              </span>
-              <span className="w-full truncate font-mono text-[11px] text-faint">
-                {server.host}
-              </span>
-            </span>
-          </button>
-        ))}
+        {visible.map((server) =>
+          server.connectedAs === null ? (
+            <button
+              key={server.serverId}
+              type="button"
+              onClick={() => onPick(server)}
+              data-testid="mcp-picker-option"
+              className="flex items-start gap-2 rounded-lg border border-line-soft bg-panel px-3 py-2.5 text-left transition-colors hover:border-line hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+            >
+              <ServerCardBody server={server} />
+            </button>
+          ) : (
+            <Link
+              key={server.serverId}
+              to={wsPath(bundlePath("mcp", server.connectedAs))}
+              data-testid="mcp-picker-added"
+              className="flex items-start gap-2 rounded-lg border border-line-soft bg-panel2 px-3 py-2.5 text-left transition-colors hover:border-line focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+            >
+              <ServerCardBody server={server} added />
+            </Link>
+          ),
+        )}
       </div>
       <p aria-live="polite" className="text-faint text-xs">
         {visible.length === servers.length
@@ -503,36 +481,56 @@ function ServerPicker({
           : visible.length === 1
             ? "1 server matches"
             : `${visible.length} servers match`}
-        {visible.length === 0 && " — add it below as a custom server."}
       </p>
     </section>
   );
 }
 
+/** The three lines every row carries, whichever affordance wraps them. */
+function ServerCardBody({ server, added = false }: { server: ServerRow; added?: boolean }) {
+  return (
+    <>
+      {/* Leading, never stacked: the mark rides beside the three lines rather than above them,
+          so a row costs the same height it did before anyone had a logo. */}
+      <McpMark logo={server.icon ?? undefined} className="mt-0.5" />
+      <span className="flex min-w-0 flex-1 flex-col items-stretch gap-0.5">
+        <span className="flex items-center gap-1.5">
+          <span className="min-w-0 flex-1 truncate font-medium text-ink text-sm">
+            {server.displayName}
+          </span>
+          <span className="shrink-0">
+            {added ? <Chip tone="neutral">added</Chip> : <AuthChip auth={server.authMode} />}
+          </span>
+        </span>
+        <span className="w-full truncate text-dim text-xs leading-snug">
+          {server.description ?? ""}
+        </span>
+        <span className="w-full truncate font-mono text-[11px] text-faint">{server.host}</span>
+      </span>
+    </>
+  );
+}
+
 /**
  * THE PICK DIALOG — the question a click asks, answered without leaving the list: is this the
- * server you meant, and here is exactly what would land if it is. Everything it shows came down
- * with the page, so it opens on the click itself; the ONE server call a picked row makes is the
- * publish, and until that button is pressed nothing anywhere has changed.
- *
- * The gate still decides. If it refuses these bytes — a name another bundle in this workspace
- * already claims is the live case — the refusal comes back INTO this dialog, beside the button
- * that asked for it, with the row still on screen.
+ * server you meant, and here is exactly what this workspace would be running. Everything it shows
+ * came down with the page, so it opens on the click itself; the ONE server call a picked row makes
+ * is the connect, and until that button is pressed nothing anywhere has changed.
  */
 function AddServerDialog({
   server,
   error,
   onClose,
 }: {
-  server: CuratedMcpRow;
+  server: ServerRow;
   error?: { error: string; code?: string; server?: string; at?: string };
   onClose: () => void;
 }) {
   const flying = useSubmittingIntent();
   const busy = flying !== null;
   // Only this row's own refusal: an answer about the server chosen before it is not about this
-  // one, and showing it here would read as a verdict on a document the gate never saw.
-  const mine = error !== undefined && error.server === server.name ? error : undefined;
+  // one, and showing it here would read as a verdict on a server nothing was asked about.
+  const mine = error !== undefined && error.server === server.serverId ? error : undefined;
   return (
     <Dialog
       open
@@ -544,72 +542,59 @@ function AddServerDialog({
     >
       <DialogContent className="max-w-xl" data-testid="mcp-pick-dialog">
         <DialogHeader>
-          <DialogTitle>Add {server.title} to this workspace?</DialogTitle>
+          <DialogTitle>Add {server.displayName} to this workspace?</DialogTitle>
           <DialogDescription>
-            It lands as one bundle holding one file — the document below — in this workspace and
-            nowhere else. Share it into a channel and every agent that channel reaches gets the
-            address; leave that empty and it waits here until someone does.
+            This workspace follows the catalog's version of it, and corrections arrive as they are
+            published. Share it into a channel and every agent that channel reaches gets the
+            address; leave that empty and it waits here until someone shares it.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2 rounded-md border border-line-soft bg-panel2 px-3 py-2.5">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             {/* The same mark the row carried, so the answer to "is this the one you clicked?" is
                 the first thing on the block rather than a name to re-read. */}
-            <McpMark logo={server.logo} className="size-4" />
-            <span className="font-mono text-[13px] text-ink">{server.name}</span>
-            {/* LABELLED, because the number is this document's and not the vendor's release: the
-                built-in list holds a minimal document naming one endpoint, and a bare "1.0.0"
-                beside a product name reads as a claim about the product. */}
-            <span className="text-faint text-xs">document version {server.version}</span>
-            <Chip tone="neutral">{server.transport}</Chip>
-            <AuthChip auth={server.auth} />
+            <McpMark logo={server.icon ?? undefined} className="size-4" />
+            <span className="font-mono text-[13px] text-ink">
+              {server.registryName ?? server.displayName}
+            </span>
+            {server.transport !== null && <Chip tone="neutral">{server.transport}</Chip>}
+            <AuthChip auth={server.authMode} />
           </div>
-          <p className="text-dim text-sm">{server.description}</p>
-          <p className="break-all font-mono text-[13px] text-dim" data-testid="mcp-dialog-url">
-            {server.url}
-          </p>
+          {server.description !== null && <p className="text-dim text-sm">{server.description}</p>}
+          {server.url !== null && (
+            <p className="break-all font-mono text-[13px] text-dim" data-testid="mcp-dialog-url">
+              {server.url}
+            </p>
+          )}
         </div>
-        {server.auth === "oauth" && (
+        {server.authMode === "oauth" && (
           <p className="text-faint text-xs leading-relaxed">
-            The publisher says an agent signs in on first use — that sign-in happens on each
-            person&apos;s own machine, never here, and no credential rides in these bytes.
+            An agent signs in on first use — that sign-in happens on each person&apos;s own machine,
+            never here, and no credential rides in what the team receives.
           </p>
         )}
         {/* THE ERRAND, SAID WHERE THE DECISION IS MADE. The card carries only the chip; the one
             sentence about a token someone has to mint or an app an admin registers lives here,
-            because this dialog is the moment of publishing — a caveat on a grid card competes
-            with twenty-four neighbours, and a caveat here is read by exactly the person acting. */}
-        {server.auth === "manual" && (
+            because this dialog is the moment of adding — a caveat on a grid card competes with
+            twenty-four neighbours, and a caveat here is read by exactly the person acting. */}
+        {server.authMode === "manual" && server.authNote !== null && (
           <p className="text-faint text-xs leading-relaxed" data-testid="mcp-dialog-auth-note">
             {server.authNote}
           </p>
         )}
-        {/* `min-w-0`, because DialogContent is a GRID: without it this item's minimum width is
-            the document's longest line, and the whole dialog grows past its own max-width
-            instead of the pre scrolling. */}
-        <details className="min-w-0">
-          <summary className="cursor-pointer text-faint text-xs">
-            The exact bytes this would store
-          </summary>
-          <pre
-            data-testid="mcp-dialog-document"
-            className="mt-2 max-h-56 overflow-auto rounded bg-panel2 p-3 font-mono text-[12px] text-dim leading-relaxed"
-          >
-            {server.document}
-          </pre>
-        </details>
         <Form method="post" className="space-y-3">
-          <input type="hidden" name="intent" value="publish" />
-          <input type="hidden" name="server" value={server.name} />
+          <input type="hidden" name="intent" value="connect" />
+          <input type="hidden" name="server_id" value={server.serverId} />
+          <input type="hidden" name="server" value={server.serverId} />
           <BusyFields busy={busy} className="space-y-3">
             <div className="flex flex-wrap items-start gap-2">
               <label className="block min-w-40 flex-1">
-                <span className="mb-1 block font-medium text-dim text-sm">Publish as</span>
+                <span className="mb-1 block font-medium text-dim text-sm">Add as</span>
                 <input
                   type="text"
                   name="name"
                   required
-                  defaultValue={server.slug}
+                  defaultValue={server.suggestedName}
                   pattern="[a-z0-9][a-z0-9-]*"
                   className="block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink focus:border-accent focus:outline-none"
                 />
@@ -620,10 +605,10 @@ function AddServerDialog({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="submit"
-                data-testid="mcp-publish"
+                data-testid="mcp-connect"
                 className={`${buttonClasses("primary")} min-h-11`}
               >
-                {flying === "publish" ? "Adding…" : "Add to the workspace"}
+                {flying === "connect" ? "Adding…" : "Add to the workspace"}
               </button>
               <button
                 type="button"
@@ -642,7 +627,7 @@ function AddServerDialog({
 
 /**
  * What one destination reads as, for THIS viewer. A curated channel is curation-gated: a member's
- * placement into it is withheld and the publish lands catalog-only. That is worth knowing before
+ * placement into it is withheld and the bundle lands catalog-only. That is worth knowing before
  * the button is pressed, not after — so the option says it, in the same words the page says
  * afterwards. Reviewers and owners place into a curated channel freely, so they see nothing extra.
  *
@@ -659,10 +644,10 @@ export function channelOptionLabel(
 }
 
 /**
- * THE DESTINATION — written once for both publishing surfaces, and RESTING ON NOTHING. Adding a
- * server to the workspace and handing it to people are two different acts, so the field opens on
- * "no channel": the import lands in the catalog, reaches nobody, and stays there until someone
- * chooses to share it. A channel is the opt-in, taken here or on the channel's own page later.
+ * THE DESTINATION — written once for both acts, and RESTING ON NOTHING. Adding a server to the
+ * workspace and handing it to people are two different things, so the field opens on "no channel":
+ * the server lands in the workspace, reaches nobody, and stays there until someone chooses to
+ * share it. A channel is the opt-in, taken here or on the channel's own page later.
  *
  * Every real channel is an ordinary option carrying its own NAME, the default `everyone`
  * included — there is no empty value standing in for a channel, so the one thing an untouched
@@ -706,20 +691,20 @@ function ChannelField() {
 }
 
 /**
- * THE CUSTOM ARM — the three typed sources, unchanged, behind a disclosure so the page rests on
- * the list. `<details>` because it is the browser's own disclosure: keyboard-operable, announced,
- * and open by nothing more than a click. These genuinely need this tier to read bytes it has
- * never seen, so they keep the preview round trip the picker no longer takes.
+ * THE CUSTOM ARM — the three typed sources behind a disclosure, so the page rests on the list.
+ * `<details>` because it is the browser's own disclosure: keyboard-operable, announced, and open
+ * by nothing more than a click. These genuinely need this tier to read a document it has never
+ * seen, so they keep the preview round trip the picker does not take.
  */
 function CustomSource({ busy, flying }: { busy: boolean; flying: string | null }) {
   return (
     <details className="max-w-2xl border-line-soft border-t pt-4" data-testid="mcp-custom">
       <summary className="cursor-pointer font-medium text-dim text-sm hover:text-ink">
-        Custom server
+        A server that is not on this list
       </summary>
       <p className="mt-2 max-w-2xl text-faint text-xs leading-relaxed">
-        Anything not on the list: a server the official registry carries, a URL serving a{" "}
-        <code className="font-mono">server.json</code>, or the document itself.
+        It becomes this workspace&apos;s own server: a server the official registry carries, a URL
+        serving a <code className="font-mono">server.json</code>, or the document itself.
       </p>
       <SourceForm busy={busy} flying={flying} />
     </details>
@@ -800,10 +785,10 @@ function SourceForm({ busy, flying }: { busy: boolean; flying: string | null }) 
 }
 
 /**
- * One refusal, said where the act was. When the answer POINTS somewhere — the server already
- * holding a name is the live case — the path it names is rendered as a real link, rooted for
- * this deployment's grammar: the message's own spelling is workspace-relative (it also travels
- * the wire, where no tenancy is known), so the tail is replaced rather than repeated.
+ * One refusal, said where the act was. When the answer POINTS somewhere, the path it names is
+ * rendered as a real link, rooted for this deployment's grammar: the message's own spelling is
+ * workspace-relative (it also travels the wire, where no tenancy is known), so the tail is
+ * replaced rather than repeated.
  */
 function RefusalNote({ error, code, at }: { error: string; code?: string; at?: string }) {
   const wsPath = useWsPath();
@@ -840,14 +825,13 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
       className="max-w-2xl space-y-3"
     >
       <SectionHeading>
-        <span id="mcp-preview-heading">What would land</span>
+        <span id="mcp-preview-heading">What would be added</span>
       </SectionHeading>
       <Card className="space-y-3 px-4 py-3">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="font-mono text-[13px] text-ink">{summary.name}</span>
           <span className="text-faint text-xs">{summary.version}</span>
           {summary.transport !== null && <Chip tone="neutral">{summary.transport}</Chip>}
-          <AuthChip auth={summary.authHint} />
         </div>
         <p className="text-dim text-sm">{summary.description}</p>
         {/* AN ADDRESS OR A PACKAGE LIST — never a blank line where an address would be. A document
@@ -870,22 +854,6 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
         )}
         <p className="text-faint text-xs">
           from {preview.origin === "" ? "the pasted document" : preview.origin}
-          {summary.authHint === "oauth" && (
-            <>
-              {" · "}the publisher says an agent signs in on first use — that sign-in happens on the
-              machine, never here
-            </>
-          )}
-          {/* The other declared world. A pasted document says `manual` and nothing more — there is
-              no note to print, because the note is the built-in list's own editorial line and not
-              something a publisher hands over — so the card says the shape of the work and leaves
-              the particulars to the vendor's own setup page. */}
-          {summary.authHint === "manual" && (
-            <>
-              {" · "}the publisher says sign-in needs a one-time manual step on each machine — a
-              token or a registered app
-            </>
-          )}
         </p>
         {summary.headers.length > 0 && (
           <ul className="text-faint text-xs">
@@ -897,23 +865,21 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
           </ul>
         )}
         <details className="min-w-0">
-          <summary className="cursor-pointer text-faint text-xs">
-            The exact bytes this would store
-          </summary>
+          <summary className="cursor-pointer text-faint text-xs">The exact document</summary>
           <pre className="mt-2 max-h-64 overflow-auto rounded bg-panel2 p-3 font-mono text-[12px] text-dim leading-relaxed">
             {preview.document}
           </pre>
         </details>
         <Form method="post" className="space-y-3">
-          <input type="hidden" name="intent" value="publish" />
+          <input type="hidden" name="intent" value="create" />
           <input type="hidden" name="document" value={preview.document} />
-          {/* Carried so a refused publish can hand this card back whole, provenance line and
-              all, instead of costing the person the bytes they staged. */}
+          {/* Carried so a refused create can hand this card back whole, provenance line and all,
+              instead of costing the person the document they staged. */}
           <input type="hidden" name="origin" value={preview.origin} />
           <BusyFields busy={busy} className="space-y-3">
             <div className="flex flex-wrap items-start gap-2">
               <label className="block min-w-48 flex-1">
-                <span className="mb-1 block font-medium text-dim text-sm">Publish as</span>
+                <span className="mb-1 block font-medium text-dim text-sm">Add as</span>
                 <input
                   type="text"
                   name="name"
@@ -927,10 +893,10 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
             </div>
             <button
               type="submit"
-              data-testid="mcp-publish"
+              data-testid="mcp-create"
               className={`${buttonClasses("primary")} min-h-11`}
             >
-              {flying === "publish" ? "Publishing…" : "Publish to the workspace"}
+              {flying === "create" ? "Adding…" : "Add to the workspace"}
             </button>
           </BusyFields>
         </Form>

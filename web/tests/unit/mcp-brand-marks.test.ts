@@ -1,48 +1,47 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MCP_BRAND_MARKS, mcpBrandMark } from "@/lib/mcp/brand-marks";
-import { CURATED_MCP_SERVERS, curatedServerRows } from "@/lib/mcp/curated.server";
+import { createScratchDb, type ScratchDb } from "./helpers/scratch-db";
 
 /**
- * THE MARKS, HELD TO THE PICKER'S ONE PROMISE: every built-in row draws SOMETHING deliberate — the
+ * THE MARKS, HELD TO THE PICKER'S ONE PROMISE: every catalog row draws SOMETHING deliberate — the
  * brand's own mark where the vendored set carries it, the app's MCP glyph where it does not — and
  * neither arm can turn into a broken image.
  *
  * The failure this suite exists to make impossible is a row that names a mark nobody vendored:
- * `logo: "canva"` against a set with no Canva in it renders an empty box that reads as a bug. That
- * is a data mistake a future entry makes silently, so it is checked here rather than looked at.
+ * `icon = 'canva'` against a set with no Canva in it renders an empty box that reads as a bug.
+ * The rows are the catalog's own now, so the check runs against a migrated database rather than
+ * against a list in code — which also catches a later seed adding a key nobody drew.
  */
 
-describe("every curated row either resolves a mark or falls back cleanly", () => {
-  it.each(
-    CURATED_MCP_SERVERS.map((entry) => [entry.title, entry] as const),
-  )("%s", (_title, entry) => {
-    if (entry.logo === undefined) {
-      // The fallback arm, stated: no key, so `McpMark` draws the Plug. Nothing to resolve.
-      expect(mcpBrandMark(entry.logo)).toBeUndefined();
-      return;
+let db: ScratchDb;
+let icons: string[] = [];
+
+beforeAll(async () => {
+  db = await createScratchDb("web_mcp_marks");
+  const rows = await db.q<{ icon: string }>(
+    "SELECT DISTINCT icon FROM web.mcp_server WHERE icon IS NOT NULL ORDER BY icon",
+  );
+  icons = rows.map((row) => row.icon);
+}, 60000);
+
+afterAll(async () => {
+  await db.drop();
+});
+
+describe("every catalog row either resolves a mark or falls back cleanly", () => {
+  it("resolves every icon key the catalog names", () => {
+    expect(icons.length).toBeGreaterThan(0);
+    for (const icon of icons) {
+      const mark = mcpBrandMark(icon);
+      // The whole point: a named key that resolves to nothing would render an empty box.
+      expect(mark, `no vendored mark for icon key "${icon}"`).toBeDefined();
+      expect(mark?.brand.length).toBeGreaterThan(0);
     }
-    const mark = mcpBrandMark(entry.logo);
-    // The whole point: a named key that resolves to nothing would render an empty 20px box.
-    expect(mark, `no vendored mark for logo key "${entry.logo}"`).toBeDefined();
-    expect(mark?.brand.length).toBeGreaterThan(0);
   });
 
-  it("carries the same answer onto the rows the loader ships", () => {
-    for (const row of curatedServerRows()) {
-      // A row with no mark has no `logo` KEY at all — not a key holding undefined — so nothing
-      // downstream has to tell the two apart.
-      if (!("logo" in row)) {
-        continue;
-      }
-      expect(mcpBrandMark(row.logo)).toBeDefined();
-    }
-  });
-
-  it("projects each entry's logo, present or absent, onto its row", () => {
-    const rows = curatedServerRows();
-    for (const [index, entry] of CURATED_MCP_SERVERS.entries()) {
-      expect(rows[index]?.logo).toBe(entry.logo);
-    }
+  it("draws the app's own glyph for a row that names no mark", () => {
+    // The fallback arm, stated: no key, so `McpMark` draws the Plug. Nothing to resolve.
+    expect(mcpBrandMark(undefined)).toBeUndefined();
   });
 });
 
@@ -63,11 +62,9 @@ describe("the vendored set itself", () => {
   });
 
   it("keeps no mark nobody flies", () => {
-    const flown = new Set(
-      CURATED_MCP_SERVERS.flatMap((entry) => (entry.logo === undefined ? [] : [entry.logo])),
-    );
-    // Dead path data is dead weight in the client bundle — and a mark for a brand this list no
-    // longer offers is a trademark carried for no reason at all.
+    const flown = new Set(icons);
+    // Dead path data is dead weight in the client bundle — and a mark for a brand this catalog
+    // does not carry is a trademark held for no reason at all.
     expect([...Object.keys(MCP_BRAND_MARKS)].filter((key) => !flown.has(key))).toEqual([]);
   });
 

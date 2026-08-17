@@ -1,5 +1,4 @@
-import type { PublishActor } from "@/lib/db/queries.custody.server";
-import { recordMcpProbe } from "@/lib/db/queries.mcp.server";
+import { recordMcpRevisionProbe } from "@/lib/db/queries.mcp-catalog.server";
 import {
   type AddressLookup,
   assertPublicHttpsUrl,
@@ -15,19 +14,19 @@ import {
 } from "@/lib/mcp/probe-state";
 
 /**
- * THE ADVISORY PROBE — one question, asked once, after a publish has already landed.
+ * THE ADVISORY PROBE — one question, asked once, after a revision is already written.
  *
- * A publish records what a workspace now holds. It says nothing about whether anything answers at
- * the address inside those bytes, and a catalog that shows an address with no idea whether it is
+ * A catalog row records what a server IS. It says nothing about whether anything answers at the
+ * address inside the document, and a catalog that shows an address with no idea whether it is
  * alive is a catalog people learn not to trust. So the plane asks: it opens ONE request to the
  * endpoint the document names, reads a bounded answer, writes down what it saw, and stops.
  *
  * THREE PROPERTIES MAKE IT SAFE TO RUN AT ALL:
  *
- *  1. **It is never a gate.** It runs strictly AFTER the publish transaction commits, its result
- *     goes into a table nothing reads to decide anything, and every failure path — a hostile
- *     endpoint, a database that will not take the row, a bug in this file — ends in the publish
- *     standing exactly as it did. `probeAndRecord` cannot throw.
+ *  1. **It is never a gate.** It runs strictly AFTER the write that produced the revision has
+ *     committed, its result goes into columns nothing reads to decide anything, and every failure
+ *     path — a hostile endpoint, a database that will not take the update, a bug in this file —
+ *     ends with the revision standing exactly as it was. `probeAndRecord` cannot throw.
  *  2. **It reuses the guarded fetch**, so an endpoint address supplied by a member cannot make
  *     this process reach into its own network: https only, every resolved address proved public,
  *     the socket dialled at exactly the addresses that were vetted, no redirect followed, no
@@ -277,27 +276,25 @@ export async function probeEndpoint(
   }
 }
 
-/** What a caller hands the probe once its publish has landed. */
-export interface PublishProbeTarget {
-  bundleId: string;
-  versionId: string;
-  /** The endpoint the published document places — null for a package-only bundle. */
+/** What a caller hands the probe once its revision is durable. */
+export interface RevisionProbeTarget {
+  revisionId: string;
+  /** The endpoint the document places — null for a package-only document. */
   endpoint: string | null;
 }
 
 /**
- * Probe one just-published version and record what came back. NEVER THROWS and never rejects: it
- * is called after the work that matters is already durable, so every failure it can meet — a
- * hostile endpoint, an unwritable row, a bug in this file — must end with the publish standing and
- * the version reading "not checked yet".
+ * Probe one revision's endpoint and record what came back. NEVER THROWS and never rejects: it is
+ * called after the work that matters is already durable, so every failure it can meet — a hostile
+ * endpoint, an unwritable row, a bug in this file — must end with the revision standing and its
+ * probe state reading "not checked yet".
  *
- * A PACKAGE-ONLY bundle is not probed: there is no address for this plane to ask. Nothing is
+ * A PACKAGE-ONLY document is not probed: there is no address for this plane to ask. Nothing is
  * recorded for it, which is the honest answer — whether a package runs is a question its own
  * machine answers, not one the cloud can.
  */
 export async function probeAndRecord(
-  actor: PublishActor,
-  target: PublishProbeTarget,
+  target: RevisionProbeTarget,
   transport: ProbeTransport = httpsProbe,
 ): Promise<ProbeVerdict | null> {
   try {
@@ -308,11 +305,11 @@ export async function probeAndRecord(
     if (verdict === null) {
       return null;
     }
-    await recordMcpProbe(actor, {
-      bundleId: target.bundleId,
-      versionId: target.versionId,
+    await recordMcpRevisionProbe(target.revisionId, {
       outcome: verdict.outcome,
-      detail: verdict.detail,
+      // The short note rides the verification block rather than a column of its own: it is the
+      // reason behind the one word, and the one word is what any surface reads.
+      verification: { probeDetail: verdict.detail },
     });
     return verdict;
   } catch {
@@ -321,11 +318,11 @@ export async function probeAndRecord(
 }
 
 /**
- * Fire the probe and DO NOT WAIT. The publish's answer is already decided by the time this is
+ * Fire the probe and DO NOT WAIT. The write's answer is already decided by the time this is
  * called, so making the caller hold its response open for somebody else's server would be paying
  * for a report with the latency of the act that produced it. The floating promise is deliberate
  * and cannot reject (see above); the void marks it as such.
  */
-export function schedulePublishProbe(actor: PublishActor, target: PublishProbeTarget): void {
-  void probeAndRecord(actor, target);
+export function scheduleRevisionProbe(target: RevisionProbeTarget): void {
+  void probeAndRecord(target);
 }

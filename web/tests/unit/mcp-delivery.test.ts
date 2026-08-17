@@ -67,9 +67,10 @@ async function seedRevision(
 ) {
   const status = opts.status ?? "published";
   const registryName = (
-    await db.q<{ registry_name: string }>(`SELECT registry_name FROM web.mcp_server WHERE id = $1`, [
-      serverId,
-    ])
+    await db.q<{ registry_name: string }>(
+      `SELECT registry_name FROM web.mcp_server WHERE id = $1`,
+      [serverId],
+    )
   )[0]?.registry_name as string;
   await db.q(
     `INSERT INTO web.mcp_server_revision

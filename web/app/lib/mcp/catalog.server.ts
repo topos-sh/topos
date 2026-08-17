@@ -1,40 +1,18 @@
-import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
-import {
-  MAX_MCP_BUNDLES_SCANNED,
-  type McpBundleRow,
-  type McpDbClient,
-  mcpBundlesWithCurrent,
-} from "@/lib/db/queries.mcp.server";
 import { MAX_SERVER_JSON_BYTES, validateServerJson } from "@/lib/mcp/validate.server";
 import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.server";
 
 /**
- * WHAT THE WORKSPACE'S MCP SERVERS SAY THEY ARE — the join between the catalog rows (which
- * bundles are `kind: 'mcp'` and where their `current` points) and the bytes the vault holds
- * for those versions. Two callers need it and need it identically:
+ * WHAT A VERSION IN THE VAULT SAYS A SERVER IS — the one reader of an MCP bundle's stored bytes.
  *
- *  · the REGISTRY LANE, which serves each document in the official read-API envelope, and
- *  · the backfill that records what an already-published server calls itself.
+ * ONE CALLER REMAINS, and it is a migration: the backfill that connects every MCP bundle written
+ * before the server catalog existed to the row it names. The name it needs lives inside those
+ * bytes, and bytes live behind an HTTP lane no statement can reach — so the reading happens here,
+ * and everything downstream of it reads rows.
  *
  * A version is immutable and content-addressed, so the parsed document is cached per
  * (workspace, bundle, version) and a hit can never be stale — the same reasoning the version
- * metadata cache runs on. That is what keeps a scan of the whole catalog cheap enough to do on
- * a whole-catalog pass cheap.
+ * metadata cache runs on.
  */
-
-/** One server the workspace publishes: the catalog row plus the document it currently holds. */
-export interface McpCatalogEntry {
-  row: McpBundleRow;
-  /** The parsed document, exactly as stored (the registry lane serves this object verbatim). */
-  server: Record<string, unknown>;
-  /** The embedded registry name (`server.name`) — the identity the read API keys on. */
-  serverName: string;
-}
-
-/** The result of one capped pass over the catalog. */
-export interface McpCatalogScan {
-  entries: McpCatalogEntry[];
-}
 
 const CACHE_CAP = 500;
 /** `${ws}\n${bundleId}\n${versionId}` → the parsed document (immutable by construction). */
@@ -94,28 +72,4 @@ export async function serverDocumentOf(
   const parsed = JSON.parse(new TextDecoder().decode(blob.data)) as Record<string, unknown>;
   cacheSet(key, parsed);
   return parsed;
-}
-
-/**
- * One capped pass over the workspace's published MCP servers. Rows whose document cannot be read
- * are DROPPED: the registry lane serves what it can prove.
- *
- * `db` is the client the CATALOG reads run on; the vault reads below are HTTP, not pool clients.
- */
-export async function scanMcpCatalog(
-  actor: MemberActor | SessionActor,
-  limit = MAX_MCP_BUNDLES_SCANNED,
-  db?: McpDbClient,
-): Promise<McpCatalogScan> {
-  const ws = actor.workspaceId;
-  const rows = await mcpBundlesWithCurrent(actor, limit, db);
-  const entries: McpCatalogEntry[] = [];
-  for (const row of rows) {
-    const server = await serverDocumentOf(ws, row.bundleId, row.versionId);
-    if (server === null || typeof server.name !== "string") {
-      continue;
-    }
-    entries.push({ row, server, serverName: server.name });
-  }
-  return { entries };
 }

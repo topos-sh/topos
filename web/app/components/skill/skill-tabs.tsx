@@ -21,28 +21,36 @@ export function SkillTabs({
   active,
   openProposals = 0,
   showSettings = false,
+  fileHistory = true,
 }: {
   basePath: string;
   active: ActiveTab;
   openProposals?: number;
   showSettings?: boolean;
+  /** Whether this bundle HAS the byte pages — a server's versions live in the catalog, and its
+   *  page carries them, so the Proposals and History tabs mount for nobody and are not offered. */
+  fileHistory?: boolean;
 }) {
   return (
     <nav aria-label="Skill sections" className="flex border-line-soft border-b">
       <Tab to={basePath} isActive={active === "current"}>
         Current
       </Tab>
-      <Tab to={`${basePath}/proposals`} isActive={active === "proposals"}>
-        Proposals
-        {openProposals > 0 && (
-          <span className="ml-1.5 inline-flex items-center rounded-full bg-accent-wash px-1.5 text-accent-deep text-xs">
-            {openProposals}
-          </span>
-        )}
-      </Tab>
-      <Tab to={`${basePath}/history`} isActive={active === "history"}>
-        History
-      </Tab>
+      {fileHistory && (
+        <Tab to={`${basePath}/proposals`} isActive={active === "proposals"}>
+          Proposals
+          {openProposals > 0 && (
+            <span className="ml-1.5 inline-flex items-center rounded-full bg-accent-wash px-1.5 text-accent-deep text-xs">
+              {openProposals}
+            </span>
+          )}
+        </Tab>
+      )}
+      {fileHistory && (
+        <Tab to={`${basePath}/history`} isActive={active === "history"}>
+          History
+        </Tab>
+      )}
       {showSettings && (
         <Tab to={`${basePath}/settings`} isActive={active === "settings"}>
           Settings

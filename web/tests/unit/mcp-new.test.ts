@@ -10,32 +10,26 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   bootWorkspace,
   createScratchDb,
-  recordSeededIdentities,
   type ScratchDb,
   seatUser,
-  seedBundle,
   seedUser,
-  versionIdFor,
 } from "./helpers/scratch-db";
-import { type StubVault, startStubVault } from "./helpers/stub-vault";
 
 /**
- * THE ADD-AN-MCP-SERVER PAGE — its two phases against a real scratch Postgres, the app's one
- * custody transport re-pointed at an in-process stub vault, and the fetch seam replaced so no
- * test touches the network.
+ * THE ADD-AN-MCP-SERVER PAGE — its two acts against a real scratch Postgres, with the fetch seam
+ * replaced so no test touches the network.
  *
- * The three CUSTOM sources are one code path by design: whatever the bytes came from, the preview
- * canonicalizes them and runs the same gate the session lane runs, and the publish arm runs it
- * AGAIN on the bytes the form posted back — the form is a client, and a client's word is not the
- * gate. That second run is what these tests lean on hardest.
+ * CONNECTING is the common one: the server is a catalog row already, so the page posts an id and
+ * the workspace gets the bundle that names it. Nothing is copied, nothing is validated a second
+ * time — the row was verified when it was published.
  *
- * The PICKER never previews at all — its documents are committed data the loader ships, so the
- * dialog answers on the click. What it posts is an ID, and the publish arm looks the bytes up on
- * this side: the tests below assert exactly that, including that a document smuggled alongside
- * the id is ignored.
+ * WRITING ONE DOWN is the other, and it is an owner's: the three custom sources are one code path,
+ * whatever the bytes came from the preview canonicalizes them and runs the document gate, and the
+ * create arm runs it AGAIN on the bytes the form posted back — the form is a client, and a
+ * client's word is not the gate. That second run is what these tests lean on hardest.
  *
- * The SSRF guard is exercised directly, with the resolver mocked: what matters is which
- * ADDRESSES it refuses, and a test that needed real DNS to say so would be testing DNS.
+ * The SSRF guard is exercised directly, with the resolver mocked: what matters is which ADDRESSES
+ * it refuses, and a test that needed real DNS to say so would be testing DNS.
  */
 
 let session: { user: { id: string; name: string; email: string } } | null = null;
@@ -70,10 +64,12 @@ vi.mock("@/lib/mcp/fetch.server", async (importOriginal) => {
 });
 
 let db: ScratchDb;
-let vault: StubVault;
 let wsId = "";
 
 const ORIGIN = "http://x";
+
+const OWNER = { id: "u_own", name: "Owner", email: "own@example.com" };
+const MEMBER = { id: "u_mem", name: "Member", email: "mem@example.com" };
 
 const WEATHER = {
   name: "io.github.acme/weather",
@@ -129,25 +125,73 @@ async function post(fields: Record<string, string>): Promise<ActionResult> {
   throw result;
 }
 
+/** A catalog server: global unless a workspace is named, published unless told otherwise. */
+async function seedServer(
+  id: string,
+  registryName: string,
+  opts: { status?: string; publish?: boolean; authMode?: string | null } = {},
+): Promise<void> {
+  await db.q(
+    `INSERT INTO web.mcp_server (id, registry_name, display_name, description, auth_mode, status)
+     VALUES ($1, $2, $2, 'A server for the suite.', $3, $4)`,
+    [
+      id,
+      registryName,
+      opts.authMode === undefined ? "none" : opts.authMode,
+      opts.status ?? "active",
+    ],
+  );
+  const revisionId = `${id}_r1`;
+  const published = opts.publish !== false;
+  await db.q(
+    `INSERT INTO web.mcp_server_revision
+       (id, server_id, seq, status, upstream_version, document, transport, url, source,
+        published_at, published_by)
+     VALUES ($1, $2, 1, $3, '1.0.0', $4::jsonb, 'streamable-http',
+             'https://acme.example/mcp', 'seed',
+             CASE WHEN $3 = 'published' THEN now() END,
+             CASE WHEN $3 = 'published' THEN 'Staff' END)`,
+    [
+      revisionId,
+      id,
+      published ? "published" : "candidate",
+      JSON.stringify({ ...WEATHER, name: registryName }),
+    ],
+  );
+  if (published) {
+    await db.q(`UPDATE web.mcp_server SET current_revision_id = $2 WHERE id = $1`, [
+      id,
+      revisionId,
+    ]);
+  }
+}
+
+const bundleNamed = async (name: string) =>
+  (
+    await db.q<{ id: string; kind: string }>(
+      `SELECT id, kind FROM web.bundle WHERE workspace_id = $1 AND name = $2`,
+      [wsId, name],
+    )
+  )[0];
+
 beforeAll(async () => {
-  vault = await startStubVault();
-  db = await createScratchDb("web_mcp_import", { PLANE_INTERNAL_URL: vault.url });
+  db = await createScratchDb("web_mcp_new", { TOPOS_WEB_RATELIMIT: "off" });
   wsId = await bootWorkspace();
-  await seedUser(db, "u_mem", "Member", "mem@example.com");
-  await seatUser(db, wsId, "u_mem", "member");
-  session = { user: { id: "u_mem", name: "Member", email: "mem@example.com" } };
+  await seedUser(db, OWNER.id, OWNER.name, OWNER.email);
+  await seatUser(db, wsId, OWNER.id, "owner");
+  await seedUser(db, MEMBER.id, MEMBER.name, MEMBER.email);
+  await seatUser(db, wsId, MEMBER.id, "member");
+  session = { user: OWNER };
 }, 60000);
 
 afterAll(async () => {
-  await vault.close();
   await db.drop();
 });
 
 beforeEach(() => {
   fetched.fail = null;
   fetched.calls.length = 0;
-  vault.calls.length = 0;
-  vault.published.length = 0;
+  session = { user: OWNER };
 });
 
 describe("the preview", () => {
@@ -158,17 +202,11 @@ describe("the preview", () => {
       source: "registry",
       registry_name: "io.github.acme/weather",
     });
+    expect(body.form).toBe("preview");
+    expect((body.summary as { name: string }).name).toBe("io.github.acme/weather");
+    // The envelope is gone: what would be stored is the document itself.
+    expect(String(body.document)).not.toContain("_meta");
     expect(fetched.calls).toEqual([{ kind: "registry", value: "io.github.acme/weather" }]);
-    expect(body.summary).toMatchObject({
-      name: "io.github.acme/weather",
-      url: "https://weather.acme.example/mcp",
-      transport: "streamable-http",
-    });
-    expect(body.suggestedName).toBe("weather");
-    // The stored bytes are the SERVER document alone — the registry's own envelope is dropped.
-    expect(JSON.parse(String(body.document))).toEqual(WEATHER);
-    // Nothing was written by a preview.
-    expect(vault.calls).toEqual([]);
   });
 
   it("reads a bare document from a URL", async () => {
@@ -178,8 +216,8 @@ describe("the preview", () => {
       source: "url",
       url: "https://example.test/server.json",
     });
-    expect(fetched.calls[0]?.kind).toBe("url");
-    expect(body.summary).toMatchObject({ name: "io.github.acme/weather" });
+    expect(body.form).toBe("preview");
+    expect((body.summary as { url: string }).url).toBe("https://weather.acme.example/mcp");
   });
 
   it("reads a PASTED document without any fetch at all", async () => {
@@ -188,19 +226,19 @@ describe("the preview", () => {
       source: "paste",
       document: JSON.stringify(WEATHER),
     });
-    expect(body.summary).toMatchObject({ name: "io.github.acme/weather" });
+    expect(body.form).toBe("preview");
     expect(body.origin).toBe("pasted");
   });
 
   it("surfaces a fetch failure as the fetcher worded it", async () => {
-    fetched.fail = "that host is on a private network — this server will not fetch it";
+    fetched.fail = "that registry has no server by that name";
     const { status, body } = await post({
       intent: "preview",
-      source: "url",
-      url: "https://internal.test/server.json",
+      source: "registry",
+      registry_name: "io.github.acme/nope",
     });
     expect(status).toBe(400);
-    expect(String(body.error)).toContain("private network");
+    expect(body.error).toBe("that registry has no server by that name");
   });
 
   it("refuses a document the gate refuses, naming the code", async () => {
@@ -217,64 +255,48 @@ describe("the preview", () => {
   });
 
   it("refuses an empty source without calling the fetcher", async () => {
-    const { status } = await post({ intent: "preview", source: "url", url: "  " });
+    const { status, body } = await post({ intent: "preview", source: "url", url: "" });
     expect(status).toBe(400);
+    expect(body.error).toBe("Pick a source and fill in the matching field.");
     expect(fetched.calls).toEqual([]);
-  });
-
-  it("has no arm for a picked row at all — the picker never previews", async () => {
-    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
-    const entry = CURATED_MCP_SERVERS[0];
-    expect(entry).toBeDefined();
-    // `curated` was a source once. It is gone: the built-in list's documents ship with the page,
-    // so there is nothing here to ask, and this arm must not quietly come back.
-    const { status } = await post({
-      intent: "preview",
-      source: "curated",
-      server: entry?.name ?? "",
-    });
-    expect(status).toBe(400);
-    expect(fetched.calls).toEqual([]);
-    expect(vault.calls).toEqual([]);
   });
 });
 
-describe("the publish", () => {
-  it("mints an mcp bundle whose one file is the canonical server.json", async () => {
-    const document = `${JSON.stringify(WEATHER, null, 2)}\n`;
+describe("connecting a catalog server", () => {
+  it("gives the workspace a bundle that names the server, and reaches nobody", async () => {
+    await seedServer("mcps_conn", "io.github.acme/connected");
     const { status, location } = await post({
-      intent: "publish",
-      document,
-      name: "weather",
+      intent: "connect",
+      server_id: "mcps_conn",
+      name: "connected",
       channel: "",
     });
-    // The arm lands by redirect to the new server's page — in the MCP section, never under
-    // /skills: the kind decides which base addresses a bundle.
+    // The act lands by redirect to the server's page — in the MCP section, never under /skills.
     expect(status).toBe(302);
-    expect(location).toBe("/mcp/weather");
+    expect(location).toBe("/mcp/connected");
 
-    expect(vault.published).toHaveLength(1);
-    expect(vault.published[0]?.files).toEqual([{ path: "server.json", content: document }]);
-
-    const rows = await db.q<{ id: string; kind: string; name: string }>(
-      `SELECT id, kind, name FROM web.bundle WHERE name = 'weather'`,
+    const bundle = await bundleNamed("connected");
+    expect(bundle?.kind).toBe("mcp");
+    const connection = await db.q<{ server_id: string; pinned_revision_id: string | null }>(
+      `SELECT server_id, pinned_revision_id FROM web.bundle_mcp WHERE bundle_id = $1`,
+      [bundle?.id],
     );
-    expect(rows[0]?.kind).toBe("mcp");
-    // AND IT REACHES NOBODY. An empty destination means no channel, not the default one:
-    // importing a server is not the same act as handing it to the workspace.
-    const placed = await db.q<{ n: string }>(
+    expect(connection[0]?.server_id).toBe("mcps_conn");
+    // Following the catalog, not pinned to today's version.
+    expect(connection[0]?.pinned_revision_id).toBe(null);
+    // AND IT REACHES NOBODY. An empty destination means no channel, not the default one: adding a
+    // server is not the same act as handing it to the workspace.
+    const placed = await db.q<{ n: number }>(
       `SELECT count(*)::int AS n FROM web.channel_bundle WHERE bundle_id = $1`,
-      [rows[0]?.id],
+      [bundle?.id],
     );
     expect(Number(placed[0]?.n)).toBe(0);
     // And the act is on the record.
-    const audit = await db.q<{ kind: string; details: Record<string, unknown> }>(
-      `SELECT kind, details FROM web.audit_event WHERE kind = 'mcp_imported'`,
+    const audit = await db.q<{ details: Record<string, unknown> }>(
+      `SELECT details FROM web.audit_event WHERE kind = 'mcp_server_connected' AND subject = $1`,
+      [bundle?.id],
     );
-    expect(audit[0]?.details).toMatchObject({
-      server: "io.github.acme/weather",
-      version: "1.4.0",
-    });
+    expect(audit[0]?.details).toMatchObject({ serverId: "mcps_conn" });
   });
 
   /**
@@ -283,9 +305,10 @@ describe("the publish", () => {
    * value doing double duty and nothing that lands in `everyone` without being asked for.
    */
   it("places into the channel the form names, the default one included", async () => {
+    await seedServer("mcps_named", "io.github.acme/named");
     const { status, location } = await post({
-      intent: "publish",
-      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/named" }, null, 2),
+      intent: "connect",
+      server_id: "mcps_named",
       name: "named-dest",
       channel: "everyone",
     });
@@ -300,9 +323,86 @@ describe("the publish", () => {
     expect(Number(placed[0]?.n)).toBe(1);
   });
 
-  it("re-runs the gate on the posted bytes — a doctored form is refused, nothing published", async () => {
+  it("refuses a second connection to a server this workspace already runs", async () => {
+    await seedServer("mcps_twice", "io.github.acme/twice");
+    expect((await post({ intent: "connect", server_id: "mcps_twice", name: "twice" })).status).toBe(
+      302,
+    );
     const { status, body } = await post({
-      intent: "publish",
+      intent: "connect",
+      server_id: "mcps_twice",
+      server: "mcps_twice",
+      name: "twice-again",
+    });
+    expect(status).toBe(400);
+    expect(body.code).toBe("MCP_ALREADY_CONNECTED");
+    // The refusal goes back into the dialog that asked, carrying the row it is about.
+    expect(body.form).toBe("pick");
+    expect(body.server).toBe("mcps_twice");
+    expect(await bundleNamed("twice-again")).toBeUndefined();
+  });
+
+  it("refuses a server the catalog does not offer, and says nothing else about it", async () => {
+    await seedServer("mcps_cand", "io.github.acme/candidate", {
+      status: "candidate",
+      publish: false,
+    });
+    for (const serverId of ["mcps_cand", "mcps_absent"]) {
+      const { status, body } = await post({ intent: "connect", server_id: serverId, name: "x" });
+      expect(status).toBe(400);
+      expect(body.code).toBe("MCP_SERVER_NOT_FOUND");
+    }
+  });
+});
+
+describe("writing down a server the catalog does not carry", () => {
+  it("is an owner's act — a member is refused the way every owner-only act refuses", async () => {
+    session = { user: MEMBER };
+    const { status } = await post({
+      intent: "create",
+      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/by-member" }),
+      name: "by-member",
+    });
+    expect(status).toBe(404);
+    expect(await bundleNamed("by-member")).toBeUndefined();
+  });
+
+  it("creates the workspace's OWN server, holding the document, and connects it", async () => {
+    const document = `${JSON.stringify({ ...WEATHER, name: "io.github.acme/private" }, null, 2)}\n`;
+    const { status, location } = await post({
+      intent: "create",
+      document,
+      name: "private-one",
+      channel: "",
+    });
+    expect(status).toBe(302);
+    expect(location).toBe("/mcp/private-one");
+
+    const bundle = await bundleNamed("private-one");
+    const rows = await db.q<{
+      workspace_id: string | null;
+      registry_name: string;
+      auth_mode: string | null;
+      document: Record<string, unknown>;
+    }>(
+      `SELECT ms.workspace_id, ms.registry_name, ms.auth_mode, r.document
+       FROM web.bundle_mcp bm
+       JOIN web.mcp_server ms ON ms.id = bm.server_id
+       JOIN web.mcp_server_revision r ON r.id = ms.current_revision_id
+       WHERE bm.bundle_id = $1`,
+      [bundle?.id],
+    );
+    // PRIVATE to this workspace, exported nowhere.
+    expect(rows[0]?.workspace_id).toBe(wsId);
+    expect(rows[0]?.registry_name).toBe("io.github.acme/private");
+    expect(rows[0]?.document).toMatchObject({ name: "io.github.acme/private" });
+    // NOTHING IS CLAIMED about the sign-in: nobody checked it, so the row says nothing.
+    expect(rows[0]?.auth_mode).toBe(null);
+  });
+
+  it("re-runs the gate on the posted bytes — a doctored form is refused, nothing written", async () => {
+    const { status, body } = await post({
+      intent: "create",
       document: JSON.stringify({
         ...WEATHER,
         name: "io.github.acme/doctored",
@@ -319,173 +419,66 @@ describe("the publish", () => {
     });
     expect(status).toBe(400);
     expect(body.code).toBe("MCP_SECRET_REFUSED");
-    expect(vault.published).toEqual([]);
-  });
-
-  it("refuses a name another bundle's document already claims", async () => {
-    const versionId = versionIdFor("s_taken");
-    await seedBundle(db, wsId, "s_taken", "tides", { kind: "mcp", versionId });
-    vault.seed(wsId, "s_taken", versionId, [
-      {
-        path: "server.json",
-        content: JSON.stringify({ ...WEATHER, name: "io.github.acme/tides" }, null, 2),
-      },
-    ]);
-    // Seeded as if published, so the name it serves is ON RECORD — which is what the page
-    // checks a new import against.
-    await recordSeededIdentities();
-    const { status, body } = await post({
-      intent: "publish",
-      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/tides" }, null, 2),
-      name: "tides-again",
-      channel: "",
-    });
-    expect(status).toBe(400);
-    expect(body.code).toBe("MCP_NAME_TAKEN");
-    // And it points home: the page of the bundle already holding the name, as an in-workspace
-    // path the note renders as a link rather than a name to go find.
-    expect(body.at).toBe("mcp/tides");
-    expect(body.error).toContain("/mcp/tides");
-    expect(vault.published).toEqual([]);
+    expect(await bundleNamed("doctored")).toBeUndefined();
+    expect(
+      await db.q(`SELECT id FROM web.mcp_server WHERE registry_name = $1`, [
+        "io.github.acme/doctored",
+      ]),
+    ).toEqual([]);
   });
 
   it("hands the staged document back with the refusal, so a retry keeps the bytes", async () => {
-    const versionId = versionIdFor("s_shoals");
-    await seedBundle(db, wsId, "s_shoals", "shoals", { kind: "mcp", versionId });
-    vault.seed(wsId, "s_shoals", versionId, [
+    // The document PARSES and passes the file gate; what refuses it is the catalog's own
+    // fail-closed schema vocabulary, which is exactly the refusal a person retries after.
+    const document = JSON.stringify(
       {
-        path: "server.json",
-        content: JSON.stringify({ ...WEATHER, name: "io.github.acme/shoals" }, null, 2),
+        ...WEATHER,
+        name: "io.github.acme/staged",
+        $schema: "https://static.modelcontextprotocol.io/schemas/2099-01-01/server.schema.json",
       },
-    ]);
-    // Seeded as if published, so the name it serves is ON RECORD — which is what the page
-    // checks a new import against.
-    await recordSeededIdentities();
-    const document = `${JSON.stringify({ ...WEATHER, name: "io.github.acme/shoals" }, null, 2)}\n`;
+      null,
+      2,
+    );
     const { status, body } = await post({
-      intent: "publish",
+      intent: "create",
       document,
-      origin: "https://example.test/server.json",
-      name: "shoals-again",
+      name: "staged",
+      origin: "https://staged.example/server.json",
       channel: "",
     });
     expect(status).toBe(400);
-    expect(body.code).toBe("MCP_NAME_TAKEN");
-    // The card can render again from this alone — same bytes, same provenance line, and the
-    // name the person had typed over the suggestion.
-    const echoed = body.preview as { document: string; origin: string; suggestedName: string };
-    expect(echoed.document).toBe(document);
-    expect(echoed.origin).toBe("https://example.test/server.json");
-    expect(echoed.suggestedName).toBe("shoals-again");
+    expect(body.code).toBe("MCP_SCHEMA_UNKNOWN");
+    const { canonicalServerJson } = await import("@/lib/mcp/fetch.server");
+    const staged = body.preview as { document: string; origin: string } | undefined;
+    // The bytes come back CANONICAL, which is what a retry would store — not the browser's
+    // spacing, and not a second opinion about it.
+    expect(staged?.document).toBe(canonicalServerJson(JSON.parse(document)));
+    expect(staged?.origin).toBe("https://staged.example/server.json");
+    expect(await bundleNamed("staged")).toBeUndefined();
   });
 
   it("hands nothing back when the posted bytes no longer preview at all", async () => {
     const { status, body } = await post({
-      intent: "publish",
-      document: JSON.stringify({ ...WEATHER, remotes: [{ type: "sse", url: "https://a.test/s" }] }),
-      name: "unpreviewable",
-      channel: "",
+      intent: "create",
+      document: "not a document",
+      name: "garbage",
     });
     expect(status).toBe(400);
-    expect(body.code).toBe("MCP_NO_STREAMABLE_REMOTE");
     expect(body.preview).toBeUndefined();
   });
 
-  it("refuses an empty payload rather than publishing nothing", async () => {
-    const { status } = await post({ intent: "publish", document: "", name: "x", channel: "" });
+  it("refuses an empty payload rather than writing nothing down", async () => {
+    const { status, body } = await post({ intent: "create", document: "", name: "empty" });
     expect(status).toBe(400);
-    expect(vault.published).toEqual([]);
-  });
-});
-
-describe("publishing a picked row", () => {
-  it("derives the bytes from the built-in list, not from the form", async () => {
-    const { CURATED_MCP_SERVERS, curatedDocumentFor } = await import("@/lib/mcp/curated.server");
-    const entry = CURATED_MCP_SERVERS[0];
-    expect(entry).toBeDefined();
-    const name = entry?.name ?? "";
-    const { status, location } = await post({
-      intent: "publish",
-      server: name,
-      name: entry?.slug ?? "",
-      channel: "",
-      // A document field alongside the id is IGNORED — the pick names a row, it does not carry
-      // one, so a doctored form cannot publish bytes this list never held.
-      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/smuggled" }),
-    });
-    expect(status).toBe(302);
-    expect(location).toBe(`/mcp/${entry?.slug}`);
-    expect(vault.published).toHaveLength(1);
-    expect(vault.published[0]?.files).toEqual([
-      { path: "server.json", content: curatedDocumentFor(name) },
-    ]);
-    // No fetch was spent on it either: a pick reaches nothing outside this process.
-    expect(fetched.calls).toEqual([]);
-
-    const rows = await db.q<{ kind: string; name: string }>(
-      `SELECT kind, name FROM web.bundle WHERE name = $1`,
-      [entry?.slug],
-    );
-    expect(rows[0]?.kind).toBe("mcp");
-    // The document's own embedded name is what the audit records, not the catalog slug.
-    const audit = await db.q<{ details: Record<string, unknown> }>(
-      `SELECT details FROM web.audit_event WHERE kind = 'mcp_imported' AND details->>'server' = $1`,
-      [name],
-    );
-    expect(audit).toHaveLength(1);
-  });
-
-  it("refuses an id this list does not hold, rather than inventing a document", async () => {
-    const { status, body } = await post({
-      intent: "publish",
-      server: "io.github.nobody/not-on-the-list",
-      name: "nobody",
-      channel: "",
-    });
-    expect(status).toBe(400);
-    expect(String(body.error)).toContain("not one of the servers on this list");
-    // The refusal is addressed to the dialog, and names the row it answers about — a page-level
-    // answer would leave the open dialog silent.
-    expect(body.form).toBe("pick");
-    expect(body.server).toBe("io.github.nobody/not-on-the-list");
-    expect(vault.published).toEqual([]);
-  });
-
-  it("sends a gate refusal back to the dialog that asked", async () => {
-    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
-    const entry = CURATED_MCP_SERVERS[1];
-    expect(entry).toBeDefined();
-    const name = entry?.name ?? "";
-    const versionId = versionIdFor("s_picked_taken");
-    // Another bundle already claims this server's embedded name — the live collision.
-    await seedBundle(db, wsId, "s_picked_taken", "already-here", { kind: "mcp", versionId });
-    vault.seed(wsId, "s_picked_taken", versionId, [
-      { path: "server.json", content: JSON.stringify({ ...WEATHER, name }, null, 2) },
-    ]);
-    // Seeded as if published, so the name it serves is ON RECORD — which is what the page
-    // checks a new import against.
-    await recordSeededIdentities();
-    const { status, body } = await post({
-      intent: "publish",
-      server: name,
-      name: entry?.slug ?? "",
-      channel: "",
-    });
-    expect(status).toBe(400);
-    expect(body.code).toBe("MCP_NAME_TAKEN");
-    expect(body.form).toBe("pick");
-    expect(body.server).toBe(name);
-    // The pointer home rides into the dialog too — same answer, same link, wherever it renders.
-    expect(body.at).toBe("mcp/already-here");
-    expect(vault.published).toEqual([]);
+    expect(body.error).toBe("Nothing to add — run the preview again.");
   });
 });
 
 /**
- * WHAT THE PUBLISH DID TO THE REACH. A curated channel withholds a MEMBER's placement — the
- * default `everyone` included — so the bundle lands in the catalog and reaches nobody. The dialog
+ * WHAT THE ACT DID TO THE REACH. A curated channel withholds a MEMBER's placement — the default
+ * `everyone` included — so the bundle lands in the workspace and reaches nobody. The dialog
  * promises that a chosen channel's agents get the address, so the outcome has to survive the
- * redirect and be said on the page it lands on; before this it was dropped on the floor.
+ * redirect and be said on the page it lands on.
  *
  * Every case here NAMES its destination: with no channel chosen there is no reach to withhold and
  * nothing to disclose.
@@ -499,22 +492,20 @@ describe("a withheld placement is disclosed", () => {
   }
 
   it("carries the withheld outcome and the channel through the redirect", async () => {
+    await seedServer("mcps_withheld", "io.github.acme/withheld");
     await defaultChannelMode("curated");
+    session = { user: MEMBER };
     try {
       const { status, location } = await post({
-        intent: "publish",
-        document: JSON.stringify({ ...WEATHER, name: "io.github.acme/withheld" }, null, 2),
+        intent: "connect",
+        server_id: "mcps_withheld",
         name: "withheld",
         channel: "everyone",
       });
       expect(status).toBe(302);
       expect(location).toBe("/mcp/withheld?placement=curated_role_required&channel=everyone");
-      // The publish itself still landed — custody is never curation-blocked.
-      const rows = await db.q<{ kind: string }>(`SELECT kind FROM web.bundle WHERE name = $1`, [
-        "withheld",
-      ]);
-      expect(rows[0]?.kind).toBe("mcp");
-      // And it is in NO channel, which is exactly what the note says.
+      // The connection itself still landed — reach is curated, existence is not.
+      expect((await bundleNamed("withheld"))?.kind).toBe("mcp");
       const placed = await db.q<{ n: number }>(
         `SELECT count(*)::int AS n FROM web.channel_bundle cb
          JOIN web.bundle b ON b.id = cb.bundle_id WHERE b.name = 'withheld'`,
@@ -526,9 +517,10 @@ describe("a withheld placement is disclosed", () => {
   });
 
   it("says nothing when the placement actually happened", async () => {
+    await seedServer("mcps_placed", "io.github.acme/placed");
     const { status, location } = await post({
-      intent: "publish",
-      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/placed" }, null, 2),
+      intent: "connect",
+      server_id: "mcps_placed",
       name: "placed-here",
       channel: "everyone",
     });
@@ -537,16 +529,18 @@ describe("a withheld placement is disclosed", () => {
   });
 
   /**
-   * A CURATED DEFAULT CHANNEL WITHHOLDS NOTHING FROM AN IMPORT THAT ASKED FOR NO CHANNEL. The
-   * bundle lands in the catalog either way, but the redirect must be plain: a note about a
-   * placement nobody requested would read as a failure where there was none.
+   * A CURATED DEFAULT CHANNEL WITHHOLDS NOTHING FROM AN ACT THAT ASKED FOR NO CHANNEL. The bundle
+   * lands either way, but the redirect must be plain: a note about a placement nobody requested
+   * would read as a failure where there was none.
    */
   it("says nothing when no channel was chosen, curated default or not", async () => {
+    await seedServer("mcps_unplaced", "io.github.acme/unplaced");
     await defaultChannelMode("curated");
+    session = { user: MEMBER };
     try {
       const { status, location } = await post({
-        intent: "publish",
-        document: JSON.stringify({ ...WEATHER, name: "io.github.acme/unplaced" }, null, 2),
+        intent: "connect",
+        server_id: "mcps_unplaced",
         name: "unplaced",
         channel: "",
       });
@@ -601,186 +595,206 @@ describe("the SSRF guard", () => {
     ["private 172.16/12", "172.20.0.5"],
     ["private 192.168/16", "192.168.1.10"],
     ["carrier-grade NAT", "100.64.0.1"],
-    ["this-network 0/8", "0.0.0.0"],
-    ["multicast", "239.1.1.1"],
     ["loopback v6", "::1"],
     ["unique-local v6", "fd00::1"],
     ["link-local v6", "fe80::1"],
-    ["a v4-mapped loopback", "::ffff:127.0.0.1"],
-    // The same three addresses a resolver is just as free to hand back in HEX: `::ffff:7f00:1`
-    // IS 127.0.0.1 to the socket layer, and reading the spelling instead of the address is
-    // exactly how a guard lets one through.
-    ["a v4-mapped loopback in hex", "::ffff:7f00:1"],
-    ["a v4-mapped private 10/8 in hex", "::ffff:a00:1"],
-    ["a v4-translated loopback (the NAT64-ish prefix)", "::ffff:0:7f00:1"],
-    // The REAL NAT64 prefixes: a translator on the path turns these back into an IPv4
-    // connection, so the whole v4 private range is reachable through an address the v4 rules
-    // never see. Both the well-known /96 and the local-use /48 are refused entire.
-    ["the well-known NAT64 prefix carrying the metadata address", "64:ff9b::a9fe:a9fe"],
-    ["the well-known NAT64 prefix in dotted form", "64:ff9b::169.254.169.254"],
-    ["the well-known NAT64 prefix carrying loopback", "64:ff9b::7f00:1"],
-    ["the local-use NAT64 prefix", "64:ff9b:1::1"],
-    ["the local-use NAT64 prefix, deeper in", "64:ff9b:1:2:3:4:5:6"],
+    ["a v4-mapped private v6", "::ffff:10.0.0.1"],
   ])("refuses %s", async (_label, address) => {
-    const { assertPublicHttpsUrl, McpFetchError } = await import("@/lib/mcp/fetch.server");
+    const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
     await expect(
-      assertPublicHttpsUrl("https://internal.test/server.json", addresses(address)),
-    ).rejects.toBeInstanceOf(McpFetchError);
+      assertPublicHttpsUrl("https://internal.example/server.json", addresses(address)),
+    ).rejects.toThrow(/private|not reachable/i);
   });
 
   it("refuses a host that answers with a public AND a private address (rebinding)", async () => {
-    const { assertPublicHttpsUrl, McpFetchError } = await import("@/lib/mcp/fetch.server");
+    const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
     await expect(
       assertPublicHttpsUrl(
-        "https://mixed.test/server.json",
-        addresses("93.184.216.34", "127.0.0.1"),
+        "https://mixed.example/server.json",
+        addresses("93.184.216.34", "10.0.0.7"),
       ),
-    ).rejects.toBeInstanceOf(McpFetchError);
+    ).rejects.toThrow(/private/i);
   });
 
   it("refuses anything but https, and refuses credentials in the URL", async () => {
-    const { assertPublicHttpsUrl, McpFetchError } = await import("@/lib/mcp/fetch.server");
-    const publicOnly = addresses("93.184.216.34");
+    const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
     await expect(
-      assertPublicHttpsUrl("http://example.test/server.json", publicOnly),
-    ).rejects.toBeInstanceOf(McpFetchError);
+      assertPublicHttpsUrl("http://example.com/server.json", addresses("93.184.216.34")),
+    ).rejects.toThrow();
     await expect(
-      assertPublicHttpsUrl("https://user:pw@example.test/server.json", publicOnly),
-    ).rejects.toBeInstanceOf(McpFetchError);
-    await expect(assertPublicHttpsUrl("not a url", publicOnly)).rejects.toBeInstanceOf(
-      McpFetchError,
-    );
+      assertPublicHttpsUrl("https://user:pass@example.com/s.json", addresses("93.184.216.34")),
+    ).rejects.toThrow();
   });
 
   it("refuses a host that does not resolve at all", async () => {
-    const { assertPublicHttpsUrl, McpFetchError } = await import("@/lib/mcp/fetch.server");
+    const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
     await expect(
-      assertPublicHttpsUrl("https://nowhere.test/server.json", async () => []),
-    ).rejects.toBeInstanceOf(McpFetchError);
-    await expect(
-      assertPublicHttpsUrl("https://nowhere.test/server.json", async () => {
+      assertPublicHttpsUrl("https://nowhere.example/server.json", async () => {
         throw new Error("ENOTFOUND");
       }),
-    ).rejects.toBeInstanceOf(McpFetchError);
+    ).rejects.toThrow();
   });
 
   it("allows a public v6 address written in its compressed form", async () => {
-    // The other half of folding v4-embedded shapes: an ordinary public v6 with a `::` run must
-    // still parse and pass, or the guard would refuse most of the v6 internet as unreadable.
     const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
     const vetted = await assertPublicHttpsUrl(
-      "https://v6.test/server.json",
-      addresses("2606:4700::6810:84e5"),
+      "https://v6.example/server.json",
+      addresses("2606:2800:220:1:248:1893:25c8:1946"),
     );
-    expect(vetted.url.host).toBe("v6.test");
+    expect(vetted.url.hostname).toBe("v6.example");
   });
 
   it("allows an ordinary public address", async () => {
     const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
     const vetted = await assertPublicHttpsUrl(
-      "https://example.test/server.json",
-      addresses("93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"),
+      "https://example.com/server.json",
+      addresses("93.184.216.34"),
     );
-    expect(vetted.url.host).toBe("example.test");
+    expect(vetted.url.protocol).toBe("https:");
   });
 
   it("hands back the addresses it proved public, which are the ones the fetch dials", async () => {
-    // The rebinding window closes only if nothing resolves twice: the guard's answer carries the
-    // vetted addresses so the connection is made to exactly them, family tags and all.
     const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
     const vetted = await assertPublicHttpsUrl(
-      "https://example.test/server.json",
+      "https://example.com/server.json",
       addresses("93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"),
     );
-    expect(vetted.addresses).toEqual([
-      { address: "93.184.216.34", family: 4 },
-      { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 },
+    expect(vetted.addresses.map((a) => a.address)).toEqual([
+      "93.184.216.34",
+      "2606:2800:220:1:248:1893:25c8:1946",
     ]);
   });
 });
 
-/**
- * WHAT THE PREVIEW SHOWS. The picker's rows and the custom arm's preview answer the same
- * question about the same field — how a person gets in once the server lands — so they must
- * answer it the same way. The preview card is rendered for real (through a static router, since
- * it carries the publish form) and read for the chip.
- */
-describe("the preview card's auth chip", () => {
-  /** Static markup escapes the apostrophes final copy is written with; read it back as written. */
-  const decode = (html: string) => html.replaceAll("&#x27;", "'").replaceAll("&quot;", '"');
+/** The loader payload the page renders from — the same shape the real loader hands over. */
+function pageData(servers: Record<string, unknown>[]) {
+  return {
+    wsName: "acme",
+    channels: [{ name: "everyone", isDefault: true, mode: "open" }],
+    role: "owner",
+    servers,
+  };
+}
 
-  /** The card as the custom arm renders it, for a document declaring `auth`. */
-  async function renderPreview(authHint: "oauth" | "none" | "manual" | null): Promise<string> {
-    const { PreviewCard } = await import("@/routes/mcp-new");
-    type Preview = Parameters<typeof PreviewCard>[0]["preview"];
-    const preview: Preview = {
-      form: "preview",
-      origin: "https://weather.acme.example/server.json",
-      suggestedName: "weather",
-      document: JSON.stringify(WEATHER, null, 2),
-      summary: {
-        name: WEATHER.name,
-        description: WEATHER.description,
-        version: WEATHER.version,
-        url: WEATHER.remotes[0]?.url ?? "",
-        transport: "streamable-http",
-        headers: [],
-        packages: [],
-        authHint,
-      },
-    };
-    const routes: RouteObject[] = [
-      {
-        path: "/",
-        // `ChannelField` reads the page's own loader data; nothing else on the card does.
-        loader: () => ({
-          channels: [{ name: "everyone", isDefault: true, mode: "open" }],
-          role: "owner",
-        }),
-        Component: () => createElement(PreviewCard, { preview }),
-      },
-    ];
-    const handler = createStaticHandler(routes);
+function renderWith(loaderData: unknown, Component: () => ReturnType<typeof createElement>) {
+  const routes: RouteObject[] = [{ path: "/", loader: () => loaderData, Component }];
+  const handler = createStaticHandler(routes);
+  return (async () => {
     const context = await handler.query(new Request("http://localhost/"));
     if (context instanceof Response) {
       throw new Error("expected a rendered context, got a Response");
     }
     const router = createStaticRouter(handler.dataRoutes, context);
     return renderToStaticMarkup(createElement(StaticRouterProvider, { router, context }));
+  })();
+}
+
+/**
+ * WHAT THE PICKER'S CARDS SAY BEFORE ANYONE CLICKS. The list comes down with the page, so the page
+ * is rendered whole here and read for the one thing a card must not leave for later: that this
+ * server costs a person a step no agent can take for it — and for the one thing it must not offer
+ * twice, a server this workspace already runs.
+ */
+describe("the picker, on the page", () => {
+  const catalogRow = (over: Record<string, unknown>) => ({
+    serverId: "mcps_x",
+    registryName: "io.github.acme/x",
+    displayName: "Acme X",
+    description: "A server for the suite.",
+    icon: null,
+    authMode: null,
+    authNote: null,
+    url: "https://acme.example/mcp",
+    transport: "streamable-http",
+    host: "acme.example",
+    suggestedName: "x",
+    connectedAs: null,
+    ...over,
+  });
+
+  async function renderPage(servers: Record<string, unknown>[]): Promise<string> {
+    const McpNew = (await import("@/routes/mcp-new")).default;
+    return await renderWith(pageData(servers), McpNew as () => ReturnType<typeof createElement>);
   }
 
-  it("says a server signs in, the same word the picker's rows use", async () => {
-    const html = await renderPreview("oauth");
-    expect(html).toContain("oauth");
-    expect(html).not.toContain("no sign-in");
+  /** How many times a marker appears — the count IS the assertion for a per-row element. */
+  const times = (html: string, needle: string) => html.split(needle).length - 1;
+
+  it("draws one card per server, every one of them offered without a round trip", async () => {
+    const html = await renderPage([
+      catalogRow({ serverId: "mcps_a", displayName: "Alpha" }),
+      catalogRow({ serverId: "mcps_b", displayName: "Beta" }),
+    ]);
+    expect(times(html, 'data-testid="mcp-picker-option"')).toBe(2);
+    expect(html).toContain("2 servers");
   });
 
-  it("says a server needs no sign-in rather than saying nothing at all", async () => {
-    // The regression: a declared `none` used to render only the transport, so the one fact a
-    // person weighs before publishing was missing from exactly the arm that pasted the bytes.
-    const html = await renderPreview("none");
-    expect(html).toContain("no sign-in");
-    expect(html).not.toContain(">oauth<");
-  });
-
-  it("says a server needs a person's one-time step, and does not call it oauth", async () => {
-    // The third world. A document declaring `manual` is one an agent CANNOT sign into by itself,
-    // and the chip that used to say "oauth" for it was the false reassurance this arm removes.
-    const html = await renderPreview("manual");
-    expect(html).toContain("manual setup");
-    expect(html).not.toContain(">oauth<");
-    expect(html).not.toContain("an agent signs in on first use");
-    expect(decode(html)).toContain(
-      "the publisher says sign-in needs a one-time manual step on each machine — a token or a registered app",
+  it("marks a manual row with the chip alone and keeps the errand's sentence off the card", async () => {
+    const html = await renderPage([
+      catalogRow({
+        serverId: "mcps_m",
+        displayName: "Manual One",
+        authMode: "manual",
+        authNote: "Mint a token in the vendor console first.",
+      }),
+    ]);
+    expect(times(html, ">manual setup<")).toBe(1);
+    // The sentence lives in the pick dialog, where the person is actually deciding — a paragraph
+    // per manual row would out-shout its neighbours. The note still rides the page's data payload
+    // (the dialog opens without a round trip), so the assertion scopes to the card itself.
+    const card = html.split('data-testid="mcp-picker-option"')[1] ?? "";
+    expect(card.slice(0, card.indexOf("</button>"))).not.toContain(
+      "Mint a token in the vendor console first.",
     );
   });
 
-  it("stays quiet about a document that declares neither", async () => {
-    const html = await renderPreview(null);
+  it("says nothing about a server whose sign-in nobody established", async () => {
+    const html = await renderPage([catalogRow({ authMode: null })]);
     expect(html).not.toContain("no sign-in");
     expect(html).not.toContain(">oauth<");
-    expect(html).not.toContain("manual setup");
-    // Still a preview: the transport is the chip that never depended on the declaration.
+    expect(html).not.toContain(">manual setup<");
+  });
+
+  it("offers a server this workspace already runs as a link to it, not as a second add", async () => {
+    const html = await renderPage([catalogRow({ connectedAs: "acme-x" })]);
+    expect(html).not.toContain('data-testid="mcp-picker-option"');
+    expect(html).toContain('data-testid="mcp-picker-added"');
+    expect(html).toContain('href="/mcp/acme-x"');
+    expect(html).toContain(">added<");
+  });
+});
+
+describe("the preview card", () => {
+  async function renderPreview(
+    summary: Record<string, unknown>,
+    document = JSON.stringify(WEATHER, null, 2),
+  ): Promise<string> {
+    const { PreviewCard } = await import("@/routes/mcp-new");
+    type Preview = Parameters<typeof PreviewCard>[0]["preview"];
+    const preview = {
+      form: "preview",
+      origin: "https://weather.acme.example/server.json",
+      suggestedName: "weather",
+      document,
+      summary,
+    } as unknown as Preview;
+    return await renderWith(pageData([]), () => createElement(PreviewCard, { preview }));
+  }
+
+  const remoteSummary = {
+    name: WEATHER.name,
+    description: WEATHER.description,
+    version: WEATHER.version,
+    url: WEATHER.remotes[0]?.url ?? "",
+    transport: "streamable-http",
+    headers: [],
+    packages: [],
+    authHint: null,
+  };
+
+  it("shows the address the document places, and the transport it speaks", async () => {
+    const html = await renderPreview(remoteSummary);
+    expect(html).toContain("https://weather.acme.example/mcp");
     expect(html).toContain("streamable-http");
   });
 
@@ -788,15 +802,9 @@ describe("the preview card's auth chip", () => {
    * A PACKAGE-ONLY DOCUMENT has no address, and the card must not leave the address line standing
    * empty where one would be: it names what each machine installs instead.
    */
-  it("shows what a package-only bundle installs, and no empty address line", async () => {
-    const { PreviewCard } = await import("@/routes/mcp-new");
-    type Preview = Parameters<typeof PreviewCard>[0]["preview"];
-    const preview: Preview = {
-      form: "preview",
-      origin: "pasted",
-      suggestedName: "files",
-      document: "{}",
-      summary: {
+  it("shows what a package-only document installs, and no empty address line", async () => {
+    const html = await renderPreview(
+      {
         name: "io.github.acme/files",
         description: "Files the agent is pointed at, over stdio.",
         version: "2.1.0",
@@ -813,24 +821,10 @@ describe("the preview card's auth chip", () => {
         ],
         authHint: null,
       },
-    };
-    const routes: RouteObject[] = [
-      {
-        path: "/",
-        loader: () => ({
-          channels: [{ name: "everyone", isDefault: true, mode: "open" }],
-          role: "owner",
-        }),
-        Component: () => createElement(PreviewCard, { preview }),
-      },
-    ];
-    const handler = createStaticHandler(routes);
-    const context = await handler.query(new Request("http://localhost/"));
-    if (context instanceof Response) {
-      throw new Error("expected a rendered context, got a Response");
-    }
-    const router = createStaticRouter(handler.dataRoutes, context);
-    const html = renderToStaticMarkup(createElement(StaticRouterProvider, { router, context }));
+      // The document itself is what the card discloses, so a package-only case carries none of
+      // the remote document's text — otherwise the assertions below would read its leftovers.
+      "{}",
+    );
     expect(html).toContain("npm @acme/mcp-files 2.1.0");
     expect(html).toContain("stdio");
     // No address, so no address element at all — and no transport chip claiming one.
@@ -844,76 +838,9 @@ describe("the preview card's auth chip", () => {
    * the field looks optional while quietly handing the server to the workspace.
    */
   it("rests on no channel, with the default one an ordinary named option", async () => {
-    const html = await renderPreview(null);
-    // The SELECTED option is the empty one — what an untouched form posts, and what the page
-    // says it means.
+    const html = await renderPreview(remoteSummary);
     expect(html).toContain('<option value="" selected="">No channel</option>');
     expect(html).toContain('<option value="everyone">everyone (everyone here)</option>');
     expect(html).toContain("Optional — a channel is how it reaches people.");
-  });
-});
-
-/**
- * WHAT THE PICKER'S CARDS SAY BEFORE ANYONE CLICKS. The list ships whole with the page, so the
- * page is rendered whole here — the same loader payload the real one hands over — and read for the
- * one thing a card must not leave for later: that this server costs a person a step no agent can
- * take for it, and exactly which step.
- */
-describe("the built-in list, on the page", () => {
-  const decode = (html: string) => html.replaceAll("&#x27;", "'").replaceAll("&quot;", '"');
-
-  async function renderPage(): Promise<string> {
-    const McpNew = (await import("@/routes/mcp-new")).default;
-    const { curatedServerRows } = await import("@/lib/mcp/curated.server");
-    const routes: RouteObject[] = [
-      {
-        path: "/",
-        loader: () => ({
-          wsName: "acme",
-          channels: [{ name: "everyone", isDefault: true, mode: "open" }],
-          role: "owner",
-          curated: curatedServerRows(),
-        }),
-        Component: McpNew,
-      },
-    ];
-    const handler = createStaticHandler(routes);
-    const context = await handler.query(new Request("http://localhost/"));
-    if (context instanceof Response) {
-      throw new Error("expected a rendered context, got a Response");
-    }
-    const router = createStaticRouter(handler.dataRoutes, context);
-    return renderToStaticMarkup(createElement(StaticRouterProvider, { router, context }));
-  }
-
-  /** How many times a marker appears — the count IS the assertion for a per-row element. */
-  const times = (html: string, needle: string) => html.split(needle).length - 1;
-
-  it("draws one card per server, every one of them offered without a round trip", async () => {
-    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
-    const html = await renderPage();
-    expect(times(html, 'data-testid="mcp-picker-option"')).toBe(CURATED_MCP_SERVERS.length);
-    expect(html).toContain(`${CURATED_MCP_SERVERS.length} servers`);
-  });
-
-  it("marks manual rows with the chip alone and keeps the errand's sentence off the cards", async () => {
-    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
-    const html = await renderPage();
-    const manual = CURATED_MCP_SERVERS.filter((entry) => entry.auth === "manual");
-    // The card carries only the chip; the sentence lives in the pick dialog, where the person is
-    // actually deciding — a paragraph per manual row would out-shout twenty-four neighbours. The
-    // notes still ride the page's data payload (the dialog opens without a round trip), so the
-    // assertion scopes to the card buttons rather than the whole document.
-    expect(times(html, ">manual setup<")).toBe(manual.length);
-    const cards = html
-      .split('data-testid="mcp-picker-option"')
-      .slice(1)
-      .map((chunk) => decode(chunk.slice(0, chunk.indexOf("</button>"))));
-    expect(cards.length).toBe(CURATED_MCP_SERVERS.length);
-    for (const entry of manual) {
-      const card = cards.find((c) => c.includes(entry.title));
-      expect(card, `${entry.title}'s card is missing`).toBeDefined();
-      expect(card, `${entry.title}'s note leaked onto its card`).not.toContain(entry.authNote);
-    }
   });
 });

@@ -310,6 +310,11 @@ const SESSIONLESS_ROUTES = new Set([
   "agent-skills-index",
   "agent-skills-index-legacy",
   "agent-skills-file",
+  // The public MCP catalog feed: the deployment's own published catalog, served to anyone in the
+  // registry read API's shape so another install can sync from it. Sessionless BY DESIGN — it
+  // carries GLOBAL PUBLISHED rows only (nothing private, nothing undecided) and answers the house
+  // 404 wherever the deployment did not turn it on.
+  "mcp-catalog-feed",
   "api.auth",
   "api.memberships",
   // The FACE layout tolerates anonymous (the constant teaser / landing renders with no session);

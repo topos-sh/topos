@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   classifyProbeAnswer,
@@ -8,18 +7,7 @@ import {
   probeEndpoint,
 } from "@/lib/mcp/probe.server";
 import { probeStateLine } from "@/lib/mcp/probe-state";
-import {
-  asSession,
-  bootWorkspace,
-  createScratchDb,
-  type ScratchDb,
-  seatUser,
-  seedBundle,
-  seedSession,
-  seedUser,
-  versionIdFor,
-} from "./helpers/scratch-db";
-import { type StubVault, startStubVault } from "./helpers/stub-vault";
+import { bootWorkspace, createScratchDb, type ScratchDb } from "./helpers/scratch-db";
 
 /**
  * THE ADVISORY PROBE — what the plane concludes from one answer, and what it does with it.
@@ -29,9 +17,9 @@ import { type StubVault, startStubVault } from "./helpers/stub-vault";
  * touches the network — the transport is injected, and every address a guard test uses is a
  * literal, so no name is ever resolved.
  *
- * The property this suite exists to protect: a probe is a report, never a gate. A publish that
- * has landed stays landed whatever the probe meets — a hostile endpoint, an unreachable one, a
- * row the database refuses.
+ * The property this suite exists to protect: a probe is a report, never a gate. The revision it
+ * is about stands whatever the probe meets — a hostile endpoint, an unreachable one, a row that
+ * is no longer there.
  */
 
 const OK_INITIALIZE = JSON.stringify({
@@ -303,198 +291,120 @@ describe("the line a catalog shows", () => {
   });
 });
 
-// ── The row, and the promise that writing it can never cost a publish ────────────────────────
-
-let signedIn: { user: { id: string; name: string; email: string } } | null = null;
-vi.mock("@/lib/auth/server", () => ({
-  getAuth: () => ({ api: { getSession: async () => signedIn } }),
-}));
+// ── The row, and the promise that writing it can never cost the act it follows ──────────────
 
 let db: ScratchDb;
-let vault: StubVault;
 let wsId = "";
-const MEMBER = { id: "u_probe", name: "Prober", email: "prober@example.com" };
 
 beforeAll(async () => {
-  vault = await startStubVault();
-  db = await createScratchDb("web_mcp_probe", { PLANE_INTERNAL_URL: vault.url });
+  db = await createScratchDb("web_mcp_probe");
   wsId = await bootWorkspace();
-  await seedUser(db, MEMBER.id, MEMBER.name, MEMBER.email);
-  await seatUser(db, wsId, MEMBER.id, "owner");
-  await seedSession(db, "cs_probe", wsId, MEMBER.id);
 }, 60000);
 
 afterAll(async () => {
-  await vault.close();
   await db.drop();
 });
 
-async function probeRowsOf(bundleId: string) {
-  return await db.q<{ version_id: string; outcome: string; detail: string | null }>(
-    "SELECT version_id, outcome, detail FROM web.mcp_probe WHERE bundle_id = $1",
-    [bundleId],
+/** A server row and one revision of it — the shape a probe is asked about. */
+async function seedRevision(serverId: string, revisionId: string): Promise<void> {
+  await db.q(
+    `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+     VALUES ($1, $2, $3, $3, 'none', 'active')
+     ON CONFLICT (id) DO NOTHING`,
+    [serverId, wsId, `io.github.acme/${serverId}`],
+  );
+  await db.q(
+    `INSERT INTO web.mcp_server_revision
+       (id, server_id, seq, status, upstream_version, document, transport, url, source,
+        published_at, published_by)
+     VALUES ($1, $2, 1, 'published', '1.0.0', $3::jsonb, 'streamable-http',
+             'https://acme.example/mcp', 'owner', now(), 'Owner')`,
+    [
+      revisionId,
+      serverId,
+      JSON.stringify({
+        name: `io.github.acme/${serverId}`,
+        version: "1.0.0",
+        remotes: [{ type: "streamable-http", url: "https://acme.example/mcp" }],
+      }),
+    ],
   );
 }
 
+async function probeStateOf(revisionId: string) {
+  const rows = await db.q<{
+    probe_outcome: string | null;
+    probed_at: Date | null;
+    verification: { probeDetail?: string | null } | null;
+  }>("SELECT probe_outcome, probed_at, verification FROM web.mcp_server_revision WHERE id = $1", [
+    revisionId,
+  ]);
+  const row = rows[0];
+  return {
+    outcome: row?.probe_outcome ?? null,
+    detail: row?.verification?.probeDetail ?? null,
+    probedAt: row?.probed_at ?? null,
+  };
+}
+
 describe("recording what was seen", () => {
-  it("writes one row per version, and a re-probe replaces its own answer", async () => {
-    const actor = asSession(wsId, MEMBER.id, "cs_probe", "owner");
-    await seedBundle(db, wsId, "s_probe_one", "weather", { kind: "mcp" });
-    const versionId = versionIdFor("s_probe_one");
-    const target = { bundleId: "s_probe_one", versionId, endpoint: "https://93.184.216.34/mcp" };
+  it("writes the answer onto the revision, and a re-probe replaces it", async () => {
+    await seedRevision("mcps_one", "mcpr_one");
+    const target = { revisionId: "mcpr_one", endpoint: "https://93.184.216.34/mcp" };
 
-    await probeAndRecord(actor, target, answer(200, OK_INITIALIZE));
-    expect(await probeRowsOf("s_probe_one")).toEqual([
-      { version_id: versionId, outcome: "responding", detail: null },
-    ]);
+    await probeAndRecord(target, answer(200, OK_INITIALIZE));
+    let state = await probeStateOf("mcpr_one");
+    expect(state.outcome).toBe("responding");
+    expect(state.detail).toBe(null);
+    expect(state.probedAt).not.toBe(null);
 
-    await probeAndRecord(actor, target, answer(503, "down"));
-    expect(await probeRowsOf("s_probe_one")).toEqual([
-      { version_id: versionId, outcome: "not_responding", detail: "answered 503" },
-    ]);
-
-    const { mcpProbeFor } = await import("@/lib/db/queries.mcp.server");
-    const read = await mcpProbeFor(actor, "s_probe_one", versionId);
-    expect(read?.outcome).toBe("not_responding");
-    expect(probeStateLine(read)).toMatch(/^not responding when checked /);
+    await probeAndRecord(target, answer(503, "down"));
+    state = await probeStateOf("mcpr_one");
+    expect(state.outcome).toBe("not_responding");
+    expect(state.detail).toBe("answered 503");
+    // The line a surface renders reads from exactly those two facts.
+    expect(
+      probeStateLine({
+        outcome: "not_responding",
+        probedAt: (state.probedAt as Date).toISOString(),
+        detail: state.detail,
+      }),
+    ).toMatch(/^not responding when checked /);
   });
 
-  it("asks nothing about a package-only bundle, and records nothing for it", async () => {
-    const actor = asSession(wsId, MEMBER.id, "cs_probe", "owner");
-    await seedBundle(db, wsId, "s_probe_pkg", "files", { kind: "mcp" });
+  it("asks nothing about a package-only document, and records nothing for it", async () => {
+    await seedRevision("mcps_pkg", "mcpr_pkg");
     const transport = vi.fn<ProbeTransport>();
-    const verdict = await probeAndRecord(
-      actor,
-      { bundleId: "s_probe_pkg", versionId: versionIdFor("s_probe_pkg"), endpoint: null },
-      transport,
-    );
+    const verdict = await probeAndRecord({ revisionId: "mcpr_pkg", endpoint: null }, transport);
     expect(verdict).toBe(null);
     expect(transport).not.toHaveBeenCalled();
-    expect(await probeRowsOf("s_probe_pkg")).toEqual([]);
+    expect(await probeStateOf("mcpr_pkg")).toMatchObject({ outcome: null, probedAt: null });
   });
 
-  it("swallows a storage failure whole — the publish it follows is already durable", async () => {
-    const actor = asSession(wsId, MEMBER.id, "cs_probe", "owner");
-    // No such bundle: the row's foreign key refuses it, which is a database error raised INSIDE
-    // the probe. It must never surface — by the time this runs, a publish has already succeeded
-    // and there is nothing left for an exception to do but break something that worked.
+  it("a revision that is no longer there costs nothing — the act it followed is durable", async () => {
     await expect(
       probeAndRecord(
-        actor,
-        {
-          bundleId: "s_probe_missing",
-          versionId: versionIdFor("s_probe_missing"),
-          endpoint: "https://93.184.216.34/mcp",
-        },
+        { revisionId: "mcpr_gone", endpoint: "https://93.184.216.34/mcp" },
         answer(200, OK_INITIALIZE),
       ),
-    ).resolves.toBe(null);
-  });
-
-  it("rides a real genesis publish, after it has landed and without holding it up", async () => {
-    // THE HOOK ITSELF, through the shared genesis path every door takes. The document names a
-    // PRIVATE address, so the probe's own guard answers without any socket being opened — and the
-    // publish must be finished and successful before that answer exists at all.
-    const { publishGenesisBundle } = await import("@/lib/api/genesis.server");
-    const document = `${JSON.stringify(
-      {
-        name: "io.github.acme/internal",
-        description: "A server inside the network this workspace runs in.",
-        version: "1.0.0",
-        remotes: [{ type: "streamable-http", url: "https://127.0.0.1/mcp" }],
-      },
-      null,
-      2,
-    )}\n`;
-    const landed = await publishGenesisBundle({
-      actor: asSession(wsId, MEMBER.id, "cs_probe", "owner"),
-      kind: "mcp",
-      bundleId: "s_probe_genesis",
-      candidate: {
-        files: [
-          {
-            path: "server.json",
-            mode: "100644",
-            content_base64: Buffer.from(document, "utf8").toString("base64"),
-          },
-        ],
-        attribution: MEMBER.name,
-        message: "imported MCP server io.github.acme/internal",
-      },
-      displayName: "internal",
-      destination: null,
-    });
-    // The publish is decided here, with nothing waited on.
-    expect(landed.kind).toBe("ok");
-
-    // …and the report arrives on its own clock, saying the neutral thing about an address this
-    // plane cannot reach rather than anything about the server.
-    let rows = await probeRowsOf("s_probe_genesis");
-    for (let attempt = 0; attempt < 40 && rows.length === 0; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      rows = await probeRowsOf("s_probe_genesis");
-    }
-    expect(rows).toEqual([
-      {
-        version_id: landed.kind === "ok" ? landed.versionId : "",
-        outcome: "not_verifiable",
-        detail: "private address",
-      },
-    ]);
+    ).resolves.toEqual({ outcome: "responding", detail: null });
+    expect(await probeStateOf("mcpr_gone")).toMatchObject({ outcome: null });
   });
 
   it("swallows a transport that throws something unexpected", async () => {
-    const actor = asSession(wsId, MEMBER.id, "cs_probe", "owner");
-    await seedBundle(db, wsId, "s_probe_boom", "boom", { kind: "mcp" });
+    await seedRevision("mcps_boom", "mcpr_boom");
     const exploding: ProbeTransport = () => {
       throw new TypeError("not a function");
     };
     await expect(
-      probeAndRecord(
-        actor,
-        {
-          bundleId: "s_probe_boom",
-          versionId: versionIdFor("s_probe_boom"),
-          endpoint: "https://93.184.216.34/mcp",
-        },
-        exploding,
-      ),
+      probeAndRecord({ revisionId: "mcpr_boom", endpoint: "https://93.184.216.34/mcp" }, exploding),
     ).resolves.toEqual({ outcome: "not_responding", detail: "no answer" });
   });
-});
 
-describe("what the bundle page carries", () => {
-  /** The face's loader, for a bundle addressed under the MCP base. */
-  async function faceOf(name: string, base: "mcp" | "skills") {
-    const { loader } = await import("@/routes/skill-current");
-    return (await loader({
-      request: new Request(`http://x/${base}/${name}`),
-      params: base === "mcp" ? { server: name } : { skill: name },
-      context: {},
-    } as never)) as { probeLine: string | null };
-  }
-
-  it("says what the probe saw, and says the honest thing when nothing was recorded", async () => {
-    signedIn = { user: MEMBER };
-    const actor = asSession(wsId, MEMBER.id, "cs_probe", "owner");
-    await seedBundle(db, wsId, "s_face_probed", "probed", { kind: "mcp" });
-    await seedBundle(db, wsId, "s_face_quiet", "unprobed", { kind: "mcp" });
-    await seedBundle(db, wsId, "s_face_skill", "runbook", { kind: "skill" });
-    await probeAndRecord(
-      actor,
-      {
-        bundleId: "s_face_probed",
-        versionId: versionIdFor("s_face_probed"),
-        endpoint: "https://93.184.216.34/mcp",
-      },
-      answer(401, "no", { "www-authenticate": "Bearer" }),
-    );
-
-    expect((await faceOf("probed", "mcp")).probeLine).toMatch(/^sign-in required, checked /);
-    // A version nobody asked about — a fact about this plane, never about the server.
-    expect((await faceOf("unprobed", "mcp")).probeLine).toBe("not checked yet");
-    // A skill has no server to ask about, so it carries no line at all.
-    expect((await faceOf("runbook", "skills")).probeLine).toBe(null);
-    signedIn = null;
+  it("fires without being waited on, and cannot reject", async () => {
+    const { scheduleRevisionProbe } = await import("@/lib/mcp/probe.server");
+    expect(() =>
+      scheduleRevisionProbe({ revisionId: "mcpr_absent", endpoint: "https://127.0.0.1/mcp" }),
+    ).not.toThrow();
   });
 });

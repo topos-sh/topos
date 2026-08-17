@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor, SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
@@ -16,7 +16,7 @@ import {
 } from "@/lib/db/queries.custody.server";
 import { bundleMcp, mcpServer, mcpServerRevision } from "@/lib/db/schema.app";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
-import type { McpProbeOutcome } from "@/lib/mcp/probe-state";
+import type { McpProbeOutcome, McpProbeRecord } from "@/lib/mcp/probe-state";
 import type { McpGateRefusal } from "@/lib/mcp/publish-gate.server";
 import { validateServerJson } from "@/lib/mcp/validate.server";
 
@@ -949,6 +949,151 @@ export interface McpCatalogRow {
   transport: string | null;
   revisionId: string;
   upstreamVersion: string;
+  /** The catalog name of the bundle this workspace already connected it as, or null. One
+   *  connection per server per workspace, so this is the answer, not one of several. */
+  connectedAs: string | null;
+}
+
+// ── The server a bundle connects to, as its page reads it ───────────────────────────────────
+
+/** One revision on the history a server's page lists. */
+export interface McpRevisionRow {
+  revisionId: string;
+  seq: number;
+  upstreamVersion: string;
+  status: string;
+  source: string;
+  publishedAt: Date | null;
+  publishedBy: string | null;
+  revokedAt: Date | null;
+}
+
+/** Everything a connected server's page shows, in one read. */
+export interface McpServerFace {
+  bundleId: string;
+  serverId: string;
+  /** The workspace's OWN server — the one an owner may edit. */
+  isPrivate: boolean;
+  registryName: string | null;
+  displayName: string;
+  description: string | null;
+  websiteUrl: string | null;
+  icon: string | null;
+  authMode: string | null;
+  authNote: string | null;
+  /** The connection follows ONE revision rather than the server's current. */
+  pinnedRevisionId: string | null;
+  currentRevisionId: string | null;
+  /** What this workspace's machines receive — null when the server has published nothing. */
+  resolved: {
+    revisionId: string;
+    upstreamVersion: string;
+    status: string;
+    url: string | null;
+    transport: string | null;
+    document: Record<string, unknown>;
+    probe: McpProbeRecord | null;
+  } | null;
+  /** The version history, newest first. A private server's is its owner's edit trail. */
+  revisions: McpRevisionRow[];
+}
+
+/** The probe columns as the shared line reader takes them — absent is "not checked yet". */
+function probeRecordOf(row: {
+  probe_outcome: string | null;
+  probed_at: string | Date | null;
+  verification: unknown;
+}): McpProbeRecord | null {
+  if (row.probe_outcome === null || row.probed_at === null) {
+    return null;
+  }
+  const detail = (row.verification as { probeDetail?: unknown } | null)?.probeDetail;
+  return {
+    outcome: row.probe_outcome as McpProbeOutcome,
+    probedAt: new Date(row.probed_at).toISOString(),
+    detail: typeof detail === "string" ? detail : null,
+  };
+}
+
+/**
+ * THE SERVER BEHIND ONE BUNDLE. Workspace-scoped through the connection row, so a bundle id from
+ * another workspace resolves to nothing — the same answer an id that names no server gets.
+ *
+ * A PRIVATE server's history is all of it; a CATALOG server's is the published part, because a
+ * candidate awaiting a staff decision is not something a workspace is being offered.
+ */
+export async function mcpServerFace(
+  actor: MemberActor | SessionActor,
+  bundleId: string,
+): Promise<McpServerFace | null> {
+  const rows = await getDb().execute(sql`
+    SELECT bm.bundle_id, bm.server_id, bm.pinned_revision_id,
+           ms.workspace_id, ms.registry_name, ms.display_name, ms.description, ms.website_url,
+           ms.icon, ms.auth_mode, ms.auth_note, ms.current_revision_id,
+           r.id AS revision_id, r.upstream_version, r.status, r.url, r.transport, r.document,
+           r.probe_outcome, r.probed_at, r.verification
+    FROM web.bundle_mcp bm
+    JOIN web.mcp_server ms ON ms.id = bm.server_id
+    LEFT JOIN web.mcp_server_revision r
+      ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
+    WHERE bm.workspace_id = ${actor.workspaceId} AND bm.bundle_id = ${bundleId}
+    LIMIT 1
+  `);
+  const row = rows.rows[0] as Record<string, unknown> | undefined;
+  if (row === undefined) {
+    return null;
+  }
+  const isPrivate = row.workspace_id !== null;
+  const history = await getDb().execute(sql`
+    SELECT r.id AS revision_id, r.seq, r.upstream_version, r.status, r.source,
+           r.published_at, r.published_by, r.revoked_at
+    FROM web.mcp_server_revision r
+    WHERE r.server_id = ${row.server_id as string}
+      AND (${isPrivate} OR r.status IN ('published', 'revoked'))
+    ORDER BY r.seq DESC
+  `);
+  return {
+    bundleId: row.bundle_id as string,
+    serverId: row.server_id as string,
+    isPrivate,
+    registryName: (row.registry_name as string | null) ?? null,
+    displayName: row.display_name as string,
+    description: (row.description as string | null) ?? null,
+    websiteUrl: (row.website_url as string | null) ?? null,
+    icon: (row.icon as string | null) ?? null,
+    authMode: (row.auth_mode as string | null) ?? null,
+    authNote: (row.auth_note as string | null) ?? null,
+    pinnedRevisionId: (row.pinned_revision_id as string | null) ?? null,
+    currentRevisionId: (row.current_revision_id as string | null) ?? null,
+    resolved:
+      row.revision_id === null || row.revision_id === undefined
+        ? null
+        : {
+            revisionId: row.revision_id as string,
+            upstreamVersion: row.upstream_version as string,
+            status: row.status as string,
+            url: (row.url as string | null) ?? null,
+            transport: (row.transport as string | null) ?? null,
+            document: row.document as Record<string, unknown>,
+            probe: probeRecordOf(
+              row as unknown as {
+                probe_outcome: string | null;
+                probed_at: string | null;
+                verification: unknown;
+              },
+            ),
+          },
+    revisions: (history.rows as Record<string, unknown>[]).map((rev) => ({
+      revisionId: rev.revision_id as string,
+      seq: Number(rev.seq),
+      upstreamVersion: rev.upstream_version as string,
+      status: rev.status as string,
+      source: rev.source as string,
+      publishedAt: rev.published_at === null ? null : new Date(rev.published_at as string),
+      publishedBy: (rev.published_by as string | null) ?? null,
+      revokedAt: rev.revoked_at === null ? null : new Date(rev.revoked_at as string),
+    })),
+  };
 }
 
 // ── The registry reads: one server, one document, one page of them ──────────────────────────
@@ -1130,28 +1275,31 @@ function workspaceRegistrySelect(workspaceId: string) {
 export async function connectableMcpServers(
   actor: MemberActor | SessionActor,
 ): Promise<McpCatalogRow[]> {
-  const rows = await getDb()
-    .select({
-      serverId: mcpServer.id,
-      registryName: mcpServer.registryName,
-      displayName: mcpServer.displayName,
-      description: mcpServer.description,
-      icon: mcpServer.icon,
-      authMode: mcpServer.authMode,
-      authNote: mcpServer.authNote,
-      url: mcpServerRevision.url,
-      transport: mcpServerRevision.transport,
-      revisionId: mcpServerRevision.id,
-      upstreamVersion: mcpServerRevision.upstreamVersion,
-    })
-    .from(mcpServer)
-    .innerJoin(mcpServerRevision, eq(mcpServerRevision.id, mcpServer.currentRevisionId))
-    .where(
-      and(
-        eq(mcpServer.status, "active"),
-        or(isNull(mcpServer.workspaceId), eq(mcpServer.workspaceId, actor.workspaceId)),
-      ),
-    )
-    .orderBy(asc(sql`lower(${mcpServer.displayName})`));
-  return rows;
+  const rows = await getDb().execute(sql`
+    SELECT ms.id AS server_id, ms.registry_name, ms.display_name, ms.description, ms.icon,
+           ms.auth_mode, ms.auth_note, r.url, r.transport,
+           r.id AS revision_id, r.upstream_version, b.name AS connected_as
+    FROM web.mcp_server ms
+    JOIN web.mcp_server_revision r ON r.id = ms.current_revision_id
+    LEFT JOIN web.bundle_mcp bm ON bm.server_id = ms.id AND bm.workspace_id = ${actor.workspaceId}
+    LEFT JOIN web.bundle b
+      ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id AND b.status = 'active'
+    WHERE ms.status = 'active'
+      AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
+    ORDER BY lower(ms.display_name)
+  `);
+  return (rows.rows as Record<string, unknown>[]).map((row) => ({
+    serverId: row.server_id as string,
+    registryName: (row.registry_name as string | null) ?? null,
+    displayName: row.display_name as string,
+    description: (row.description as string | null) ?? null,
+    icon: (row.icon as string | null) ?? null,
+    authMode: (row.auth_mode as string | null) ?? null,
+    authNote: (row.auth_note as string | null) ?? null,
+    url: (row.url as string | null) ?? null,
+    transport: (row.transport as string | null) ?? null,
+    revisionId: row.revision_id as string,
+    upstreamVersion: row.upstream_version as string,
+    connectedAs: (row.connected_as as string | null) ?? null,
+  }));
 }

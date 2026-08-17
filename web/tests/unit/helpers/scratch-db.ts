@@ -313,24 +313,3 @@ export async function bootWorkspace(): Promise<string> {
   }
   return ws.id;
 }
-
-/**
- * Record the registry name every seeded, PUBLISHED MCP server serves.
- *
- * A fixture that inserts a bundle row and hands the vault its bytes has built a server that
- * exists but never went through a publish — so nothing recorded the name it claims, and the next
- * publish would find that name free. The boot backfill is exactly the step a real deployment
- * runs for servers that already exist, so fixtures run the real one rather than writing the row
- * themselves (which would let the row and the bytes drift apart). Call it AFTER the vault
- * fixture holds the documents.
- *
- * Returns the report, so a suite that seeds a deliberately unreadable document can assert on it.
- */
-export async function recordSeededIdentities(): Promise<{
-  claimed: number;
-  unreadable: string[];
-  contested: string[];
-}> {
-  const { backfillBundleIdentities } = await import("@/lib/db/bundle-identity.server");
-  return await backfillBundleIdentities();
-}

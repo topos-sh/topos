@@ -404,48 +404,6 @@ export const bundleNameHint = webSchema.table(
 );
 
 /**
- * A BUNDLE'S SECOND NAME — the identity its own KIND keys on, when its kind has one.
- *
- * A catalog name is what people type; some kinds also carry a name their MACHINE consumers
- * resolve. An MCP server's `server.json` declares a registry name, and the workspace's registry
- * lane answers `…/servers/{name}` with it — so two bundles declaring one name would make an
- * agent's lookup a coin flip. That name lives in the BYTES, which no query can reach, so this
- * table is where the claim is RECORDED: one row per bundle that holds one, written in the same
- * transaction as the pointer move that makes it true, deleted when the bundle archives or is
- * deleted (both free the name for someone else).
- *
- * The PRIMARY KEY is the rule: (workspace, kind, identity) is unique, so a second claimant is
- * refused BY THE DATABASE. That is what this table is for — the refusal used to come from
- * scanning every published document under a per-workspace advisory lock, which is a lock and a
- * bounded scan standing in for an index. `kind` is part of the key rather than assumed, so a
- * later kind's identity namespace is its own and cannot collide with an MCP server's.
- *
- * NO check constraint on `kind`: the closed vocabulary is stated once, on `bundle`, and the
- * composite FK below ties every row here to a bundle that already satisfies it.
- */
-export const bundleIdentity = webSchema.table(
-  "bundle_identity",
-  {
-    workspaceId: text("workspace_id").notNull(),
-    bundleId: text("bundle_id").notNull(),
-    /** The kind whose namespace this identity lives in — `bundle.kind`, carried here. */
-    kind: text("kind").notNull(),
-    /** The name that kind's consumers resolve (an MCP server's embedded registry name). */
-    identity: text("identity").notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.workspaceId, table.kind, table.identity] }),
-    // The bundle-keyed reads: what this bundle claims (to release or replace it).
-    index("bundle_identity_bundle_idx").on(table.workspaceId, table.bundleId),
-    foreignKey({
-      name: "bundle_identity_bundle_fk",
-      columns: [table.bundleId, table.workspaceId],
-      foreignColumns: [bundle.id, bundle.workspaceId],
-    }).onDelete("cascade"),
-  ],
-);
-
-/**
  * A bundle's UPSTREAM — the external origin it was imported from (a fork that remembers its
  * parent): host + repo + path, recorded at publish when the published copy carries import
  * provenance, or by the web add-from-GitHub flow. One upstream per bundle; the server-side
@@ -501,48 +459,6 @@ export const versionUpstream = webSchema.table(
       columns: [table.bundleId, table.workspaceId],
       foreignColumns: [bundle.id, bundle.workspaceId],
     }).onDelete("cascade"),
-  ],
-);
-
-/**
- * WHAT THIS PLANE SAW WHEN IT ASKED — one advisory probe per published MCP version.
- *
- * A publish records what the workspace now holds; it says nothing about whether the server on the
- * other end of that address is up, or whether the address is even reachable from here. So after a
- * version lands, and strictly AFTER its transaction commits, the app asks the endpoint once and
- * writes down what came back. It is a REPORT, never a gate: a probe that fails, times out, or
- * never runs at all leaves the version exactly as published, and a version with no row here reads
- * as "not checked yet" rather than as anything about the server.
- *
- * Keyed by version, like `version_upstream` beside it: a version is immutable and
- * content-addressed, so one answer per version is one answer per set of bytes, and re-publishing
- * the same document from another workspace gets its own row rather than inheriting a verdict.
- * `outcome` carries its OWN small vocabulary (see app/lib/mcp/probe.server.ts) — nothing here
- * feeds delivery status, which keeps its closed set of words.
- */
-export const mcpProbe = webSchema.table(
-  "mcp_probe",
-  {
-    workspaceId: text("workspace_id").notNull(),
-    bundleId: text("bundle_id").notNull(),
-    versionId: text("version_id").notNull(),
-    /** `responding` · `sign_in_required` · `not_verifiable` · `not_responding`. */
-    outcome: text("outcome").notNull(),
-    /** One short machine-written note (a status code, a timeout) — never a body, never a header. */
-    detail: text("detail"),
-    probedAt: timestamp("probed_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.bundleId, table.versionId] }),
-    foreignKey({
-      name: "mcp_probe_bundle_fk",
-      columns: [table.bundleId, table.workspaceId],
-      foreignColumns: [bundle.id, bundle.workspaceId],
-    }).onDelete("cascade"),
-    check(
-      "mcp_probe_outcome_check",
-      sql`${table.outcome} IN ('responding', 'sign_in_required', 'not_verifiable', 'not_responding')`,
-    ),
   ],
 );
 
