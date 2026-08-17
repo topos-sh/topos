@@ -13,7 +13,14 @@ import {
   requireOwnerInScope,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
-import { type BundleBase, baseOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import {
+  type BundleBase,
+  baseOf,
+  bundleNoun,
+  bundlePath,
+  kindEntry,
+  useBundleBase,
+} from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
@@ -315,12 +322,17 @@ export default function SkillSettings() {
         active="settings"
         openProposals={openProposals}
         showSettings
+        fileHistory={kindEntry(kind).isFileBundle}
       />
-      <ProtectionCeremony
-        skill={skill}
-        protection={protection}
-        protectionDefault={protectionDefault}
-      />
+      {/* REVIEW PROTECTION IS ABOUT PROPOSALS, and a kind with no files has none: its versions
+          are decided in the server catalog, so a pin here would be a switch nothing reads. */}
+      {kindEntry(kind).isFileBundle && (
+        <ProtectionCeremony
+          skill={skill}
+          protection={protection}
+          protectionDefault={protectionDefault}
+        />
+      )}
       <UpstreamPanel />
       <RenameCeremony skill={skill} />
       <ArchiveCeremony skill={skill} />
