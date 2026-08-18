@@ -287,10 +287,18 @@ impl WorkspaceNames {
             workspace_id: workspace_id.to_owned(),
             name: name.to_owned(),
             channels: channels.channels.iter().map(|c| c.name.clone()).collect(),
+            // ONE catalog, TWO lists — a workspace's NAME universe is every bundle it shares,
+            // whichever list carries it, or a server would be a name nothing here could resolve.
             skills: skills
                 .skills
                 .iter()
                 .map(|s| (s.name.clone(), s.skill_id.clone()))
+                .chain(
+                    skills
+                        .mcp_servers
+                        .iter()
+                        .map(|s| (s.name.clone(), s.skill_id.clone())),
+                )
                 .collect(),
         }
     }

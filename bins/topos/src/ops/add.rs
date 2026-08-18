@@ -1733,16 +1733,25 @@ pub(crate) fn published_matches(
         // left to fabricate a match. A failed read above keeps the cache's answer — offline
         // degradation, not truth decay.
         found.remove(&(s.host.clone(), s.workspace_name.clone()));
-        for e in index.skills {
-            if e.name != name || e.status != "active" {
-                continue;
-            }
-            if let Some(published) = PublishedName::spelled(
-                &s.host,
-                &s.workspace_name,
-                &e.name,
-                Some(e.bundle_digest.clone()),
-            ) {
+        // ONE catalog, TWO lists. A connected server states NO consent digest — it holds no files
+        // to hash — and the ladder reads that absence as "no bytes to compare against", which is
+        // exactly true of a folder standing beside a server's name.
+        let named = index
+            .skills
+            .iter()
+            .filter(|e| e.name == name && e.status == "active")
+            .map(|e| (e.name.clone(), Some(e.bundle_digest.clone())))
+            .chain(
+                index
+                    .mcp_servers
+                    .iter()
+                    .filter(|e| e.name == name && e.status == "active")
+                    .map(|e| (e.name.clone(), None)),
+            );
+        for (bundle_name, digest) in named {
+            if let Some(published) =
+                PublishedName::spelled(&s.host, &s.workspace_name, &bundle_name, digest)
+            {
                 found.insert((s.host.clone(), s.workspace_name.clone()), published);
             }
         }
@@ -1839,14 +1848,24 @@ fn confirmed_cached_match(
     else {
         return Some(candidate); // unanswered: the cache's word stands, claiming no digest
     };
-    index
+    if let Some(e) = index
         .skills
         .into_iter()
         .find(|e| e.name == name && e.status == "active")
-        .map(|e| PublishedName {
+    {
+        return Some(PublishedName {
             bundle_digest: Some(e.bundle_digest),
             ..candidate
-        })
+        });
+    }
+    // A CONNECTED SERVER states no consent digest — it holds no files to hash — so the answered
+    // catalog confirms the name and fills nothing in. Everything else the catalog does not carry
+    // withdraws the disclosure, as it always did.
+    index
+        .mcp_servers
+        .iter()
+        .any(|e| e.name == name && e.status == "active")
+        .then_some(candidate)
 }
 
 /// What a bare `add <name>` resolved to (see [`plan_bare_add`]).

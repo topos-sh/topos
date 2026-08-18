@@ -191,9 +191,23 @@ fn add_feed(
 struct Resolved {
     session: Session,
     canonical: String,
-    /// The catalog entry, for a bundle reference (a channel has no bytes of its own).
-    entry: Option<Box<topos_types::requests::WireSkillIndexEntry>>,
+    /// The catalog's answer, for a BUNDLE reference (a channel has no bytes of its own).
+    entry: Option<Box<CatalogBundle>>,
     name: String,
+}
+
+/// What the catalog says a resolved bundle IS — read from whichever of its two lists answered,
+/// because everything below this point asks the same four questions of a bundle and none of them
+/// is a question about which list it came from.
+struct CatalogBundle {
+    skill_id: String,
+    name: String,
+    kind: BundleKind,
+    /// What the workspace shares it at: a file bundle's `current` commit, or a connected server's
+    /// catalog revision.
+    version_id: String,
+    /// The `current` consent digest — `None` for a bundle with no files to hash.
+    bundle_digest: Option<String>,
 }
 
 /// The kind a catalog entry names, or the refusal `add` answers for a kind this build cannot
@@ -230,10 +244,7 @@ fn add_workspace(
     // The catalog's KIND, parsed against what this build can deliver. A bundle a newer server
     // published under a kind this binary predates is refused HERE — before a row is written for
     // something no sweep could ever place.
-    let kind = match resolved.entry.as_deref() {
-        Some(e) => Some(add_kind(&e.kind, &resolved.name)?),
-        None => None,
-    };
+    let kind = resolved.entry.as_deref().map(|e| e.kind);
     // A `--kind` word that CONTRADICTS the catalog is refused, never quietly overruled. The
     // catalog is the authority on what a workspace bundle is, so the flag can only ever agree with
     // it or be wrong — and being wrong mattered: `--kind skill` on a server bundle used to deliver
@@ -265,7 +276,7 @@ fn add_workspace(
             skill_id: Some(e.skill_id.clone()),
             name: e.name.clone(),
             version_id: Some(e.version_id.clone()),
-            bundle_digest: Some(e.bundle_digest.clone()),
+            bundle_digest: e.bundle_digest.clone(),
             ..set_data(&resolved.name)
         },
         None => set_data(&resolved.name),
@@ -1071,8 +1082,7 @@ fn mcp_bundle(resolved: &Resolved) -> bool {
     resolved
         .entry
         .as_deref()
-        .and_then(|e| BundleKind::parse(&e.kind))
-        .is_some_and(BundleKind::is_mcp)
+        .is_some_and(|e| e.kind.is_mcp())
 }
 
 /// The MACHINE folder a `-g` add just landed its own copy in, when a checkout at or above this
@@ -1134,18 +1144,41 @@ fn resolve_workspace(
                 .directory
                 .skills_index(&session.workspace_id)
                 .map_err(|e| unread_catalog(&session, bundle, &e))?;
-            let entry = catalog
+            // ONE catalog, TWO lists — a name is looked for in both, and what it turns out to be
+            // is the answer rather than a second question.
+            let found = catalog
                 .skills
                 .iter()
                 .find(|e| &e.name == bundle)
-                .cloned()
-                .ok_or_else(|| {
-                    ClientError::NotAvailable(format!(
-                        "'{bundle}' is not in {}'s catalog, or is not visible with your current \
-                         access — check the name; a teammate can confirm it",
-                        session.workspace_name
-                    ))
-                })?;
+                .map(|e| {
+                    Ok::<_, ClientError>(CatalogBundle {
+                        skill_id: e.skill_id.clone(),
+                        name: e.name.clone(),
+                        kind: add_kind(&e.kind, &e.name)?,
+                        version_id: e.version_id.clone(),
+                        bundle_digest: Some(e.bundle_digest.clone()),
+                    })
+                })
+                .or_else(|| {
+                    catalog.mcp_servers.iter().find(|e| &e.name == bundle).map(|e| {
+                        Ok(CatalogBundle {
+                            skill_id: e.skill_id.clone(),
+                            name: e.name.clone(),
+                            kind: add_kind(&e.kind, &e.name)?,
+                            version_id: e.revision_id.clone(),
+                            // A connected server holds no files, so there is no consent digest to
+                            // state — and stating a zero one would look like an answer.
+                            bundle_digest: None,
+                        })
+                    })
+                });
+            let entry = found.ok_or_else(|| {
+                ClientError::NotAvailable(format!(
+                    "'{bundle}' is not in {}'s catalog, or is not visible with your current \
+                     access — check the name; a teammate can confirm it",
+                    session.workspace_name
+                ))
+            })??;
             Ok(Resolved {
                 canonical: shape.canonical(),
                 name: entry.name.clone(),

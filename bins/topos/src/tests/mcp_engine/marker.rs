@@ -120,56 +120,32 @@ fn an_empty_map_with_no_kind_evidence_fails_closed_on_targeted_verbs() {
 
 /// THE TWO-DOMAIN RACE, made single-process. A bundle's DIR custody (`map.json`) and its CONFIG
 /// custody (`entries.json`) are written under DIFFERENT locks — the per-skill flock and the scope's
-/// mcp lock — and a targeted verb legitimately holds the skill lock across a converge, so the two
-/// can never be made to serialize against each other without deadlocking. Safety therefore comes
-/// from the FILES, not the locks: one writer each.
+/// mcp lock — and a run legitimately holds the skill lock across a converge, so the two can never
+/// be made to serialize against each other without deadlocking. Safety therefore comes from the
+/// FILES, not the locks: one writer each.
 ///
 /// This drives the interleave that proves it, in one process because the locks no longer share a
-/// document: a targeted go-back reads dir custody (t0), a hook-fired quiet sweep converges config
-/// custody in the window (t1), the go-back commits its dir custody from the t0 snapshot (t2), and
-/// only then converges (t3). With both halves in ONE document, t2 writes back a snapshot taken
-/// before t1 and silently drops the rows t1 committed — leaving a live entry with no record, which
-/// the go-back's converge reads as a hand edit and refuses to touch: a permanent drift standoff
-/// that no later sweep clears. With the halves in sibling files, t2 cannot reach the rows: the
-/// entry stays provably topos's, current at v2, and is REPLACED with v1.
+/// document: a run reads dir custody (t0), a hook-fired quiet sweep converges config custody in the
+/// window (t1), the first run commits its dir custody from the t0 snapshot (t2), and a targeted
+/// update converges after it (t3). With both halves in ONE document, t2 writes back a snapshot
+/// taken before t1 and silently drops the rows t1 committed — leaving a live entry with no record,
+/// which the converge reads as a hand edit and refuses to touch: a permanent drift standoff that no
+/// later sweep clears. With the halves in sibling files, t2 cannot reach the rows: the entry stays
+/// provably topos's, current at v2, and is REPLACED when the workspace moves back to v1.
 #[test]
-fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
+fn a_targeted_update_racing_a_sweep_never_lands_in_a_drift_standoff() {
     let rig = Rig::new("standoff");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v1 = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/v1").as_bytes(),
-    )]);
-    let v2 = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/v2").as_bytes(),
-    )]);
-    let plane = FakePlane::new()
-        .with_version("s_linear", &v1)
-        .with_version("s_linear", &v2);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v1)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v1)],
-        channels: Vec::new(),
-    };
-    rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
-    ));
+    let v1 = served_at("https://mcp.example/v1");
+    let v2 = served_at("https://mcp.example/v2");
+    let (plane, dir) = deliver_linear(&rig, &v1);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
-    // The team moves to v2 and the sweep converges onto it.
-    let mut served2 = delivered_mcp("s_linear", "linear", &v2);
-    served2.generation = 2;
-    plane.serves(vec![served2]);
-    let mut entry2 = mcp_catalog_entry("s_linear", "linear", &v2);
-    entry2.generation = 2;
-    let dir2 = FakeDirectory {
-        skills: vec![entry2],
-        channels: Vec::new(),
-    };
-    sweep(&ctx, &plane, &dir2);
+    // The team publishes a new revision and the sweep converges onto it.
+    let (plane2, dir2) = deliver_linear(&rig, &v2);
+    sweep(&ctx, &plane2, &dir2);
     let cursor = rig.home.0.join(".cursor/mcp.json");
     assert!(
         std::fs::read_to_string(&cursor)
@@ -180,13 +156,13 @@ fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
     let sid = crate::id::SkillId::parse("s_linear").unwrap();
     let map_path = rig.layout().published(&sid).map;
 
-    // t0 — the snapshot a targeted verb reads before it converges.
+    // t0 — the snapshot the dir-custody writer reads before anything converges.
     let stale_map = crate::doc::read_map(&rig.fs, &map_path).unwrap().unwrap();
 
     // t1 — the quiet sweep lands in the window. The person had deleted the entry by hand, so this
     // run REWRITES it and commits fresh config custody.
     std::fs::write(&cursor, "{\n  \"mcpServers\": {}\n}\n").unwrap();
-    sweep(&ctx, &plane, &dir2);
+    sweep(&ctx, &plane2, &dir2);
     assert!(
         std::fs::read_to_string(&cursor)
             .unwrap()
@@ -194,7 +170,7 @@ fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
         "the interleaved sweep re-placed the entry"
     );
 
-    // t2 — the targeted verb commits DIR custody from its pre-sweep snapshot. This is the write
+    // t2 — the other domain commits DIR custody from its pre-sweep snapshot. This is the write
     // that used to take the config rows with it.
     crate::doc::write_map(&rig.fs, &map_path, &stale_map).unwrap();
     assert!(
@@ -202,17 +178,10 @@ fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
         "a dir-custody commit must not disturb config custody — the two have different writers"
     );
 
-    // t3 — the go-back converges. The entry is topos's own, current at v2, so it is REPLACED.
-    let out = ops::pull(
-        &ctx,
-        ops::PullScope::One {
-            name: "linear".into(),
-            workspace: None,
-            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v1.id)),
-            store: ops::StoreScope::Here,
-        },
-    )
-    .expect("the go-back applies");
+    // t3 — the workspace goes back to the earlier revision and the person converges that ONE
+    // bundle. The entry is topos's own, current at v2, so it is REPLACED.
+    let (plane3, dir3) = deliver_linear(&rig, &v1);
+    let out = sweep_one(&ctx, &plane3, &dir3, "linear");
     let text = std::fs::read_to_string(&cursor).unwrap();
     assert!(
         text.contains("https://mcp.example/v1") && !text.contains("https://mcp.example/v2"),
@@ -223,7 +192,7 @@ fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
         .skills
         .iter()
         .find(|s| s.skill == "linear")
-        .expect("the go-back row");
+        .expect("the targeted row");
     let cursor_state = row
         .harnesses
         .iter()
@@ -237,33 +206,18 @@ fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
     assert!(cursor_state.state.wrote(), "{cursor_state:?}");
 }
 
-/// ITEM PAIR (go-back converges configs): a targeted `update <mcp>@<version>` must leave the
-/// agent configs carrying the RESTORED document before it returns success. Before the fix only
-/// the store/lock moved — the configs kept the newer URL until the next sweep.
+/// ITEM PAIR (a targeted update converges configs): `topos update <name>` over a connected server
+/// must leave the agent configs carrying the DELIVERED document before it returns success — the
+/// converge is the sweep's own, narrowed to the one bundle, so nothing about it waits for a later
+/// run. The record moves with them: it is the demand every later run reads.
 #[test]
-fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
-    let rig = Rig::new("goback-converge");
+fn a_targeted_update_converges_the_configs_before_it_returns() {
+    let rig = Rig::new("targeted-converge");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v1 = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/v1").as_bytes(),
-    )]);
-    let v2 = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/v2").as_bytes(),
-    )]);
-    let plane = FakePlane::new()
-        .with_version("s_linear", &v1)
-        .with_version("s_linear", &v2);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v1)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v1)],
-        channels: Vec::new(),
-    };
-    rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
-    ));
+    let v1 = served_at("https://mcp.example/v1");
+    let v2 = served_at("https://mcp.example/v2");
+    let (plane, dir) = deliver_linear(&rig, &v1);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
     let cursor = rig.home.0.join(".cursor/mcp.json");
@@ -273,46 +227,21 @@ fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
             .contains("https://mcp.example/v1")
     );
 
-    // The team moves to v2 (generation 2 — a publish moved the pointer); the sweep converges the
-    // configs onto it.
-    let mut served2 = delivered_mcp("s_linear", "linear", &v2);
-    served2.generation = 2;
-    plane.serves(vec![served2]);
-    let mut entry2 = mcp_catalog_entry("s_linear", "linear", &v2);
-    entry2.generation = 2;
-    let dir2 = FakeDirectory {
-        skills: vec![entry2],
-        channels: Vec::new(),
-    };
-    let out2 = sweep(&ctx, &plane, &dir2);
-    assert!(
-        std::fs::read_to_string(&cursor)
-            .unwrap()
-            .contains("https://mcp.example/v2"),
-        "warnings: {:?} rows: {:?}",
-        out2.warnings,
-        out2.data
-            .skills
-            .iter()
-            .map(|s| (&s.skill, &s.action))
-            .collect::<Vec<_>>()
-    );
-
-    // The deliberate go-back: the configs carry v1's document again BEFORE the verb returns.
-    let out = ops::pull(
-        &ctx,
-        ops::PullScope::One {
-            name: "linear".into(),
-            workspace: None,
-            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v1.id)),
-            store: ops::StoreScope::Here,
-        },
-    )
-    .expect("the go-back applies");
+    // The team publishes a new revision; the person converges that one bundle by name.
+    let (plane2, dir2) = deliver_linear(&rig, &v2);
+    let out = sweep_one(&ctx, &plane2, &dir2, "linear");
     let text = std::fs::read_to_string(&cursor).unwrap();
     assert!(
-        text.contains("https://mcp.example/v1") && !text.contains("https://mcp.example/v2"),
-        "the configs carry the restored document immediately: {text}"
+        text.contains("https://mcp.example/v2") && !text.contains("https://mcp.example/v1"),
+        "the configs carry the delivered document immediately: {text} / {:?}",
+        out.warnings
+    );
+    assert_eq!(
+        server_record(&rig.fs, &rig.layout(), "s_linear")
+            .expect("the record")
+            .revision_id,
+        v2.revision_id,
+        "the record carries the revision the entries were rendered from"
     );
     // The row reports the per-agent outcomes of the converge it just ran.
     let row = &out.data.skills[0];
@@ -320,27 +249,20 @@ fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
     assert_eq!(agents, ["cursor", "openclaw"].into());
 }
 
-/// ITEM PAIR (targeted go-back honors narrowing): a bundle narrowed to ONE harness must stay in
-/// that one harness through a targeted `update <mcp>@<version>` — the go-back's converge reaches
-/// only the harnesses that already hold a custody entry here, so a harness the narrowing excluded
-/// never gains one. Before the fix the targeted demand carried an EMPTY narrowing, read as ALL
-/// harnesses: openclaw (detected, engaged, excluded by the row) gained an entry the sweep then had
-/// to claw back.
+/// ITEM PAIR (a targeted update honors narrowing): a bundle narrowed to ONE harness must stay in
+/// that one harness through a targeted `topos update <name>` — reach is the row's, resolved at
+/// planning, so a harness the narrowing excluded never gains an entry a later sweep would have to
+/// claw back. A targeted demand that carried no narrowing at all would read as ALL harnesses, and
+/// openclaw (detected, engaged, excluded by the row) would gain one.
 #[test]
-fn a_targeted_go_back_never_reaches_a_narrowing_excluded_harness() {
-    let rig = Rig::new("goback-narrow");
+fn a_targeted_update_never_reaches_a_narrowing_excluded_harness() {
+    let rig = Rig::new("targeted-narrow");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0); // BOTH hermetic slugs detect; the narrowing admits one.
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
@@ -352,138 +274,18 @@ fn a_targeted_go_back_never_reaches_a_narrowing_excluded_harness() {
         "the sweep placed cursor alone"
     );
 
-    let out = ops::pull(
-        &ctx,
-        ops::PullScope::One {
-            name: "linear".into(),
-            workspace: None,
-            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
-            store: ops::StoreScope::Here,
-        },
-    )
-    .expect("the go-back applies");
+    let out = sweep_one(&ctx, &plane, &dir, "linear");
 
     // The excluded harness stayed excluded — no config was born for it.
     assert!(
         !openclaw.exists(),
-        "a narrowing-excluded harness must not gain an entry on a targeted go-back"
+        "a narrowing-excluded harness must not gain an entry on a targeted update"
     );
     let text = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json")).unwrap();
     assert!(text.contains("https://mcp.example/linear"), "{text}");
     let row = &out.data.skills[0];
     let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
     assert_eq!(agents, ["cursor"].into(), "{row:?}");
-}
-
-/// A plane that serves ONE bundle's `current` pointer (the targeted-accept read) over the fake
-/// version store — what `topos update <mcp-name>` dials when the pointer has advanced.
-struct ServesCurrent {
-    inner: FakePlane,
-    record: topos_types::WireCurrentRecord,
-}
-impl PlaneSource for ServesCurrent {
-    fn get_current(
-        &self,
-        skill_id: &str,
-        _known: Option<KnownCurrent>,
-    ) -> Result<PointerFetch, PlaneError> {
-        if skill_id == self.record.scope.skill_id {
-            Ok(PointerFetch::Record(self.record.clone()))
-        } else {
-            Err(PlaneError::NotFound)
-        }
-    }
-    fn fetch_version(
-        &self,
-        skill_id: &str,
-        version_id: [u8; 32],
-    ) -> Result<FetchedVersion, PlaneError> {
-        self.inner.fetch_version(skill_id, version_id)
-    }
-}
-
-/// ITEM PAIR (targeted accept converges): `topos update <mcp-name>` must not report success while
-/// every agent config still carries the previous document. The accept advances the store AND
-/// converges this scope's configs before returning, threading the per-agent states onto the row —
-/// the same converge the go-back runs. Before the fix the targeted path gave an mcp record an
-/// empty placement plan and left the configs stale until the next sweep.
-#[test]
-fn a_targeted_accept_updates_the_configs_before_reporting_success() {
-    let rig = Rig::new("accept-converge");
-    rig.seed_session();
-    seed_harness_dirs(&rig.home.0);
-    let v1 = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/v1").as_bytes(),
-    )]);
-    let v2 = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/v2").as_bytes(),
-    )]);
-    let (plane, dir) = deliver_linear(&rig, &v1);
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    sweep(&ctx, &plane, &dir);
-    let cursor = rig.home.0.join(".cursor/mcp.json");
-    assert!(
-        std::fs::read_to_string(&cursor)
-            .unwrap()
-            .contains("https://mcp.example/v1"),
-        "the sweep placed v1"
-    );
-
-    // The pointer advanced to v2; the person runs the targeted accept.
-    let serves = ServesCurrent {
-        inner: FakePlane::new().with_version("s_linear", &v2),
-        record: topos_types::WireCurrentRecord {
-            schema_version: topos_types::WIRE_SCHEMA_VERSION,
-            scope: topos_types::PointerScope {
-                workspace_id: WS.to_owned(),
-                skill_id: "s_linear".to_owned(),
-            },
-            record: topos_types::CurrentRecord {
-                version_id: topos_core::digest::to_hex(&v2.id),
-                generation: 2,
-            },
-        },
-    };
-    let follow = ops::CacheFollow::load(&rig.fs, &rig.layout());
-    let ctx2 = Ctx {
-        progress: crate::progress::silent(),
-        fs: &rig.fs,
-        ids: &rig.ids,
-        clock: &rig.clock,
-        device_id: "d_test".into(),
-        layout: rig.layout(),
-        harness: &rig.harness,
-        triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
-        plane: &serves,
-        follow: &follow,
-        roots: Some(crate::ctx::AgentRoots {
-            home: rig.home.0.clone(),
-            cwd: Some(rig.work.0.clone()),
-        }),
-    };
-    let out = ops::pull(
-        &ctx2,
-        ops::PullScope::One {
-            name: "linear".into(),
-            workspace: None,
-            mode: ops::TargetMode::AcceptPending,
-            store: ops::StoreScope::Here,
-        },
-    )
-    .expect("the accept applies");
-
-    // The configs carry v2 BEFORE the verb returned — and the row reports the per-agent states.
-    let text = std::fs::read_to_string(&cursor).unwrap();
-    assert!(
-        text.contains("https://mcp.example/v2") && !text.contains("https://mcp.example/v1"),
-        "the accept converged the configs: {text}"
-    );
-    let row = &out.data.skills[0];
-    assert_eq!(row.action, topos_types::results::PullAction::FastForwarded);
-    let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
-    assert_eq!(agents, ["cursor", "openclaw"].into(), "{row:?}");
 }
 
 /// ITEM PAIR (keyless targeted converge skips): with the LEDGER deleted, a targeted go-back has
