@@ -86,6 +86,23 @@ fn good_delivery() -> WireDelivery {
                 picked: None,
             },
         }],
+        mcp_servers: vec![topos_types::requests::WireDeliveryMcpServer {
+            skill_id: "s_2".into(),
+            name: "weather".into(),
+            kind: "mcp".into(),
+            display_name: None,
+            revision_id: format!("mcpr_{}", "c".repeat(32)),
+            document: json!({ "name": "io.github.acme/weather" }),
+            pinned: None,
+            revoked: None,
+            updated_at: 2,
+            via: WireVia {
+                channels: vec!["everyone".into()],
+                direct: false,
+                assigned_by: None,
+                picked: None,
+            },
+        }],
         declined: Vec::new(),
         notices: vec![WireNotice {
             id: "n_1".into(),
@@ -120,6 +137,24 @@ fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
     assert!(
         !v.is_valid(&bad),
         "a 63-char skill version_id must be rejected (pattern)"
+    );
+
+    // A connected server's revision id is the CATALOG's own handle, and the pattern says so — a
+    // commit-shaped one names nothing this list could resolve.
+    let mut bad = good.clone();
+    bad["mcp_servers"][0]["revision_id"] = json!("a".repeat(64));
+    assert!(
+        !v.is_valid(&bad),
+        "a 64-hex commit is not a catalog revision id (pattern)"
+    );
+
+    // The SECOND LIST is required: a delivery that omits it says nothing about the servers this
+    // device should have, and a client reading absence as "none" would take every one of them out.
+    let mut listless = good.clone();
+    listless.as_object_mut().unwrap().remove("mcp_servers");
+    assert!(
+        !v.is_valid(&listless),
+        "a delivery omitting mcp_servers must be rejected"
     );
 
     // schema_version is pinned const 1.

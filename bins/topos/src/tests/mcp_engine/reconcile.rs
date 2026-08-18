@@ -90,12 +90,22 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
 
-    // The row landed store-only: lock custody exists, NO skill-dir placement anywhere.
+    // The delivery landed as a RECORD — the document this machine was given, under the revision
+    // it came from. That record IS the sync for the kind: there is nothing content-addressed
+    // behind it, so the lock beside it is the ordinary never-received one and no dir is placed.
+    let record = server_record(&rig.fs, &rig.layout(), "s_linear").expect("the record");
+    assert_eq!(record.revision_id, s.revision_id);
+    assert_eq!(
+        record.document["remotes"][0]["url"],
+        "https://mcp.example/linear",
+        "{record:?}"
+    );
     let sid = crate::id::SkillId::parse("s_linear").unwrap();
     let sp = rig.layout().published(&sid);
     let lock: topos_types::persisted::Lock =
         crate::doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
-    assert_eq!(lock.base_commit, topos_core::digest::to_hex(&v.id));
+    assert_eq!(lock.base_commit, crate::ops::inventory::ZERO_HEX);
+    assert!(lock.files.is_empty(), "a connected server holds no files");
     let map = crate::doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
     assert!(
         map.placements.is_empty(),
@@ -141,7 +151,10 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
         .iter()
         .find(|(id, ..)| id == "s_linear")
         .unwrap_or_else(|| panic!("reported: {reported:?}"));
-    assert_eq!(version, &topos_core::digest::to_hex(&v.id));
+    assert_eq!(
+        version, &s.revision_id,
+        "what this installation holds is the catalog revision, in the wire's own spelling"
+    );
     assert_eq!(harnesses.len(), 2, "{harnesses:?}");
     assert!(
         harnesses.iter().all(|h| h.state == TargetOutcome::Current),
@@ -199,16 +212,10 @@ fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
     std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
     std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global("[bundles]\n");
     let ctx = rig.ctx_at(Some(&proj.0));
 
@@ -248,16 +255,10 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
     let rig = Rig::new("offline");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
-    plane.serves(vec![delivered_mcp("s_a", "alpha", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
@@ -267,7 +268,7 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
     assert!(cursor.exists());
 
     // The network dies AND the entry is lost locally (the file deleted by hand): the next sweep
-    // converges from the STORE's held bytes + the custody — no dial needed.
+    // converges from the RECORD the last delivery wrote — no dial needed.
     std::fs::remove_file(&cursor).unwrap();
     plane.serve_unreachable();
     let out = sweep(&ctx, &plane, &dir);
@@ -299,16 +300,10 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
     let rig = Rig::new("repair");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
-    plane.serves(vec![delivered_mcp("s_a", "alpha", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     // TWO hermetic config files: only one of them is deleted below, so the receipt has something
     // to be wrong about.
     rig.write_global(&format!(
@@ -461,13 +456,10 @@ fn a_channel_drop_removes_the_entries_everywhere() {
     let rig = Rig::new("chdrop");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
     let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
+        servers: vec![mcp_catalog_entry("s_a", "alpha", &s)],
         channels: vec![WireChannelEntry {
             name: "tools".into(),
             mode: "open".into(),
@@ -478,6 +470,7 @@ fn a_channel_drop_removes_the_entries_everywhere() {
                 name: "alpha".into(),
             }],
         }],
+        ..FakeDirectory::default()
     };
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = {{ {SAFE_CHANNEL} }}\n"
@@ -494,7 +487,7 @@ fn a_channel_drop_removes_the_entries_everywhere() {
     // The channel stops carrying the bundle: the next sweep's removal convergence clears every
     // config entry (the channel still exists and expands — to nothing).
     let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
+        servers: vec![mcp_catalog_entry("s_a", "alpha", &s)],
         channels: vec![WireChannelEntry {
             name: "tools".into(),
             mode: "open".into(),
@@ -502,6 +495,7 @@ fn a_channel_drop_removes_the_entries_everywhere() {
             included: true,
             skills: Vec::new(),
         }],
+        ..FakeDirectory::default()
     };
     let out = sweep(&ctx, &plane, &dir);
     assert!(
@@ -550,15 +544,9 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
         format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \"*\"\n"),
     )
     .unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
 
@@ -618,15 +606,9 @@ fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
         format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ version = \"*\", dest = [\".cursor/mcp.json\"] }}\n"),
     )
     .unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
@@ -659,15 +641,9 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     let rig = Rig::new("narrow");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     // BOTH hermetic agents are detected; the row's dest names cursor's file alone, plus a file
     // no harness claims.
     rig.write_global(&format!(
@@ -753,15 +729,9 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
     let rig = Rig::new("dest-none");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", dest = [\"~/.codex/config.yaml\"] }}\n"
     ));
@@ -876,15 +846,9 @@ fn a_drifted_entry_keeps_list_from_claiming_the_bundle_reaches_no_agent() {
     let rig = Rig::new("dest-none-drift");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
@@ -953,24 +917,13 @@ fn one_bundles_dest_advisory_never_swallows_anothers_reaches_no_agent() {
     let rig = Rig::new("dest-dedupe");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let va = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let vb = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/b").as_bytes(),
-    )]);
-    let plane = FakePlane::new()
-        .with_version("s_a", &va)
-        .with_version("s_b", &vb);
-    let dir = FakeDirectory {
-        skills: vec![
-            mcp_catalog_entry("s_a", "alpha", &va),
-            mcp_catalog_entry("s_b", "beta", &vb),
-        ],
-        channels: Vec::new(),
-    };
+    let sa = served_at("https://mcp.example/a");
+    let sb = served_at("https://mcp.example/b");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![
+        mcp_catalog_entry("s_a", "alpha", &sa),
+        mcp_catalog_entry("s_b", "beta", &sb),
+    ]);
     rig.write_global(&format!(
         "[bundles]\n\
          \"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.typo/mcp.json\"] }}\n\
@@ -1013,14 +966,11 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
     std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
     std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/sentry").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_sentry", &v);
-    plane.serves(vec![delivered_mcp("s_sentry", "sentry", &v)]);
+    let s = served_at("https://mcp.example/sentry");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_sentry", "sentry", &s)]);
     let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_sentry", "sentry", &v)],
+        servers: vec![mcp_catalog_entry("s_sentry", "sentry", &s)],
         channels: vec![WireChannelEntry {
             name: "everyone".into(),
             mode: "open".into(),
@@ -1031,6 +981,7 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
                 name: "sentry".into(),
             }],
         }],
+        ..FakeDirectory::default()
     };
     rig.write_global("[bundles]\n");
     let manifest = proj.0.join(crate::manifest::MANIFEST_FILE);
@@ -1147,16 +1098,10 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
     std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
     std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/sentry").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_sentry", &v);
-    plane.serves(vec![delivered_mcp("s_sentry", "sentry", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_sentry", "sentry", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/sentry");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_sentry", "sentry", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_sentry", "sentry", &s)]);
     rig.write_global("[bundles]\n");
     let row = |body: &str| {
         std::fs::write(
