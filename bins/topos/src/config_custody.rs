@@ -100,7 +100,9 @@ pub(crate) struct EntryPlacement {
     /// the precondition for deleting the file when the last entry leaves.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owns_file: bool,
-    /// The bundle version whose `server.json` the entry was rendered from (provenance).
+    /// Where the `server.json` this entry was rendered from came from (provenance): the catalog
+    /// revision (`mcpr_…`) for a workspace server, empty for a local row, whose folder IS the
+    /// provenance. It is read back for nothing but the record — an opaque string, never parsed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version_id: String,
 }

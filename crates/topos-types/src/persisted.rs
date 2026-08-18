@@ -50,6 +50,39 @@ pub struct SyncState {
     pub draft_observed: Option<String>,
 }
 
+/// `skills/<id>/server.json` — a CONNECTED SERVER's delivered state, and the whole of it: the
+/// document the workspace last delivered, the catalog revision it came from, and the two facts a
+/// receipt discloses about that revision.
+///
+/// It stands where [`Lock`] stands for a file bundle, and it is a different document because a
+/// connected server is made of something else. There is no version to fetch, no byte-exact file
+/// list to consent to, and no store to render from: the document IS the delivery. Holding it here
+/// is what keeps the config converge OFFLINE — a machine with no network still heals every agent's
+/// entry from the last document it was given.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct McpServerRecord {
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    pub schema_version: u32,
+    /// The bundle id this record belongs to.
+    pub skill_id: String,
+    /// The catalog name at the last delivery.
+    pub name: String,
+    /// The catalog revision the document came from (`mcpr_` + 32 lowercase hex) — the custody
+    /// provenance every placed entry records, and what this machine reports back as what it holds.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^mcpr_[0-9a-f]{32}$")))]
+    pub revision_id: String,
+    /// The `server.json` verbatim, in the official registry format.
+    pub document: serde_json::Value,
+    /// This connection follows ONE revision rather than the server's current.
+    #[serde(default)]
+    pub pinned: bool,
+    /// The revision was pulled back after publication. It is still what this machine holds — a pin
+    /// is a promise — and every receipt about the bundle says so.
+    #[serde(default)]
+    pub revoked: bool,
+}
+
 /// `skills/<id>/lock.json` — the pinned skill identity + the byte-exact file list. **Pinned** (the
 /// per-file `(path, mode, sha256, size)` tuple and the digest are frozen; the JSON spelling here is
 /// the natural object form).

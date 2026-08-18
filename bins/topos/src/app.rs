@@ -655,7 +655,14 @@ fn run_command(
                 }
                 // The one door applies immediately with an undo-led receipt; `--yes` stays parsed
                 // and changes nothing here (the flag's own help says so).
-                let result = ops::add_mcp(&ctx, &source, global, &selection);
+                let result = ops::add_mcp(
+                    &ctx,
+                    &connect_session_transports,
+                    &source,
+                    workspace.as_deref(),
+                    global,
+                    &selection,
+                );
                 // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
                 // other adopt receipt (the same trigger-arming moment).
                 let result = result.map(|mut added| {

@@ -391,8 +391,48 @@ pub struct WireSkillIndexEntry {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct WireSkillIndex {
-    /// The workspace's skills (possibly empty).
+    /// The workspace's file bundles (possibly empty).
     pub skills: Vec<WireSkillIndexEntry>,
+    /// The workspace's connected MCP servers (possibly empty), each with the document it resolves
+    /// to. They are a SEPARATE list because they are made of something else: a file bundle names a
+    /// version to fetch, a connected server carries its document, and there is no byte lane behind
+    /// one to fetch from.
+    pub mcp_servers: Vec<WireMcpIndexEntry>,
+}
+
+/// One CONNECTED MCP SERVER of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns
+/// it — the same identity a delivered one carries, plus the catalog lifecycle `status` every index
+/// row states.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireMcpIndexEntry {
+    /// The bundle id (the `<skill>` path segment).
+    pub skill_id: String,
+    /// The catalog's user-facing name.
+    pub name: String,
+    /// The catalog's bundle kind — `"mcp"` for every row of this list.
+    pub kind: String,
+    /// The catalog lifecycle status — `"active"` / `"archived"`. An OPEN string, deliberately.
+    pub status: String,
+    /// The unsigned, advisory display name (may be absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The catalog revision this connection resolves to (see [`WireDeliveryMcpServer::revision_id`]).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^mcpr_[0-9a-f]{32}$")))]
+    pub revision_id: String,
+    /// The `server.json` verbatim, in the official registry format.
+    pub document: serde_json::Value,
+    /// This connection follows ONE revision rather than the server's current. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    /// The resolved revision was pulled back after publication. Omitted while it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked: Option<bool>,
+    /// When the resolved revision was published (epoch milliseconds).
+    pub updated_at: i64,
 }
 
 /// Why THIS device is entitled to a delivered skill — the attribution the client's narration reads. A
@@ -457,6 +497,51 @@ pub struct WireDeliverySkill {
     pub via: WireVia,
 }
 
+/// One CONNECTED MCP SERVER this device should have — **the document itself**, not a pointer to
+/// bytes.
+///
+/// A `kind: "mcp"` bundle names a row in the server catalog: there is nothing content-addressed to
+/// fetch and no second round trip to make, so the document rides the delivery it belongs to and the
+/// machine caches it beside the revision it came from. `revision_id` is what the device reports
+/// back as the thing it holds, where a file bundle reports a commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireDeliveryMcpServer {
+    /// The bundle id (the `<skill>` path segment).
+    pub skill_id: String,
+    /// The catalog's user-facing name.
+    pub name: String,
+    /// The catalog's bundle kind — `"mcp"` for every row of this list. An OPEN string on the wire
+    /// and a CLOSED vocabulary at the server that mints it; a client that does not know the kind a
+    /// row names refuses that row rather than placing it as something else.
+    pub kind: String,
+    /// The unsigned, advisory display name; absent ⇒ show `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The catalog revision this connection resolves to — a pin, else the server's current. The
+    /// catalog's own version handle (`mcpr_` + 32 lowercase hex), minted by the server that holds
+    /// the revision; a client treats it as an opaque string and reports it back verbatim.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^mcpr_[0-9a-f]{32}$")))]
+    pub revision_id: String,
+    /// The `server.json` verbatim, in the official registry format.
+    pub document: serde_json::Value,
+    /// This connection follows ONE revision rather than the server's current. OMITTED when it does
+    /// not — the wire spells absence by absence, never by `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    /// The resolved revision was pulled back after it was published. It is STILL SERVED — a pin is
+    /// a promise — and the client discloses it. Omitted while the revision stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked: Option<bool>,
+    /// When the resolved revision was published (epoch milliseconds).
+    pub updated_at: i64,
+    /// Why this device is entitled to the server (channels ∪ direct).
+    pub via: WireVia,
+}
+
 /// One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without
 /// a schema break (today's values include `"verdict"` and `"proposal_closed"`); every other field is
 /// present only when the notice names it. The silent auto-update hook fetches these without acking; an
@@ -514,8 +599,12 @@ pub struct WireDelivery {
     pub schema_version: u32,
     /// The workspace this delivery is scoped to (echoed from the path).
     pub workspace_id: String,
-    /// The entitled skills — everything this device should have (a possibly-empty list).
+    /// The entitled file bundles — everything this device should have (a possibly-empty list).
     pub skills: Vec<WireDeliverySkill>,
+    /// The entitled MCP servers, documents inline (a possibly-empty list). ONE feed, TWO lists:
+    /// a bundle's kind decides only what an entitled row is MADE OF, and a connected server is
+    /// made of its document where a file bundle is made of a version to fetch.
+    pub mcp_servers: Vec<WireDeliveryMcpServer>,
     /// The caller's DECLINED bundles in this workspace (declined on the web — the everywhere
     /// stance). A machine's own manifest row may still deliver one; the client reads this list
     /// to disclose that honestly ("declined on the web, delivered here by your manifest").
@@ -547,6 +636,47 @@ pub struct WireDeclined {
     pub name: String,
 }
 
+/// `POST /v1/workspaces/{ws}/mcp-servers` body — SUBMIT a server to this workspace. Exactly one of
+/// the two fields is set, and the difference between them is the difference between two acts: a
+/// `registry_name` the catalog already holds is a CONNECTION any member may make, and a
+/// `document_url` is a server this workspace writes down as its OWN, which is an owner's.
+///
+/// The client sends the spelling a person typed and nothing else. Reading the document, deciding
+/// whether it may be shared, and naming the bundle all happen at the server — one gate, one place,
+/// one answer, whichever surface asked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct McpAddRequest {
+    /// Always `1` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    pub schema_version: u32,
+    /// The official registry identity of the server (`io.github.acme/weather`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_name: Option<String>,
+    /// An https link to a `server.json` document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_url: Option<String>,
+}
+
+/// The `POST /v1/workspaces/{ws}/mcp-servers` success payload — what the workspace now shares.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct McpAddedData {
+    /// The bundle id the connection is filed under.
+    pub skill_id: String,
+    /// The bundle name the workspace shares it as — the name every machine adds it by.
+    pub name: String,
+    /// The workspace wrote a server of its OWN down for this, rather than connecting one the
+    /// catalog already held.
+    pub created: bool,
+}
+
 /// One applied-state row a device reports: the skill and the version it currently holds after its
 /// reconcile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -557,8 +687,14 @@ pub struct WireDeclined {
 pub struct WireAppliedSkill {
     /// The skill id (the `<skill>` path segment).
     pub skill_id: String,
-    /// The version this device holds (64-char lowercase hex).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    /// The version this device holds: a file bundle's commit (64-char lowercase hex), or a
+    /// connected server's catalog revision (`mcpr_` + 32 lowercase hex). ONE field carries both
+    /// because a report is one snapshot of what a machine holds, and what a bundle's version IS
+    /// belongs to its kind.
+    #[cfg_attr(
+        feature = "contract-derives",
+        schemars(extend("pattern" = "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"))
+    )]
     pub version_id: String,
     /// Per-harness applied states for a config-placed (`mcp`) bundle: which detected agents hold
     /// the entry and how (`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` /
@@ -1356,6 +1492,23 @@ mod tests {
                     picked: None,
                 },
             }],
+            mcp_servers: vec![WireDeliveryMcpServer {
+                skill_id: "s_weather".to_owned(),
+                name: "weather".to_owned(),
+                kind: "mcp".to_owned(),
+                display_name: None,
+                revision_id: format!("mcpr_{}", "c".repeat(32)),
+                document: serde_json::json!({ "name": "io.github.acme/weather" }),
+                pinned: Some(true),
+                revoked: None,
+                updated_at: 1_700_000_000_001,
+                via: WireVia {
+                    channels: Vec::new(),
+                    direct: true,
+                    assigned_by: None,
+                    picked: Some(true),
+                },
+            }],
             declined: vec![WireDeclined {
                 skill_id: "s_old".to_owned(),
                 name: "old-skill".to_owned(),
@@ -1390,6 +1543,13 @@ mod tests {
         // The declined list rides id + name pairs.
         assert_eq!(v["declined"][0]["skill_id"], "s_old");
         assert_eq!(v["declined"][0]["name"], "old-skill");
+        // The SECOND list: a connected server carries its document, not a version to fetch, and
+        // its two flags spell absence by absence.
+        assert_eq!(v["mcp_servers"][0]["skill_id"], "s_weather");
+        assert_eq!(v["mcp_servers"][0]["document"]["name"], "io.github.acme/weather");
+        assert_eq!(v["mcp_servers"][0]["pinned"], true);
+        assert!(v["mcp_servers"][0].get("revoked").is_none());
+        assert!(v["mcp_servers"][0].get("display_name").is_none());
         assert_eq!(v["notices"][0]["kind"], "verdict");
         assert_eq!(v["notices"][0]["reason"], "looks good");
         // Absent optional notice fields omit (skip_serializing_if) — never serialized as null.
@@ -1401,6 +1561,9 @@ mod tests {
         let back: WireDelivery = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills.len(), 1);
         assert_eq!(back.skills[0].via.channels, vec!["everyone".to_owned()]);
+        assert_eq!(back.mcp_servers[0].name, "weather");
+        assert_eq!(back.mcp_servers[0].pinned, Some(true));
+        assert_eq!(back.mcp_servers[0].revoked, None);
         assert_eq!(back.proposals_awaiting, 2);
         // A PENDING delivery (no data flows over a pending session) still round-trips — empty
         // sets, a zero gauge, and the pending status the client's sweep skips on; the absent
@@ -1409,6 +1572,7 @@ mod tests {
             "schema_version": 1,
             "workspace_id": "w_demo",
             "skills": [],
+            "mcp_servers": [],
             "notices": [],
             "proposals_awaiting": 0,
             "staleness_window_ms": 604800000,
@@ -1416,6 +1580,7 @@ mod tests {
         }))
         .unwrap();
         assert!(pending.skills.is_empty() && pending.notices.is_empty());
+        assert!(pending.mcp_servers.is_empty());
         assert!(pending.declined.is_empty());
         assert_eq!(pending.session_status, "pending");
     }

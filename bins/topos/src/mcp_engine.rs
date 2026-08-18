@@ -87,10 +87,12 @@ pub(crate) struct DemandedBundle {
     /// The workspace address slug for a workspace bundle (`None` = a local row) — the key-mint
     /// namespace.
     pub workspace_slug: Option<String>,
-    /// The stored version the `server.json` bytes came from (custody provenance).
+    /// Where the `server.json` bytes came from, recorded on every entry this demand places
+    /// (custody provenance): the catalog revision (`mcpr_…`) for a workspace server, empty for a
+    /// local row, whose folder IS the provenance.
     pub version_id: String,
-    /// The bundle's `server.json` bytes, read from the scope store's current tree (or the local
-    /// row's dir).
+    /// The bundle's `server.json` bytes — the record this scope holds for a workspace server, or
+    /// the local row's own file.
     pub server_json: Vec<u8>,
     /// The harness narrowing the caller resolved — the slugs whose config files the row's `dest`
     /// names, or (for a targeted verb) the harnesses whose recorded rows prove the bundle already
@@ -251,9 +253,9 @@ pub(crate) struct ConvergeOutcome {
 // The refusal a gated document earns.
 // =================================================================================================
 
-/// The ONE refusal line a gated server document earns. `{code}` is the GATE's own code (WHY the
-/// document was refused), and the remedy names the audience that can actually act: a local folder
-/// row is the reader's own file to correct; a workspace bundle is an owner's.
+/// The ONE refusal line an unplaceable server document earns. The remedy names the audience that
+/// can actually act: a local folder row is the reader's own file to correct; a workspace bundle is
+/// an owner's.
 fn gate_refusal(code: &str, name: &str, reason: &str, from_workspace: bool) -> Message {
     let remedy = if from_workspace {
         "ask a workspace owner to correct it, then run 'topos update'"
@@ -341,33 +343,20 @@ pub(crate) fn converge(
     // [`BundleStates::first_placement`]).
     let placed_before: HashSet<String> = custody.placed_bundles().into_iter().collect();
 
-    // Parse every demand once. The FULL server-document gate (`mcp_validate`) re-runs on the
-    // demand bytes here, fail-closed, BEFORE the placement parse: a local row's `server.json` is
-    // re-read from disk every converge and can have been edited since it was adopted (a smuggled
-    // credential, an http endpoint, a template), and the converge boundary trusts no earlier
-    // check — content-addressed workspace bytes were gated at publish, but the re-check is one
-    // call. A refusal HOLDS the bundle (its standing entries must not read as undemanded,
-    // nothing new is placed) and the warning names the typed refusal code.
+    // Parse every demand once — the PLACEMENT parse ([`crate::mcp_render`]), which is what says
+    // whether these bytes can become an entry at all and which fails closed on the shapes a
+    // placed entry must never carry (a secret / templated / value-less header). Nothing here
+    // re-decides what may be SHARED: a workspace's servers are validated where they are written
+    // down, and a local row's document is the person's own file. A parse failure HOLDS the bundle
+    // (its standing entries must not read as undemanded, nothing new is placed).
     let mut parsed: Vec<(usize, ServerDoc)> = Vec::new();
     let mut failed: BTreeMap<usize, String> = BTreeMap::new();
     for (i, d) in demands.iter().enumerate() {
-        // ONE code per line. The gate's own code used to be pasted in front of its sentence and
-        // then wrapped in this line's code, so a person read two machine words before the first
-        // English one (`MCP_UNPLACEABLE weather: MCP_INSECURE_URL: the endpoint …`). The gate's
-        // code is the one that survives, because it is the one an agent can act on — WHY the
-        // document was refused, not merely that something was. A failure with no typed code of
-        // its own (an unparseable document) keeps the generic one.
-        let gated = crate::mcp_validate::validate_server_json(&d.server_json)
-            .map_err(|r| (r.code.as_str().to_owned(), r.message))
-            .and_then(|_| {
-                crate::mcp_render::parse_server_json(&d.server_json)
-                    .map_err(|m| ("MCP_UNPLACEABLE".to_owned(), m))
-            });
-        match gated {
+        match crate::mcp_render::parse_server_json(&d.server_json) {
             Ok(p) => parsed.push((i, p)),
-            Err((code, reason)) => {
+            Err(reason) => {
                 out.warnings.push(gate_refusal(
-                    &code,
+                    "MCP_UNPLACEABLE",
                     &d.name,
                     &reason,
                     d.workspace_slug.is_some(),
@@ -2038,7 +2027,7 @@ pub(crate) fn converge_bundle_now(
     let Some(roots) = ctx.roots.clone() else {
         return (Vec::new(), Vec::new());
     };
-    let Ok(Some((version_id, server_json))) = stored_server_json(ctx, sid) else {
+    let Ok(Some(recorded)) = recorded_server(ctx, sid) else {
         return (Vec::new(), Vec::new());
     };
     // An ADVISORY (unlocked) read: it answers whether an ownership record exists to reuse, and
@@ -2104,8 +2093,8 @@ pub(crate) fn converge_bundle_now(
         bundle_id: sid.as_str().to_owned(),
         name: name.to_owned(),
         workspace_slug: None,
-        version_id,
-        server_json,
+        version_id: recorded.revision_id,
+        server_json: recorded.document,
         plan: fresh,
     };
     let outcome = converge(
@@ -2241,36 +2230,157 @@ pub(crate) fn recorded_bundles(io: &ScopeIo<'_>) -> Vec<String> {
 }
 
 // =================================================================================================
-// The store-read helper the reconcile's demand sites share.
+// A connected server's RECORD — the delivered-state document every demand site reads.
 // =================================================================================================
 
-/// Read a stored MCP bundle's `server.json` from its scope store's CURRENT tree (the lock's
-/// pinned version, rendered verified). `Ok(None)` when the store holds no received version yet.
-pub(crate) fn stored_server_json(
+/// One connected server's record as the converge wants it: the identity, the document as BYTES
+/// (one serialization, done here, so every reader renders the same run of characters), and the
+/// two facts a receipt discloses about the revision it came from.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordedServer {
+    pub revision_id: String,
+    pub document: Vec<u8>,
+    pub pinned: bool,
+    pub revoked: bool,
+}
+
+/// Read a connected server's record from THIS scope's store (`skills/<id>/server.json`) — the
+/// document the last delivery left there. `Ok(None)` when this scope holds no record for it yet.
+///
+/// This is the ONE demand source for a workspace server: the sweep writes the record from a fresh
+/// delivery and then reads it back here, and an offline run reads exactly the same file. There is
+/// no second path, so a machine with no network converges from what it was last given rather than
+/// from nothing.
+pub(crate) fn recorded_server(
     ctx: &crate::ctx::Ctx<'_>,
     sid: &crate::id::SkillId,
-) -> Result<Option<(String, Vec<u8>)>, ClientError> {
+) -> Result<Option<RecordedServer>, ClientError> {
     let sp = ctx.layout.published(sid);
-    let Some(lock) = crate::doc::read_doc::<topos_types::persisted::Lock>(ctx.fs, &sp.lock)? else {
+    let Some(rec) =
+        crate::doc::read_doc::<topos_types::persisted::McpServerRecord>(ctx.fs, &sp.server)?
+    else {
         return Ok(None);
     };
-    if lock.base_commit.is_empty() || lock.base_commit.bytes().all(|b| b == b'0') {
-        return Ok(None);
+    let document = serde_json::to_vec(&rec.document).map_err(|e| {
+        ClientError::Corrupt(format!(
+            "{}: its recorded server document could not be read back ({e})",
+            rec.name
+        ))
+    })?;
+    Ok(Some(RecordedServer {
+        revision_id: rec.revision_id,
+        document,
+        pinned: rec.pinned,
+        revoked: rec.revoked,
+    }))
+}
+
+/// Write a connected server's record into this scope's store, building the record directory when
+/// this scope meets the bundle for the first time. The whole delivery for the kind: there is no
+/// version to fetch and nothing to materialize, so this one write IS the sync.
+///
+/// A NEW record is the ordinary never-received baseline — `lock.json` naming the bundle and no
+/// files, `sync.json` at zero, an empty `map.json` — plus [`SkillPaths::server`]. Those three say
+/// exactly the true thing about a connected server: it holds no files, so it has no file list to
+/// pin, no bytes to have received, and no folder to place. There is no object store either, which
+/// is why every file verb refuses the kind rather than opening one.
+///
+/// [`SkillPaths::server`]: crate::sidecar::SkillPaths::server
+///
+/// # Errors
+/// The record could not be written, or the document is not JSON.
+pub(crate) fn record_server(
+    ctx: &crate::ctx::Ctx<'_>,
+    sid: &crate::id::SkillId,
+    name: &str,
+    revision_id: &str,
+    document: &[u8],
+    pinned: bool,
+    revoked: bool,
+) -> Result<(), ClientError> {
+    let document: serde_json::Value = serde_json::from_slice(document).map_err(|e| {
+        ClientError::Corrupt(format!("{name}: its server document is not JSON ({e})"))
+    })?;
+    let record = topos_types::persisted::McpServerRecord {
+        schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+        skill_id: sid.as_str().to_owned(),
+        name: name.to_owned(),
+        revision_id: revision_id.to_owned(),
+        document,
+        pinned,
+        revoked,
+    };
+    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    if ctx.fs.exists(&ctx.layout.skill_dir(sid)) {
+        let sp = ctx.layout.published(sid);
+        // A catalog rename travels: the lock is what every by-name resolution reads, so a record
+        // whose server was renamed answers to the new name from the next delivery on.
+        if let Some(mut lock) = crate::doc::read_doc::<topos_types::persisted::Lock>(ctx.fs, &sp.lock)?
+            && lock.name != name
+        {
+            lock.name = name.to_owned();
+            crate::doc::write_doc(ctx.fs, &sp.lock, &lock)?;
+        }
+        return crate::doc::write_doc(ctx.fs, &sp.server, &record);
     }
-    let commit = crate::ops::parse_hex32(&lock.base_commit)?;
-    let digest = crate::ops::parse_hex32(&lock.bundle_digest)?;
-    let store = topos_gitstore::Store::open(&sp.store)?;
-    let bundle = store.render_verified(commit, digest)?;
-    let server = bundle
-        .files
-        .iter()
-        .find(|f| f.path == "server.json")
-        .map(|f| f.bytes.clone());
-    match server {
-        Some(bytes) => Ok(Some((lock.base_commit, bytes))),
-        None => Err(ClientError::Corrupt(format!(
-            "{}: an mcp bundle without a server.json at its root",
-            lock.name
-        ))),
+    let (staging_base, sp) = ctx.layout.staging(sid);
+    if ctx.fs.exists(&staging_base) {
+        ctx.fs.remove_dir_all(&staging_base)?;
     }
+    ctx.fs.create_dir_all(&staging_base)?;
+    crate::doc::write_doc(
+        ctx.fs,
+        &sp.sync,
+        &topos_types::persisted::SyncState {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            observed: 0,
+            observed_version_id: crate::ops::inventory::ZERO_HEX.to_owned(),
+            applied: 0,
+            base_commit: crate::ops::inventory::ZERO_HEX.to_owned(),
+            work_hash: crate::ops::inventory::ZERO_HEX.to_owned(),
+            held: false,
+            draft_observed: None,
+        },
+    )?;
+    crate::doc::write_map(
+        ctx.fs,
+        &sp.map,
+        &topos_types::persisted::PlacementMap {
+            schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+            placements: Vec::new(),
+            applied_commit: crate::ops::inventory::ZERO_HEX.to_owned(),
+            materialized_sha: crate::ops::inventory::ZERO_HEX.to_owned(),
+            placement_state: Vec::new(),
+            harness: Some(ctx.harness.id()),
+            harness_slug: Some(ctx.harness.id().slug().to_owned()),
+        },
+    )?;
+    crate::doc::write_doc(ctx.fs, &sp.server, &record)?;
+    // lock LAST — the commit marker (recovery keeps a record directory only when it is present).
+    crate::doc::write_doc(
+        ctx.fs,
+        &sp.lock,
+        &topos_types::persisted::Lock {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            skill_id: sid.as_str().to_owned(),
+            name: name.to_owned(),
+            base_commit: crate::ops::inventory::ZERO_HEX.to_owned(),
+            bundle_digest: crate::ops::inventory::ZERO_HEX.to_owned(),
+            files: Vec::new(),
+        },
+    )?;
+    match ctx
+        .fs
+        .rename_dir_noreplace(&staging_base, &ctx.layout.skill_dir(sid))
+    {
+        Ok(()) => {}
+        // Raced another run laying the same record — keep theirs, then write our document over it.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            ctx.fs.remove_dir_all(&staging_base)?;
+            return crate::doc::write_doc(ctx.fs, &ctx.layout.published(sid).server, &record);
+        }
+        Err(e) => return Err(ClientError::Io(format!("server record {sid}: {e}"))),
+    }
+    ctx.fs.fsync_dir(&ctx.layout.skills_dir())?;
+    Ok(())
 }

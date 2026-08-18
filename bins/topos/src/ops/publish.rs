@@ -362,16 +362,10 @@ pub(crate) fn publish_describe(
             got: pin.clone(),
         });
     }
-    // The BUNDLE KIND, and — for an mcp one — the gate. The describe refuses exactly where the
-    // apply would, so a document carrying a credential — or a server too old to record the kind —
-    // is named here rather than after `--yes`.
+    // The BUNDLE KIND rides the wire; what a workspace will ACCEPT for it is the workspace's
+    // ruling, and it answers the describe and the apply identically. A connected server holds no
+    // files at all, so a publish naming one is refused there — one gate, where the bundle lives.
     let bundle_kind = crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill();
-    if bundle_kind.is_mcp() {
-        gate_mcp_bundle(&scanned, &skill_name)?;
-        crate::compat::ensure_server_records_mcp(
-            lane.transports.contribute.protocol_card().as_ref(),
-        )?;
-    }
 
     // A skill has a `current` to be identical TO when it is FOLLOWED (the bytes this client holds are
     // `lock.bundle_digest`) OR it has ever been published from here (`sync.observed != GENESIS` — a
@@ -676,33 +670,6 @@ fn from_disclosure(
         Some(p) => (Some(p.spelling.display.clone()), p.others_edited.clone()),
         None => (cross_scope, Vec::new()),
     }
-}
-
-/// REFUSAL-FIRST: an mcp bundle's WHOLE candidate goes through the same gate the web tier runs
-/// ([`crate::mcp_validate::validate_candidate_files`]) BEFORE the op is built — the exact allowed
-/// file set, a credential scan over every file's bytes, and the full server-document rules — so a
-/// stray sibling or a document carrying a credential never reaches the local store, the op WAL, or
-/// the wire. A publish that would ship one is refused with the shared typed code, and nothing at
-/// all has happened.
-///
-/// # Errors
-/// [`ClientError::InvalidArgument`] when the folder holds no root `server.json` (an mcp bundle IS
-/// its document); [`ClientError::McpRefused`] with the gate's own code otherwise.
-fn gate_mcp_bundle(scanned: &scan::ScannedBundle, skill_name: &str) -> Result<(), ClientError> {
-    if !scanned.files.iter().any(|f| f.path == "server.json") {
-        return Err(ClientError::InvalidArgument(format!(
-            "'{skill_name}' is recorded as an MCP bundle but holds no server.json at its root — \
-             an MCP bundle IS its document"
-        )));
-    }
-    let files: Vec<(&str, &[u8])> = scanned
-        .files
-        .iter()
-        .map(|f| (f.path.as_str(), f.bytes.as_slice()))
-        .collect();
-    crate::mcp_validate::validate_candidate_files(&files)
-        .map_err(|r| ClientError::mcp_refused_about(r, skill_name))?;
-    Ok(())
 }
 
 /// The server's FRESH per-skill protection for the describe's gate, read over the session lane's delivery
@@ -1025,17 +992,9 @@ fn enrolled_publish(
         });
     }
 
-    // The BUNDLE KIND, and — for an mcp one — the GATE, BEFORE the WAL is even consulted: the
-    // shared refusal rules run against the scanned draft, so a `server.json` carrying a credential
-    // never reaches the local store, the op record, or the wire. Refusal-first means the refusal
-    // IS the whole outcome; nothing has happened when it fires. The server-version preflight sits
-    // beside it: a server that predates MCP kinds would silently record a SKILL, so it refuses
-    // typed here rather than mis-kind on the wire.
+    // The BUNDLE KIND rides the wire, and the workspace rules on it (see the describe's twin
+    // above).
     let bundle_kind = crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill();
-    if bundle_kind.is_mcp() {
-        gate_mcp_bundle(&scanned, &lock.name)?;
-        crate::compat::ensure_server_records_mcp(transport.protocol_card().as_ref())?;
-    }
 
     // Whether this machine FOLLOWS the bundle — read BEFORE the write, like the describe's, and
     // carried to the receipt as the undo gate: `topos revert` resolves only a followed skill, so a

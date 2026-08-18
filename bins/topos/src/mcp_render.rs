@@ -51,6 +51,14 @@ use topos_harness::registry::McpBridge;
 /// same document answers every agent, and [`select`] is where they differ.
 #[derive(Debug, Clone)]
 pub(crate) struct ServerDoc {
+    /// The server's own name — the reverse-DNS identity the document states. Empty when it states
+    /// none; nothing here refuses on it, because what a MACHINE can set up is the only question
+    /// this parse answers.
+    pub name: String,
+    /// The one-line description the document states.
+    pub description: String,
+    /// The version string the document states.
+    pub version: String,
     /// The FIRST `streamable-http` remote with a url, and its literal headers.
     pub remote: Option<RemoteEndpoint>,
     /// Every package the document declares, in its own order.
@@ -207,7 +215,16 @@ pub(crate) fn parse_server_json(bytes: &[u8]) -> Result<ServerDoc, String> {
         Some("manual") => AuthHint::Manual,
         _ => AuthHint::Unknown,
     };
+    let text = |key: &str| {
+        root.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
     Ok(ServerDoc {
+        name: text("name"),
+        description: text("description"),
+        version: text("version"),
         remote,
         packages,
         auth,

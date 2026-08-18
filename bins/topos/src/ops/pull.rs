@@ -23,7 +23,6 @@ use std::path::Path;
 use topos_types::persisted::SyncState;
 use topos_types::results::{ExchangeFault, PullData, ResetData};
 
-use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::id::SkillId;
@@ -653,8 +652,10 @@ pub(crate) fn reset_to_never_received(
 
 /// The applied report, plus what the single row per bundle could not say.
 pub(super) struct AppliedSnapshot {
-    /// The wire rows — one `(skill_id, applied commit)` per held bundle.
-    pub applied: Vec<(String, [u8; 32])>,
+    /// The wire rows — one `(skill_id, applied version)` per held bundle, each in the wire's own
+    /// spelling: a file bundle's commit as 64-char hex, a connected server's catalog revision
+    /// verbatim.
+    pub applied: Vec<(String, String)>,
     /// Every store holding a bundle at a version OTHER than the workspace's current — the
     /// cross-scope split the ONE reported row cannot carry, as DATA: the caller decides which of
     /// them a person is told about, and phrases it.
@@ -701,7 +702,7 @@ pub(super) fn applied_snapshot(
     ctx: &Ctx<'_>,
     delivered: &HashSet<&str>,
     project_stores: &[crate::sidecar::Layout],
-    current: &std::collections::HashMap<&str, [u8; 32]>,
+    current: &std::collections::HashMap<&str, String>,
 ) -> Result<AppliedSnapshot, ClientError> {
     // The stated order: the person store, then the project stores by path. `recall_and_record`
     // already yields a path-sorted set; sorting here makes the guarantee this function's own.
@@ -717,41 +718,43 @@ pub(super) fn applied_snapshot(
         // Every store that genuinely holds it, in the stated order — the first is the reported
         // row; EVERY one of them (the first included) is measured against the workspace's current,
         // because the store that answers the wire is just as able to be the stale one.
-        let mut holdings: Vec<(Option<std::path::PathBuf>, [u8; 32], bool)> = Vec::new();
+        let mut holdings: Vec<(Option<std::path::PathBuf>, String, bool)> = Vec::new();
         for layout in std::iter::once(&ctx.layout).chain(projects.iter().copied()) {
             let sp = layout.published(&sid);
-            let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
-                continue;
-            };
-            // A placement the sweep removed (or never laid) is not held, whatever the doc says.
-            // A CONFIG-PLACED (mcp) record legitimately has NO placement dirs — its applied
-            // version is the store's held current, reported whenever the delivered set names it
-            // (the per-agent config states ride the same report row). That no-dirs claim is
-            // gated on the DURABLE kind marker: a skill whose `dest` narrowing matched no
-            // detected agent also records an empty map, and reporting IT as held would tell the
-            // fleet page this device serves bytes it placed nowhere.
-            if map.placements.is_empty() {
-                let marker = crate::bundle_kind::kind_marker(ctx.fs, layout, &sid);
-                if marker.as_deref().and_then(BundleKind::parse) != Some(BundleKind::Mcp) {
-                    continue;
+            // WHAT THIS STORE HOLDS, per kind. A connected server holds a catalog revision and
+            // that is the whole of it: no placement dirs, no commit, nothing to scan — the record
+            // says which revision, and the per-agent config states ride the same report row.
+            let held = match crate::doc::read_doc::<topos_types::persisted::McpServerRecord>(
+                ctx.fs, &sp.server,
+            )? {
+                Some(record) => record.revision_id,
+                None => {
+                    let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
+                        continue;
+                    };
+                    // A placement the sweep removed (or never laid) is not held, whatever the doc
+                    // says.
+                    if map.placements.is_empty()
+                        || !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p)))
+                    {
+                        continue;
+                    }
+                    match super::parse_hex32(&map.applied_commit) {
+                        Ok(commit) if commit != [0u8; 32] => map.applied_commit.clone(),
+                        _ => continue,
+                    }
                 }
-            } else if !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
-                continue;
-            }
-            if let Ok(commit) = super::parse_hex32(&map.applied_commit)
-                && commit != [0u8; 32]
-            {
-                // Behind = not at the served current. A HELD store (a deliberate local go-back)
-                // is exempt: no update command would move it, so it is a choice, not staleness.
-                let behind = current.get(skill_id).is_some_and(|c| *c != commit)
-                    && !doc::read_doc::<SyncState>(ctx.fs, &sp.sync)?
-                        .is_some_and(|s: SyncState| s.held);
-                holdings.push((
-                    layout.project_root().map(std::path::Path::to_path_buf),
-                    commit,
-                    behind,
-                ));
-            }
+            };
+            // Behind = not at the served current. A HELD store (a deliberate local go-back)
+            // is exempt: no update command would move it, so it is a choice, not staleness.
+            let behind = current.get(skill_id).is_some_and(|c| *c != held)
+                && !doc::read_doc::<SyncState>(ctx.fs, &sp.sync)?
+                    .is_some_and(|s: SyncState| s.held);
+            holdings.push((
+                layout.project_root().map(std::path::Path::to_path_buf),
+                held,
+                behind,
+            ));
         }
         let Some((_, first_commit, _)) = holdings.first().cloned() else {
             continue;

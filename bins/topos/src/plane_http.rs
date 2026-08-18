@@ -374,8 +374,29 @@ impl crate::plane::DeliverySource for UreqPlane {
                 picked: ds.via.picked.unwrap_or(false),
             });
         }
+        let mut mcp_servers = Vec::with_capacity(wire.mcp_servers.len());
+        for ds in wire.mcp_servers {
+            // The document becomes BYTES here and stays bytes: one serialization, at the boundary,
+            // so the record on disk, the parse, and every rendered entry read the same run of
+            // characters. (`serde_json::Value` sorts its object keys, so the bytes are stable
+            // across runs and machines.)
+            let document = serde_json::to_vec(&ds.document)
+                .map_err(|e| PlaneError::Malformed(format!("server document: {e}")))?;
+            mcp_servers.push(crate::plane::DeliveryMcpServer {
+                skill_id: ds.skill_id,
+                name: ds.name,
+                revision_id: ds.revision_id,
+                document,
+                pinned: ds.pinned.unwrap_or(false),
+                revoked: ds.revoked.unwrap_or(false),
+                via_channels: ds.via.channels,
+                assigned_by: ds.via.assigned_by,
+                picked: ds.via.picked.unwrap_or(false),
+            });
+        }
         Ok(crate::plane::DeliverySnapshot {
             skills,
+            mcp_servers,
             proposals_awaiting: wire.proposals_awaiting,
             notices: wire.notices,
             staleness_window_ms: wire.staleness_window_ms,
@@ -436,7 +457,7 @@ impl crate::plane::DeliverySource for UreqPlane {
                 .iter()
                 .map(|row| topos_types::requests::WireAppliedSkill {
                     skill_id: row.skill_id.clone(),
-                    version_id: topos_core::digest::to_hex(&row.version_id),
+                    version_id: row.version_id.clone(),
                     harnesses: row
                         .harnesses
                         .iter()
@@ -1328,11 +1349,6 @@ impl ContributeSource for UreqDeviceClient {
     fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError> {
         self.post_write("/v1/reviews", &body.workspace_id, &body, "review")
     }
-    fn protocol_card(&self) -> Option<WireProtocolCard> {
-        // Best-effort by contract: an unreadable card answers `None`, never an error — the one
-        // caller (the mcp publish preflight) fails toward silence on it.
-        EnrollSource::fetch_card(self, &self.base_url).ok()
-    }
 }
 
 // =================================================================================================
@@ -1588,6 +1604,59 @@ impl DirectorySource for UreqDeviceClient {
             channel,
         )
     }
+
+    fn add_mcp_server(
+        &self,
+        workspace_id: &str,
+        body: topos_types::requests::McpAddRequest,
+    ) -> Result<topos_types::requests::McpAddedData, ClientError> {
+        ensure_safe_ids_client("mcp", workspace_id)?;
+        let value = serde_json::to_value(&body)
+            .map_err(|e| ClientError::Corrupt(format!("mcp server body: {e}")))?;
+        let credential = self.credential_for(workspace_id)?;
+        let url = format!("{}/v1/workspaces/{}/mcp-servers", self.base_url, workspace_id);
+        let (status, bytes) = self.post_json_auth(&url, credential, &value, "add mcp server")?;
+        map_mcp_add_envelope(&self.host(), status, &bytes)
+    }
+}
+
+/// Map the add-a-server response — the all-outcome **200 envelope** — to the typed result. A
+/// non-200 is a transport/auth/integrity fault; `ok` carries the [`McpAddedData`]; `!ok` is the
+/// SERVER'S OWN refusal, rendered as it wrote it.
+///
+/// The refusal sentence is the server's because the ruling is: whether a document may be shared,
+/// whether this catalog holds that name, and whether the caller may write a server down are all
+/// answered where the workspace lives. A client that re-worded them would be a second gate whose
+/// vocabulary drifts from the first. **Pure** (status + bytes in), so every arm is unit-tested
+/// without a socket.
+///
+/// [`McpAddedData`]: topos_types::requests::McpAddedData
+fn map_mcp_add_envelope(
+    host: &str,
+    status: u16,
+    bytes: &[u8],
+) -> Result<topos_types::requests::McpAddedData, ClientError> {
+    match classify(status) {
+        HttpClass::Ok => {}
+        HttpClass::UpgradeRequired => return Err(update_required_from(bytes)),
+        _ => return Err(ClientError::Plane(status_reason(host, status))),
+    }
+    let env: JsonEnvelope = serde_json::from_slice(bytes)
+        .map_err(|e| ClientError::WireInvalid(format!("mcp server envelope is malformed: {e}")))?;
+    if !env.ok {
+        let error = env.error;
+        let said = error
+            .as_ref()
+            .and_then(|e| e.context.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let code = error.map_or_else(|| "DENIED".to_owned(), |e| e.code);
+        return Err(ClientError::InvalidArgument(
+            said.unwrap_or_else(|| format!("the server refused this server ({code})")),
+        ));
+    }
+    serde_json::from_value(env.data)
+        .map_err(|e| ClientError::WireInvalid(format!("mcp server data is malformed: {e}")))
 }
 
 /// Parse an unauthenticated card-read body: the constant protocol card (its `card` discriminant is

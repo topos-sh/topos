@@ -210,12 +210,44 @@ pub(crate) struct DeliverySkill {
     pub picked: bool,
 }
 
+/// One CONNECTED MCP SERVER the workspace delivers to this device — the document itself.
+///
+/// It is a separate shape from [`DeliverySkill`] because a connected server is made of something
+/// else: no version to fetch, no consent digest to re-derive, no generation to compare-and-set.
+/// What arrives is the document, and what the machine records is which catalog revision it came
+/// from.
+#[derive(Debug, Clone)]
+pub(crate) struct DeliveryMcpServer {
+    /// The stable plane-minted bundle id (the sidecar key).
+    pub skill_id: String,
+    /// The catalog's user-facing name.
+    pub name: String,
+    /// The catalog revision this connection resolves to (`mcpr_…`) — an OPAQUE handle: the
+    /// custody provenance every placed entry records, and what the device reports back.
+    pub revision_id: String,
+    /// The `server.json` bytes, exactly as this machine will store and render them.
+    pub document: Vec<u8>,
+    /// The connection follows ONE revision rather than the server's current.
+    pub pinned: bool,
+    /// The resolved revision was pulled back after publication — still delivered, and disclosed.
+    pub revoked: bool,
+    /// The channels delivering the server (the `via` attribution a receipt narrates).
+    pub via_channels: Vec<String>,
+    /// The display name of the direct assignment's creator, when someone else aimed it here.
+    pub assigned_by: Option<String>,
+    /// `true` when the caller's own pick (a self-assignment) delivers it.
+    pub picked: bool,
+}
+
 /// The per-workspace delivery snapshot: what to have, and what the PERSON detached (freeze in
 /// place — absence alone cannot distinguish "you detached this" from "upstream withdrew this",
 /// and the two have opposite on-disk consequences).
 #[derive(Debug, Clone)]
 pub(crate) struct DeliverySnapshot {
     pub skills: Vec<DeliverySkill>,
+    /// The connected MCP servers, documents inline — a SEPARATE list because the two kinds are
+    /// made of different things and reconcile through different engines.
+    pub mcp_servers: Vec<DeliveryMcpServer>,
     /// OPEN proposals across the delivered set (the `proposals_awaiting` gauge).
     pub proposals_awaiting: u64,
     /// The unacked, person-scoped notices feed (verdicts, proposal closures, …). An interactive
@@ -238,7 +270,10 @@ pub(crate) struct DeliverySnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct AppliedSkillReport {
     pub skill_id: String,
-    pub version_id: [u8; 32],
+    /// What this installation holds, in the wire's own spelling: a file bundle's commit as 64-char
+    /// hex, a connected server's catalog revision (`mcpr_…`) verbatim. ONE field, because a report
+    /// is one snapshot of what a machine holds and what a bundle's version IS belongs to its kind.
+    pub version_id: String,
     pub harnesses: Vec<topos_types::results::McpAgentState>,
 }
 
@@ -355,6 +390,20 @@ pub(crate) trait DirectorySource {
         channel: &str,
         level: &str,
     ) -> Result<(), ClientError>;
+
+    /// `POST /v1/workspaces/{ws}/mcp-servers` — submit a server to this workspace: a catalog name
+    /// to connect, or an https link to a document the workspace should hold as its own. The
+    /// client sends the spelling and renders the answer; the server reads the document, rules on
+    /// it, and names the bundle.
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] carrying the server's own refusal for anything it declines;
+    /// otherwise as [`me`](Self::me).
+    fn add_mcp_server(
+        &self,
+        workspace_id: &str,
+        body: topos_types::requests::McpAddRequest,
+    ) -> Result<topos_types::requests::McpAddedData, ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -668,14 +717,6 @@ pub(crate) trait ContributeSource {
     /// As [`publish`](Self::publish).
     fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError>;
 
-    /// The server's constant protocol card, best-effort — the publish preflight's version probe:
-    /// a `kind = "mcp"` publish needs a server that RECORDS bundle kinds, and an older one would
-    /// silently file the bundle as a skill. `None` = unknown (an unreadable card, a fake) — the
-    /// caller fails toward silence, exactly like the login-time floor. The real transport
-    /// overrides this with the unauthenticated card GET on its base URL.
-    fn protocol_card(&self) -> Option<WireProtocolCard> {
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------------------------

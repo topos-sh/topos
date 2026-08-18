@@ -59,6 +59,13 @@ pub(crate) struct SkillPaths {
     /// never clobber entry custody a concurrent converge just wrote, and neither lock has to know
     /// about the other. Absent for every bundle delivered as directories.
     pub entries: PathBuf,
+    /// A CONNECTED SERVER's delivered state (`skills/<id>/server.json`) — the document the
+    /// workspace last delivered and the catalog revision it came from
+    /// ([`topos_types::persisted::McpServerRecord`]). It stands where `lock.json` and the object
+    /// store stand for a file bundle, and it is the WHOLE of a server bundle's record: there is
+    /// no version to fetch and no byte-exact file list to consent to, so there is nothing for the
+    /// other two documents to hold. Absent for every bundle delivered as files.
+    pub server: PathBuf,
     /// The durable RETIREMENT marker — written once when the one-time orphan resolution retires a
     /// record no row claims and nothing delivers. The record's bytes stay on disk forever, but
     /// every store walker skips a marked record: it is never listed, resolved, rebuilt, cleaned,
@@ -77,6 +84,7 @@ impl SkillPaths {
             origin: base.join("origin.json"),
             kind: base.join("kind.json"),
             entries: base.join("entries.json"),
+            server: base.join("server.json"),
             retired: base.join("retired.json"),
         }
     }

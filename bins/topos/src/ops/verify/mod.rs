@@ -76,15 +76,41 @@ pub(crate) fn verify(
     if !crate::bundle_kind::classify(&sctx, sid.as_str(), &placements).is_mcp() {
         return Err(not_a_server(&lock.name));
     }
-    let Some((_version, bytes)) = crate::mcp_engine::stored_server_json(&sctx, &sid)? else {
-        return Err(ClientError::InvalidArgument(format!(
-            "'{}' has no version on this machine yet — run `topos update` first",
-            lock.name
-        )));
+    // A local row's folder holds its own document; a workspace server's is the record this scope
+    // was last given. Either way there is one document, read from where that kind keeps it.
+    let bytes = match crate::mcp_engine::recorded_server(&sctx, &sid)? {
+        Some(recorded) => recorded.document,
+        None => match local_document(&sctx, &placements)? {
+            Some(bytes) => bytes,
+            None => {
+                return Err(ClientError::InvalidArgument(format!(
+                    "'{}' has no server document on this machine yet — run `topos update` first",
+                    lock.name
+                )));
+            }
+        },
     };
     let doc = mcp_render::parse_server_json(&bytes)
         .map_err(|e| ClientError::Corrupt(format!("{}: {e}", lock.name)))?;
     Ok(data_for(&lock.name, &check(&doc)?))
+}
+
+/// A LOCAL row's document: the `server.json` at the root of the folder its record was adopted at.
+/// `None` when no recorded folder holds one, which is the same "nothing to verify" the caller
+/// answers for a workspace server with no record.
+///
+/// # Errors
+/// A filesystem failure reading the folder.
+fn local_document(
+    ctx: &Ctx<'_>,
+    placements: &[String],
+) -> Result<Option<Vec<u8>>, ClientError> {
+    for dir in placements {
+        if let Some(bytes) = ctx.fs.read_opt(&std::path::Path::new(dir).join("server.json"))? {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
 }
 
 /// A `verify` on a bundle that is not a server. The refusal names what the verb needs and what

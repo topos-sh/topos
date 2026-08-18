@@ -950,18 +950,6 @@ pub(crate) enum ClientError {
         crate::compat::MIN_SERVER_VERSION
     )]
     ServerTooOld { server_version: String },
-    /// The MCP corner of the same client-side floor, checked only when a publish would record a
-    /// `kind = "mcp"` bundle: the workspace's server predates MCP bundle kinds, so its catalog
-    /// would silently record a SKILL while the client receipt claimed otherwise. Refused BEFORE
-    /// the op WAL — nothing is minted, nothing is sent — with the server-too-old shape (the same
-    /// wire code + `server_version` field), so an agent branches exactly as it does on the login
-    /// floor. The one remedy is the server's, so only that is named.
-    #[error(
-        "that server does not record MCP bundles yet — it runs {server_version}, and publishing \
-         one needs {} or later; ask whoever runs the server to update it",
-        crate::compat::MCP_MIN_SERVER_VERSION
-    )]
-    McpServerTooOld { server_version: String },
     /// A self-update download (`topos upgrade`) did not match the sha256 the release `SHA256SUMS` lists —
     /// refused BEFORE the binary is touched (the mandatory, never-skippable integrity gate). The message is
     /// all-public (the asset name + the two hashes), so it is safe to show verbatim.
@@ -1130,17 +1118,6 @@ pub(crate) enum ClientError {
         candidates: Vec<TargetCandidate>,
         global: bool,
     },
-    /// An MCP server document the gate refused ([`crate::mcp_validate`]) — the shared, two-language
-    /// rule set at `tests/fixtures/mcp/`. The code is the vector's own
-    /// (`MCP_INVALID` · `MCP_PACKAGE_UNPINNED` · `MCP_NO_STREAMABLE_REMOTE` · `MCP_INSECURE_URL` ·
-    /// `MCP_URL_TEMPLATE` · `MCP_SECRET_REFUSED`), so an agent branches on the same word both
-    /// tiers use; the message is this code's own sentence and is shown VERBATIM. It never quotes
-    /// the document — a refusal for carrying a credential must not echo the credential.
-    #[error("{message}")]
-    McpRefused {
-        code: crate::mcp_validate::McpRefusalCode,
-        message: String,
-    },
     /// A plain `add`/`publish` named a folder whose kind the door cannot read off it, in either
     /// of the two ways that happens: the root holds a `server.json` and no `SKILL.md` (a server
     /// bundle the skill door would silently mis-kind, delivering raw JSON into skills dirs), or it
@@ -1192,15 +1169,6 @@ pub(crate) enum ClientError {
     },
 }
 
-impl From<crate::mcp_validate::McpRefusal> for ClientError {
-    fn from(r: crate::mcp_validate::McpRefusal) -> Self {
-        ClientError::McpRefused {
-            code: r.code,
-            message: r.message,
-        }
-    }
-}
-
 impl ClientError {
     /// A folder whose root holds a `server.json` and no `SKILL.md`: it is a server bundle, and the
     /// skill door would deliver raw JSON into skills dirs. The answer is definite, so the sentence
@@ -1232,23 +1200,6 @@ impl ClientError {
         }
     }
 
-    /// The gate's refusal, told with the SUBJECT it judged in front of it — the folder or bundle
-    /// name, in the same `<subject>: <sentence>` shape every other coded line in this CLI uses.
-    ///
-    /// The gate's sentences are about a document ("description is required and must be 1–500
-    /// characters") and never about WHICH document, because the validator is shared with the web
-    /// tier and knows only bytes. On the CLI that left a person staring at a rule with no way to
-    /// tell which of their folders broke it. The sentence itself is still verbatim — nothing is
-    /// reworded, and the document is still never quoted.
-    pub(crate) fn mcp_refused_about(
-        r: crate::mcp_validate::McpRefusal,
-        subject: &str,
-    ) -> ClientError {
-        ClientError::McpRefused {
-            code: r.code,
-            message: format!("{subject}: {}", r.message),
-        }
-    }
 }
 
 impl ClientError {
@@ -1336,7 +1287,6 @@ impl ClientError {
             ClientError::UpdateRequired { .. } => "CLI_UPDATE_REQUIRED",
             ClientError::ServerTooOld { .. } => "SERVER_TOO_OLD",
             // The MCP corner shares the shape and the code — agents branch identically.
-            ClientError::McpServerTooOld { .. } => "SERVER_TOO_OLD",
             // A self-update checksum mismatch is an integrity failure (same family as verify-on-read).
             ClientError::ChecksumMismatch { .. } => "INTEGRITY_ERROR",
             // A failed (or missing) release signature is the same integrity family — same code, so an
@@ -1369,7 +1319,6 @@ impl ClientError {
             ClientError::AmbiguousTarget { .. } => "AMBIGUOUS_NAME",
             // The MCP gate's own vocabulary, carried through unflattened — the client and the web
             // tier refuse the same document with the same word.
-            ClientError::McpRefused { code, .. } => code.as_str(),
             // A folder whose kind the door cannot read: the fix is the `--kind` word,
             // machine-runnable. The code names the WORD that is missing, not the flag spelling
             // that used to carry it.
@@ -1450,11 +1399,10 @@ impl ClientError {
             // A definitive 4xx rejection — the op cannot succeed as-is.
             ClientError::PlaneRejected(_) => TerminalOutcome::PermanentFailure,
             // Neither side of the version floor heals on a retry: the same binary meets the same
-            // server and gets the same answer. The way out is a different binary, never a loop —
-            // and for the MCP corner, a newer SERVER.
-            ClientError::UpdateRequired { .. }
-            | ClientError::ServerTooOld { .. }
-            | ClientError::McpServerTooOld { .. } => TerminalOutcome::PermanentFailure,
+            // server and gets the same answer. The way out is a different binary, never a loop.
+            ClientError::UpdateRequired { .. } | ClientError::ServerTooOld { .. } => {
+                TerminalOutcome::PermanentFailure
+            }
             // A tampered/corrupt download will not heal on a retry against the same bad bytes.
             ClientError::ChecksumMismatch { .. } => TerminalOutcome::PermanentFailure,
             // A release that fails (or lacks) its mandatory signature will not heal on a retry either —
