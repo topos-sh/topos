@@ -398,6 +398,8 @@ impl DeliverySource for FakePlane {
 #[derive(Clone)]
 pub(in crate::tests) struct FakeDirectory {
     pub(super) skills: Vec<WireSkillIndexEntry>,
+    /// The catalog's SECOND list — the workspace's connected servers, carrying their documents.
+    pub(super) mcp_servers: Vec<topos_types::requests::WireMcpIndexEntry>,
     pub(super) channels: Vec<WireChannelEntry>,
     /// When set, the index reads fail (a transport fault) — the freeze suites flip it.
     pub(super) unavailable: Arc<Mutex<bool>>,
@@ -410,9 +412,19 @@ impl FakeDirectory {
     ) -> Self {
         Self {
             skills,
+            mcp_servers: Vec::new(),
             channels,
             unavailable: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// The same fake, serving one connected SERVER beside whatever file bundles it already has.
+    pub(in crate::tests) fn with_server(
+        mut self,
+        entry: topos_types::requests::WireMcpIndexEntry,
+    ) -> Self {
+        self.mcp_servers.push(entry);
+        self
     }
     pub(super) fn set_unavailable(&self, v: bool) {
         *self.unavailable.lock().unwrap() = v;
@@ -459,7 +471,7 @@ impl DirectorySource for FakeDirectory {
     fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
         self.check_reachable()?;
         Ok(WireSkillIndex {
-            mcp_servers: Vec::new(),
+            mcp_servers: self.mcp_servers.clone(),
             skills: self.skills.clone(),
         })
     }
@@ -1234,6 +1246,27 @@ pub(super) fn sid(id: &str) -> crate::id::SkillId {
 }
 
 /// A gate-valid `server.json` for the MCP rows below (the converge re-runs the whole gate).
+/// One CONNECTED SERVER as the catalog serves it — the document inline, at a revision of the
+/// shape the catalog mints.
+pub(in crate::tests) fn catalog_server(
+    skill_id: &str,
+    name: &str,
+    url: &str,
+) -> topos_types::requests::WireMcpIndexEntry {
+    topos_types::requests::WireMcpIndexEntry {
+        skill_id: skill_id.into(),
+        name: name.into(),
+        kind: "mcp".into(),
+        status: "active".into(),
+        display_name: None,
+        revision_id: format!("mcpr_{}", "a".repeat(32)),
+        document: serde_json::from_str(&mcp_server_json(url)).expect("a server document"),
+        pinned: None,
+        revoked: None,
+        updated_at: 0,
+    }
+}
+
 pub(super) fn mcp_server_json(url: &str) -> String {
     format!(
         "{{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\

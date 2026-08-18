@@ -190,6 +190,309 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     assert!(detail.placements.is_empty());
 }
 
+/// **THE RECORD IS THE DELIVERY, AND A SECOND HELPING OF IT IS NOTHING.** Writing the document
+/// down IS the sync for this kind, so the first sweep must leave it in the store — and a sweep
+/// served the SAME revision again must move nothing at all: no config byte, and a row that rests
+/// at `up to date`. A run that re-rendered every entry each sweep would churn every agent's config
+/// file on the hook's timer, and every receipt would claim work that never happened.
+#[test]
+fn a_second_delivery_of_the_same_revision_writes_nothing_and_reads_up_to_date() {
+    let rig = Rig::new("same-revision");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let first = sweep(&ctx, &plane, &dir);
+    let record = server_record(&rig.fs, &rig.layout(), "s_a").expect("the first sweep recorded it");
+    assert_eq!(record.revision_id, s.revision_id);
+    assert_eq!(
+        record.document["remotes"][0]["url"], "https://mcp.example/a",
+        "{record:?}"
+    );
+    assert!(!record.pinned && !record.revoked, "{record:?}");
+    let row = first
+        .data
+        .skills
+        .iter()
+        .find(|r| r.skill == "alpha")
+        .unwrap();
+    assert_eq!(row.action, topos_types::results::PullAction::Installed);
+
+    // The same revision again: nothing to do anywhere.
+    let files = [
+        rig.home.0.join(".cursor/mcp.json"),
+        rig.home.0.join(".openclaw/openclaw.json"),
+    ];
+    let before: Vec<Vec<u8>> = files.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    let out = sweep(&ctx, &plane, &dir);
+    let after: Vec<Vec<u8>> = files.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    assert_eq!(before, after, "a settled sweep writes no config byte");
+    let row = out.data.skills.iter().find(|r| r.skill == "alpha").unwrap();
+    assert_eq!(row.action, topos_types::results::PullAction::UpToDate);
+    assert!(
+        row.harnesses.iter().all(|h| !h.state.wrote()),
+        "nothing was written, and every per-agent line says so: {row:?}"
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
+    );
+    assert!(
+        tty.starts_with("checked ") && tty.contains("Checked 1 bundle: all up to date."),
+        "{tty}"
+    );
+}
+
+/// **A REVISION THAT MOVES MOVES BOTH HALVES.** When the workspace publishes a new revision, the
+/// sweep rewrites the RECORD and re-renders every agent's entry from it. The two must never
+/// disagree: the record is the demand the next run reads, so a config carrying one document over a
+/// record holding another would heal back to the old one the moment the network went away.
+#[test]
+fn a_moved_revision_rewrites_the_record_and_every_agents_entry() {
+    let rig = Rig::new("moved-revision");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v1 = served_at("https://mcp.example/v1");
+    let v2 = served_at("https://mcp.example/v2");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &v1)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &v1)]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &v2)]);
+    let dir2 = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &v2)]);
+    let out = sweep(&ctx, &plane, &dir2);
+
+    assert_eq!(
+        server_record(&rig.fs, &rig.layout(), "s_a")
+            .expect("the record")
+            .revision_id,
+        v2.revision_id,
+        "the record follows the revision"
+    );
+    for path in [
+        rig.home.0.join(".cursor/mcp.json"),
+        rig.home.0.join(".openclaw/openclaw.json"),
+    ] {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        assert!(
+            text.contains("https://mcp.example/v2") && !text.contains("https://mcp.example/v1"),
+            "{path:?}: {text}"
+        );
+    }
+    // The store never moved — there is no store to move — so the row's verb comes from the config
+    // files: this run rewrote entries this scope had already placed, which is the ordinary
+    // catch-up, never a second install.
+    let row = out.data.skills.iter().find(|r| r.skill == "alpha").unwrap();
+    assert_eq!(
+        row.action,
+        topos_types::results::PullAction::Refreshed,
+        "{row:?}"
+    );
+}
+
+/// **OFFLINE, THE RECORD IS THE WHOLE DEMAND.** With no delivery to be had and a catalog that
+/// knows nothing, the sweep must still heal an entry a person deleted — from the document this
+/// machine was last given and nothing else. That is the one thing the record exists for: the
+/// bytes of a connected server never come back over the wire on a later run, so a machine that
+/// could not converge from its own record could not converge at all.
+#[test]
+fn an_offline_sweep_heals_the_entries_from_the_record_alone() {
+    let rig = Rig::new("offline-record");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
+    // An EMPTY catalog throughout: the feed row is the only thing that ever delivers this server,
+    // so nothing below can have come from a lane.
+    let dir = FakeDirectory::default();
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(cursor.exists(), "the feed placed it");
+
+    // The entry is deleted by hand and the network dies.
+    std::fs::remove_file(&cursor).unwrap();
+    plane.serve_unreachable();
+    let out = sweep(&ctx, &plane, &dir);
+
+    let text = std::fs::read_to_string(&cursor).unwrap_or_else(|e| panic!("not healed: {e}"));
+    assert!(
+        text.contains("https://mcp.example/a") && text.contains("topos-eng-alpha"),
+        "{text}"
+    );
+    let row = out.data.skills.iter().find(|r| r.skill == "alpha").unwrap();
+    assert!(
+        row.harnesses
+            .iter()
+            .any(|h| h.agent == "cursor" && h.state.wrote()),
+        "the repaired entry says this run wrote it: {row:?}"
+    );
+}
+
+/// **A WITHDRAWN REVISION IS SAID, AND STILL PLACED.** The catalog can pull a revision back after
+/// publishing it; this machine is still holding it, and hiding that would leave a person to guess
+/// which of "withdrawn" and "installed" is true here. So it is ONE disclosure line — never a
+/// failure, never a per-agent line — and the placement happens exactly as it would have.
+#[test]
+fn a_withdrawn_revision_is_disclosed_once_and_still_placed() {
+    let rig = Rig::new("withdrawn");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    // The row is explicit, so the CATALOG is the lane that answers for it — and the catalog
+    // states the withdrawal exactly as the feed does.
+    let mut entry = mcp_catalog_entry("s_a", "alpha", &s);
+    entry.revoked = Some(true);
+    let dir = FakeDirectory::of_servers(vec![entry]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // Placed — in both hermetic config files, exactly as an unwithdrawn revision would be.
+    for path in [
+        rig.home.0.join(".cursor/mcp.json"),
+        rig.home.0.join(".openclaw/openclaw.json"),
+    ] {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        assert!(text.contains("https://mcp.example/a"), "{path:?}: {text}");
+    }
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
+    // Said ONCE, in the disclosure channel, in words a person can act on.
+    let said: Vec<String> = crate::message::legacy_lines(&out.disclosures)
+        .into_iter()
+        .filter(|d| d.contains("MCP_REVISION_WITHDRAWN"))
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            "MCP_REVISION_WITHDRAWN alpha: the version topos places here was withdrawn from the \
+             catalog."
+                .to_owned()
+        ],
+        "{:?}",
+        out.disclosures
+    );
+    // And the record carries the fact, so every later run says the same thing offline.
+    assert!(
+        server_record(&rig.fs, &rig.layout(), "s_a")
+            .expect("the record")
+            .revoked
+    );
+}
+
+/// **WHAT THIS INSTALLATION HOLDS, PER KIND.** One report, two spellings: a connected server holds
+/// a catalog revision (`mcpr_…`) and a file bundle holds the commit of its bytes. They ride the
+/// same field because a report is one snapshot of what a machine holds — and what a version IS
+/// belongs to the kind, so a reader that assumed 64 hex characters would drop every server on the
+/// fleet page.
+#[test]
+fn the_applied_report_carries_a_revision_for_a_server_and_a_commit_for_a_skill() {
+    let rig = Rig::new("report-kinds");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let s = served_at("https://mcp.example/a");
+    let v = mk_version(&[("SKILL.md", b"# deploy\n")]);
+    let plane = FakePlane::new().with_version("s_dep", &v);
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
+    plane.serves(vec![delivered_skill("s_dep", "deploy", &v)]);
+    let dir = FakeDirectory::default();
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    let reported = plane.reported.lock().unwrap().clone();
+    let held = |id: &str| {
+        reported
+            .iter()
+            .find(|(reported_id, ..)| reported_id == id)
+            .unwrap_or_else(|| panic!("{id} reported: {reported:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(held("s_a"), s.revision_id);
+    assert_eq!(held("s_dep"), topos_core::digest::to_hex(&v.id));
+}
+
+/// **A DOCUMENT THIS MACHINE CANNOT READ FAILS THE BUNDLE.** The delivery answer carries the
+/// document itself, so a row whose document cannot be read at all is a row nothing can ever be
+/// placed for. It is a FAILURE, not a skip: the bundle is counted, the line names it, and its
+/// standing entries are HELD rather than read as undemanded — a bundle that vanished quietly
+/// would leave the receipt saying "all up to date" over a machine that received nothing.
+#[test]
+fn a_served_document_that_cannot_be_read_fails_the_bundle() {
+    let rig = Rig::new("unreadable-document");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let s = served_at("https://mcp.example/a");
+    let mut served = delivered_mcp("s_a", "alpha", &s);
+    served.document = b"<not a document>".to_vec();
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![served]);
+    // The FEED delivers it (the catalog knows nothing), so the bytes this machine tries to record
+    // are the ones the delivery carried.
+    let dir = FakeDirectory::default();
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // Nothing was recorded and nothing was placed.
+    assert!(server_record(&rig.fs, &rig.layout(), "s_a").is_none());
+    assert!(!rig.home.0.join(".cursor/mcp.json").exists());
+    assert!(!rig.home.0.join(".openclaw/openclaw.json").exists());
+    // The bundle is COUNTED, under its identity, and the line names it.
+    assert_eq!(
+        out.failed_bundles,
+        [("person".to_owned(), "s_a".to_owned())]
+            .into_iter()
+            .collect(),
+        "{:?}",
+        out.warnings
+    );
+    assert!(
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.contains("alpha")),
+        "{:?}",
+        out.warnings
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
+    );
+    assert!(
+        !tty.contains("already up to date"),
+        "a run that received nothing never claims it was current: {tty}"
+    );
+}
+
 /// ITEM (the subscribe receipt's typed block): `topos add` of a workspace mcp bundle — the same
 /// act a workspace mcp reference rides — delivers in the same invocation and folds
 /// the typed `mcp` block from the document that LANDED: the embedded identity, the endpoint,

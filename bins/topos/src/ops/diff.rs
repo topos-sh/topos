@@ -192,11 +192,6 @@ fn diff_draft_vs_current(
     budget: DiffBudget,
     sel: &super::Selection,
 ) -> Result<DiffData, ClientError> {
-    let store = Store::open(&sp.store)?;
-    let version_id = parse_hex32(&lock.base_commit)?;
-    let bundle_digest = parse_hex32(&lock.bundle_digest)?;
-    let base = store.render_verified(version_id, bundle_digest)?;
-
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
     // A CONFIG-PLACED (mcp) bundle has no working tree — its bytes live in agent configs, not in
@@ -204,6 +199,10 @@ fn diff_draft_vs_current(
     // the held current), which reads as "nothing has changed" over a bundle this verb never looked
     // at — including one whose entry a person had hand-edited. It refuses instead, through the ONE
     // construction every file verb shares.
+    //
+    // Asked BEFORE the object store is opened, because such a bundle has none: there is no version
+    // to fetch behind a connected server, so the store directory is never laid, and opening it
+    // answered a git error naming a path that was never supposed to exist.
     if let Some(refusal) = crate::bundle_kind::refuse_file_verb(
         crate::bundle_kind::FileVerb::Diff,
         &lock.name,
@@ -211,6 +210,10 @@ fn diff_draft_vs_current(
     ) {
         return Err(refusal);
     }
+    let store = Store::open(&sp.store)?;
+    let version_id = parse_hex32(&lock.base_commit)?;
+    let bundle_digest = parse_hex32(&lock.bundle_digest)?;
+    let base = store.render_verified(version_id, bundle_digest)?;
     // The draft side is the WORK TREE — the single edited copy when one exists (draft-anywhere),
     // else the first placement; several divergent copies freeze typed. A `-a`/`--dest` selection
     // names ONE copy instead and BYPASSES that freeze: the aggregate classification refuses before

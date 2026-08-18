@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use topos_types::requests::{WireChannelEntry, WireChannelSkill, WireSkillIndexEntry};
+use topos_types::requests::{
+    WireChannelEntry, WireChannelSkill, WireMcpIndexEntry, WireSkillIndexEntry,
+};
 
 use crate::config_custody::ScopeEntries;
 use crate::ctx::Ctx;
@@ -14,31 +16,25 @@ use crate::sessions::Session;
 
 use super::rig::*;
 
-/// A catalog entry for an ordinary SKILL — the mcp fixture with its kind flipped, so one channel
-/// can hold a member of each kind.
-fn skill_catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
-    let mut e = mcp_catalog_entry(skill_id, name, v);
-    e.kind = "skill".into();
-    e
-}
-
-/// A `tools` channel carrying exactly these catalog entries.
-fn channel_of(members: Vec<WireSkillIndexEntry>) -> FakeDirectory {
+/// A `tools` channel carrying exactly these members — of BOTH kinds, because a channel is the one
+/// row whose members can be either, and the catalog answers for them in two lists.
+fn channel_of(skills: Vec<WireSkillIndexEntry>, servers: Vec<WireMcpIndexEntry>) -> FakeDirectory {
+    let members = skills
+        .iter()
+        .map(|e| (e.skill_id.clone(), e.name.clone()))
+        .chain(servers.iter().map(|e| (e.skill_id.clone(), e.name.clone())))
+        .map(|(skill_id, name)| WireChannelSkill { skill_id, name })
+        .collect();
     FakeDirectory {
         channels: vec![WireChannelEntry {
             name: "tools".into(),
             mode: "open".into(),
             builtin: false,
             included: true,
-            skills: members
-                .iter()
-                .map(|e| WireChannelSkill {
-                    skill_id: e.skill_id.clone(),
-                    name: e.name.clone(),
-                })
-                .collect(),
+            skills: members,
         }],
-        skills: members,
+        skills,
+        servers,
     }
 }
 
@@ -57,13 +53,10 @@ fn project_with(tag: &str, body: &str) -> Scratch {
 
 /// The skill + server pair every channel test below expands — ids deliberately unequal to their
 /// display names, so nothing can pass while confusing one for the other.
-fn skill_and_server() -> (Version, Version) {
+fn skill_and_server() -> (Version, ServedServer) {
     (
         mk_version(&[("SKILL.md", b"# deploy\n")]),
-        mk_version(&[(
-            "server.json",
-            server_json("https://mcp.example/a").as_bytes(),
-        )]),
+        served_at("https://mcp.example/a"),
     )
 }
 
@@ -85,13 +78,11 @@ fn a_channel_dest_places_its_skills_while_its_servers_reach_every_agent() {
         ),
     );
     let (sk, sv) = skill_and_server();
-    let plane = FakePlane::new()
-        .with_version("s_dep", &sk)
-        .with_version("s_a", &sv);
-    let dir = channel_of(vec![
-        skill_catalog_entry("s_dep", "deploy", &sk),
-        mcp_catalog_entry("s_a", "alpha", &sv),
-    ]);
+    let plane = FakePlane::new().with_version("s_dep", &sk);
+    let dir = channel_of(
+        vec![skill_catalog_entry("s_dep", "deploy", &sk)],
+        vec![mcp_catalog_entry("s_a", "alpha", &sv)],
+    );
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
 
@@ -145,13 +136,11 @@ fn a_channels_typoed_mcp_dest_fails_the_server_and_names_the_channel() {
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     let (sk, sv) = skill_and_server();
-    let plane = FakePlane::new()
-        .with_version("s_dep", &sk)
-        .with_version("s_a", &sv);
-    let dir = channel_of(vec![
-        skill_catalog_entry("s_dep", "deploy", &sk),
-        mcp_catalog_entry("s_a", "alpha", &sv),
-    ]);
+    let plane = FakePlane::new().with_version("s_dep", &sk);
+    let dir = channel_of(
+        vec![skill_catalog_entry("s_dep", "deploy", &sk)],
+        vec![mcp_catalog_entry("s_a", "alpha", &sv)],
+    );
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
          {{ mcp_dest = [\"~/.cursor/mcp.jsonn\"] }}\n"
@@ -269,8 +258,8 @@ fn a_channels_partly_mapping_mcp_dest_delivers_narrowed_with_no_advisory() {
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     let (_, sv) = skill_and_server();
-    let plane = FakePlane::new().with_version("s_a", &sv);
-    let dir = channel_of(vec![mcp_catalog_entry("s_a", "alpha", &sv)]);
+    let plane = FakePlane::new();
+    let dir = channel_of(Vec::new(), vec![mcp_catalog_entry("s_a", "alpha", &sv)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
          {{ mcp_dest = [\"~/.cursor/mcp.json\", \"~/.typo/mcp.json\"] }}\n"
@@ -321,13 +310,11 @@ fn a_config_file_path_in_a_channels_dest_is_a_folder_to_skills_and_nothing_to_se
         ),
     );
     let (sk, sv) = skill_and_server();
-    let plane = FakePlane::new()
-        .with_version("s_dep", &sk)
-        .with_version("s_a", &sv);
-    let dir = channel_of(vec![
-        skill_catalog_entry("s_dep", "deploy", &sk),
-        mcp_catalog_entry("s_a", "alpha", &sv),
-    ]);
+    let plane = FakePlane::new().with_version("s_dep", &sk);
+    let dir = channel_of(
+        vec![skill_catalog_entry("s_dep", "deploy", &sk)],
+        vec![mcp_catalog_entry("s_a", "alpha", &sv)],
+    );
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
 
@@ -363,21 +350,16 @@ fn each_server_a_channel_strands_is_named_once_and_counted_once() {
     let rig = Rig::new("ch-dedupe");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let va = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let vb = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/b").as_bytes(),
-    )]);
-    let plane = FakePlane::new()
-        .with_version("s_a", &va)
-        .with_version("s_b", &vb);
-    let dir = channel_of(vec![
-        mcp_catalog_entry("s_a", "alpha", &va),
-        mcp_catalog_entry("s_b", "beta", &vb),
-    ]);
+    let va = served_at("https://mcp.example/a");
+    let vb = served_at("https://mcp.example/b");
+    let plane = FakePlane::new();
+    let dir = channel_of(
+        Vec::new(),
+        vec![
+            mcp_catalog_entry("s_a", "alpha", &va),
+            mcp_catalog_entry("s_b", "beta", &vb),
+        ],
+    );
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
          {{ mcp_dest = [\"~/.typo/mcp.json\"] }}\n"
@@ -431,13 +413,11 @@ fn a_mixed_channel_split_gives_each_survivor_its_own_kinds_destinations() {
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     let (sk, sv) = skill_and_server();
-    let plane = FakePlane::new()
-        .with_version("s_dep", &sk)
-        .with_version("s_a", &sv);
-    let dir = channel_of(vec![
-        skill_catalog_entry("s_dep", "deploy", &sk),
-        mcp_catalog_entry("s_a", "alpha", &sv),
-    ]);
+    let plane = FakePlane::new().with_version("s_dep", &sk);
+    let dir = channel_of(
+        vec![skill_catalog_entry("s_dep", "deploy", &sk)],
+        vec![mcp_catalog_entry("s_a", "alpha", &sv)],
+    );
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
          {{ dest = [\"~/.claude/skills\"], mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
@@ -555,12 +535,7 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
     seed_harness_dirs(&rig.home.0);
     let v = mk_version(&[("SKILL.md", b"# deploy\n")]);
     let plane = FakePlane::new().with_version("s_dep", &v);
-    let mut entry = mcp_catalog_entry("s_dep", "deploy", &v);
-    entry.kind = "skill".into();
-    let dir = FakeDirectory {
-        skills: vec![entry],
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::of_skills(vec![skill_catalog_entry("s_dep", "deploy", &v)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ version = \"*\", dest = [\"~/.codex/skills\"] }}\n"
     ));
@@ -604,33 +579,29 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
     );
 }
 
-/// F3: a local `kind = "mcp"` row's `server.json` is re-read from disk EVERY sweep — a
-/// post-adopt edit smuggling a credential, an insecure endpoint, or a template must be refused
-/// at the converge boundary with the typed code: nothing new placed, the standing entries left
-/// as-is (removal only on demand-drop, never on a now-invalid source).
+/// F3: a local `kind = "mcp"` row's `server.json` is re-read from disk EVERY sweep — a later edit
+/// leaving a header this build refuses to render (secret, variable-substituted, value-less) must
+/// be refused at the converge boundary: nothing new placed, the standing entries left as-is
+/// (removal only on demand-drop, never on a now-unreadable source).
 #[test]
 fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() {
     let rig = Rig::new("tamper");
     seed_harness_dirs(&rig.home.0);
     let dir = rig.home.0.join("weather");
     std::fs::create_dir_all(&dir).unwrap();
-    let good = |url: &str, header_value: &str| {
-        format!(
-            "{{\"name\":\"io.test/w\",\"description\":\"W.\",\"version\":\"1.0.0\",\
-             \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\",\
-             \"headers\":[{{\"name\":\"X-R\",\"value\":\"{header_value}\"}}]}}]}}"
-        )
-    };
-    std::fs::write(dir.join("server.json"), good("https://w.example/mcp", "eu")).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        "{\"name\":\"io.test/w\",\"description\":\"W.\",\"version\":\"1.0.0\",\
+         \"remotes\":[{\"type\":\"streamable-http\",\"url\":\"https://w.example/mcp\",\
+         \"headers\":[{\"name\":\"X-R\",\"value\":\"eu\"}]}]}",
+    )
+    .unwrap();
     rig.write_global(&format!(
         "[bundles]\n\"{}\" = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n",
         dir.display()
     ));
     let plane = FakePlane::new();
-    let fdir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
+    let fdir = FakeDirectory::default();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &fdir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
@@ -638,15 +609,28 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
     let placed = std::fs::read_to_string(&cursor).unwrap();
     assert!(placed.contains("https://w.example/mcp"), "{placed}");
 
-    // Each tamper: the sweep warns with the TYPED refusal code, the config file stays
-    // byte-identical (the credential never reaches it), and the custody keeps the entry.
-    let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
-    for (tampered, code) in [
-        (good("https://w.example/mcp", &token), "MCP_SECRET_REFUSED"),
-        (good("http://w.example/mcp", "eu"), "MCP_INSECURE_URL"),
+    // Each tamper: the sweep warns with the refusal and the sentence naming what it could not
+    // read, the config file stays byte-identical (the header never reaches it), and the custody
+    // keeps the entry.
+    let header = |body: &str| {
+        format!(
+            "{{\"name\":\"io.test/w\",\"description\":\"W.\",\"version\":\"1.0.0\",\
+             \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"https://w.example/mcp\",\
+             \"headers\":[{{\"name\":\"X-R\",{body}}}]}}]}}"
+        )
+    };
+    for (tampered, said) in [
         (
-            good("https://{tenant}.example/mcp", "eu"),
-            "MCP_URL_TEMPLATE",
+            header("\"isSecret\":true"),
+            "its X-R header is marked secret",
+        ),
+        (
+            header("\"value\":\"eu\",\"variables\":{\"region\":{\"default\":\"eu\"}}"),
+            "its X-R header carries variable substitutions",
+        ),
+        (
+            header("\"isRequired\":true"),
+            "its X-R header carries no literal value",
         ),
     ] {
         std::fs::write(dir.join("server.json"), &tampered).unwrap();
@@ -654,28 +638,27 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
         assert!(
             crate::message::legacy_lines(&out.warnings)
                 .into_iter()
-                .any(|w| w.contains(code)),
-            "{code}: {:?}",
+                .any(|w| w.starts_with("MCP_UNPLACEABLE") && w.contains(said)),
+            "{said}: {:?}",
             out.warnings
         );
         let now = std::fs::read_to_string(&cursor).unwrap();
-        assert_eq!(now, placed, "{code}: the placed config never moves");
-        assert!(!now.contains("ghp_"), "{code}: no credential lands");
+        assert_eq!(now, placed, "{said}: the placed config never moves");
         assert!(
             ScopeEntries::load(&rig.fs, &rig.layout())
                 .unwrap()
                 .has_entries_for(&crate::config_custody::local_identity(
                     &dir.display().to_string()
                 )),
-            "{code}: the standing entry is held, not dropped"
+            "{said}: the standing entry is held, not dropped"
         );
         // AND THE SUMMARY AGREES WITH THE STATUS. The refused bundle is a bundle that could not
-        // be carried forward, so it is counted as one: the gate's line alone left the run exiting
-        // non-zero while the receipt said "1 already up to date".
+        // be carried forward, so it is counted as one: the refusal's line alone left the run
+        // exiting non-zero while the receipt said "1 already up to date".
         assert_eq!(
             out.failed_bundles.len(),
             1,
-            "{code}: the refused bundle is counted: {:?}",
+            "{said}: the refused bundle is counted: {:?}",
             out.failed_bundles
         );
         let tty = crate::render::pull_tty(
@@ -689,7 +672,7 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
         );
         assert!(
             !tty.contains("already up to date"),
-            "{code}: a run that placed nothing never claims it was already current: {tty}"
+            "{said}: a run that placed nothing never claims it was already current: {tty}"
         );
     }
 }
@@ -703,22 +686,13 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
 #[test]
 fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
     let rig = Rig::new("orphan-visible");
+    rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     let plane = FakePlane::new();
-    let fdir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
-    let dir = rig.home.0.join("wx");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("server.json"),
-        server_json("https://wx.example/mcp"),
-    )
-    .unwrap();
+    let fdir = take_server(&rig, "s_wx", "wx");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    // The ordinary door: the adopt mints the record AND places the entry.
-    ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default()).unwrap();
+    // The ordinary door: the row delivers, which writes the RECORD and places the entry.
+    sweep(&ctx, &plane, &fdir);
     let cursor = rig.home.0.join(".cursor/mcp.json");
     assert!(cursor.exists(), "the entry landed");
 
@@ -789,40 +763,33 @@ fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
         "{:?}",
         listing(&ctx).data.scopes[0].orphans
     );
-    // AND IT COSTS NO BYTES OF THEIRS. The folder is the one the person named to `add` — topos
-    // adopted it in place and never created it, so the record and the config entry are the whole
-    // of what this command may end. A line that offered `remove` and deleted the source folder
-    // would be the listing talking somebody into losing their own work.
+    // AND IT COSTS NO BYTES OF THEIRS. The entry standing in Cursor's config is one the person
+    // edited by hand, so it is theirs now: the record is the whole of what this command may end.
+    // A line that offered `remove` and took a hand-written entry with it would be the listing
+    // talking somebody into losing their own work.
     assert!(
-        dir.is_dir() && dir.join("server.json").is_file(),
-        "the adopted source folder survives the command the listing offered"
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("edited.example"),
+        "the hand-edited entry survives the command the listing offered"
     );
     let ops::RemoveOutcome::Applied(data) = outcome else {
         panic!("--yes applies");
     };
-    assert!(
-        data.items[0].bytes_kept,
-        "…and the receipt says so: {data:?}"
-    );
     let tty = crate::render::remove_applied_tty(&data);
-    assert!(
-        tty.contains("stays") && tty.contains("wx"),
-        "the receipt names the folder it left alone: {tty}"
-    );
+    assert!(tty.contains("wx"), "the receipt names what it ended: {tty}");
 }
 
-/// Adopt `name` as an MCP bundle rooted in the home dir, machine-wide — the ordinary door: a row,
-/// a record, and a config entry in every detected agent.
-fn adopt_mcp(rig: &Rig, ctx: &Ctx<'_>, name: &str) -> PathBuf {
-    let dir = rig.home.0.join(name);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("server.json"),
-        server_json(&format!("https://{name}.example/mcp")),
-    )
-    .unwrap();
-    ops::add_mcp(ctx, dir.to_str().unwrap(), true, &Default::default()).unwrap();
-    dir
+/// A workspace catalog sharing ONE connected server, plus the machine-wide row that takes it —
+/// what mints the RECORD every orphan question below is about (a server only this machine runs is
+/// a line in a file, and leaves no record behind to abandon).
+fn take_server(rig: &Rig, id: &str, name: &str) -> FakeDirectory {
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/{name}\" = \"*\"\n"));
+    FakeDirectory::of_servers(vec![mcp_catalog_entry(
+        id,
+        name,
+        &served_at(&format!("https://{name}.example/mcp")),
+    )])
 }
 
 /// A PAGE IS NOT A DEMAND. The orphan pass asks "does anything still demand this record?" and it
@@ -834,10 +801,18 @@ fn adopt_mcp(rig: &Rig, ctx: &Ctx<'_>, name: &str) -> PathBuf {
 #[test]
 fn paging_the_rows_never_invents_an_orphan() {
     let rig = Rig::new("orphan-paged");
+    rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    adopt_mcp(&rig, &ctx, "aaa");
-    adopt_mcp(&rig, &ctx, "zzz");
+    let plane = FakePlane::new();
+    let fdir = FakeDirectory::of_servers(vec![
+        mcp_catalog_entry("s_aaa", "aaa", &served_at("https://aaa.example/mcp")),
+        mcp_catalog_entry("s_zzz", "zzz", &served_at("https://zzz.example/mcp")),
+    ]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/aaa\" = \"*\"\n\"{HOST}/{WS_NAME}/zzz\" = \"*\"\n"
+    ));
+    sweep(&ctx, &plane, &fdir);
 
     let listing = |page: ops::RowPage| {
         ops::list_with(
@@ -881,34 +856,30 @@ fn paging_the_rows_never_invents_an_orphan() {
 }
 
 /// A NAME IS NOT A RECORD. Two non-retired records in one scope can carry one display name — a
-/// workspace copy beside a local one is the everyday case — and the orphan pass suppressed by
-/// name, so a healthy `wx` silenced an ABANDONED `wx` whose config entry was sitting live in
-/// Cursor with nothing naming it. Suppression keys on the record the row actually resolved.
+/// server the workspace has since withdrawn beside the skill that took its name is the everyday
+/// case — and the orphan pass suppressed by name, so a healthy `wx` silenced an ABANDONED `wx`
+/// whose config entry was sitting live in Cursor with nothing naming it. Suppression keys on the
+/// record the row actually resolved.
 #[test]
 fn a_same_named_healthy_record_never_silences_an_abandoned_one() {
     let rig = Rig::new("orphan-twin");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let mcp_dir = adopt_mcp(&rig, &ctx, "wx");
+    let server_dir = take_server(&rig, "s_wx_mcp", "wx");
+    sweep(&ctx, &FakePlane::new(), &server_dir);
     let cursor = rig.home.0.join(".cursor/mcp.json");
     let placed = std::fs::read_to_string(&cursor).unwrap();
     std::fs::write(&cursor, placed.replace("wx.example", "edited.example")).unwrap();
 
-    // The local MCP row goes — its record is now abandoned with a live, hand-edited entry. A
-    // WORKSPACE bundle of the same name is demanded in its place; its row names its OWN record
-    // (the delivery carries the id), which is the whole point: one name, two records.
+    // The server leaves the catalog and its row goes with it — its record is now abandoned with a
+    // live, hand-edited entry. A SKILL of the same name is demanded in its place; its row names
+    // its OWN record (the delivery carries the id), which is the whole point: one name, two
+    // records.
     let v = mk_version(&[("SKILL.md", b"# wx\n")]);
     let plane = FakePlane::new().with_version("s_wx", &v);
-    let mut ds = delivered_mcp("s_wx", "wx", &v);
-    ds.kind = "skill".into();
-    plane.serves(vec![ds]);
-    let mut ce = mcp_catalog_entry("s_wx", "wx", &v);
-    ce.kind = "skill".into();
-    let fdir = FakeDirectory {
-        skills: vec![ce],
-        channels: Vec::new(),
-    };
+    plane.serves(vec![delivered_skill("s_wx", "wx", &v)]);
+    let fdir = FakeDirectory::of_skills(vec![skill_catalog_entry("s_wx", "wx", &v)]);
     rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/wx\" = \"*\"\n"));
     let _ = sweep(&ctx, &plane, &fdir);
 
@@ -941,8 +912,10 @@ fn a_same_named_healthy_record_never_silences_an_abandoned_one() {
         "it names the live entry: {orphans:?}"
     );
     assert!(
-        mcp_dir.is_dir(),
-        "the adopted folder is untouched by a read"
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("edited.example"),
+        "the hand-edited entry is untouched by a read"
     );
 }
 
@@ -955,17 +928,19 @@ fn a_same_named_healthy_record_never_silences_an_abandoned_one() {
 #[test]
 fn a_project_orphans_offered_command_reaches_the_project_record() {
     let rig = Rig::new("orphan-proj");
+    rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    rig.write_global("[bundles]\n");
     let proj = Scratch::new("orphan-proj-checkout");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
     let ctx = rig.ctx_at(Some(&proj.0));
+    let plane = FakePlane::new();
+    let fdir = take_server(&rig, "s_wx", "wx");
 
     // A MACHINE record of the same name stands beside it — the twin the home-only resolver used
     // to answer with. Its row is dropped so no demand-guard stands between the test and the
     // resolution being proven; the RECORD is what must come through untouched.
-    let machine_dir = adopt_mcp(&rig, &ctx, "wx");
+    sweep_machine(&ctx, &plane, &fdir);
     let machine_records: Vec<PathBuf> = std::fs::read_dir(rig.layout().skills_dir())
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -973,30 +948,23 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
     assert_eq!(machine_records.len(), 1, "{machine_records:?}");
     rig.write_global("[bundles]\n");
 
-    // The project adopt: the checkout's own store, its own row, its own config entry.
-    let proj_dir = proj.0.join("wx");
-    std::fs::create_dir_all(&proj_dir).unwrap();
+    // The project takes the same server: the checkout's own store, its own row, its own config
+    // entry.
     std::fs::write(
-        proj_dir.join("server.json"),
-        server_json("https://wx-proj.example/mcp"),
+        proj.0.join(crate::manifest::MANIFEST_FILE),
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/wx\" = \"*\"\n"),
     )
     .unwrap();
-    ops::add_mcp(&ctx, proj_dir.to_str().unwrap(), false, &Default::default())
-        .expect("project adopt");
+    sweep(&ctx, &plane, &fdir);
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
-        .expect("the project adopt minted the checkout's store");
+        .expect("the project delivery minted the checkout's store");
     let cursor = proj.0.join(".cursor/mcp.json");
     let placed = std::fs::read_to_string(&cursor).unwrap();
-    std::fs::write(&cursor, placed.replace("wx-proj.example", "edited.example")).unwrap();
+    std::fs::write(&cursor, placed.replace("wx.example", "edited.example")).unwrap();
 
     // The project row goes; the hand-edited entry stays, so the record sticks — an orphan.
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
-    let plane = FakePlane::new();
-    let fdir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
-    let _ = sweep(&ctx, &plane, &fdir);
+    let _ = sweep(&ctx, &plane, &FakeDirectory::default());
 
     let listing = || {
         ops::list_with(
@@ -1065,8 +1033,6 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
             == 0,
         "the project store's record is gone"
     );
-    // Both folders are the person's own; neither was ever topos's to delete.
-    assert!(proj_dir.is_dir() && machine_dir.is_dir());
     // And the MACHINE twin — the record the home-only resolver would have hit — still stands.
     assert!(
         machine_records.iter().all(|p| p.is_dir()),
@@ -1082,10 +1048,7 @@ fn a_github_sourced_mcp_row_refuses_when_the_manifest_loads() {
     let rig = Rig::new("ghmcp");
     rig.seed_session();
     let plane = FakePlane::new();
-    let dir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::default();
     rig.write_global("[bundles]\n\"github.com/o/r/tool\" = { version = \"*\", kind = \"mcp\" }\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let err = ops::manifest_update(
@@ -1103,19 +1066,17 @@ fn a_github_sourced_mcp_row_refuses_when_the_manifest_loads() {
     );
 }
 
-/// F6: the SAME folder adopted in BOTH scopes must keep each scope's config key stable. The
-/// reconcile resolves a local row's custody identity against THE SCOPE'S OWN store — never the
-/// other scope's — because add-time minted the key under the scope's tracked id, and a
-/// cross-scope answer would retire that key and re-mint `-2` (the one path an entry name could
-/// move, orphaning any OAuth token filed under it).
+/// F6: the SAME folder named by a row in BOTH scopes must keep each scope's config key stable.
+/// The reconcile resolves a local row's custody identity against THE SCOPE'S OWN store — never
+/// the other scope's — because the key was minted under that identity, and a cross-scope answer
+/// would retire that key and re-mint `-2` (the one path an entry name could move, orphaning any
+/// OAuth token filed under it).
 #[test]
-fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
+fn a_folder_named_in_both_scopes_keeps_each_scopes_config_key_stable() {
     let rig = Rig::new("dual");
     seed_harness_dirs(&rig.home.0);
-    rig.write_global("[bundles]\n");
     let proj = Scratch::new("dual-proj");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
     let dir = proj.0.join("weather");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1124,13 +1085,18 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
          \"remotes\":[{\"type\":\"streamable-http\",\"url\":\"https://w.example/mcp\"}]}",
     )
     .unwrap();
+    // The same folder is a line in the PROJECT's file and in the machine's — two scopes, two
+    // custody documents, two keys that must not reach across at each other.
+    let row = format!("[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n", dir.display());
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), &row).unwrap();
+    rig.write_global(&row);
     let ctx = rig.ctx_at(Some(&proj.0));
-    // Adopt at PROJECT scope (the checkout's store tracks the dir under the project id), then
-    // the SAME folder with `-g` (the home store tracks it under its own id).
-    ops::add_mcp(&ctx, dir.to_str().unwrap(), false, &Default::default()).expect("project adopt");
-    ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default()).expect("global adopt");
+    let plane = FakePlane::new();
+    let fdir = FakeDirectory::default();
+    sweep_machine(&ctx, &plane, &fdir);
+    sweep(&ctx, &plane, &fdir);
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
-        .expect("the project adopt minted the checkout's store");
+        .expect("the project row minted the checkout's store");
     let before = ScopeEntries::load(&rig.fs, &playout).unwrap();
     assert_eq!(before.doc.keys.len(), 1, "{before:?}");
     let (proj_bundle, proj_key) = before.doc.keys.iter().next().unwrap();
@@ -1139,13 +1105,8 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
     let placed = std::fs::read_to_string(&cursor).unwrap();
     assert!(placed.contains(&proj_key), "{placed}");
 
-    // The sweep must resolve the SAME identity the add minted the key under: no retire, no
+    // The next sweep must resolve the SAME identity the key was minted under: no retire, no
     // `-2` re-mint, the config entry's name never moves.
-    let plane = FakePlane::new();
-    let fdir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
     sweep(&ctx, &plane, &fdir);
     let after = ScopeEntries::load(&rig.fs, &playout).unwrap();
     assert_eq!(
@@ -1170,15 +1131,9 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
     let rig = Rig::new("rm");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", {SAFE} }}\n"
     ));

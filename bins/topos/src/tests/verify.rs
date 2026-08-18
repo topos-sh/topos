@@ -1398,18 +1398,16 @@ fn the_verb_resolves_a_bundle_by_name_and_reports_the_live_verdict() {
 fn a_bundle_this_build_cannot_set_up_refuses_rather_than_reporting_a_verdict() {
     let rig = Rig::new("gap");
     rig.write_manifest();
-    let src = rig.work.0.join("imaged");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join("server.json"),
+    let ctx = rig.ctx();
+    record_connected(
+        &ctx,
+        "s_imaged",
+        "imaged",
         r#"{"name":"io.github.acme/imaged","description":"A container-packaged server.",
             "version":"1.4.0","packages":[{"registryType":"oci",
             "identifier":"ghcr.io/acme/imaged@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "transport":{"type":"stdio"}}]}"#,
-    )
-    .unwrap();
-    let ctx = rig.ctx();
-    ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default()).unwrap();
+    );
 
     let err = ops::verify(&ctx, "imaged", ops::StoreScope::Here).unwrap_err();
     // The GAP's own code travels: one cause, one word, whichever verb met it.

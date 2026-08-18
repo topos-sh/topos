@@ -345,7 +345,7 @@ fn a_folder_refuses_and_spells_the_line_a_machine_local_server_is() {
     let err = ops::add_mcp(
         &ctx,
         &connect(&lane, &publishes),
-        &format!("./{}", dir.display()),
+        dir.to_str().unwrap(),
         None,
         true,
         &Default::default(),
@@ -354,15 +354,16 @@ fn a_folder_refuses_and_spells_the_line_a_machine_local_server_is() {
     let detail = err.detail();
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(detail.contains("is a folder on this machine"), "{detail}");
-    assert!(detail.contains(r#"= { kind = "mcp" }"#), "{detail}");
+    // The LINE, spelled with the person's own folder in it, and how to make it take effect.
+    assert!(
+        detail.contains(&format!("`\"{}\" = {{ kind = \"mcp\" }}`", dir.display())),
+        "{detail}"
+    );
     assert!(detail.contains("under [bundles]"), "{detail}");
     assert!(detail.contains("'topos update'"), "{detail}");
     // …and the other half: what sharing this server with the team actually takes.
     assert!(
-        detail.contains(
-            "topos add --kind mcp <its registry name or the https link to its \
-                         server.json>"
-        ),
+        detail.contains("topos add --kind mcp <its registry name or the https link"),
         "{detail}"
     );
     // Nothing was asked of the workspace, and nothing was written.
@@ -513,7 +514,11 @@ fn the_workspace_names_the_bundle_and_the_row_and_the_entries_follow() {
     )
     .expect("the share lands");
     assert_eq!(added.data.name, "weather");
-    assert!(!added.reached_nobody, "{:?}", added.messages);
+    assert!(
+        added.messages.is_empty(),
+        "every planned surface was written: {:?}",
+        added.messages
+    );
 
     let text = rig.global_text();
     assert!(
@@ -525,6 +530,150 @@ fn the_workspace_names_the_bundle_and_the_row_and_the_entries_follow() {
     assert!(
         cursor.contains("https://weather.acme.example/mcp"),
         "{cursor}"
+    );
+
+    // The receipt states WHICH server this row now points at — the one thing the per-surface lines
+    // beside it cannot say — read back from the record the delivery landed, never from the
+    // spelling that was typed. No `bundle` folder is named: a shared server has none.
+    let mcp = added.data.mcp.as_ref().expect("the typed block");
+    assert_eq!(mcp.server, "io.github.acme/weather");
+    assert_eq!(mcp.url, "https://weather.acme.example/mcp");
+    assert_eq!(mcp.transport, "streamable-http");
+    assert_eq!(mcp.agents, vec!["Cursor".to_owned()]);
+    assert_eq!(mcp.bundle, None);
+    assert!(
+        added.data.note.as_deref().unwrap_or_default().contains(
+            "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp over \
+                 streamable-http"
+        ),
+        "{:?}",
+        added.data.note
+    );
+}
+
+/// **THE AUTH WORD THAT IS A TASK GETS A LINE OF ITS OWN.** `oauth` and `none` describe something
+/// that happens by itself and ride the summary line as a clause; `manual` describes something a
+/// person has to go and do, and the entry stands there doing nothing until they do — so the
+/// receipt says it in words, once, where the row is reported.
+#[test]
+fn a_manual_sign_in_says_what_the_person_has_to_do() {
+    const SETUP: &str = "Signing in to this server is a one-time manual step on this machine — a \
+                         token you create, or an app an administrator registers; no agent can \
+                         complete it";
+    let rig = Rig::new("manual-auth");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let publishes = RecordingPublish::default();
+
+    let lane = ShareLane::sharing(
+        "s_rota",
+        "rota",
+        r#"{"name":"io.github.acme/rota","description":"Read and edit the on-call rota.",
+            "version":"2.1.0","remotes":[{"type":"streamable-http",
+            "url":"https://rota.acme.example/mcp"}],"_meta":{"sh.topos/auth":"manual"}}"#,
+    );
+    let added = ops::add_mcp(
+        &ctx,
+        &connect(&lane, &publishes),
+        "io.github.acme/rota",
+        None,
+        true,
+        &Default::default(),
+    )
+    .expect("the share lands");
+    // The word travels TYPED too — an agent reading `--json` gets it without parsing prose.
+    assert_eq!(
+        added
+            .data
+            .mcp
+            .as_ref()
+            .expect("typed block")
+            .auth
+            .as_deref(),
+        Some("manual")
+    );
+    let note = added.data.note.clone().unwrap_or_default();
+    assert!(note.contains(", auth manual"), "{note}");
+    assert!(note.contains(SETUP), "{note}");
+
+    // An OAUTH server is unchanged: the clause, and no second line — nobody has to do anything.
+    let rig = Rig::new("oauth-auth");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let lane = ShareLane::sharing(
+        "s_tickets",
+        "tickets",
+        r#"{"name":"io.github.acme/tickets","description":"Search and comment on tickets.",
+            "version":"0.9.0","remotes":[{"type":"streamable-http",
+            "url":"https://tickets.acme.example/mcp"}],"_meta":{"sh.topos/auth":"oauth"}}"#,
+    );
+    let added = ops::add_mcp(
+        &ctx,
+        &connect(&lane, &publishes),
+        "io.github.acme/tickets",
+        None,
+        true,
+        &Default::default(),
+    )
+    .expect("the share lands");
+    let note = added.data.note.clone().unwrap_or_default();
+    assert!(note.contains(", auth oauth"), "{note}");
+    assert!(!note.contains(SETUP), "{note}");
+}
+
+/// A `--kind` WORD THAT CONTRADICTS THE CATALOG IS REFUSED. The catalog is the authority on what a
+/// workspace bundle is, which is exactly why the flag can only agree with it or be wrong — and
+/// being wrong mattered: `--kind skill` on a shared server used to deliver a tool endpoint into
+/// the person's agents without a syllable about it.
+#[test]
+fn a_kind_word_contradicting_the_catalog_refuses_at_the_workspace_door() {
+    let rig = Rig::new("kind-contradict");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let lane = ShareLane::sharing("s_weather", "weather", &good_server());
+    let publishes = RecordingPublish::default();
+
+    let add = |declared: Option<crate::bundle_kind::BundleKind>| {
+        ops::add_reference(
+            &ctx,
+            &connect(&lane, &publishes),
+            None,
+            &format!("{HOST}/{WS_NAME}/weather"),
+            true,
+            true,
+            &Default::default(),
+            declared,
+        )
+    };
+
+    // The contradiction refuses — naming both kinds, and the flag as the thing to drop.
+    let err = add(Some(crate::bundle_kind::BundleKind::Skill))
+        .expect_err("`--kind skill` on a shared server refuses");
+    let msg = crate::render::safe_message(&err);
+    assert!(
+        msg.contains("is an MCP server in the catalog, not a skill")
+            && msg.contains("needs no `--kind` at all"),
+        "{msg}"
+    );
+    assert_eq!(
+        rig.global_text(),
+        "[bundles]\n",
+        "nothing was written: {msg}"
+    );
+
+    // The word that AGREES passes this gate — the flag is redundant here, never wrong.
+    add(Some(crate::bundle_kind::BundleKind::Mcp)).expect("the matching word is never the refusal");
+    assert!(
+        rig.global_text()
+            .contains(&format!("\"{HOST}/{WS_NAME}/weather\"")),
+        "{}",
+        rig.global_text()
     );
 }
 
@@ -1234,6 +1383,17 @@ fn claim_folder(ctx: &Ctx<'_>, sid: &crate::id::SkillId, dir: &Path) {
         .unwrap()
         .expect("the map");
     map.placements.push(dir.display().to_string());
+    // Strictly 1:1 with the placements, as the document's own invariant demands.
+    map.placement_state
+        .push(topos_types::persisted::PlacementState {
+            kind: topos_types::persisted::PlacementKind::Native,
+            agent: None,
+            materialized_sha: None,
+            pre_existing_sha: None,
+            swap_capability: topos_types::persisted::SwapCapability::Unsupported,
+            adopted_source: true,
+            claim: None,
+        });
     crate::doc::write_map(ctx.fs, &path, &map).unwrap();
 }
 

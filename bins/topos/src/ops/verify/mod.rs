@@ -139,10 +139,9 @@ fn local_row_server(
                 continue;
             }
             let dir = if let Some(rest) = raw.strip_prefix("~/") {
-                ctx.roots.as_ref().map_or_else(
-                    || std::path::PathBuf::from(raw),
-                    |r| r.home.join(rest),
-                )
+                ctx.roots
+                    .as_ref()
+                    .map_or_else(|| std::path::PathBuf::from(raw), |r| r.home.join(rest))
             } else if std::path::Path::new(raw).is_absolute() {
                 std::path::PathBuf::from(raw)
             } else {

@@ -341,6 +341,18 @@ pub(crate) fn publish_describe(
     // gates it here too (refuse on mismatch), so a describe never previews bytes the apply would refuse.
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+    // WHAT THE KIND CAN SERVE, asked before a work tree is looked for. `publish` ships a bundle's
+    // placed files and a connected server has none — its whole delivery is a document the catalog
+    // publishes — so it refuses through the ONE file-verb construction. Without this the search
+    // for a work tree fails first, and a person is told their own machine is unreadable about a
+    // bundle that is behaving exactly as its kind says it should.
+    if let Some(refusal) = crate::bundle_kind::refuse_file_verb(
+        crate::bundle_kind::FileVerb::Publish,
+        &skill_name,
+        crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill(),
+    ) {
+        return Err(refusal);
+    }
     // The WORK TREE: the single edited copy when one exists (the draft being shipped — it may live
     // in the shared dir or any native copy), else the first placement; several DIVERGENT copies are
     // the typed freeze — a BARE publish never picks for you. `--dest`/`-a` is what supplies the

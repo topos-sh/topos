@@ -349,15 +349,8 @@ fn a_scoped_out_skill_with_an_empty_map_is_not_reported_held() {
     // Deliberately NO detect dirs anywhere: the project plan has no agent to place for.
     let v = mk_version(&[("SKILL.md", b"# alpha\n")]);
     let plane = FakePlane::new().with_version("s_alpha", &v);
-    let mut delivered = delivered_mcp("s_alpha", "alpha", &v);
-    delivered.kind = "skill".into();
-    plane.serves(vec![delivered]);
-    let mut entry = mcp_catalog_entry("s_alpha", "alpha", &v);
-    entry.kind = "skill".into();
-    let dir = FakeDirectory {
-        skills: vec![entry],
-        channels: Vec::new(),
-    };
+    plane.serves(vec![delivered_skill("s_alpha", "alpha", &v)]);
+    let dir = FakeDirectory::of_skills(vec![skill_catalog_entry("s_alpha", "alpha", &v)]);
     // Person scope demands nothing; the PROJECT manifest carries a feed row — illegal in a
     // project file, so that scope is FROZEN. The run drives the MACHINE scope (driving the
     // frozen project would refuse the run whole now), which syncs nothing: the delivered skill
@@ -400,11 +393,7 @@ fn a_bare_diff_of_a_config_placed_bundle_refuses_naming_the_kind() {
     let rig = Rig::new("bare-diff");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let (plane, dir) = deliver_linear(&rig, &v);
+    let (plane, dir) = deliver_linear(&rig, &served_at("https://mcp.example/linear"));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
@@ -442,16 +431,10 @@ fn an_offline_sweep_keeps_a_dest_narrowed_bundle_narrow() {
     let rig = Rig::new("offline-narrow");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/a").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_a", &v);
-    plane.serves(vec![delivered_mcp("s_a", "alpha", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/a");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\
          \"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
@@ -495,16 +478,10 @@ fn a_workspace_mcp_add_leaves_the_marker_behind_before_it_returns() {
     let proj = Scratch::new("add-marker-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global("[bundles]\n");
     let ctx = rig.ctx_at(Some(&proj.0));
 
@@ -549,17 +526,11 @@ fn an_mcp_row_never_stands_without_its_marker_even_when_the_feed_is_dark() {
     let rig = Rig::new("dark-feed-marker");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
     // The FEED is unreachable for the whole invocation.
     plane.serve_unreachable();
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global("[bundles]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     ops::add_reference(
@@ -584,10 +555,7 @@ fn an_mcp_row_never_stands_without_its_marker_even_when_the_feed_is_dark() {
 
     // The other half: with no catalog answer there is no row either, so "row without marker" has
     // no way to come about.
-    let empty = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
+    let empty = FakeDirectory::default();
     ops::add_reference(
         &ctx,
         &connect(&plane, &empty),
@@ -623,16 +591,10 @@ fn a_qualified_row_resolves_its_own_record_when_the_name_is_shared() {
     crate::ops::add(&ctx, &local).expect("the local skill adopts");
 
     // Record TWO: the workspace's MCP bundle, same name, delivered by its qualified row.
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_mcp", &v);
-    plane.serves(vec![delivered_mcp("s_mcp", "linear", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_mcp", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_mcp", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_mcp", "linear", &s)]);
     rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \"*\"\n"));
     sweep(&ctx, &plane, &dir);
     assert!(
@@ -753,30 +715,18 @@ fn two_same_named_bundles_from_two_workspaces_both_failing_count_as_two() {
     rig.seed_session();
     seed_ops_session(&rig);
     seed_harness_dirs(&rig.home.0);
-    let eng = mk_version(&[(
-        "server.json",
-        server_json("http://eng.example/linear").as_bytes(),
-    )]);
-    let ops_v = mk_version(&[(
-        "server.json",
-        server_json("http://ops.example/linear").as_bytes(),
-    )]);
+    let eng = served(&unplaceable_server_json("https://eng.example/linear"));
+    let ops_server = served(&unplaceable_server_json("https://ops.example/linear"));
     let lanes = [
         (
             WS,
-            FakePlane::new().with_version("s_lin_eng", &eng),
-            FakeDirectory {
-                skills: vec![mcp_catalog_entry("s_lin_eng", "linear", &eng)],
-                channels: Vec::new(),
-            },
+            FakePlane::new(),
+            FakeDirectory::of_servers(vec![mcp_catalog_entry("s_lin_eng", "linear", &eng)]),
         ),
         (
             "w_ops",
-            FakePlane::new().with_version("s_lin_ops", &ops_v),
-            FakeDirectory {
-                skills: vec![mcp_catalog_entry("s_lin_ops", "linear", &ops_v)],
-                channels: Vec::new(),
-            },
+            FakePlane::new(),
+            FakeDirectory::of_servers(vec![mcp_catalog_entry("s_lin_ops", "linear", &ops_server)]),
         ),
     ];
     rig.write_global(&format!(
@@ -790,7 +740,7 @@ fn two_same_named_bundles_from_two_workspaces_both_failing_count_as_two() {
     assert_eq!(
         crate::message::legacy_lines(&out.warnings)
             .into_iter()
-            .filter(|w| w.contains("MCP_INSECURE_URL"))
+            .filter(|w| w.contains("MCP_UNPLACEABLE"))
             .count(),
         2,
         "each bundle's own refusal: {:?}",
@@ -828,21 +778,15 @@ fn a_failed_bundle_stands_down_its_own_row_and_the_healthy_twin_keeps_its_row() 
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     // The healthy one: the workspace's `linear`, over https.
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_lin_ws", &v);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_lin_ws", "linear", &v)],
-        channels: Vec::new(),
-    };
-    // The failing one: a LOCAL folder of the same name whose document names an http endpoint.
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_lin_ws", "linear", &s)]);
+    // The failing one: a LOCAL folder of the same name whose document this build cannot read.
     let local = rig.home.0.join("linear");
     std::fs::create_dir_all(&local).unwrap();
     std::fs::write(
         local.join("server.json"),
-        server_json("http://local.example/linear"),
+        unplaceable_server_json("https://local.example/linear"),
     )
     .unwrap();
     rig.write_global(&format!(
@@ -896,5 +840,5 @@ fn a_failed_bundle_stands_down_its_own_row_and_the_healthy_twin_keeps_its_row() 
         cursor.contains("topos-eng-linear") && cursor.contains("https://mcp.example/linear"),
         "{cursor}"
     );
-    assert!(!cursor.contains("http://local.example"), "{cursor}");
+    assert!(!cursor.contains("local.example"), "{cursor}");
 }

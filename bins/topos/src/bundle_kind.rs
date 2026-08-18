@@ -167,6 +167,8 @@ pub(crate) enum FileVerb {
     Reset,
     /// `topos update --keep-mine` — end a stopped merge over the placed files.
     KeepMine,
+    /// `topos publish` — ship the placed files to the workspace.
+    Publish,
 }
 
 impl FileVerb {
@@ -177,6 +179,7 @@ impl FileVerb {
             Self::Diff => "`diff` compares",
             Self::Reset => "`--reset` discards your edits to",
             Self::KeepMine => "`--keep-mine` ends a stopped merge over",
+            Self::Publish => "`publish` ships",
         }
     }
 }
@@ -197,9 +200,9 @@ pub(crate) fn refuse_file_verb(
         BundleKind::Skill => None,
         BundleKind::Mcp => Some(crate::error::ClientError::InvalidArgument(format!(
             "'{name}' is an MCP server bundle — {} a skill's placed files, and a server bundle \
-             places none. Its bytes are one entry per agent MCP config, and an entry you edited by \
-             hand is left exactly as you left it, never overwritten. `topos list {name}` names the \
-             files carrying it",
+             places none. What it puts on this machine is one entry per agent MCP config, and an \
+             entry you edited by hand is left exactly as you left it, never overwritten. \
+             `topos list {name}` names the files carrying it",
             verb.acts_on()
         ))),
     }

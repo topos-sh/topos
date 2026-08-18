@@ -2143,6 +2143,9 @@ fn reconcile_thing<'a>(
                         &sc.label,
                         &run.session.workspace_name,
                     ));
+                    sweep
+                        .failed_bundles
+                        .insert((sc.label.clone(), entry.skill_id.clone()));
                     return;
                 };
                 sync_workspace_server(
@@ -2788,6 +2791,9 @@ fn reconcile_set<'a>(
                                 &sc.label,
                                 &run.session.workspace_name,
                             ));
+                            sweep
+                                .failed_bundles
+                                .insert((sc.label.clone(), server.skill_id.clone()));
                             continue;
                         };
                         sync_workspace_server(
@@ -3104,16 +3110,35 @@ fn served_kind(
     warnings: &mut Vec<Message>,
 ) -> Option<BundleKind> {
     let kind = BundleKind::parse(word);
-    if kind.is_none() {
-        warnings.push(crate::message::failure(
-            "UNKNOWN_KIND",
-            format!(
-                "\"{bundle}\" ({label}) is a \"{word}\" bundle, and this version of topos does \
-                 not know how to deliver that kind. Run 'topos self-update'."
-            ),
-        ));
+    match kind {
+        None => {
+            warnings.push(crate::message::failure(
+                "UNKNOWN_KIND",
+                format!(
+                    "\"{bundle}\" ({label}) is a \"{word}\" bundle, and this version of topos does \
+                     not know how to deliver that kind. Run 'topos self-update'."
+                ),
+            ));
+            None
+        }
+        // A CONNECTED SERVER served in the FILE-BUNDLE list. It has its own list on both lanes,
+        // and one arriving here would be materialized as files — a `server.json` written into
+        // every agent's skills folder, which is the exact mis-placement the kind vocabulary
+        // exists to prevent. The row is skipped WHOLE: nothing synced, nothing cached, nothing
+        // placed.
+        Some(BundleKind::Mcp) => {
+            warnings.push(crate::message::failure(
+                "SERVED_AS_FILES",
+                format!(
+                    "\"{bundle}\" ({label}) is an MCP server and this workspace served it among \
+                     the file bundles. topos placed nothing for it — ask whoever runs the server \
+                     to look at it."
+                ),
+            ));
+            None
+        }
+        Some(k) => Some(k),
     }
-    kind
 }
 
 struct CatalogTarget {
@@ -5782,17 +5807,24 @@ fn run_mcp_converge(
             let (name, ws_id, display) = match named {
                 Some((n, w, d)) => (n, Some(w), d),
                 // No delivery cache row describes this bundle (a local row, a workspace whose
-                // cache entry is gone). Its OWN record still holds the name it was placed under —
-                // ask that before falling back to the opaque id, or a receipt announces the
-                // removal of something nobody can recognise.
+                // cache entry is gone). Ask what this run still DEMANDS of it, then its own
+                // record, before falling back to the identity — or a receipt announces the
+                // removal of something nobody can recognise, and a bundle that merely NARROWED
+                // gets two names on one receipt and is counted twice.
                 None => {
-                    let recorded = SkillId::parse(&bundle_id).ok().and_then(|sid| {
-                        doc::read_doc::<Lock>(env.ctx.fs, &layout.published(&sid).lock)
-                            .ok()
-                            .flatten()
-                            .map(|l| l.name)
-                    });
-                    let name = recorded.unwrap_or_else(|| {
+                    let demanded = demands
+                        .iter()
+                        .find(|d| d.bundle_id == bundle_id)
+                        .map(|d| d.name.clone());
+                    let recorded = || {
+                        SkillId::parse(&bundle_id).ok().and_then(|sid| {
+                            doc::read_doc::<Lock>(env.ctx.fs, &layout.published(&sid).lock)
+                                .ok()
+                                .flatten()
+                                .map(|l| l.name)
+                        })
+                    };
+                    let name = demanded.or_else(recorded).unwrap_or_else(|| {
                         bundle_id
                             .strip_prefix("local:")
                             .unwrap_or(&bundle_id)

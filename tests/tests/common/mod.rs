@@ -48,6 +48,12 @@ pub(crate) const OWNER_EMAIL: &str = "owner@acme.test";
 /// The shared internal-lane bearer the composed stack arms on both sides (test-only value).
 pub(crate) const INTERNAL_TOKEN: &str = "e2e-internal-token";
 
+/// How the harness NAMES ITSELF on the session lane — the same `topos/<version>` a real client
+/// sends. The server's floor is a version comparison, and a caller that says nothing is BELOW any
+/// floor there is: every lane path answers such a caller `426`, catch-all included. The version
+/// is this workspace's own, so the harness cannot drift below the floor the same tree ships.
+pub(crate) const CLIENT_USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
+
 // ── per-test Postgres provisioning (the production recipe) ──────────────────────────────────────────
 
 /// The two application roles' test passwords (mirroring the compose defaults).
@@ -708,7 +714,8 @@ impl Stack {
             "DELETE" => agent.delete(&url).force_send_body(),
             other => panic!("unsupported method {other}"),
         }
-        .header("Accept", "application/json");
+        .header("Accept", "application/json")
+        .header("User-Agent", CLIENT_USER_AGENT);
         if let Some(cred) = credential {
             req = req.header("Authorization", format!("Bearer {cred}"));
         }
@@ -746,6 +753,7 @@ impl Stack {
             .get(format!("{}{path}", self.origin))
             .force_send_body()
             .header("Accept", "application/json")
+            .header("User-Agent", CLIENT_USER_AGENT)
             .header("Authorization", format!("Bearer {credential}"))
             .send(&[][..])
             .expect("origin-rooted GET over loopback");
@@ -970,7 +978,15 @@ pub(crate) struct CliOut {
 impl CliOut {
     /// The `--json` envelope, asserted successful.
     pub(crate) fn envelope(&self, what: &str) -> serde_json::Value {
-        assert_eq!(self.code, 0, "{what} exited {}: {}", self.code, self.stderr);
+        // BOTH streams, because the answer is on stdout and only the noise is on stderr: a verb
+        // that exits non-zero still prints its typed envelope — the refusal, or the failure
+        // messages a partly-converged sweep exits on — and a diagnostic that showed stderr alone
+        // reported the progress line and swallowed the reason.
+        assert_eq!(
+            self.code, 0,
+            "{what} exited {}: {} {}",
+            self.code, self.stdout, self.stderr
+        );
         let value: serde_json::Value = serde_json::from_str(&self.stdout)
             .unwrap_or_else(|e| panic!("{what} printed a JSON envelope ({e}): {}", self.stdout));
         assert_eq!(value["ok"], true, "{what}: {}", self.stdout);

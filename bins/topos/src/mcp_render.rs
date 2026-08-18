@@ -187,11 +187,10 @@ impl ServerDoc {
 /// a secret / templated / variable / value-less HEADER — fails the whole demand closed (never
 /// place a suspect entry).
 ///
-/// DISCIPLINE, unchanged from the day this was only about addresses: the checks here are a
-/// MATCHING RE-CHECK of the shared validation gate ([`crate::mcp_validate`]), rule for rule. Every
-/// refusal this parse could make BEYOND the gate either moves into the gate (with shared vectors,
-/// both tiers) or is deleted — a bundle the gate publishes must never be permanently unplaceable
-/// here. What a given MACHINE can set up is a different question, and it is [`select`]'s.
+/// DISCIPLINE: this parse decides only whether these bytes can BECOME AN ENTRY. What may be
+/// SHARED is the workspace's ruling, made where a server is written down — so nothing here
+/// re-decides it, and a server a workspace shares must never be permanently unplaceable here.
+/// What a given MACHINE can set up is a third question, and it is [`select`]'s.
 ///
 /// # Errors
 /// One honest sentence naming what could not be read.

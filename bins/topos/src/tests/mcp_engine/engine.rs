@@ -12,7 +12,6 @@ use topos_types::results::TargetOutcome;
 use crate::config_custody::{self, ScopeEntries};
 use crate::fs_seam::{FaultFs, FsOps as _, RealFs};
 use crate::mcp_engine::{self, DemandedBundle, ScopeIo};
-use crate::ops;
 use crate::sidecar::Layout;
 
 use super::rig::*;
@@ -81,7 +80,7 @@ fn a_surface_symlinked_out_between_plan_and_write_is_refused_with_zero_writes() 
 /// The reach resolves to one harness whose surface no longer proves inside the checkout, so there
 /// is nothing to write anywhere. Returning early there would drop the per-agent line the receipt
 /// owes AND skip the intent journal's crash recovery, which runs inside the converge — so a crash
-/// left by an earlier run would survive every targeted verb.
+/// left by an earlier run would survive every targeted run.
 #[test]
 fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() {
     let rig = Rig::new("withheld-targeted");
@@ -95,16 +94,10 @@ fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() 
         format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"./.cursor/mcp.json\"] }}\n"),
     )
     .unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep(&ctx, &plane, &dir);
     assert!(
@@ -140,19 +133,15 @@ fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() 
         "the crash-left intent stands before the verb"
     );
 
-    let out = ops::pull(
-        &ctx,
-        ops::PullScope::One {
-            name: "linear".into(),
-            workspace: None,
-            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
-            store: ops::StoreScope::Here,
-        },
-    )
-    .expect("the go-back applies");
+    let out = sweep_one(&ctx, &plane, &dir, "linear");
 
     // It SPOKE: the per-agent line survives a run that wrote nothing.
-    let row = &out.data.skills[0];
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "linear")
+        .unwrap_or_else(|| panic!("the targeted row: {:?}", out.data.skills));
     let st = row
         .harnesses
         .iter()
@@ -177,9 +166,8 @@ fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() 
 /// file topos wholly owned there. Both are work that WORKED: routed through the warning channel
 /// the deletion made a clean run count itself FAILED and exit non-zero while `--json` still said
 /// `ok: true`. It rides disclosures now — and the row reporting the surfaces the bundle left names
-/// it the way a person knows it. For a LOCALLY ADOPTED bundle no delivery cache describes, that
-/// name comes from the bundle's own record; the opaque store id is the last resort, not the first
-/// answer.
+/// it the way a person knows it. For a MACHINE-LOCAL server no delivery cache describes, that name
+/// is the line the person wrote in their own file; the opaque store id is never the answer.
 #[test]
 fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     let rig = Rig::new("dest-move");
@@ -194,18 +182,13 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     )
     .unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    // Adopted in place: the store tracks the folder under an opaque id, and no delivery cache
-    // will ever describe it — the shape whose receipt used to print that id at a person.
-    ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default())
-        .expect("the local mcp folder adopts");
     let plane = FakePlane::new();
-    let fdir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
+    let fdir = FakeDirectory::default();
+    // A server only this machine runs is a LINE, not something a workspace shares: no record, no
+    // delivery cache row — the shape whose receipt used to print a store id at a person.
+    let row = format!("\"{}\"", dir.display());
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n",
-        dir.display()
+        "[bundles]\n{row} = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     sweep(&ctx, &plane, &fdir);
     let cursor = rig.home.0.join(".cursor/mcp.json");
@@ -252,7 +235,9 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
         ) && !note_tty.contains("MCP_FILE_REMOVED"),
         "the note reads as English on the TTY: {note_tty}"
     );
-    // The row for the surfaces the bundle left names `demo` — never the store's id for it.
+    // The row for the surfaces the bundle left names `demo` — the name its OTHER row on this
+    // receipt is printed under, never the identity the custody keys it by (this row and that one
+    // are one bundle, and the summary below counts them as one).
     let left = out
         .data
         .skills
@@ -964,16 +949,16 @@ fn package_server_json(registry: &str, identifier: &str, version: &str) -> Strin
     )
 }
 
-/// **The bundle that publishes and could not be delivered.** A document offering only a package
-/// passes the shared gate and, until this increment, was refused by the placement parse — so a
-/// workspace could share a server no machine ever received. Both halves are asserted here, in one
-/// test, because the bug was exactly the gap between them: the gate ACCEPTS the document, and the
-/// converge WRITES the entry every dialect spells.
+/// **The bundle that publishes and could not be delivered.** A document offering only a package is
+/// one a workspace shares, and it was once refused by the placement parse — so a workspace could
+/// share a server no machine ever received. Both halves are asserted here, in one test, because
+/// the bug was exactly the gap between them: the document READS, and the converge WRITES the entry
+/// every dialect spells.
 #[test]
-fn a_package_only_bundle_passes_the_gate_and_lands_as_the_program_each_agent_runs() {
+fn a_package_only_bundle_reads_and_lands_as_the_program_each_agent_runs() {
     let document = package_server_json("npm", "@acme/server", "2.1.0");
-    crate::mcp_validate::validate_server_json(document.as_bytes())
-        .expect("the shared gate publishes a package-only document");
+    crate::mcp_render::parse_server_json(document.as_bytes())
+        .expect("a package-only document is one this build can read");
 
     let home = Scratch::new("package-npm");
     let fs = RealFs;
@@ -1101,7 +1086,7 @@ fn a_package_only_bundle_passes_the_gate_and_lands_as_the_program_each_agent_run
 #[test]
 fn a_pypi_bundle_is_run_by_uvx_at_the_version_the_document_pins() {
     let document = package_server_json("pypi", "acme-server", "3.0.1");
-    crate::mcp_validate::validate_server_json(document.as_bytes()).expect("gate");
+    crate::mcp_render::parse_server_json(document.as_bytes()).expect("the document reads");
     let home = Scratch::new("package-pypi");
     let fs = RealFs;
     let layout = Layout::new(&home.0.join(".topos"));
@@ -1174,7 +1159,7 @@ fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
                \"identifier\":\"ghcr.io/acme/server@sha256:\
                aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\
                \"transport\":{\"type\":\"stdio\"}}]}";
-    crate::mcp_validate::validate_server_json(oci.as_bytes()).expect("an oci bundle publishes");
+    crate::mcp_render::parse_server_json(oci.as_bytes()).expect("an oci document reads");
     let out = mcp_engine::converge(
         &io,
         &plan(&io, vec![demand("s_b", "beta", Some("eng"), oci)]),
@@ -1194,7 +1179,7 @@ fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
 }
 
 /// **A package the document says is spoken to over http is withheld, not run as a program.** The
-/// gate publishes it (the format expresses it, and some other client may know how to bring it up);
+/// document READS (the format expresses it, and some other client may know how to bring it up);
 /// this build has no entry shape for a server that becomes an address only once it is running, and
 /// writing a `command` for one would hand an agent a pipe nothing answers on.
 #[test]
@@ -1204,8 +1189,8 @@ fn a_package_served_over_http_is_withheld_and_nothing_is_written() {
                     \"identifier\":\"@acme/server\",\"version\":\"2.1.0\",\
                     \"transport\":{\"type\":\"streamable-http\",\
                     \"url\":\"https://127.0.0.1:9000/mcp\"}}]}";
-    crate::mcp_validate::validate_server_json(document.as_bytes())
-        .expect("the shared gate publishes an http-served package");
+    crate::mcp_render::parse_server_json(document.as_bytes())
+        .expect("an http-served package is a document this build can read");
 
     let home = Scratch::new("package-http");
     let fs = RealFs;
@@ -1800,16 +1785,20 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     );
     let line = crate::message::legacy_lines(&out.warnings)
         .into_iter()
-        .find(|w| w.contains("MCP_SECRET_REFUSED"))
-        .unwrap_or_else(|| panic!("the typed refusal is named: {:?}", out.warnings));
-    // ONE code per line. The gate's code used to be printed INSIDE this line's own
-    // (`MCP_UNPLACEABLE alpha: MCP_SECRET_REFUSED: …`), so a reader met two machine words
-    // before the first English one and a parser found two codes on one line.
+        .find(|w| w.contains("MCP_UNPLACEABLE"))
+        .unwrap_or_else(|| panic!("the refusal is named: {:?}", out.warnings));
+    // ONE code per line, and one code for the whole refusal: a document this machine cannot place
+    // is unplaceable, and the SENTENCE says which part of it could not be read. A second code
+    // printed inside the line (`MCP_UNPLACEABLE alpha: MCP_SECRET_REFUSED: …`) put two machine
+    // words in front of the first English one, and gave a parser two codes on one line.
     assert!(
-        line.starts_with("MCP_SECRET_REFUSED alpha: "),
+        line.starts_with("MCP_UNPLACEABLE alpha: "),
         "the code leads, once: {line}"
     );
-    assert!(!line.contains("MCP_UNPLACEABLE"), "{line}");
+    assert!(
+        line.contains("its Authorization header is marked secret"),
+        "the sentence names what could not be read: {line}"
+    );
     assert_eq!(
         line.split_whitespace()
             .filter(

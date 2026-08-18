@@ -501,29 +501,28 @@ fn an_unreadable_folder_refuses_before_a_row_is_written() {
 #[test]
 fn an_mcp_bundle_has_no_folder_copy_to_claim() {
     let rig = Rig::new("mcp");
-    let dir = rig.work.0.join("weather");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("server.json"),
-        std::fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .ancestors()
-                .nth(2)
-                .expect("the workspace root")
-                .join("tests/fixtures/mcp/valid/remote-no-auth.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
     let ctx = rig.ctx();
     let scope = ops::add_scope(&ctx, true).unwrap();
-    let mut data =
-        ops::adopt_path_any_kind(&ctx, &scope, &dir, crate::bundle_kind::BundleKind::Mcp).unwrap();
-    ops::note_added_path_in(&ctx, &mut data, &scope.target, &dir).unwrap();
-    let name = data.name.clone();
+    // A CONNECTED SERVER, recorded exactly as a delivery records one: the document, the catalog
+    // revision it came from, and the durable kind marker the claim door classifies on. It has no
+    // folder of its own — which is the whole point of the refusal below.
+    let sid = crate::id::SkillId::parse("s_weather").unwrap();
+    crate::mcp_engine::record_server(
+        &ctx,
+        &sid,
+        "weather",
+        "mcpr_0123456789abcdef0123456789abcdef",
+        br#"{"name":"io.github.acme/weather","description":"Conditions for a named place.",
+            "version":"1.4.0","remotes":[{"type":"streamable-http",
+            "url":"https://weather.acme.example/mcp"}]}"#,
+        false,
+        false,
+    )
+    .unwrap();
+    crate::bundle_kind::write_kind_marker(&ctx, &sid, crate::bundle_kind::BundleKind::Mcp);
 
     let copy = rig.folder("codex/weather", "# not a server\n");
-    let err = ops::claim(&ctx, &scope, &copy, &name).unwrap_err();
+    let err = ops::claim(&ctx, &scope, &copy, "weather").unwrap_err();
     assert!(err.to_string().contains("is an MCP server"), "{err}");
     assert!(
         err.to_string().contains("no folder copy to manage"),

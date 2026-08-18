@@ -6,7 +6,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use topos_core::digest::FileMode;
 use topos_types::results::{ExchangeFault, PullAction};
 
 use crate::ctx::Ctx;
@@ -1313,18 +1312,14 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     std::fs::create_dir_all(rig.home.0.join(".openclaw")).unwrap();
 
-    let v = mk_version(&[(
-        "server.json",
-        FileMode::Regular,
-        mcp_server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new(log).with_version("s_linear", &v);
-    let mut ds = delivered("s_linear", "linear", &v);
-    ds.kind = "mcp".into();
-    plane.serves(vec![ds]);
-    let mut entry = catalog_entry("s_linear", "linear", &v);
-    entry.kind = "mcp".into();
-    let dir = FakeDirectory::new(vec![entry], Vec::new());
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    // A CONNECTED SERVER is the catalog's second list — the document inline, no bytes to fetch.
+    let dir = FakeDirectory::new(Vec::new(), Vec::new()).with_server(catalog_server(
+        "s_linear",
+        "linear",
+        "https://mcp.example/linear",
+    ));
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n"
     ));
@@ -1449,18 +1444,13 @@ fn two_same_named_mcp_bundles_in_one_scope_each_keep_their_own_states() {
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     std::fs::create_dir_all(rig.home.0.join(".openclaw")).unwrap();
 
-    let v = mk_version(&[(
-        "server.json",
-        FileMode::Regular,
-        mcp_server_json("https://mcp.example/workspace").as_bytes(),
-    )]);
-    let plane = FakePlane::new(log).with_version("s_linear", &v);
-    let mut ds = delivered("s_linear", "linear", &v);
-    ds.kind = "mcp".into();
-    plane.serves(vec![ds]);
-    let mut entry = catalog_entry("s_linear", "linear", &v);
-    entry.kind = "mcp".into();
-    let dir = FakeDirectory::new(vec![entry], Vec::new());
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new()).with_server(catalog_server(
+        "s_linear",
+        "linear",
+        "https://mcp.example/workspace",
+    ));
 
     // The LOCAL bundle of the same name: its own folder, its own address.
     let local = rig.work.0.join("linear");

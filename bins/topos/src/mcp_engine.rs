@@ -2121,8 +2121,10 @@ pub(crate) fn record_server(
     pinned: bool,
     revoked: bool,
 ) -> Result<(), ClientError> {
+    // A document that is not JSON came from the WIRE, not from this machine's own state — so it
+    // says so with the wire's own error rather than telling a person their install is unreadable.
     let document: serde_json::Value = serde_json::from_slice(document).map_err(|e| {
-        ClientError::Corrupt(format!("{name}: its server document is not JSON ({e})"))
+        ClientError::WireInvalid(format!("{name}: its server document is not JSON ({e})"))
     })?;
     let record = topos_types::persisted::McpServerRecord {
         schema_version: topos_types::PERSISTED_SCHEMA_VERSION,

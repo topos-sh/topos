@@ -185,6 +185,17 @@ pub(super) fn server_json(url: &str) -> String {
     )
 }
 
+/// A document this build cannot place: the header is marked secret, so the placement parse fails
+/// the whole demand closed rather than write a header whose value nothing vouched for. The ONE
+/// unplaceable shape the fixtures use, because there is now ONE refusal code for all of them.
+pub(super) fn unplaceable_server_json(url: &str) -> String {
+    format!(
+        "{{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\
+         \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\",\
+         \"headers\":[{{\"name\":\"Authorization\",\"isSecret\":true}}]}}]}}"
+    )
+}
+
 /// One connected server as a workspace serves it: the document, and the catalog revision it
 /// resolves to. Both lanes (the delivery feed and the catalog index) carry exactly this pair, so
 /// one fixture feeds both.
@@ -416,8 +427,21 @@ pub(super) fn skill_catalog_entry(skill_id: &str, name: &str, v: &Version) -> Wi
     }
 }
 impl DirectorySource for FakeDirectory {
-    fn me(&self, _ws: &str) -> Result<WireMe, ClientError> {
-        Err(ClientError::Plane("no me in this fake".into()))
+    /// The caller's standing in the workspace. Only the ADDRESS NAME is load-bearing here — it is
+    /// what a reference resolves through — so it is derived from the id the way these fixtures
+    /// spell their workspaces (`w_eng` → `eng`), and one impl answers for every lane.
+    fn me(&self, workspace_id: &str) -> Result<WireMe, ClientError> {
+        let name = workspace_id.strip_prefix("w_").unwrap_or(workspace_id);
+        Ok(WireMe {
+            workspace_id: workspace_id.to_owned(),
+            name: name.to_owned(),
+            display_name: name.to_owned(),
+            address: format!("{HOST}/{name}"),
+            principal: "person@acme.test".into(),
+            role: "member".into(),
+            invited_by: None,
+            session_status: Some("active".into()),
+        })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
         Ok(WireChannelIndex {
@@ -504,6 +528,45 @@ pub(super) fn sweep(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> op
         &connect(plane, dir),
         None,
         &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap()
+}
+
+/// `topos update -g` — the MACHINE scope alone, from wherever the invocation stands.
+pub(super) fn sweep_machine(
+    ctx: &Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect(plane, dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            scope: ops::UpdateScope::Machine,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap()
+}
+
+/// `topos update <name>` — the TARGETED door. It is the same reconcile narrowed to one row, which
+/// is the whole of what a connected server's own verbs are: there is no per-bundle version engine
+/// behind it to drive.
+pub(super) fn sweep_one(
+    ctx: &Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    target: &str,
+) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect(plane, dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            targets: vec![target.to_owned()],
+            ..ops::ManifestUpdateOpts::default()
+        },
     )
     .unwrap()
 }

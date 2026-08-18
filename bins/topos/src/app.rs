@@ -2713,7 +2713,6 @@ fn finish_add_mcp(
     }
 }
 
-
 /// The multi-`add` finisher — one `add` receipt per imported (skill × harness) combination.
 fn finish_add_many(
     json: bool,

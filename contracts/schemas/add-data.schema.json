@@ -199,12 +199,12 @@
       }
     },
     "version_id": {
-      "description": "The base commit the local sidecar starts from. Absent wherever `skill_id` is.",
+      "description": "What the local record starts from: a file bundle's base commit (64-char lowercase hex), or\na connected server's catalog revision (`mcpr_` + 32 lowercase hex). Absent wherever\n`skill_id` is.",
       "type": [
         "string",
         "null"
       ],
-      "pattern": "^[0-9a-f]{64}$"
+      "pattern": "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"
     }
   },
   "required": [

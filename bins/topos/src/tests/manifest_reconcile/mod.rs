@@ -22,4 +22,4 @@ mod sweep;
 mod write_path;
 mod write_row;
 
-pub(super) use rig::{FakeDirectory, NoGovernance, catalog_entry, mk_version};
+pub(super) use rig::NoGovernance;

@@ -1,17 +1,28 @@
-//! The composed MCP-BUNDLE loop, over real HTTP against the real web app and the real `topos`
-//! binary: an author adopts a local `server.json` folder (`add --kind mcp`) and publishes it as a
-//! `kind = "mcp"` catalog bundle; a second member's session sweeps and the server lands as a
-//! config entry in ALL SIX MCP-capable agents, each in its own exact dialect; the applied report
-//! carries the per-agent states back to the workspace; a removal converges every surface back to
-//! the bytes the person had; a hand-edited entry is DRIFTED — never overwritten, never removed,
-//! and disclosed; and a project-scoped row reaches the four project surfaces alone.
+//! The composed CONNECTED-SERVER loop, over real HTTP against the real web app and the real
+//! `topos` binary. An MCP server is not a folder anybody authors here: it is a CATALOG ROW a
+//! workspace connects to, and its document rides the wire inline. So the arc starts with an owner
+//! sharing one in a single command (`add --kind mcp <registry name>`) — which connects the
+//! workspace to the install's catalog row and lands the entry in that owner's own six agent
+//! configs at once — and then follows what a connection is worth to everybody else.
+//!
+//! What it pins: the connection REACHES NOBODY until a channel is chosen, so the delivery lane is
+//! empty while the CATALOG INDEX carries the server, document and revision inline, and the
+//! workspace's registry-shape lane serves it under its embedded name; a second member adds it by
+//! that name and the entry lands in ALL SIX MCP-capable agents, each in its own exact dialect; the
+//! applied report carries the CATALOG REVISION back as the thing this machine holds; a removal
+//! converges every surface back to the bytes the person had; a hand-edited entry is DRIFTED —
+//! never overwritten, never removed, and disclosed; a project-scoped row reaches the four project
+//! surfaces alone; a curator puts the server in a channel and only then does the feed deliver it;
+//! `publish` is refused, because a bundle of this kind has no files; and — the property only a
+//! catalog kind has — a machine whose workspace is GONE still heals a deleted config file from the
+//! document it was last given.
 //!
 //! Like the conflict suite, this one drives the REAL CLI BINARY (`target/<profile>/topos`) as a
-//! subprocess rather than the in-process fixture rig: `add --kind mcp`, the per-scope config converge
-//! and the harness detection all resolve against `$HOME` / `$TOPOS_HOME`, so only a real process
-//! with a fake home proves them. The two halves share one installation — the fixture rig owns the
-//! browser login (the `/verify` approval), the binary owns every verb after it, both over the same
-//! `~/.topos`.
+//! subprocess rather than the in-process fixture rig: `add --kind mcp`, the per-scope config
+//! converge and the harness detection all resolve against `$HOME` / `$TOPOS_HOME`, so only a real
+//! process with a fake home proves them. The two halves share one installation — the fixture rig
+//! owns the browser login (the `/verify` approval), the binary owns every verb after it, both
+//! over the same `~/.topos`.
 
 mod common;
 
@@ -23,14 +34,18 @@ use topos::test_support::SessionInstall;
 
 // ── the shared scenario constants ───────────────────────────────────────────────────────────────
 
-/// The published bundle's name — the catalog row, the `publish` target, and the key-mint half.
-const BUNDLE: &str = "team-weather";
-/// The document's embedded registry name (what the registry-shape lane serves it under).
-const SERVER_NAME: &str = "io.github.acme/team-weather";
+/// The server this suite shares: an install-catalog row every deployment is seeded with, so the
+/// share needs no outbound network — the workspace already holds the document. Its shape is the
+/// simplest one there is (one plain `streamable-http` remote, no headers, no credential), which
+/// is what makes the six dialects comparable byte for byte.
+const REGISTRY_NAME: &str = "com.amazon.aws/knowledge";
+/// The name the workspace shares it as — the tail of the registry name. The catalog row, the
+/// word every machine `topos add`s it by, and the key-mint half.
+const BUNDLE: &str = "knowledge";
 /// The one remote endpoint every dialect must carry, byte-identically.
-const SERVER_URL: &str = "https://team-weather.acme.example/mcp";
+const SERVER_URL: &str = "https://knowledge-mcp.global.api.aws";
 /// The minted config key for the workspace bundle: `topos-<workspace slug>-<name>`.
-const KEY: &str = "topos-acme-team-weather";
+const KEY: &str = "topos-acme-knowledge";
 /// A url a hand-edit puts in place of [`SERVER_URL`] (the drift phase).
 const DRIFTED_URL: &str = "https://hand-edited.example/mcp";
 
@@ -153,7 +168,7 @@ fn seed_user_configs(home: &Path) -> Vec<(&'static str, PathBuf, String)> {
 /// Mark every driven harness's trigger REGISTERED in the shared `~/.topos`, the state a real
 /// machine reaches at login: the sweep offers a trigger once per agent ever, and this document is
 /// that record. Written by arrangement because the fixture rig's ops-level login never runs the
-/// composition root's breadth registration — without it, the first `update` would settle the
+/// composition root's breadth registration — without it, the first verb would settle the
 /// question itself and write trigger artifacts into configs these tests pin byte-exactly.
 fn settle_trigger_registration(install: &Install) {
     let agents: serde_json::Map<String, Value> = SIX
@@ -252,152 +267,26 @@ fn state_of(data: &Value, bundle: &str, agent: &str) -> Option<String> {
         .map(|(_, s)| s)
 }
 
-// ── the arrangement halves ──────────────────────────────────────────────────────────────────────
-
-/// Write the author's MCP bundle folder: ONE `server.json`, the shared vector's no-auth shape with
-/// this suite's own name and endpoint.
-fn write_server_bundle(dir: &Path) {
-    std::fs::create_dir_all(dir).expect("create the mcp bundle dir");
-    let document = json!({
-        "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-        "name": SERVER_NAME,
-        "description": "The team's shared weather endpoint.",
-        "version": "1.0.0",
-        "remotes": [ { "type": "streamable-http", "url": SERVER_URL } ],
-    });
-    let mut text = serde_json::to_string_pretty(&document).expect("render server.json");
-    text.push('\n');
-    std::fs::write(dir.join("server.json"), text).expect("write server.json");
-}
-
-/// Log an installation in through the REAL browser-approval ceremony (the fixture rig owns the
-/// flow; the binary inherits the session it lands).
-fn login(stack: &Stack, install: &Install, approver: &Session) {
-    stack.login_begin_and_approve(&install.rig, approver);
-    let granted = install.rig.login(None).expect("the login resume");
-    assert_eq!(granted.session_status, "active");
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// The matrix — one composed stack, one arc.
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn the_mcp_bundle_loop_across_six_agents() {
-    let stack = start_stack("mcp");
-    let owner = stack.claim_owner(OWNER_EMAIL);
-
-    // ── 1. the author: adopt a local server.json folder, then publish it ────────────────────────
-    let author = Install::new("mcp-author");
-    login(&stack, &author, &owner);
-    seed_user_configs(&author.home());
-
-    let root = author.root().canonicalize().expect("canonical author root");
-    let src = root.join(BUNDLE);
-    write_server_bundle(&src);
-
-    let added = author
-        .run(
-            &root,
-            &["add", "--kind", "mcp", "./team-weather", "-g", "--json"],
-        )
-        .data("add --kind mcp");
-    assert_eq!(
-        added["name"], BUNDLE,
-        "the folder name IS the bundle: {added}"
-    );
-    // The local-adopt arm converges the author's OWN surfaces immediately, under the LOCAL key.
-    let author_cursor = read_json(&author.home().join(".cursor").join("mcp.json"));
-    assert_eq!(
-        author_cursor["mcpServers"]["topos-local-team-weather"],
-        json!({ "url": SERVER_URL }),
-        "the local adopt places under the local key: {author_cursor}"
-    );
-
-    let published = author
-        .run(
-            &root,
-            &[
-                "publish",
-                BUNDLE,
-                "--yes",
-                "-m",
-                "the team endpoint",
-                "--json",
-            ],
-        )
-        .data("publish");
-    assert!(
-        published["version_id"].is_string(),
-        "the genesis publish lands a version: {published}"
-    );
-
-    // The catalog row's KIND, three ways: the row itself, the delivery lane, and the workspace's
-    // own registry-shape read API (which serves `kind = 'mcp'` bundles and nothing else).
-    assert_eq!(
-        stack.text_witness(&format!(
-            "SELECT kind FROM web.bundle WHERE name = '{BUNDLE}'"
-        )),
-        Some("mcp".to_owned()),
-        "the catalog records what the bundle IS"
-    );
-    let probe = stack.mint_session(&owner, "registry-probe");
-    let registry = stack.origin_get_json(&probe.credential, "/registry/v0.1/servers");
-    assert_eq!(registry.status, 200, "the registry lane: {}", registry.body);
-    let registry: Value = serde_json::from_str(&registry.body).expect("registry JSON");
-    assert_eq!(registry["metadata"]["count"], 1, "{registry}");
-    assert_eq!(registry["servers"][0]["server"]["name"], SERVER_NAME);
-    assert_eq!(
-        registry["servers"][0]["server"]["remotes"][0]["url"],
-        SERVER_URL
-    );
-    let delivery = stack.device_get(
-        &probe.credential,
-        &format!("/v1/workspaces/{}/delivery", stack.workspace_id),
-    );
-    assert_eq!(delivery.status, 200, "the delivery lane: {}", delivery.body);
-    let delivery: Value = serde_json::from_str(&delivery.body).expect("delivery JSON");
-    let item = delivery["skills"]
+/// One row of a lane answer's `mcp_servers` list — the SECOND list a connected server rides. A
+/// miss panics with the whole answer, because the list a bundle lands in is the assertion.
+fn mcp_row<'a>(answer: &'a Value, name: &str) -> &'a Value {
+    answer["mcp_servers"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|s| s["name"] == BUNDLE)
-        .unwrap_or_else(|| panic!("the delivery lane carries the bundle: {delivery}"));
-    assert_eq!(item["kind"], "mcp", "the kind rides the wire: {item}");
+        .find(|s| s["name"] == name)
+        .unwrap_or_else(|| panic!("`{name}` rides the connected-server list: {answer}"))
+}
 
-    // ── 2. a second member sweeps: the entry lands in ALL SIX config surfaces ───────────────────
-    let dev_browser = stack.add_member("dev@acme.test", "member");
-    let dev = Install::new("mcp-dev");
-    login(&stack, &dev, &dev_browser);
-    let home = dev.home();
-    // The fixture rig's login is ops-level and never runs the composition root's breadth
-    // registration, so on this install the trigger question is still open — and the first real
-    // `update` would settle it by writing trigger artifacts into the very configs the seeds below
-    // pin byte-exactly. A real machine settles registration at login; this rig settles it by
-    // arrangement, so the assertions stay about MCP entry custody alone.
-    settle_trigger_registration(&dev);
-    let seeds = seed_user_configs(&home);
+// ── the six dialects, asserted ──────────────────────────────────────────────────────────────────
 
-    let swept = dev.run(dev.root(), &["update", "--json"]).data("update");
-    let states = harness_states(&swept, BUNDLE);
-    assert_eq!(
-        states
-            .iter()
-            .map(|(a, _)| a.as_str())
-            .collect::<Vec<_>>()
-            .as_slice(),
-        SIX.as_slice(),
-        "every MCP-capable agent reports: {swept}"
-    );
-    for (agent, state) in &states {
-        // A FIRST placement — nothing stood in any of the six configs before this sweep. The
-        // client's one outcome vocabulary tells that apart from rewriting an entry it already
-        // owned (`refreshed`), where both used to read `placed`.
-        assert_eq!(state, "created", "{agent} placed the entry: {swept}");
-    }
-
+/// The WHOLE per-dialect truth over one installation's fake home: the entry topos owns, spelled
+/// the way each agent's own config parser demands, and the person's own content still standing
+/// beside it. Asserted for every machine this suite gives the server to, because a dialect that
+/// is right on one machine and wrong on the next is the failure this matrix exists to catch.
+fn assert_the_six_dialects(home: &Path) {
     // Claude Code — a wholly topos-owned plugin DIR, both files rendered whole.
-    let plugin = claude_plugin_dir(&home);
+    let plugin = claude_plugin_dir(home);
     assert_eq!(
         read(&plugin.join(".claude-plugin").join("plugin.json")),
         "{\n  \"description\": \"Team-shared MCP servers delivered by Topos\",\n  \"displayName\": \"Topos MCP\",\n  \"name\": \"topos-mcp\",\n  \"version\": \"0.1.0\"\n}\n",
@@ -441,14 +330,15 @@ fn the_mcp_bundle_loop_across_six_agents() {
     );
 
     // OpenClaw — nested `mcp.servers`, transport EXPLICIT, nothing else.
-    let openclaw = read_jsonc(&home.join(".openclaw").join("openclaw.json"));
+    let openclaw_path = home.join(".openclaw").join("openclaw.json");
+    let openclaw = read_jsonc(&openclaw_path);
     assert_eq!(
         openclaw["mcp"]["servers"][KEY],
         json!({ "transport": "streamable-http", "url": SERVER_URL }),
         "openclaw: {openclaw}"
     );
     assert!(
-        read(&home.join(".openclaw").join("openclaw.json")).contains("// the house server"),
+        read(&openclaw_path).contains("// the house server"),
         "the person's JSONC comment survives"
     );
 
@@ -460,9 +350,222 @@ fn the_mcp_bundle_loop_across_six_agents() {
         )),
         "hermes: the one-line sentinel entry: {hermes}"
     );
+}
 
-    // The APPLIED REPORT reached the workspace: the dev session's row carries the six states.
+// ── the arrangement halves ──────────────────────────────────────────────────────────────────────
+
+/// Log an installation in through the REAL browser-approval ceremony (the fixture rig owns the
+/// flow; the binary inherits the session it lands).
+fn login(stack: &Stack, install: &Install, approver: &Session) {
+    stack.login_begin_and_approve(&install.rig, approver);
+    let granted = install.rig.login(None).expect("the login resume");
+    assert_eq!(granted.session_status, "active");
+}
+
+/// The catalog revision THIS workspace's connection resolves to — a pin, else the server's own
+/// current. The one expression the delivery lane and the machine's record both answer with, read
+/// straight off the rows so the wire is compared against the catalog rather than against itself.
+fn resolved_revision(stack: &Stack) -> String {
+    stack
+        .text_witness(&format!(
+            "SELECT r.id FROM web.bundle b
+             JOIN web.bundle_mcp bm ON bm.bundle_id = b.id
+             JOIN web.mcp_server ms ON ms.id = bm.server_id
+             JOIN web.mcp_server_revision r
+               ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
+             WHERE b.name = '{BUNDLE}'"
+        ))
+        .expect("the connection resolves to a revision")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// The matrix — one composed stack, one arc.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn the_connected_server_loop_across_six_agents() {
+    let stack = start_stack("mcp");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    // ── 1. sharing: one command shares the server AND lands it on this machine ──────────────────
+    let author = Install::new("mcp-owner");
+    login(&stack, &author, &owner);
+    settle_trigger_registration(&author);
+    seed_user_configs(&author.home());
+    let root = author.root().canonicalize().expect("canonical owner root");
+
+    let added = author
+        .run(
+            &root,
+            &["add", "--kind", "mcp", REGISTRY_NAME, "-g", "--json"],
+        )
+        .data("add --kind mcp");
+    assert_eq!(
+        added["name"], BUNDLE,
+        "the workspace names the bundle off the registry name's tail: {added}"
+    );
+    assert_eq!(
+        added["mcp"]["server"], REGISTRY_NAME,
+        "the receipt states the server that was shared: {added}"
+    );
+    assert_eq!(added["mcp"]["url"], SERVER_URL, "{added}");
+    assert_eq!(added["mcp"]["transport"], "streamable-http", "{added}");
+    assert_eq!(
+        added["mcp"]["auth"], "none",
+        "the catalog's VERIFIED sign-in word rides the receipt: {added}"
+    );
+    assert_eq!(
+        added["mcp"]["agents"].as_array().map(Vec::len),
+        Some(SIX.len()),
+        "the share reached every MCP-capable agent set up here: {added}"
+    );
+
+    // The workspace now holds a bundle whose bytes are a CATALOG ROW: the kind on the catalog
+    // row, and the connection beside it naming the install's own global server.
+    assert_eq!(
+        stack.text_witness(&format!(
+            "SELECT kind FROM web.bundle WHERE name = '{BUNDLE}'"
+        )),
+        Some("mcp".to_owned()),
+        "the catalog records what the bundle IS"
+    );
+    assert_eq!(
+        stack.text_witness(&format!(
+            "SELECT ms.registry_name || ' ' || coalesce(ms.workspace_id, 'global')
+             FROM web.bundle b
+             JOIN web.bundle_mcp bm ON bm.bundle_id = b.id
+             JOIN web.mcp_server ms ON ms.id = bm.server_id
+             WHERE b.name = '{BUNDLE}'"
+        )),
+        Some(format!("{REGISTRY_NAME} global")),
+        "the connection names the INSTALL's catalog row — a name the catalog already offers is \
+         connected, never copied into the workspace"
+    );
+
+    // …and the owner's own six agents already carry it, under the WORKSPACE key. There was no
+    // second command: sharing a server and getting it are one act on the machine that shares it.
+    assert_the_six_dialects(&author.home());
+
+    // ── 2. the wire: a connection reaches nobody, and the catalog carries it anyway ─────────────
+    let probe = stack.mint_session(&owner, "catalog-probe");
+    let revision = resolved_revision(&stack);
+    assert!(
+        revision.starts_with("mcpr_"),
+        "a connected server's version handle is the catalog's own: {revision}"
+    );
+
+    // The DELIVERY lane is the entitlement question, and nothing entitles anybody yet: the share
+    // lane connects with NO channel, so the server reaches no one until a curator picks one.
+    let delivery = stack.device_get(
+        &probe.credential,
+        &format!("/v1/workspaces/{}/delivery", stack.workspace_id),
+    );
+    assert_eq!(delivery.status, 200, "the delivery lane: {}", delivery.body);
+    let delivery: Value = serde_json::from_str(&delivery.body).expect("delivery JSON");
+    assert_eq!(
+        delivery["mcp_servers"].as_array().map(Vec::len),
+        Some(0),
+        "a connection reaches nobody until a channel is chosen: {delivery}"
+    );
+
+    // The CATALOG INDEX is the other question — what this workspace holds — and it carries the
+    // server in its OWN list, document inline. That is the lane a machine resolves a name
+    // through, and the reason a bundle with no bytes needs no byte lane behind it.
+    let index = stack.device_get(
+        &probe.credential,
+        &format!("/v1/workspaces/{}/skills", stack.workspace_id),
+    );
+    assert_eq!(index.status, 200, "the catalog index: {}", index.body);
+    let index: Value = serde_json::from_str(&index.body).expect("catalog index JSON");
+    assert!(
+        index["skills"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|s| s["name"] != BUNDLE),
+        "a connected server is not a file bundle, and never rides the file list: {index}"
+    );
+    let listed = mcp_row(&index, BUNDLE);
+    assert_eq!(listed["kind"], "mcp", "{listed}");
+    assert_eq!(
+        listed["revision_id"], revision,
+        "the index serves the revision the connection resolves to: {listed}"
+    );
+    assert_eq!(
+        listed["document"]["name"], REGISTRY_NAME,
+        "the document rides inline, verbatim: {listed}"
+    );
+    assert_eq!(listed["document"]["remotes"][0]["url"], SERVER_URL);
+
+    // The workspace's registry-shape read API serves the same server under its EMBEDDED registry
+    // name — the name the document itself carries, not the word the workspace shares it by.
+    let registry = stack.origin_get_json(&probe.credential, "/registry/v0.1/servers");
+    assert_eq!(registry.status, 200, "the registry lane: {}", registry.body);
+    let registry: Value = serde_json::from_str(&registry.body).expect("registry JSON");
+    assert_eq!(registry["metadata"]["count"], 1, "{registry}");
+    assert_eq!(registry["servers"][0]["server"]["name"], REGISTRY_NAME);
+    assert_eq!(
+        registry["servers"][0]["server"]["remotes"][0]["url"],
+        SERVER_URL
+    );
+
+    // ── 3. a second member adds it BY NAME: the entry lands in ALL SIX config surfaces ──────────
+    let dev_browser = stack.add_member("dev@acme.test", "member");
+    let dev = Install::new("mcp-dev");
+    login(&stack, &dev, &dev_browser);
+    let home = dev.home();
+    // The fixture rig's login is ops-level and never runs the composition root's breadth
+    // registration, so on this install the trigger question is still open — and the first real
+    // verb would settle it by writing trigger artifacts into the very configs the seeds below
+    // pin byte-exactly. A real machine settles registration at login; this rig settles it by
+    // arrangement, so the assertions stay about MCP entry custody alone.
+    settle_trigger_registration(&dev);
+    let seeds = seed_user_configs(&home);
+
+    // No feed carries the server, so the name is resolved against the workspace CATALOG — and a
+    // bare word is all a person needs, because the catalog already records what the bundle is.
+    let taken = dev
+        .run(dev.root(), &["add", BUNDLE, "-g", "--json"])
+        .data("add <name> -g");
+    assert_eq!(taken["name"], BUNDLE, "{taken}");
+    assert_eq!(
+        taken["mcp"]["server"], REGISTRY_NAME,
+        "the member's receipt names the same server the owner shared: {taken}"
+    );
+    assert_the_six_dialects(&home);
+
+    // The add converged the entries inline, so this sweep finds every one of them in order.
+    let swept = dev.run(dev.root(), &["update", "--json"]).data("update");
+    let states = harness_states(&swept, BUNDLE);
+    assert_eq!(
+        states
+            .iter()
+            .map(|(a, _)| a.as_str())
+            .collect::<Vec<_>>()
+            .as_slice(),
+        SIX.as_slice(),
+        "every MCP-capable agent reports: {swept}"
+    );
+    for (agent, state) in &states {
+        assert_eq!(state, "current", "{agent} holds the entry: {swept}");
+    }
+
+    // ── 4. the applied report: what a machine holds for this kind is a CATALOG REVISION ─────────
     let reported = stack
+        .text_witness(&format!(
+            "SELECT s.applied_version_id FROM web.session_bundle_state s
+             JOIN web.bundle b ON b.id = s.bundle_id
+             JOIN web.cli_session cs ON cs.id = s.session_id
+             JOIN web.\"user\" u ON u.id = cs.user_id
+             WHERE b.name = '{BUNDLE}' AND u.email = 'dev@acme.test'"
+        ))
+        .expect("the dev session reported the bundle");
+    assert_eq!(
+        reported, revision,
+        "ONE field carries both vocabularies — a file bundle's commit, and a connected server's \
+         catalog revision"
+    );
+    let harness_state = stack
         .text_witness(&format!(
             "SELECT s.harness_state::text FROM web.session_bundle_state s
              JOIN web.bundle b ON b.id = s.bundle_id
@@ -470,11 +573,11 @@ fn the_mcp_bundle_loop_across_six_agents() {
              JOIN web.\"user\" u ON u.id = cs.user_id
              WHERE b.name = '{BUNDLE}' AND u.email = 'dev@acme.test'"
         ))
-        .expect("the dev session reported the bundle");
-    let reported: Value = serde_json::from_str(&reported).expect("harness_state JSON");
+        .expect("the report carries the per-harness half");
+    let harness_state: Value = serde_json::from_str(&harness_state).expect("harness_state JSON");
     // The lane stores the harness under `slug` (the server's own spelling of the client's
     // `agent`), with the client's note kept verbatim.
-    let reported_agents: Vec<&str> = reported
+    let reported_agents: Vec<&str> = harness_state
         .as_array()
         .expect("a per-harness list")
         .iter()
@@ -483,25 +586,25 @@ fn the_mcp_bundle_loop_across_six_agents() {
     assert_eq!(
         reported_agents.as_slice(),
         SIX.as_slice(),
-        "the report carries every agent's state: {reported}"
+        "the report carries every agent's state: {harness_state}"
     );
     assert!(
-        reported
+        harness_state
             .as_array()
             .expect("a per-harness list")
             .iter()
             .all(|h| h["state"] == "current"),
         "the fleet's STANDING picture — where the entries live, not what the last sweep did to \
-         them: {reported}"
+         them: {harness_state}"
     );
 
-    // ── 3. removal converges: every surface returns to the person's own bytes ───────────────────
+    // ── 5. removal converges: every surface returns to the person's own bytes ───────────────────
     let removed = dev
         .run(dev.root(), &["remove", BUNDLE, "-g", "--yes", "--json"])
         .data("remove -g");
     assert_eq!(
-        removed["items"][0]["kind"], "manifest-excluded",
-        "the off row is the one negative: {removed}"
+        removed["items"][0]["kind"], "manifest-removed",
+        "the machine's own line goes, and delivery to this scope ends with it: {removed}"
     );
     // The receipt names EVERY surface the entry left, keyed by the config FILE it lived in
     // (`~`-abbreviated) — destinations, never agents.
@@ -521,7 +624,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
         .run(dev.root(), &["update", "--json"])
         .data("update after remove");
     assert!(
-        !plugin.exists(),
+        !claude_plugin_dir(&home).exists(),
         "the wholly-owned plugin dir goes with its last entry"
     );
     for (slug, path, seeded) in &seeds {
@@ -538,15 +641,15 @@ fn the_mcp_bundle_loop_across_six_agents() {
         "nothing is delivered here any more: {swept}"
     );
 
-    // ── 4. the off switch lifts and the feed flows again ───────────────────────────────────────
+    // ── 6. the row goes back, and so does the entry ─────────────────────────────────────────────
     dev.run(
         dev.root(),
         &["add", &format!("@acme/{BUNDLE}"), "-g", "--json"],
     )
-    .data("add -g (the off lift)");
+    .data("add -g (the workspace reference)");
     let swept = dev
         .run(dev.root(), &["update", "--json"])
-        .data("update after the lift");
+        .data("update after the re-add");
     assert_eq!(
         state_of(&swept, BUNDLE, "cursor").as_deref(),
         Some("current"),
@@ -559,7 +662,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
         SERVER_URL
     );
 
-    // ── 5. DRIFT: a hand-edited entry is never overwritten ─────────────────────────────────────
+    // ── 7. DRIFT: a hand-edited entry is never overwritten ──────────────────────────────────────
     let mut hand_edited = read_json(&cursor_path);
     hand_edited["mcpServers"][KEY]["url"] = json!(DRIFTED_URL);
     let drifted_bytes = format!(
@@ -590,7 +693,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
         );
     }
 
-    // ── 6. removal LEAVES the drifted entry, and says so ───────────────────────────────────────
+    // ── 8. removal LEAVES the drifted entry, and says so ────────────────────────────────────────
     dev.run(dev.root(), &["remove", BUNDLE, "-g", "--yes", "--json"])
         .data("remove -g (with drift standing)");
     let out = dev.run(dev.root(), &["update", "--json"]);
@@ -625,7 +728,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
     // Put cursor back to its seed so the project phase reads a clean user surface.
     std::fs::write(&cursor_path, &seeds[1].2).expect("restore the cursor seed");
 
-    // ── 7. PROJECT scope: the four project surfaces, and no user config ─────────────────────────
+    // ── 9. PROJECT scope: the four project surfaces, and no user config ─────────────────────────
     let proj = dev.root().join("proj");
     std::fs::create_dir_all(proj.join(".git")).expect("a git checkout");
     dev.run(&proj, &["init", "--json"]).data("init");
@@ -663,7 +766,10 @@ fn the_mcp_bundle_loop_across_six_agents() {
         "a fresh opencode.json leads with its schema: {proj_oc_text}"
     );
     // …and NOTHING reached the user surfaces (they still hold exactly the person's own bytes).
-    assert!(!plugin.exists(), "no user-scope plugin dir was written");
+    assert!(
+        !claude_plugin_dir(&home).exists(),
+        "no user-scope plugin dir was written"
+    );
     for (slug, path, seeded) in &seeds {
         assert_eq!(
             &read(path),
@@ -718,13 +824,13 @@ fn the_mcp_bundle_loop_across_six_agents() {
         "the deep dive answers per agent, with the file: {deep}"
     );
 
-    // ── 8. the two KINDS coexist: a same-named local skill dir is never touched ─────────────────
-    // An agent folder that already holds a skill called `team-weather` is a different thing from
-    // the workspace's MCP server of the same name: the kind rides the CATALOG, so the config
+    // ── 10. the two KINDS coexist: a same-named local skill dir is never touched ────────────────
+    // An agent folder that already holds a skill called `knowledge` is a different thing from the
+    // workspace's MCP server of the same name: the kind rides the CATALOG, so the config
     // placement and the skill dir live side by side under the same `.claude/skills/` root.
     let local_skill = home.join(".claude").join("skills").join(BUNDLE);
     std::fs::create_dir_all(&local_skill).expect("create the same-named local skill");
-    let local_bytes = "# team-weather\nSomeone's own, unmanaged notes.\n";
+    let local_bytes = "# knowledge\nSomeone's own, unmanaged notes.\n";
     std::fs::write(local_skill.join("SKILL.md"), local_bytes).expect("write the local skill");
 
     dev.run(
@@ -746,7 +852,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
         "the person's same-named skill dir is untouched"
     );
     assert!(
-        plugin.join(".mcp.json").is_file(),
+        claude_plugin_dir(&home).join(".mcp.json").is_file(),
         "the plugin dir is its own sibling under the same skills root"
     );
     assert_eq!(
@@ -754,9 +860,140 @@ fn the_mcp_bundle_loop_across_six_agents() {
         SERVER_URL,
         "…and the config entry is the MCP half"
     );
-    // The workspace's registry-shape lane still publishes exactly the ONE mcp bundle — a skill
-    // folder of the same name on somebody's machine is not a catalog fact.
+    // The workspace's registry-shape lane still publishes exactly the ONE connected server — a
+    // skill folder of the same name on somebody's machine is not a catalog fact.
     let registry = stack.origin_get_json(&probe.credential, "/registry/v0.1/servers");
     let registry: Value = serde_json::from_str(&registry.body).expect("registry JSON");
     assert_eq!(registry["metadata"]["count"], 1, "{registry}");
+
+    // ── 11. a curator gives the connection REACH, and the feed carries it ───────────────────────
+    // The member drops their own row first, so what arrives next arrives for one reason only: a
+    // curator put the server in a channel. Until this act the connection reached nobody — that is
+    // the whole ruling the share lane rests on.
+    dev.run(dev.root(), &["remove", BUNDLE, "-g", "--yes", "--json"])
+        .data("remove -g (before the curation)");
+    let everyone = stack
+        .text_witness("SELECT id FROM web.channel WHERE name = 'everyone'")
+        .expect("every workspace is born with its default channel");
+    let bundle_id = taken["skill_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the add receipt names the bundle: {taken}"))
+        .to_owned();
+    let curated = owner.post_form(
+        "/channels/everyone",
+        &[
+            ("intent", "add-skill"),
+            ("channel_id", &everyone),
+            ("skill_id", &bundle_id),
+        ],
+    );
+    assert_eq!(curated.status, 200, "the curation lands: {}", curated.body);
+
+    // The DELIVERY lane answers differently now — the connected server rides its own list, with
+    // the catalog revision and the document inline, and says which channel earned it.
+    let delivery = stack.device_get(
+        &probe.credential,
+        &format!("/v1/workspaces/{}/delivery", stack.workspace_id),
+    );
+    assert_eq!(delivery.status, 200, "the delivery lane: {}", delivery.body);
+    let delivery: Value = serde_json::from_str(&delivery.body).expect("delivery JSON");
+    assert!(
+        delivery["skills"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|s| s["name"] != BUNDLE),
+        "a connected server never rides the file list, delivered or not: {delivery}"
+    );
+    let served = mcp_row(&delivery, BUNDLE);
+    assert_eq!(served["kind"], "mcp", "{served}");
+    assert_eq!(served["revision_id"], revision, "{served}");
+    assert_eq!(served["document"]["name"], REGISTRY_NAME, "{served}");
+    assert_eq!(
+        served["document"]["remotes"][0]["url"], SERVER_URL,
+        "{served}"
+    );
+    assert_eq!(
+        served["via"]["channels"],
+        json!(["everyone"]),
+        "the feed says WHY this device is entitled: {served}"
+    );
+
+    // …and the member's next sweep places it from the feed alone — no row of their own.
+    let swept = dev
+        .run(dev.root(), &["update", "--json"])
+        .data("update (delivered by the channel)");
+    for agent in SIX {
+        assert_eq!(
+            state_of(&swept, BUNDLE, agent).as_deref(),
+            Some("created"),
+            "{agent}: a FIRST placement, from the feed: {swept}"
+        );
+    }
+    assert_the_six_dialects(&home);
+
+    // ── 12. there are no files, so there is nothing to publish ──────────────────────────────────
+    let refused = author
+        .run(&root, &["publish", BUNDLE, "--yes", "--json"])
+        .refusal("publish over a connected server");
+    assert_eq!(
+        refused["error"]["code"], "KIND_HAS_NO_FILES",
+        "the workspace refuses the verb by the bundle's KIND: {refused}"
+    );
+    assert_eq!(
+        resolved_revision(&stack),
+        revision,
+        "a refused publish moves no version pointer"
+    );
+    assert_eq!(
+        stack.count(&format!(
+            "SELECT count(*) FROM web.mcp_server_revision r
+             JOIN web.mcp_server ms ON ms.id = r.server_id
+             JOIN web.bundle_mcp bm ON bm.server_id = ms.id
+             JOIN web.bundle b ON b.id = bm.bundle_id
+             WHERE b.name = '{BUNDLE}'"
+        )),
+        1,
+        "…and mints no revision either"
+    );
+
+    // ── 13. OFFLINE HEALING: the machine's own record is the demand, online and off ─────────────
+    // The whole workspace goes away — the app dies with the stack. A file bundle would have
+    // nothing to fetch from; a connected server was DELIVERED WHOLE, and the document sits in
+    // this installation's own record beside the revision it came from. Deleting an agent's whole
+    // config file is exactly the accident that record exists for.
+    let recorded = dev
+        .root()
+        .join(".topos")
+        .join("skills")
+        .join(&bundle_id)
+        .join("server.json");
+    let recorded: Value =
+        serde_json::from_str(&read(&recorded)).expect("the recorded server document");
+    assert_eq!(
+        recorded["revision_id"], revision,
+        "the record keeps the revision it was given: {recorded}"
+    );
+    assert_eq!(
+        recorded["document"]["remotes"][0]["url"], SERVER_URL,
+        "…and the document itself, verbatim: {recorded}"
+    );
+
+    drop(stack);
+    std::fs::remove_file(&cursor_path).expect("delete an agent's whole config file");
+    let healed = dev.run(dev.root(), &["update", "--json"]);
+    assert_eq!(
+        read_json(&cursor_path)["mcpServers"][KEY],
+        json!({ "url": SERVER_URL }),
+        "the entry is back from the machine's own record, with no workspace left to ask: {} {}",
+        healed.stdout,
+        healed.stderr
+    );
+    for (slug, path, _) in seeds.iter().filter(|(s, _, _)| *s != "cursor") {
+        assert!(
+            read(path).contains(SERVER_URL),
+            "{slug}: an offline sweep leaves every standing entry alone ({})",
+            path.display()
+        );
+    }
 }

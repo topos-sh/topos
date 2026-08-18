@@ -1125,9 +1125,14 @@ pub struct AddData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
     pub name: String,
-    /// The base commit the local sidecar starts from. Absent wherever `skill_id` is.
+    /// What the local record starts from: a file bundle's base commit (64-char lowercase hex), or
+    /// a connected server's catalog revision (`mcpr_` + 32 lowercase hex). Absent wherever
+    /// `skill_id` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    #[cfg_attr(
+        feature = "contract-derives",
+        schemars(extend("pattern" = "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"))
+    )]
     pub version_id: Option<String>,
     /// The kernel digest of the bytes this add landed. Present whenever bytes landed — including
     /// an adopted MCP folder, which IS the bundle — and absent for a row that points at somebody
