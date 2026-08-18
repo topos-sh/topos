@@ -3,8 +3,8 @@
 The serde structs/enums for the boundary: the `--json` envelope, every per-verb result payload
 (`results`), the frozen terminal-outcome enum, the unsigned `WireCurrentRecord` pointer body, the
 error taxonomy, the HTTP wire request/response DTOs (`requests`), and the on-disk client documents
-(`persisted`: sync / lock / map / op / conflict — each dispatching on its schema version,
-fail-closed).
+(`persisted`: sync / lock / map / op / conflict / the connected-server record — each dispatching
+on its schema version, fail-closed).
 
 **No logic here.** These are deserialization shapes — the app libs parse them into validated
 domain types at the boundary (parse-don't-validate). This is the shared leaf every app lib, every
@@ -17,7 +17,7 @@ fixture, and the contract generator link.
   `RevertRequest` / `ReviewRequest` + `WireCandidate`/`WireFile`), the read bodies
   (`WireCurrentRecord`, `WireVersionMeta`, `WireProposalList`, `WireSkillIndex`, `WireDelivery` +
   `WireAppliedReport`, `WireMe`/`WireChannelIndex`/`WireProposalIndex`/`WireSkillLog`),
-  the row-op bodies (`ProtectionSetRequest`, `NoticeAckRequest`,
+  the row-op bodies (`ProtectionSetRequest`, `NoticeAckRequest`, `McpAddRequest`,
   `InvitationRequest`), and the constant `WireProtocolCard`. `session_status`
   ("active"/"pending") rides `WireMe`, `WireDelivery`, and the granted poll;
   `DELETE /v1/session` is the self-end.

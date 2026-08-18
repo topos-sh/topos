@@ -202,24 +202,21 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   (that is the bundle record's custody). Composes `topos-harness::{coverage,registry,mcp}`. `Drift`
   is the ONE payload-free vocabulary both shapes project onto (Absent/Clean/Modified/Foreign/
   Unscannable) for the words receipts and the wire choose; `ScanStatus` keeps its scanned bytes.
-- `mcp_validate` + `ops/add_mcp` — the `kind = "mcp"` bundle's AUTHORING half. `mcp_validate` is
-  the server-document gate, mirroring the web tier rule for rule over the shared vectors at
-  `tests/fixtures/mcp/` (six typed refusal codes; the credential scan runs FIRST, over the whole
-  raw text; the named shapes are compiled-in matcher fns — no regex engine ships — and a
-  dev-dependency `regex` referees them against the JSON's own sources in test). `ops/add_mcp` is
-  `add --kind mcp`'s ONE door: a local folder holding a root `server.json` is gated whole then
-  adopted in place with `kind = "mcp"` on its row, and the scope's configs converge in the same
-  invocation. The client FETCHES NOTHING — a registry-shaped name and an https link to a document
-  are classified only so their refusal can teach the covered path (the server is added to a
-  workspace on the web, then every machine adds it by catalog name, needing no flag at all). The
-  kind word is `--kind`'s value enum, which IS `BundleKind`, so the CLI vocabulary and the
-  deliverable vocabulary cannot drift; the server-bundle guard on the plain skill doors arms only
-  on SILENCE, so `--kind skill` adopts a `server.json`-rooted folder as a skill. `publish` reads
-  the kind through the one classifier (`bundle_kind`), re-runs the gate BEFORE the op WAL, and
-  threads it onto the wire.
-- `mcp_render` — WHAT ONE `server.json` BECOMES on this machine, for one agent. The document is
-  read once (`ServerDoc`: the address it offers, the packages it pins, the auth word — the header
-  re-check of the publish gate lives here, fail-closed), then `select` crosses it with the
+- `ops/add_mcp` — `add --kind mcp`'s ONE door, and a THIN one: a registry name or an https link to
+  a document is SUBMITTED to the workspace (`DirectorySource::add_mcp_server`), which reads the
+  document, rules on whether it may be shared, and answers with the name it shares the server as;
+  the rest is the ordinary `add_reference` on `<host>/<ws>/<name>`. There is no client-side
+  document gate — one gate, where the workspace lives, so the terminal and the browser answer
+  alike and a refusal is rendered in the server's own words. A FOLDER refuses here, teaching the
+  hand-written manifest row a machine-local server is (`"<dir>" = { kind = "mcp" }`) and the
+  shared path. The kind word is `--kind`'s value enum, which IS `BundleKind`, so the CLI
+  vocabulary and the deliverable vocabulary cannot drift; the server-bundle guard on the plain
+  skill doors arms only on SILENCE, so `--kind skill` adopts a `server.json`-rooted folder as a
+  skill.
+- `mcp_render` — WHAT ONE `server.json` BECOMES on this machine, for one agent, and the ONE reader
+  of the document left client-side. It is read once (`ServerDoc`: its identity, the address it
+  offers, the packages it pins, the auth word — the shapes a placed entry must never carry fail
+  CLOSED here), then `select` crosses it with the
   harness's capability columns and this machine's runtimes, in ONE fixed order: the address where
   the agent dials one · the address through the table-pinned bridge (`npx -y mcp-remote@<v> <url>`,
   headers as `Name:${VAR}` with the value in the environment — the spelling that survives Windows
@@ -230,8 +227,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   render as references in the harness's own syntax, so a name travels and a value never does. The
   runtime probe is a seam (`RuntimeProbe` on `ScopeIo`), because "needs node" has to be a tested
   outcome and not a property of the machine running the suite.
-- `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half: a store-only sync
-  (lock custody, no dir placement) feeds a per-scope config CONVERGE over
+- `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half. A connected server
+  is NOT bytes: its document arrives inline with the delivery and is written to
+  `skills/<id>/server.json` (`McpServerRecord`: the document, the catalog revision it came from,
+  and whether that revision is pinned or withdrawn) beside the ordinary never-received lock. That
+  ONE record is the demand source, online and off, so a machine with no network heals every entry
+  from what it was last given. It feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, and the converge itself
   is DEMAND (each bundle's entries plan) plus CUSTODY (its own recorded rows). Before a surface is
   written a COLLISION PRE-FLIGHT asks what already stands where each entry would go — by name or by

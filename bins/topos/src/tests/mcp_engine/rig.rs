@@ -13,8 +13,8 @@ use topos_core::identity::Commit;
 use topos_harness::mcp::McpDialect;
 use topos_harness::registry::{self, KnownHarness};
 use topos_types::requests::{
-    WireChannelEntry, WireChannelIndex, WireMe, WireProposalIndex, WireSkillIndex,
-    WireSkillIndexEntry, WireSkillLog,
+    WireChannelEntry, WireChannelIndex, WireMcpIndexEntry, WireMe, WireProposalIndex,
+    WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 
 use crate::ctx::Ctx;
@@ -24,9 +24,9 @@ use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::mcp_engine::{self, DemandedBundle, McpDemand, ScopeIo};
 use crate::ops;
 use crate::plane::{
-    AppliedSkillReport, DeliverySkill, DeliverySnapshot, DeliverySource, DirectorySource,
-    FetchedFile, FetchedVersion, InertFollow, InertPlane, KnownCurrent, LinkStatus, PlaneError,
-    PlaneSource, PointerFetch,
+    AppliedSkillReport, DeliveryMcpServer, DeliverySkill, DeliverySnapshot, DeliverySource,
+    DirectorySource, FetchedFile, FetchedVersion, InertFollow, InertPlane, KnownCurrent,
+    LinkStatus, PlaneError, PlaneSource, PointerFetch,
 };
 use crate::sessions::{self, SESSION_ACTIVE, Session};
 use crate::sidecar::Layout;
@@ -174,15 +174,54 @@ pub(super) fn mk_version(files: &[(&str, &[u8])]) -> Version {
     }
 }
 
-/// The common server.json fixture (no auth hint = Unknown) — GATE-VALID: the converge re-runs
-/// the full `mcp_validate` gate on every demand's bytes, exactly as real stored bundles passed
-/// it at publish.
+/// The common server.json fixture (no auth hint = Unknown) — PLACEABLE: every demand's bytes go
+/// through `mcp_render`'s parse on the way into a config file, so a fixture document has to be one
+/// this build can actually render.
 pub(super) fn server_json(url: &str) -> String {
     format!(
         "{{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\
          \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\",\
          \"headers\":[{{\"name\":\"X-Team\",\"value\":\"eng\"}}]}}]}}"
     )
+}
+
+/// One connected server as a workspace serves it: the document, and the catalog revision it
+/// resolves to. Both lanes (the delivery feed and the catalog index) carry exactly this pair, so
+/// one fixture feeds both.
+#[derive(Clone)]
+pub(super) struct ServedServer {
+    pub(super) revision_id: String,
+    pub(super) document: String,
+}
+
+/// A served server whose document is `document`. The revision is DERIVED from the bytes, so a
+/// fixture that edits the document moves the revision the way a publish does, and one that serves
+/// the same bytes twice serves the same revision — which is what the "nothing moved" sweeps rest
+/// on.
+pub(super) fn served(document: &str) -> ServedServer {
+    let hex = digest::to_hex(&digest::sha256(document.as_bytes()));
+    ServedServer {
+        revision_id: format!("mcpr_{}", &hex[..32]),
+        document: document.to_owned(),
+    }
+}
+
+/// The everyday served server: the common document, dialing `url`.
+pub(super) fn served_at(url: &str) -> ServedServer {
+    served(&server_json(url))
+}
+
+/// What a STORE holds for a connected server: the record the last delivery wrote
+/// (`skills/<id>/server.json`). It is the whole of the kind's durable state — there is no version
+/// store behind it — so every "what did this machine receive" assertion reads it. `None` when this
+/// store has never been told what the server is.
+pub(super) fn server_record(
+    fs: &RealFs,
+    layout: &Layout,
+    skill_id: &str,
+) -> Option<topos_types::persisted::McpServerRecord> {
+    let sid = crate::id::SkillId::parse(skill_id).expect("a fixture id parses");
+    crate::doc::read_doc(fs, &layout.published(&sid).server).expect("the record reads")
 }
 
 pub(super) type CallLog = Arc<Mutex<Vec<String>>>;
@@ -211,10 +250,22 @@ impl FakePlane {
         );
         self
     }
+    /// What the feed serves as FILE bundles. The connected servers it serves are their own list
+    /// (they are made of different things), so each setter replaces its own half and leaves the
+    /// other standing.
     pub(super) fn serves(&self, skills: Vec<DeliverySkill>) {
-        *self.delivery.lock().unwrap() = Ok(DeliverySnapshot {
-            skills,
-            ..empty_snapshot()
+        let mut delivery = self.delivery.lock().unwrap();
+        let base = delivery.clone().unwrap_or_else(|_| empty_snapshot());
+        *delivery = Ok(DeliverySnapshot { skills, ..base });
+    }
+    /// What the feed serves as CONNECTED SERVERS — documents inline, exactly as the wire carries
+    /// them.
+    pub(super) fn serves_servers(&self, mcp_servers: Vec<DeliveryMcpServer>) {
+        let mut delivery = self.delivery.lock().unwrap();
+        let base = delivery.clone().unwrap_or_else(|_| empty_snapshot());
+        *delivery = Ok(DeliverySnapshot {
+            mcp_servers,
+            ..base
         });
     }
     pub(super) fn serve_unreachable(&self) {
@@ -232,11 +283,28 @@ pub(super) fn empty_snapshot() -> DeliverySnapshot {
         declined: Vec::new(),
     }
 }
-pub(super) fn delivered_mcp(skill_id: &str, name: &str, v: &Version) -> DeliverySkill {
+/// One connected server in the DELIVERY answer — the document inline, and the revision it
+/// resolves to. Nothing here is fetched: this row is the whole delivery for the kind.
+pub(super) fn delivered_mcp(skill_id: &str, name: &str, s: &ServedServer) -> DeliveryMcpServer {
+    DeliveryMcpServer {
+        skill_id: skill_id.into(),
+        name: name.into(),
+        revision_id: s.revision_id.clone(),
+        document: s.document.as_bytes().to_vec(),
+        pinned: false,
+        revoked: false,
+        via_channels: vec!["everyone".into()],
+        assigned_by: None,
+        picked: false,
+    }
+}
+
+/// One FILE bundle in the delivery answer — the other list, for the fixtures that hold both kinds.
+pub(super) fn delivered_skill(skill_id: &str, name: &str, v: &Version) -> DeliverySkill {
     DeliverySkill {
         skill_id: skill_id.into(),
         name: name.into(),
-        kind: "mcp".into(),
+        kind: "skill".into(),
         review_required: false,
         version_id: v.id,
         generation: 1,
@@ -288,16 +356,53 @@ impl DeliverySource for FakePlane {
     }
 }
 
-#[derive(Clone)]
+/// The workspace catalog, ONE index with TWO lists — the same split the delivery answer makes,
+/// because a manifest row and a channel member resolve through the catalog and the two kinds are
+/// made of different things.
+#[derive(Clone, Default)]
 pub(super) struct FakeDirectory {
     pub(super) skills: Vec<WireSkillIndexEntry>,
+    pub(super) servers: Vec<WireMcpIndexEntry>,
     pub(super) channels: Vec<WireChannelEntry>,
 }
-pub(super) fn mcp_catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
-    WireSkillIndexEntry {
+impl FakeDirectory {
+    /// A catalog holding these connected servers and nothing else.
+    pub(super) fn of_servers(servers: Vec<WireMcpIndexEntry>) -> Self {
+        Self {
+            servers,
+            ..Self::default()
+        }
+    }
+    /// A catalog holding these file bundles and nothing else.
+    pub(super) fn of_skills(skills: Vec<WireSkillIndexEntry>) -> Self {
+        Self {
+            skills,
+            ..Self::default()
+        }
+    }
+}
+/// One connected server in the CATALOG index — the same identity, document and revision the
+/// delivery carries, plus the lifecycle status every index row states.
+pub(super) fn mcp_catalog_entry(skill_id: &str, name: &str, s: &ServedServer) -> WireMcpIndexEntry {
+    WireMcpIndexEntry {
         skill_id: skill_id.into(),
         name: name.into(),
         kind: "mcp".into(),
+        status: "active".into(),
+        display_name: None,
+        revision_id: s.revision_id.clone(),
+        document: serde_json::from_str(&s.document).expect("a fixture document is JSON"),
+        pinned: None,
+        revoked: None,
+        updated_at: 0,
+    }
+}
+/// One FILE bundle in the catalog index.
+pub(super) fn skill_catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
+    WireSkillIndexEntry {
+        skill_id: skill_id.into(),
+        name: name.into(),
+        kind: "skill".into(),
         status: "active".into(),
         version_id: topos_core::digest::to_hex(&v.id),
         bundle_digest: topos_core::digest::to_hex(&v.digest),
@@ -321,7 +426,7 @@ impl DirectorySource for FakeDirectory {
     }
     fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
         Ok(WireSkillIndex {
-            mcp_servers: Vec::new(),
+            mcp_servers: self.servers.clone(),
             skills: self.skills.clone(),
         })
     }

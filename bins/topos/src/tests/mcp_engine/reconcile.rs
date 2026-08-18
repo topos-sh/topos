@@ -33,16 +33,10 @@ fn the_claude_plugin_dirs_file_spelling_is_taught_and_delivers() {
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \
          {{ dest = [\"~/.claude/skills/topos-mcp/.mcp.json\"] }}\n"
@@ -85,16 +79,10 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     let rig = Rig::new("deliver");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let plane = FakePlane::new().with_version("s_linear", &v);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
-        channels: Vec::new(),
-    };
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     // The explicit row delivers; its `dest` names the hermetic config files.
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"

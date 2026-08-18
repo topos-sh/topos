@@ -100,7 +100,9 @@ its own Postgres schema, `web`: people (`user`, `session`, `account`), **seats**
 by `user.id`), **CLI sessions** (`cli_session` — user × workspace × installation, minted by the login flow)
 and the login-flow rows, invitations, the bundle catalog (each row carrying a `kind` tag — a closed
 vocabulary, `skill` and `mcp` today, that clients branch on to pick a bundle's delivery mechanics; a kind
-neither side knows is refused, never guessed at), channels (named, curated sets of bundles; the default channel is
+neither side knows is refused, never guessed at), the MCP SERVER CATALOG a `kind: 'mcp'` bundle names
+rather than holds bytes for (servers, their append-only revisions, and one connection row per
+workspace — delivered as the document itself, inline, because there are no bytes behind it), channels (named, curated sets of bundles; the default channel is
 every member's baseline), **assignments** (one positive row — a bundle or a channel aimed at a person or at
 everyone; a curator's act and a person's own "add to mine" mint the same row) and **declines** (the one
 negative — per person per bundle, keyed to bundle identity so it survives version and channel changes),
