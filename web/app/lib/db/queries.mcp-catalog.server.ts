@@ -302,6 +302,14 @@ export async function addMcpRevisionInTx(
 // ── Private servers: an owner's own, created and edited by the same mechanism ────────────────
 
 /** The editorial half of a server row — what a person reading a catalog entry is told. */
+/**
+ * WHO MAY WRITE A WORKSPACE'S OWN SERVER DOWN: an owner, whichever surface they came through.
+ * The page's cookie-side `OwnerActor` and the session lane's bearer-side actor are the same seat
+ * read two ways, and the type says so rather than making the lane widen the parameter to any
+ * member and prove the role in prose.
+ */
+export type McpServerAuthor = OwnerActor | (SessionActor & { readonly role: "owner" });
+
 export interface McpServerDetails {
   displayName: string;
   description?: string | null;
@@ -327,7 +335,7 @@ export type McpServerOutcome =
  * nobody to be reviewed by.
  */
 export async function createPrivateMcpServer(
-  actor: OwnerActor,
+  actor: McpServerAuthor,
   details: McpServerDetails,
   document: Record<string, unknown>,
 ): Promise<McpServerOutcome> {
@@ -402,7 +410,7 @@ export async function createPrivateMcpServer(
  * server", because the answer to "may I edit this" must not double as a way to learn it exists.
  */
 export async function editPrivateMcpServer(
-  actor: OwnerActor,
+  actor: McpServerAuthor,
   serverId: string,
   details: McpServerDetails,
   document: Record<string, unknown>,
@@ -1216,6 +1224,30 @@ export async function workspaceRegistryServer(
     LIMIT 1
   `);
   return registryRowsOf(rows.rows as Record<string, unknown>[])[0] ?? null;
+}
+
+/**
+ * The bundle a workspace ALREADY connects a catalog server through, by the server's registry
+ * name — `null` when it connects none. The idempotent half of the lane's connect: asking twice
+ * for the same server is not a mistake to refuse, it is a question with an answer.
+ */
+export async function connectedMcpBundle(
+  actor: MemberActor | SessionActor,
+  registryName: string,
+): Promise<{ bundleId: string; name: string } | null> {
+  const rows = await getDb().execute(sql`
+    SELECT b.id AS bundle_id, b.name
+    FROM web.mcp_server ms
+    JOIN web.bundle_mcp bm ON bm.server_id = ms.id AND bm.workspace_id = ${actor.workspaceId}
+    JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
+    WHERE ms.registry_name = ${registryName}
+      AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
+      AND b.status = 'active'
+    ORDER BY (ms.workspace_id IS NULL), ms.id
+    LIMIT 1
+  `);
+  const row = (rows.rows as Record<string, unknown>[])[0];
+  return row === undefined ? null : { bundleId: row.bundle_id as string, name: row.name as string };
 }
 
 /** The workspace lane's one FROM/WHERE, written once for the list and the single read. */
