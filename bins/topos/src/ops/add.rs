@@ -222,13 +222,15 @@ pub(crate) fn adopt_path(
     adopt_path_any_kind(ctx, scope, source, BundleKind::Skill)
 }
 
-/// [`adopt_path`] minus the server-bundle guard — `add --kind mcp`'s own local door, which adopts
-/// exactly that shape deliberately (the flag IS the declaration the guard asks for).
+/// [`adopt_path`] minus the server-bundle guard, kept KIND-PARAMETERIZED because everything below
+/// it — the two-engines probe, the kind-change refusal, the marker the mint writes — is a question
+/// about which kind a folder's record stands under, and answering it with a constant would make
+/// the guards read as decoration.
 ///
 /// `ctx` is the OUTER context and `scope` what the invocation resolved to write, exactly as the
 /// claim door takes them: the record and the row belong to the scope, and the ownership question
 /// spans both stores.
-pub(crate) fn adopt_path_any_kind(
+fn adopt_path_any_kind(
     ctx: &Ctx<'_>,
     scope: &super::manifest_edit::AddScope,
     source: &Path,

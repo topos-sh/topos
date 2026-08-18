@@ -313,30 +313,22 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 readd_argv.clone(),
             ),
         ],
-        // A folder whose kind the door could not read: the fix is the `--kind` word, runnable as
-        // is. A folder carrying BOTH markers gets BOTH words — an agent must not have to pick
-        // between a real choice and a guess, and offering only one would be this refusal making
-        // the very decision it just declined to make.
-        ClientError::KindRequired { dir, ambiguous, .. } => {
-            let run = |kind: &str| {
-                crate::actions::next_action(
-                    ActionCode::from("RUN_COMMAND".to_owned()),
-                    vec![
-                        "topos".into(),
-                        "add".into(),
-                        "--kind".into(),
-                        kind.into(),
-                        dir.clone(),
-                        "--json".into(),
-                    ],
-                )
-            };
-            if *ambiguous {
-                vec![run("skill"), run("mcp")]
-            } else {
-                vec![run("mcp")]
-            }
-        }
+        // A folder whose kind the door could not read. ONE runnable answer rides here — adopting
+        // the folder as a skill — because it is the only one that IS a command: a server this
+        // machine keeps to itself is a line in a file, and a server shared with a workspace names
+        // a registry entry or a link rather than this folder. Both of those are in the sentence,
+        // where they can be read; neither is offered as an argv that would not run.
+        ClientError::KindRequired { dir, .. } => vec![crate::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            vec![
+                "topos".into(),
+                "add".into(),
+                "--kind".into(),
+                "skill".into(),
+                dir.clone(),
+                "--json".into(),
+            ],
+        )],
         ClientError::AlreadyTrackedName { name } => vec![crate::actions::next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec!["topos".into(), "diff".into(), name.clone(), "--json".into()],

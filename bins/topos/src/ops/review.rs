@@ -316,6 +316,21 @@ pub(crate) fn review(
     // "not served here" instead of authenticating under the workspace credential membership provides.
     ctx.plane.bind_skill(&workspace_id, id.as_str());
     let sp = ctx.layout.published(&id);
+    // The KIND decides whether this verb applies at all. A record this machine has never seen
+    // classifies as indeterminate and reads as an ordinary skill — the workspace answers for that
+    // one, as it does for every proposal it holds.
+    let placements: Vec<String> = crate::doc::read_map(ctx.fs, &sp.map)
+        .ok()
+        .flatten()
+        .map(|m| m.placements)
+        .unwrap_or_default();
+    if let Some(refusal) = crate::bundle_kind::refuse_version_verb(
+        crate::bundle_kind::VersionVerb::Review,
+        &skill_name,
+        crate::bundle_kind::classify(ctx, id.as_str(), &placements).or_skill(),
+    ) {
+        return Err(refusal);
+    }
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
     let su = super::connect::session_universe(ctx, connectors.session)?;

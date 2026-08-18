@@ -61,6 +61,20 @@ pub(crate) fn log(
     // action log) in the checkout's own store, so a `log` run from inside that checkout reads THAT
     // store — not a same-named machine twin, and not a not-found.
     let (layout, id, lock) = super::resolve_skill_here(ctx, skill, None)?;
+    let sctx = super::pull::ctx_with_layout(ctx, &layout);
+    // The KIND decides whether this verb applies at all, asked before a single event is read.
+    let placements: Vec<String> = crate::doc::read_map(sctx.fs, &layout.published(&id).map)
+        .ok()
+        .flatten()
+        .map(|m| m.placements)
+        .unwrap_or_default();
+    if let Some(refusal) = crate::bundle_kind::refuse_version_verb(
+        crate::bundle_kind::VersionVerb::Log,
+        &lock.name,
+        crate::bundle_kind::classify(&sctx, id.as_str(), &placements).or_skill(),
+    ) {
+        return Err(refusal);
+    }
 
     // ---- the local action log (`log.jsonl`) — non-version events (add / error / …) ----
     // Each store keeps its OWN `log.jsonl` (the layout resolves it under that store's root), and an

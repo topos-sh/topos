@@ -388,21 +388,33 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             let (layout, skill_id, _lock) =
                 super::resolve_skill_in_scope(ctx, &name, workspace.as_deref(), store)?;
             let sctx = ctx_with_layout(ctx, &layout);
-            // `--keep-mine` finishes a stopped merge over PLACED FILES. A config-placed bundle has
-            // none and can hold no merge, so it refuses through the ONE kind construction rather
-            // than reporting "no merge has stopped" in a skill's merge vocabulary.
-            if matches!(mode, TargetMode::KeepMine) {
+            // The two modes a CONNECTED SERVER cannot serve, each refused through its own
+            // construction: `--keep-mine` finishes a stopped merge over placed files, and such a
+            // bundle has none; a go-back puts an earlier version back, and its versions are the
+            // catalog's — this machine holds the one it was given and nothing before it.
+            if matches!(mode, TargetMode::KeepMine | TargetMode::GoBack(_)) {
                 let placements: Vec<String> =
                     doc::read_map(ctx.fs, &layout.published(&skill_id).map)
                         .ok()
                         .flatten()
                         .map(|m: topos_types::persisted::PlacementMap| m.placements)
                         .unwrap_or_default();
-                if let Some(refusal) = crate::bundle_kind::refuse_file_verb(
-                    crate::bundle_kind::FileVerb::KeepMine,
-                    &_lock.name,
-                    crate::bundle_kind::classify(&sctx, skill_id.as_str(), &placements).or_skill(),
-                ) {
+                let kind =
+                    crate::bundle_kind::classify(&sctx, skill_id.as_str(), &placements).or_skill();
+                let refusal = if matches!(mode, TargetMode::KeepMine) {
+                    crate::bundle_kind::refuse_file_verb(
+                        crate::bundle_kind::FileVerb::KeepMine,
+                        &_lock.name,
+                        kind,
+                    )
+                } else {
+                    crate::bundle_kind::refuse_version_verb(
+                        crate::bundle_kind::VersionVerb::GoBack,
+                        &_lock.name,
+                        kind,
+                    )
+                };
+                if let Some(refusal) = refusal {
                     return Err(refusal);
                 }
             }

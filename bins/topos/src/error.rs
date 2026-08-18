@@ -1122,19 +1122,13 @@ pub(crate) enum ClientError {
     /// of the two ways that happens: the root holds a `server.json` and no `SKILL.md` (a server
     /// bundle the skill door would silently mis-kind, delivering raw JSON into skills dirs), or it
     /// holds BOTH markers (nothing in the folder says which one it is). Each carries its own
-    /// sentence and both name the `--kind` words; `dir` is the user's own spelling, shown
-    /// VERBATIM. Constructed only by [`ClientError::kind_required`] / [`ClientError::kind_ambiguous`].
+    /// sentence; `dir` is the user's own spelling, shown VERBATIM. Constructed only by
+    /// [`ClientError::kind_required`] / [`ClientError::kind_ambiguous`].
     ///
     /// The refusal ARMS ON SILENCE only — an explicit `--kind` word always wins, because the guard
     /// exists to stop a silent mis-kind, not to overrule someone who said what they meant.
     #[error("{message}")]
-    KindRequired {
-        dir: String,
-        message: String,
-        /// Whether BOTH markers stand (the ambiguous shape) — the renderer offers both `--kind`
-        /// words for it, and one for the server-folder shape.
-        ambiguous: bool,
-    },
+    KindRequired { dir: String, message: String },
     /// A manifest a verb had to READ refuses the grammar (bad TOML, an unknown field, an illegal
     /// value, a `dest` entry in the wrong scope's dialect). The fault is the FILE's — a
     /// user-authored `topos.toml`, never topos's own state — so the message (the file, the
@@ -1177,10 +1171,13 @@ impl ClientError {
         ClientError::KindRequired {
             dir: dir.to_owned(),
             message: format!(
-                "{dir} looks like an MCP server (its root holds server.json and no SKILL.md) — \
-                 `topos add --kind mcp {dir}` adds it as one, and `--kind skill` adds it as a skill"
+                "{dir} is an MCP server, not a skill: its root holds server.json and no SKILL.md. \
+                 A server only this machine runs is a line in your topos.toml — add \
+                 `\"{dir}\" = {{ kind = \"mcp\" }}` under [bundles], then run 'topos update'. To \
+                 share one with your workspace, `topos add --kind mcp <its registry name, or the \
+                 https link to its server.json>`. `topos add --kind skill {dir}` adopts the folder \
+                 as a skill, if that is what it is"
             ),
-            ambiguous: false,
         }
     }
 
@@ -1193,10 +1190,10 @@ impl ClientError {
             dir: dir.to_owned(),
             message: format!(
                 "{dir} holds both a SKILL.md and a root server.json, so nothing in the folder \
-                 says which one it is — `topos add --kind skill {dir}` adopts it as a skill, and \
-                 `topos add --kind mcp {dir}` adds it as an MCP server"
+                 says which one it is — `topos add --kind skill {dir}` adopts it as a skill; to \
+                 run its server here, add `\"{dir}\" = {{ kind = \"mcp\" }}` to your topos.toml \
+                 under [bundles]"
             ),
-            ambiguous: true,
         }
     }
 

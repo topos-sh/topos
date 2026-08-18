@@ -484,6 +484,10 @@ fn scope_rows(
         // workspace bundle by its skill id; a local folder by the id this scope's store tracks it
         // by, or — for an imported document no store adopted — its line-keyed local identity.
         let mut custody_ids: Vec<String> = Vec::new();
+        // The row's pin, once — and NONE for a connected server, whatever the row spells. What
+        // such a row receives is the catalog's resolution; a hash written on it names nothing, so
+        // it is read as absent everywhere at once rather than in each reader's own way.
+        let row_pin = row.pin().filter(|_| row_kind(cache, &row.shape, kind.as_deref()) != Some(BundleKind::Mcp));
         let applied = match &row.shape {
             KeyShape::WorkspaceBundle {
                 host,
@@ -501,7 +505,9 @@ fn scope_rows(
                     // `update` delivers here, so measuring against `current` would report a row
                     // sitting exactly where it was asked to sit as "behind — `topos update` lands
                     // the newer version", advice the next `update` correctly refuses to take.
-                    let target = row.pin().unwrap_or_else(|| hit.ds.served_version.clone());
+                    // A connected server has no pin to read (see `PlanRow::pin`) — the catalog
+                    // resolves what it receives, so the served revision is always the target.
+                    let target = row_pin.clone().unwrap_or_else(|| hit.ds.served_version.clone());
                     applied_for_id(ctx, layout, hit.skill_id, &target)
                 }
                 None => {
@@ -589,7 +595,7 @@ fn scope_rows(
             source_file: file.clone(),
             source_key: Some(row.reference.clone()),
             feed: None,
-            pin: row.pin(),
+            pin: row_pin,
             placements: applied.placements,
             draft_in: applied.draft_in,
             record: applied.record,
@@ -1042,7 +1048,17 @@ pub(crate) fn awaiting_first_sync(
                 awaiting = None;
                 continue;
             };
-            match doc::read_doc::<SyncState>(ctx.fs, &ctx.layout.published(&sid).sync) {
+            let sp = ctx.layout.published(&sid);
+            // A CONNECTED SERVER's record IS its first sync — the document is what it was waiting
+            // for, and it holds no bytes to be waiting on. Its zeroed sync says exactly that, so
+            // the record is asked before the sync is read.
+            if matches!(
+                doc::read_doc::<topos_types::persisted::McpServerRecord>(ctx.fs, &sp.server),
+                Ok(Some(_))
+            ) {
+                continue;
+            }
+            match doc::read_doc::<SyncState>(ctx.fs, &sp.sync) {
                 Ok(Some(sync)) if sync.base_commit == ZERO_HEX => {
                     awaiting = awaiting.map(|n| n + 1);
                 }
@@ -1119,6 +1135,27 @@ fn applied_for_id(
         return Applied::unknown();
     }
     let sp = layout.published(&sid);
+    // A CONNECTED SERVER's record answers for itself and stops here: what it holds is a catalog
+    // revision, there is no work tree to scan and no bytes to be edited, so the three questions
+    // below (a draft, a block, a merge) have no subject. Only the one comparison remains — is
+    // this the revision the workspace serves.
+    if let Ok(Some(record)) =
+        doc::read_doc::<topos_types::persisted::McpServerRecord>(ctx.fs, &sp.server)
+    {
+        let behind = !served_version.is_empty() && served_version != record.revision_id;
+        return Applied {
+            state: if behind {
+                StatusItemState::Behind
+            } else {
+                StatusItemState::Applied
+            },
+            version: Some(record.revision_id),
+            digest: None,
+            placements: Vec::new(),
+            draft_in: DraftCopies::None,
+            record: Some(sid),
+        };
+    }
     let Ok(Some(sync)) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync) else {
         return Applied::unknown();
     };
@@ -1477,6 +1514,23 @@ fn cache_lookup<'a>(
         skill_id,
         ds,
     })
+}
+
+/// The KIND a row is known to be here: what it spells, else what the last delivery recorded. It
+/// answers `None` only when neither says, which is a row nothing has ever delivered.
+fn row_kind(cache: &SyncStatus, shape: &KeyShape, declared: Option<&str>) -> Option<BundleKind> {
+    if let Some(word) = declared {
+        return BundleKind::parse(word);
+    }
+    let KeyShape::WorkspaceBundle {
+        host,
+        workspace,
+        bundle,
+    } = shape
+    else {
+        return None;
+    };
+    BundleKind::of_tag(cache_lookup(cache, host, workspace, bundle)?.ds.kind.as_deref())
 }
 
 /// Whether the workspace's last delivery ASSIGNED this bundle to the person (a feed row — a

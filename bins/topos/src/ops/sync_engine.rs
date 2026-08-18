@@ -309,14 +309,15 @@ pub(crate) fn sync_one_planned(
     // coverage adds a target; a record only ever leaves through an explicit verb). The reconciled
     // map carries every recorded placement — appended targets are never-materialized until an apply.
     let applied_eq_observed = sync.applied == sync.observed;
-    // A CONFIG-PLACED (mcp) record reached without an injected planner (a targeted accept, a
-    // resume) plans ENTRIES targets, never dirs: skill-dir placement must never engage for it —
-    // its bytes reach agents through the config files the plan names, and the apply below
-    // dispatches on the target arm.
-    let mcp_record = plan_fn.is_none() && planning_kind(ctx, skill_id, &map, &name)?.is_mcp();
+    // A CONNECTED SERVER never reaches this engine. It holds no version to fetch and no object
+    // store to fetch into — its whole delivery is the document the reconcile records — so an
+    // arrival here is a caller that believed a record was something its own kind marker denies.
+    // Fail closed: refuse, rather than plan a placement for bytes that do not exist.
+    if plan_fn.is_none() && planning_kind(ctx, skill_id, &map, &name)?.is_mcp() {
+        return Err(server_has_no_versions(&name));
+    }
     let make_plan = |map: &PlacementMap| match plan_fn {
         Some(f) => f(ctx, skill_id, &lock, map),
-        None if mcp_record => crate::mcp_engine::recorded_entries_plan(ctx, skill_id),
         None => placement::plan_for_skill(ctx, skill_id, &lock, map),
     };
     let plan = make_plan(&map);
@@ -507,8 +508,6 @@ pub(crate) fn sync_one_planned(
             // advance `applied` with NO swap, never a false DIVERGED — and no spurious draft snapshot.
             heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
-            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
-            row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
         }
@@ -529,8 +528,6 @@ pub(crate) fn sync_one_planned(
             }
             apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
-            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
-            row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
         }
@@ -561,34 +558,6 @@ pub(crate) fn sync_one_planned(
             )
         }
     }
-}
-
-/// THE TARGETED-ACCEPT CONVERGE — the same rule the go-back applies below: for a config-placed
-/// bundle the store move alone changes nothing an agent reads, so an explicit
-/// `topos update <mcp-name>` converges this scope's configs NOW and threads the per-agent states
-/// onto the row, instead of reporting success while every config keeps the previous document
-/// until the next sweep. `run` is false for everything that is not an explicit mcp apply (the
-/// bare sweep's converge is the reconcile's own). Best-effort by construction: the store move
-/// already landed, and the next sweep reaches the same configs — warnings ride stderr, the
-/// channel every targeted converge uses.
-fn converge_explicit_mcp(
-    ctx: &Ctx<'_>,
-    run: bool,
-    skill_id: &str,
-    name: &str,
-) -> Vec<topos_types::results::McpAgentState> {
-    if !run {
-        return Vec::new();
-    }
-    let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
-        return Vec::new();
-    };
-    let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name);
-    for w in warnings {
-        crate::out::errln!("topos update: {}", w.text);
-    }
-    prettify_state_files(ctx, &mut states);
-    states
 }
 
 /// Abbreviate the config-file paths a receipt row's per-agent states carry (`~` under the home) —
@@ -625,6 +594,19 @@ fn planning_kind(
     }
 }
 
+/// The typed refusal every version-shaped path answers over a CONNECTED SERVER. It is a belt, not
+/// a door: every verb that could name one refuses in its own words first, and reaching here means
+/// a record's kind marker and its caller disagree.
+fn server_has_no_versions(name: &str) -> ClientError {
+    ClientError::PlacementUnsupported {
+        reason: format!(
+            "'{name}' is an MCP server bundle — this machine holds the one revision it was given \
+             and no version history behind it, so there is nothing here to apply. `topos update` \
+             converges its config entries."
+        ),
+    }
+}
+
 /// The typed refusal every empty-map + unknowable-kind path answers: the record may be a
 /// config-placed (mcp) bundle whose kind evidence was lost, and materializing its bytes into
 /// skill dirs on a guess is exactly the corruption the marker exists to prevent.
@@ -656,14 +638,12 @@ pub(crate) fn go_back(
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_map_required(ctx, &sp)?;
     let name = lock.name.clone();
-    // An mcp record's go-back moves the STORE state only — no skill-dir placement may be planned
-    // for it (the converge below re-renders configs from the restored version's server.json).
-    let mcp_record = planning_kind(ctx, skill_id, &map, &name)?.is_mcp();
-    let plan = if mcp_record {
-        crate::mcp_engine::recorded_entries_plan(ctx, skill_id)
-    } else {
-        placement::plan_for_skill(ctx, skill_id, &lock, &map)
-    };
+    // A CONNECTED SERVER has no version history here to go back through (see the sweep's own
+    // arm above); the doors that could name one refuse first, and this is the belt.
+    if planning_kind(ctx, skill_id, &map, &name)?.is_mcp() {
+        return Err(server_has_no_versions(&name));
+    }
+    let plan = placement::plan_for_skill(ctx, skill_id, &lock, &map);
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);
 
@@ -744,22 +724,6 @@ pub(crate) fn go_back(
         },
     )?;
     log_apply(ctx, skill_id, "pull-goback", target, &report);
-    // THE GO-BACK CONVERGE: for a config-placed bundle the store move alone changes nothing an
-    // agent reads — converge this scope's configs NOW, so the restored document is what they
-    // carry before the command reports success (the next sweep would heal it anyway; a targeted
-    // verb must not leave the window open). Converge warnings ride stderr, the same channel every
-    // best-effort sweep fact uses.
-    let harnesses = if mcp_record {
-        let sid = crate::id::SkillId::parse(skill_id)?;
-        let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, &name);
-        for w in warnings {
-            crate::out::errln!("topos update: {}", w.text);
-        }
-        prettify_state_files(ctx, &mut states);
-        states
-    } else {
-        Vec::new()
-    };
     Ok(PullSkill {
         skill: name,
         // The workspace provenance is stamped by the pull aggregator (`pull.rs`), which owns the
@@ -775,10 +739,8 @@ pub(crate) fn go_back(
         display: None,
         note: None,
         scope: None,
-        harnesses,
-        // The go-back's own row: a config-placed bundle says so, so the receipt that follows
-        // names what it moved rather than calling every row a skill.
-        kind: mcp_record.then(|| BundleKind::Mcp.as_str().to_owned()),
+        harnesses: Vec::new(),
+        kind: None,
         // A go-back RESTORES the recorded bytes over the placement, so nothing of the person's is
         // left unshared in it.
         draft: false,
@@ -824,16 +786,13 @@ pub(crate) fn reset_to_base(
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_map_required(ctx, &sp)?;
-    // Same rule as the go-back: an mcp record never gets skill-dir placements planned, and an
-    // empty-map record with no kind evidence fails CLOSED rather than materializing on a guess.
-    let plan = if planning_kind(ctx, sid, &map, &lock.name)?.is_mcp() {
-        // An mcp record plans ENTRIES, so this reset touches no folder. Restoring the store is
-        // where a reset's authority ends here: the config files reconverge on the next sweep (or
-        // on a targeted `update <name>`), which is also where a narrowing change would land.
-        crate::mcp_engine::recorded_entries_plan(ctx, sid)
-    } else {
-        placement::plan_for_skill(ctx, sid, &lock, &map)
-    };
+    // Same rule as the go-back: a connected server never reaches here (the verb refuses the kind
+    // at its own door), and an empty-map record with no kind evidence fails CLOSED rather than
+    // materializing on a guess.
+    if planning_kind(ctx, sid, &map, &lock.name)?.is_mcp() {
+        return Err(server_has_no_versions(&lock.name));
+    }
+    let plan = placement::plan_for_skill(ctx, sid, &lock, &map);
     // The selection is resolved against the RECORDED map, before reconcile: a reconcile only ever
     // appends targets or replaces never-materialized reservations, so an EDITED copy keeps its
     // index — and resolving against the dir rather than the index below makes that structural.

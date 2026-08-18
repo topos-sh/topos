@@ -131,7 +131,7 @@ caller.
   catalog at every door: SOMETHING TO RUN (a remote `streamable-http` endpoint over https, or
   `packages[]`, or both; neither refuses), every package PINNED to one immutable thing (exact
   version · OCI tag-or-digest · `fileSha256`; `latest` and version ranges refuse), no
-  `{placeholder}` in the endpoint, no credential (the shapes live in the repo-root
+  `{placeholder}` in the endpoint, no credential (the shapes live in this app's own
   `tests/fixtures/mcp/`, compiled into `secret-patterns.generated.ts`; a package env/flag may
   NAME a credential slot — the machine fills it — but never arrive with the value in it).
   `registryType` is open-world: what a given machine can set up is the client's answer at render

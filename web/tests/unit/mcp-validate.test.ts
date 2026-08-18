@@ -24,7 +24,7 @@ import {
 
 /**
  * The MCP server-document gate, driven by the SHARED vectors at the repo root
- * (`tests/fixtures/mcp/`) — the same files a client-side reader validates against, so the two
+ * (`web/tests/fixtures/mcp/`) — the vectors that pin what may be shared, so the rule and its
  * languages can never quietly disagree about what is accepted. Every vector names one verdict:
  * `ok`, or the exact refusal code. A rule change here fails until the vector changes with it.
  *
@@ -36,7 +36,7 @@ import {
  */
 
 // tests/unit → web → repo root.
-const FIXTURES = resolve(__dirname, "..", "..", "..", "tests", "fixtures", "mcp");
+const FIXTURES = resolve(__dirname, "..", "fixtures", "mcp");
 
 /** One file of a multi-file vector: a fixture on disk, or literal content spelled inline. */
 interface VectorFile {

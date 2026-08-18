@@ -186,16 +186,6 @@ pub(crate) struct BundleStates {
     /// placement is an INSTALL however the store got its bytes; a write over a bundle the custody
     /// already placed is a repair. False whenever `wrote` is.
     pub first_placement: bool,
-    /// The agents whose state ALREADY HAS A LINE of its own in this converge's typed channels — a
-    /// capability gap, an entry topos does not own, a surface that could not be written.
-    ///
-    /// One canonical sentence per fact: those lines carry the whole story AND the way out, so a
-    /// receipt that also printed the state's short cause said one thing twice, at two lengths, in
-    /// two wordings. A caller rendering per-agent rows skips these and lets the sentence speak. It
-    /// is a SET OF SLUGS rather than a flag on the state, because the state's shape cannot tell an
-    /// ordinary structural narrowing (an agent with no config at this scope — no line anywhere,
-    /// so its row is the only thing that says it) from a capability gap, which has one.
-    pub spoken_for: BTreeSet<String>,
 }
 
 /// One removed placement (removal convergence / the `remove` verb's inline converge).
@@ -427,8 +417,6 @@ pub(crate) fn converge(
     // them or it attributes one bundle's gap to the other. `(code, sentence) → the demands`, in
     // first-seen order, so the emitted order is still the descriptor order the receipt reads in.
     let mut standing: Vec<(&'static str, String, BTreeSet<usize>)> = Vec::new();
-    // Per demand, the agents whose state already HAS a line — see [`BundleStates::spoken_for`].
-    let mut spoken: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
     let mut note_standing = |code: &'static str, text: String, demand: usize| match standing
         .iter_mut()
         .find(|(c, t, _)| *c == code && *t == text)
@@ -542,7 +530,6 @@ pub(crate) fn converge(
                         ),
                     );
                     note_standing(gap.code(), gap.message(h.slug), *i);
-                    spoken.entry(*i).or_default().insert(h.slug.to_owned());
                     capability_gaps.insert(*i);
                     continue;
                 }
@@ -574,7 +561,6 @@ pub(crate) fn converge(
                 );
                 let (code, text) = hit.message(h.slug, &io.home);
                 note_standing(code, text, *i);
-                spoken.entry(*i).or_default().insert(h.slug.to_owned());
             }
         }
         if !blocked.is_empty() {
@@ -632,16 +618,6 @@ pub(crate) fn converge(
             &provenance,
             &names,
         );
-        // A surface that could not be WRITTEN says so in a sentence of its own, keyed by its file
-        // — so the per-agent row for the same surface would be that sentence again, shorter and
-        // without the way out.
-        if !surface_out.warnings.is_empty() {
-            for key in surface_out.states.iter().map(|(k, _)| k) {
-                if let Some(i) = desired_bundles.get(key) {
-                    spoken.entry(*i).or_default().insert(h.slug.to_owned());
-                }
-            }
-        }
         out.warnings.extend(surface_out.warnings);
         out.notices.extend(surface_out.notices);
         for key in &surface_out.wrote {
@@ -746,7 +722,6 @@ pub(crate) fn converge(
             states: states.remove(&i).unwrap_or_default(),
             wrote: wrote.contains(&i),
             first_placement: wrote.contains(&i) && !placed_before.contains(&d.bundle_id),
-            spoken_for: spoken.remove(&i).unwrap_or_default(),
         })
         .collect();
     out
@@ -1992,158 +1967,6 @@ fn prune_plugin_dir(fs: &dyn FsOps, slug: &str, mcp_path: &Path) -> Option<Messa
         let _ = fs.remove_dir_all(dir);
     }
     kept
-}
-
-/// Converge THIS scope's config entries for ONE bundle right now — the store/lock just moved (a
-/// go-back, a targeted accept), and the command must not return success while agent configs still
-/// carry the previous document. Same wiring as the sweep's converge, narrowed to one demand;
-/// removals stay OFF (a targeted verb never touches another bundle's entries). Best-effort by construction: the store
-/// move already landed, and the next sweep reaches the same configs — failures come back as
-/// warning lines beside the per-agent states.
-///
-/// OWNED-ONLY CONVERGENCE: the targeted run does not re-derive the row's `dest` narrowing (that
-/// lives in the scope plan the sweep resolves), so it must not fan out past what the narrowing
-/// last admitted. Two rails hold that line:
-///
-/// - it runs only when the custody holds this bundle's MINTED key — with the custody gone there is
-///   no ownership record to reuse, and minting fresh here would land a DUPLICATE `topos-local-*`
-///   entry beside the original (now-foreign, unremovable) one. Skip with an honest warning; the
-///   next sweep re-mints under the full scope plan and heals this scope;
-/// - the reach is the harnesses that ALREADY hold a custody entry for this bundle in this scope. A
-///   harness the narrowing excluded never gained an entry, so it stays untouched; a narrowing
-///   CHANGE is the sweep's job, not a go-back's.
-///
-/// **The reach is derived HERE, not handed in.** A verb plans at its top and converges after a
-/// snapshot, a fetch and a materialize; a sweep landing in that window can widen this bundle's
-/// entries, and converging with the older set would CLAW BACK the entry the sweep just placed (a
-/// demanded bundle's standing rows are never `preserved`, so a surface an out-of-date reach omits
-/// gets prior-matched and removed). So the reach comes from the custody read immediately before
-/// the lock — the verb's own plan decides only THAT the entries mechanic runs, never how far.
-pub(crate) fn converge_bundle_now(
-    ctx: &crate::ctx::Ctx<'_>,
-    sid: &crate::id::SkillId,
-    name: &str,
-) -> (Vec<McpAgentState>, Vec<Message>) {
-    let Some(roots) = ctx.roots.clone() else {
-        return (Vec::new(), Vec::new());
-    };
-    let Ok(Some(recorded)) = recorded_server(ctx, sid) else {
-        return (Vec::new(), Vec::new());
-    };
-    // An ADVISORY (unlocked) read: it answers whether an ownership record exists to reuse, and
-    // supplies the reach below. The authoritative read-modify-write happens inside `converge`,
-    // under the per-scope lock.
-    let custody = match ScopeEntries::load(ctx.fs, &ctx.layout) {
-        Ok(l) => l,
-        Err(e) => {
-            // The same fail-closed answer the sweep's converge gives an unreadable custody.
-            return (
-                Vec::new(),
-                vec![crate::message::failure(
-                    "MCP_CUSTODY_UNREADABLE",
-                    format!(
-                        "{}: topos's record of which MCP config entries it owns could not be read \
-                         ({}), so no MCP config file was read or written this run. Inspect that \
-                         file by hand.",
-                        ctx.layout.config_custody_path().display(),
-                        e.detail()
-                    ),
-                )],
-            );
-        }
-    };
-    let Some(reach) = recorded_reach(&custody, sid.as_str()) else {
-        return (
-            Vec::new(),
-            vec![crate::message::failure(
-                "MCP_OWNERSHIP_MISSING",
-                format!(
-                    "{name}: topos has no record of where it placed this server's MCP entries \
-                     here. The next 'topos update' restores it."
-                ),
-            )],
-        );
-    };
-    let project_root = ctx.layout.project_root().map(Path::to_path_buf);
-    // The demand's plan, from the reach as it stands NOW.
-    let fresh = crate::placement::entries_plan(ctx, project_root.as_deref(), Some(&reach));
-    // Nothing to place AND nothing to say. A plan with only WITHHELD surfaces still enters: it
-    // writes nothing, but it speaks the per-agent states a receipt owes, and the converge it
-    // enters is also where the intent journal's crash recovery runs.
-    if fresh.entries().next().is_none() && fresh.withheld.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-    let descriptors = mcp::descriptor::mcp_harnesses();
-    let cwd = project_root.clone().or_else(|| roots.cwd.clone());
-    let detected: BTreeSet<String> =
-        topos_harness::registry::detected_harnesses(&roots.home, cwd.as_deref())
-            .iter()
-            .map(|h| h.slug.to_owned())
-            .collect();
-    let io = ScopeIo {
-        fs: ctx.fs,
-        runtimes: &crate::mcp_render::PathRuntimes,
-        layout: &ctx.layout,
-        home: roots.home.clone(),
-        project_root,
-    };
-    // `workspace_slug: None` is safe: the key check above proved the mint will find and reuse the
-    // existing key, never build a fresh one from the namespace rule.
-    let demand = McpDemand {
-        bundle_id: sid.as_str().to_owned(),
-        name: name.to_owned(),
-        workspace_slug: None,
-        version_id: recorded.revision_id,
-        server_json: recorded.document,
-        plan: fresh,
-    };
-    let outcome = converge(
-        &io,
-        std::slice::from_ref(&demand),
-        &descriptors,
-        &detected,
-        &HashSet::new(),
-        false,
-    );
-    let states = outcome
-        .bundles
-        .into_iter()
-        .find(|b| b.bundle_id == demand.bundle_id)
-        .map(|b| b.states)
-        .unwrap_or_default();
-    (states, outcome.warnings)
-}
-
-/// **The targeted verbs' ENTRIES plan** — the row-derived reach A2 keeps: a bundle's plan here is
-/// exactly the harnesses whose RECORDED rows prove it already stands there, planned onto this
-/// scope's surfaces through the one planner. A targeted accept, go-back or reset must never fan a
-/// bundle out past what the sweep's narrowing last admitted, and the record is the only local
-/// evidence of what that was. An unreadable custody, or a bundle with no minted key, plans nothing
-/// — `converge_bundle_now` then says so with its own honest warning.
-pub(crate) fn recorded_entries_plan(
-    ctx: &crate::ctx::Ctx<'_>,
-    skill_id: &str,
-) -> crate::placement::PlacementPlan {
-    let reach = ScopeEntries::load(ctx.fs, &ctx.layout)
-        .ok()
-        .and_then(|custody| recorded_reach(&custody, skill_id))
-        .unwrap_or_default();
-    crate::placement::entries_plan(ctx, ctx.layout.project_root(), Some(&reach))
-}
-
-/// The harnesses whose RECORDED rows hold this bundle's minted key in one scope — the row-derived
-/// reach itself, shared by the verb's plan and by the converge's late re-derivation so the two can
-/// never answer differently. `None` = no minted key here at all, which is not an empty reach but
-/// an absent ownership record, and the caller says so.
-fn recorded_reach(custody: &ScopeEntries, skill_id: &str) -> Option<Vec<String>> {
-    let key = custody.key_of(skill_id)?.to_owned();
-    Some(
-        mcp::descriptor::mcp_harnesses()
-            .iter()
-            .filter(|h| custody.holds(&placement_key(h.slug, &key)))
-            .map(|h| h.slug.to_owned())
-            .collect(),
-    )
 }
 
 // =================================================================================================

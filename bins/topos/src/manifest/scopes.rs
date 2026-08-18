@@ -72,7 +72,15 @@ impl PlanRow {
     }
 
     /// The version pin the row spells, if any (`"*"` and absent both mean track-current).
+    ///
+    /// A row whose KIND says it is a connected server has none, whatever it spells: what such a
+    /// row delivers is the catalog's own resolution, and a commit hash written here names nothing
+    /// on either side of the wire. It reads as ABSENT, silently — a warning about it would be a
+    /// line with no act behind it, and the row does exactly what an unpinned one does.
     pub(crate) fn pin(&self) -> Option<String> {
+        if self.value.declared_kind() == Some(crate::bundle_kind::BundleKind::Mcp) {
+            return None;
+        }
         match &self.value {
             EntryValue::Pin(p) => Some(p.clone()),
             EntryValue::Fields(f) => f.version.clone().filter(|v| v != "*"),

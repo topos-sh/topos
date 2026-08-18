@@ -23,7 +23,7 @@ import { upgradeRequired } from "./wire.server";
  * deleted whose loss costs an older client one best-effort field and no more. A break with no
  * graceful degradation moves this floor in the same change as the break.
  */
-export const MIN_CLI_VERSION = "0.1.15";
+export const MIN_CLI_VERSION = "0.1.42";
 
 /**
  * The first CLI release that identifies itself on the session lane. A client sending no parseable

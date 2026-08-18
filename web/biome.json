@@ -9,7 +9,8 @@
       "!.react-router",
       "!app/lib/plane/contract/schema.d.ts",
       "!app/lib/docs/content.generated.server.ts",
-      "!drizzle"
+      "!drizzle",
+      "!tests/fixtures/mcp"
     ]
   },
   "formatter": {

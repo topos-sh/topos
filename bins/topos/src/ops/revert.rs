@@ -69,6 +69,19 @@ pub(crate) fn revert(
     // the name) is dropped before the ambiguity count, and a non-followed target fails locally as "not a
     // followed skill" rather than an opaque plane rejection.
     let (id, lock) = resolve_followed_skill_in_workspace(ctx, skill_name, workspace)?;
+    // The KIND decides whether this verb applies at all, asked before any version is resolved.
+    let placements: Vec<String> = crate::doc::read_map(ctx.fs, &ctx.layout.published(&id).map)
+        .ok()
+        .flatten()
+        .map(|m| m.placements)
+        .unwrap_or_default();
+    if let Some(refusal) = crate::bundle_kind::refuse_version_verb(
+        crate::bundle_kind::VersionVerb::Revert,
+        &lock.name,
+        crate::bundle_kind::classify(ctx, id.as_str(), &placements).or_skill(),
+    ) {
+        return Err(refusal);
+    }
     // The resolved display NAME leads the describe + the success line (never the opaque id).
     let name = lock.name;
     let workspace_id = workspace_of(ctx, id.as_str())?;

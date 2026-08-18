@@ -205,6 +205,55 @@ pub(crate) fn refuse_file_verb(
     }
 }
 
+/// A verb that acts on a bundle's VERSION HISTORY — the versions this machine has held, the one it
+/// would put back, the proposal it would decide. That is the SECOND axis a kind can fail to serve:
+/// a connected server holds no history here at all. What it holds is one catalog revision, and
+/// every version behind that one is the catalog's, published and withdrawn by whoever publishes
+/// the server. A machine that never received them has nothing to show, nothing to go back to, and
+/// nothing to review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VersionVerb {
+    /// `topos log` — the versions this machine has held.
+    Log,
+    /// `topos update <name>@<version>` — put an older version's bytes back here.
+    GoBack,
+    /// `topos revert` — publish an older version forward as the new current.
+    Revert,
+    /// `topos review` — decide a proposal.
+    Review,
+}
+
+impl VersionVerb {
+    /// The clause naming what this verb does, spelled as the person typed it.
+    const fn acts_on(self) -> &'static str {
+        match self {
+            Self::Log => "`log` lists the versions of",
+            Self::GoBack => "`update <name>@<version>` puts an earlier version of",
+            Self::Revert => "`revert` publishes an earlier version of",
+            Self::Review => "`review` decides a proposed version of",
+        }
+    }
+}
+
+/// The refusal `verb` earns over a bundle of `kind` — `None` when the kind serves it. The twin of
+/// [`refuse_file_verb`], for the other axis, and constructed in one place for the same reason:
+/// every version verb says the same true thing about the same bundle.
+pub(crate) fn refuse_version_verb(
+    verb: VersionVerb,
+    name: &str,
+    kind: BundleKind,
+) -> Option<crate::error::ClientError> {
+    match kind {
+        BundleKind::Skill => None,
+        BundleKind::Mcp => Some(crate::error::ClientError::InvalidArgument(format!(
+            "'{name}' is an MCP server bundle — {} a bundle's own versions, and a server's \
+             versions are the catalog's: this machine holds the one it was given and nothing \
+             before it. `topos list {name}` shows what it holds",
+            verb.acts_on()
+        ))),
+    }
+}
+
 // =================================================================================================
 // The durable marker
 // =================================================================================================

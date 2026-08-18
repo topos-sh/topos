@@ -33,7 +33,7 @@ import {
  * argument/environment objects. `registryType` is OPEN-WORLD — npm, pypi, oci, nuget, mcpb and
  * whatever the registry adds next are all publishable here; whether a given machine can SET one
  * up is the client's question, answered when it renders, not this gate's. The refusal vectors
- * that pin all of it live at the repo root — `tests/fixtures/mcp/vectors.json` — and the unit
+ * that pin all of it live beside the suite — `web/tests/fixtures/mcp/vectors.json` — and the unit
  * suite drives THIS function through every one of them, so a rule cannot change here without the
  * vector changing too.
  *
@@ -60,7 +60,7 @@ export const MAX_SERVER_JSON_BYTES = 256 * 1024;
 export const MCP_ALLOWED_FILES = ["server.json", "README.md"] as const;
 
 /**
- * THE TWO NAME VOCABULARIES, from the shared vectors — `tests/fixtures/mcp/secret-patterns.json`,
+ * THE TWO NAME VOCABULARIES, from the vectors — `web/tests/fixtures/mcp/secret-patterns.json`,
  * the same file the client's gate compiles in. They were written out twice, in two languages, and
  * drifted: the client's list grew a word for signing keys and this one did not, so a package slot
  * named for one, arriving with a value, passed publication here and was refused by every client's
