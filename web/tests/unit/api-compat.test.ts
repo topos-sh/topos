@@ -45,36 +45,38 @@ describe("the floor under the shipped constants", () => {
   });
 
   it("passes the floor release itself and everything after it", () => {
-    expect(decide("topos/0.1.15")).toEqual({ refused: false, clientVersion: "0.1.15" });
-    expect(decide("topos/0.1.20")).toEqual({ refused: false, clientVersion: "0.1.20" });
+    expect(decide("topos/0.1.42")).toEqual({ refused: false, clientVersion: "0.1.42" });
+    expect(decide("topos/0.1.50")).toEqual({ refused: false, clientVersion: "0.1.50" });
     expect(decide("topos/1.0.0")).toEqual({ refused: false, clientVersion: "1.0.0" });
   });
 
-  it("passes every caller that does not identify itself as a topos it can read", () => {
-    // A pre-mechanism topos sends no User-Agent at all — the case the whole interval is built
-    // around, and the one that must stay silent.
-    expect(decide(null)).toEqual({ refused: false, clientVersion: null });
-    expect(decide("")).toEqual({ refused: false, clientVersion: null });
-    // Foreign clients: a human's curl, the HTTP library's own default.
-    expect(decide("curl/8.7.1")).toEqual({ refused: false, clientVersion: null });
-    expect(decide("ureq/3.3.0")).toEqual({ refused: false, clientVersion: null });
+  it("REFUSES every caller that does not identify itself, now that the floor outran the header", () => {
+    // The floor sits above the release that taught the CLI to name itself, so silence has stopped
+    // being ambiguous: every build from 0.1.21 on sends a version, and one that sends none is
+    // provably older than the floor. What it is refused FOR still shows nothing of its own bytes.
+    expect(decide(null)).toEqual({ refused: true, clientVersion: null });
+    expect(decide("")).toEqual({ refused: true, clientVersion: null });
+    // Foreign clients: a human's curl, the HTTP library's own default. The session lane is for
+    // topos machines, and one that cannot say which topos it is cannot be spoken to.
+    expect(decide("curl/8.7.1")).toEqual({ refused: true, clientVersion: null });
+    expect(decide("ureq/3.3.0")).toEqual({ refused: true, clientVersion: null });
     // Our product token carrying something this build cannot read: unidentified, never a guess.
-    expect(decide("topos/garbage")).toEqual({ refused: false, clientVersion: null });
-    expect(decide("topos/")).toEqual({ refused: false, clientVersion: null });
-    expect(decide("topos/0.1")).toEqual({ refused: false, clientVersion: null });
-    expect(decide("topos/v0.1.14")).toEqual({ refused: false, clientVersion: null });
+    expect(decide("topos/garbage")).toEqual({ refused: true, clientVersion: null });
+    expect(decide("topos/")).toEqual({ refused: true, clientVersion: null });
+    expect(decide("topos/0.1")).toEqual({ refused: true, clientVersion: null });
+    expect(decide("topos/v0.1.42")).toEqual({ refused: true, clientVersion: null });
     // A digit run no release could carry: unidentified, so the message can never show a person
     // something that is not a plain three-number version.
     expect(decide("topos/99999999999999999999.0.0")).toEqual({
-      refused: false,
+      refused: true,
       clientVersion: null,
     });
   });
 
   it("decides on the semver core — a pre-release/build suffix never moves the boundary", () => {
-    expect(decide("topos/0.1.15-rc.1")).toEqual({ refused: false, clientVersion: "0.1.15" });
-    expect(decide("topos/0.1.14-rc.1")).toEqual({ refused: true, clientVersion: "0.1.14" });
-    expect(decide("topos/0.1.20+build.7")).toEqual({ refused: false, clientVersion: "0.1.20" });
+    expect(decide("topos/0.1.42-rc.1")).toEqual({ refused: false, clientVersion: "0.1.42" });
+    expect(decide("topos/0.1.41-rc.1")).toEqual({ refused: true, clientVersion: "0.1.41" });
+    expect(decide("topos/0.1.50+build.7")).toEqual({ refused: false, clientVersion: "0.1.50" });
   });
 
   it("reads the version off the FIRST product token and re-renders it from its own digits", () => {
@@ -85,8 +87,9 @@ describe("the floor under the shipped constants", () => {
     });
     // What a refusal shows is OUR three numbers, never the caller's span of bytes.
     expect(decide("topos/0.01.014").clientVersion).toBe("0.1.14");
-    // A topos token that is not first is not this client identifying itself.
-    expect(decide("evil/1.0 topos/0.1.14")).toEqual({ refused: false, clientVersion: null });
+    // A topos token that is not first is not this client identifying itself — and unidentified is
+    // now a refusal, so the smuggled token buys nothing either way.
+    expect(decide("evil/1.0 topos/0.1.14")).toEqual({ refused: true, clientVersion: null });
   });
 });
 
@@ -109,11 +112,14 @@ describe("the future rule — when the floor outruns the header", () => {
 });
 
 describe("day-one quiet — the shipped constants, asserted", () => {
-  it("keeps the floor at or below the release that started sending a version", () => {
-    // While this holds, an unidentified caller passes — no deployment can refuse a topos that
-    // was never taught to name itself.
-    expect(decide(null).refused).toBe(false);
-    expect(compat.MIN_CLI_VERSION).toBe("0.1.15");
+  it("has crossed the header line, so silence is refused with the rest", () => {
+    // DELIBERATE, and the reason is the break this floor carries: the delivery answer now names a
+    // machine's connected servers in a list of their own, and a client that predates it reads its
+    // own servers as withdrawn and takes every one of them out of every agent config on the
+    // machine. That is not a degradation a client rides out — so the floor moved past the release
+    // that started sending a version, and a caller that names none is refused with the rest.
+    expect(decide(null).refused).toBe(true);
+    expect(compat.MIN_CLI_VERSION).toBe("0.1.42");
   });
 
   it("keeps the floor at or below this build's own release", () => {
@@ -139,10 +145,10 @@ describe("clientFloor — the wired decision", () => {
       headers: userAgent === undefined ? {} : { "user-agent": userAgent },
     });
 
-  it("passes a current client and every unidentified caller", () => {
+  it("passes a current client and refuses every unidentified caller", () => {
     expect(compat.clientFloor(req(`topos/${CARGO_VERSION}`))).toBeNull();
-    expect(compat.clientFloor(req())).toBeNull();
-    expect(compat.clientFloor(req("curl/8.7.1"))).toBeNull();
+    expect((compat.clientFloor(req()) as Response).status).toBe(426);
+    expect((compat.clientFloor(req("curl/8.7.1")) as Response).status).toBe(426);
   });
 
   it("answers the 426 for a below-floor client, naming the floor and nothing of the header", async () => {

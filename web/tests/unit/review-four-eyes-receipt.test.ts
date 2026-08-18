@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { action as reviewsAction } from "@/routes/api.v1.reviews";
+import { laneHeaders } from "./helpers/lane";
 import {
   createScratchDb,
   type ScratchDb,
@@ -56,7 +57,10 @@ describe("device-lane review: an author's self-approve on a reviewed bundle", ()
   it("answers 200 ok:false FOUR_EYES_REQUIRED, carrying a DENIED receipt that echoes the op_id", async () => {
     const request = new Request(`${ORIGIN}/api/v1/reviews`, {
       method: "POST",
-      headers: { authorization: "Bearer dk_rev", "content-type": "application/json" },
+      headers: laneHeaders({
+        authorization: "Bearer dk_rev",
+        "content-type": "application/json",
+      }),
       body: JSON.stringify({
         workspace_id: wsId,
         skill_id: "s_fe",

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { laneHeaders } from "./helpers/lane";
 import {
   bootWorkspace,
   createScratchDb,
@@ -66,7 +67,10 @@ async function post(
   const { action } = await import("@/routes/api.v1.mcp-servers");
   const request = new Request(`${ORIGIN}/api/v1/workspaces/${ws}/mcp-servers`, {
     method: "POST",
-    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+    headers: laneHeaders({
+      authorization: `Bearer ${bearer}`,
+      "content-type": "application/json",
+    }),
     body: JSON.stringify(body),
   });
   let response: Response;

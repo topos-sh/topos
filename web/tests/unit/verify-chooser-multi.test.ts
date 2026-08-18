@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { laneHeaders } from "./helpers/lane";
 import { createScratchDb, type ScratchDb, seatUser, seedUser } from "./helpers/scratch-db";
 
 /**
@@ -218,10 +219,10 @@ describe("the lane-side connect across workspaces", () => {
       (await (action as RouteHandler)({
         request: new Request(`${ORIGIN}/api/v1/login/connect`, {
           method: "POST",
-          headers: {
+          headers: laneHeaders({
             authorization: `Bearer ${flow.flowCode}`,
             "content-type": "application/json",
-          },
+          }),
           body: JSON.stringify({ workspace, requested_name: "two-cli" }),
         }),
         params: {},

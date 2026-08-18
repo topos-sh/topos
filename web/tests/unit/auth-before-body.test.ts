@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { laneHeaders } from "./helpers/lane";
 import {
   bootWorkspace,
   createScratchDb,
@@ -78,7 +79,7 @@ function bodyProbeRequest(path: string, opts: { method?: string; cred?: string }
       controller.close();
     },
   });
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = laneHeaders({ "content-type": "application/json" });
   if (opts.cred !== undefined) {
     headers.authorization = `Bearer ${opts.cred}`;
   }
@@ -176,11 +177,11 @@ describe("unauthenticated writes never buffer a body", () => {
     const { action } = await import("@/routes/api.v1.publish");
     const request = new Request("http://x/api/v1/publish", {
       method: "POST",
-      headers: {
+      headers: laneHeaders({
         authorization: "Bearer cred_owner",
         "content-type": "application/json",
         "content-length": String(200 * 1024 * 1024),
-      },
+      }),
       body: new ReadableStream<Uint8Array>({
         start(controller) {
           controller.close();
@@ -200,7 +201,10 @@ describe("the workspace bind behind the credential-first resolve", () => {
       action,
       new Request("http://x/api/v1/publish", {
         method: "POST",
-        headers: { authorization: "Bearer cred_owner", "content-type": "application/json" },
+        headers: laneHeaders({
+          authorization: "Bearer cred_owner",
+          "content-type": "application/json",
+        }),
         body: publishBody("w_someone_elses"),
       }),
     );
@@ -220,7 +224,10 @@ describe("the storage quota (`storage-bytes`)", () => {
         action,
         new Request("http://x/api/v1/publish", {
           method: "POST",
-          headers: { authorization: "Bearer cred_owner", "content-type": "application/json" },
+          headers: laneHeaders({
+            authorization: "Bearer cred_owner",
+            "content-type": "application/json",
+          }),
           body: publishBody(wsId),
         }),
       );

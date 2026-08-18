@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { laneHeaders } from "./helpers/lane";
 import {
   asMember,
   asSession,
@@ -138,7 +139,10 @@ describe("what a machine may report holding", () => {
     const route = await import("@/routes/api.v1.report");
     const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
       method: "PUT",
-      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      headers: laneHeaders({
+        "content-type": "application/json",
+        authorization: "Bearer cs_box",
+      }),
       body: JSON.stringify({ schema_version: 1, applied: [row] }),
     });
     try {
@@ -217,7 +221,10 @@ describe("the report door shape-checks the block — an authenticated member's 4
       // Authenticated: the door resolves the credential FIRST (auth-before-body), so the
       // shape 400s below are a member's answers — an unauthenticated caller meets only the
       // uniform 404 and never makes the tier buffer a body.
-      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      headers: laneHeaders({
+        "content-type": "application/json",
+        authorization: "Bearer cs_box",
+      }),
       body: JSON.stringify({
         schema_version: 1,
         applied: [{ skill_id: "s_srv", version_id: VERSION, harnesses }],
@@ -286,7 +293,10 @@ describe("the report door shape-checks the block — an authenticated member's 4
     const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
       method: "PUT",
       // The seeded session's credential — this one goes all the way to the row.
-      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      headers: laneHeaders({
+        "content-type": "application/json",
+        authorization: "Bearer cs_box",
+      }),
       body: JSON.stringify({
         schema_version: 1,
         applied: [
@@ -312,7 +322,10 @@ describe("the report door shape-checks the block — an authenticated member's 4
     const route = await import("@/routes/api.v1.report");
     const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
       method: "PUT",
-      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      headers: laneHeaders({
+        "content-type": "application/json",
+        authorization: "Bearer cs_box",
+      }),
       body: JSON.stringify({
         schema_version: 1,
         applied: [
@@ -357,7 +370,10 @@ describe("the report door shape-checks the block — an authenticated member's 4
 
     const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
       method: "PUT",
-      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      headers: laneHeaders({
+        "content-type": "application/json",
+        authorization: "Bearer cs_box",
+      }),
       body,
     });
     const res = await route.action({ request, params: { ws: wsId } } as never);
@@ -370,7 +386,10 @@ describe("the report door shape-checks the block — an authenticated member's 4
     // Bigger than any derivable cap, and not even valid JSON: the read never gets that far.
     const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
       method: "PUT",
-      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      headers: laneHeaders({
+        "content-type": "application/json",
+        authorization: "Bearer cs_box",
+      }),
       body: "x".repeat(20 * 1024 * 1024),
     });
     const res = await route.action({ request, params: { ws: wsId } } as never);

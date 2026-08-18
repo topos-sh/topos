@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { laneHeaders } from "./helpers/lane";
 import {
   createScratchDb,
   type ScratchDb,
@@ -148,7 +149,7 @@ describe("the workspace ROOT face (dashboard) — signed-in strangers see no exi
 describe("a device-lane API route (/channels) — the uniform wire 404, status AND body", () => {
   async function probe(ws: string, bearer?: string): Promise<{ status: number; body: string }> {
     const { loader } = await import("@/routes/api.v1.channels");
-    const headers: Record<string, string> = {};
+    const headers = laneHeaders();
     if (bearer !== undefined) {
       headers.authorization = `Bearer ${bearer}`;
     }

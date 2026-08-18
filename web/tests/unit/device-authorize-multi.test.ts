@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { laneHeaders } from "./helpers/lane";
 import { createScratchDb, type ScratchDb, seatUser, seedUser } from "./helpers/scratch-db";
 
 /**
@@ -39,7 +40,7 @@ async function authorize(body: unknown): Promise<Response> {
   return await (action as RouteAction)({
     request: new Request(`${ORIGIN}/api/v1/login/authorize`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: laneHeaders({ "content-type": "application/json" }),
       body: JSON.stringify(body),
     }),
     params: {},
@@ -51,7 +52,7 @@ async function tokenPoll(deviceCode: string): Promise<Response> {
   return await (action as RouteAction)({
     request: new Request(`${ORIGIN}/api/v1/login/token`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: laneHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ device_code: deviceCode }),
     }),
     params: {},

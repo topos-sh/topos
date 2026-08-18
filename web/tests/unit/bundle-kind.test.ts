@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { laneHeaders } from "./helpers/lane";
 import {
   asSession,
   bootWorkspace,
@@ -301,7 +302,10 @@ describe("the door refuses an unknown kind — before any custody call", () => {
       method: "POST",
       // Authenticated: the door resolves the credential FIRST (auth-before-body), so the kind
       // refusal is a member's 400 — an unauthenticated caller meets only the uniform 404.
-      headers: { "content-type": "application/json", authorization: "Bearer cs_auth" },
+      headers: laneHeaders({
+        "content-type": "application/json",
+        authorization: "Bearer cs_auth",
+      }),
       body: JSON.stringify(body(kind)),
     });
     let res: Response;

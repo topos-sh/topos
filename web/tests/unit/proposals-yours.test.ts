@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loader as wsProposalsLoader } from "@/routes/api.v1.ws-proposals";
+import { laneHeaders } from "./helpers/lane";
 import {
   createScratchDb,
   type ScratchDb,
@@ -53,7 +54,7 @@ afterAll(async () => {
 
 async function proposalsFor(cred: string): Promise<{ yours: boolean; proposer: string }[]> {
   const request = new Request(`${ORIGIN}/api/v1/workspaces/${wsId}/proposals`, {
-    headers: { authorization: `Bearer ${cred}` },
+    headers: laneHeaders({ authorization: `Bearer ${cred}` }),
   });
   const res = await wsProposalsLoader({
     request,

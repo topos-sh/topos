@@ -17,6 +17,7 @@ import { action as reportAction, loader as reportWrongMethod } from "@/routes/ap
 import { loader as skillCurrentLoader } from "@/routes/api.v1.skill-current";
 import { action as skillProtAction } from "@/routes/api.v1.skill-protection";
 import { loader as skillsIndexLoader } from "@/routes/api.v1.skills-index";
+import { laneHeaders } from "./helpers/lane";
 import {
   assignBundleRow,
   assignChannelRow,
@@ -81,7 +82,7 @@ function req(
   path: string,
   opts: { cred?: string; body?: unknown; rawBody?: string; headers?: Record<string, string> } = {},
 ): Request {
-  const headers: Record<string, string> = { ...opts.headers };
+  const headers: Record<string, string> = laneHeaders(opts.headers);
   if (opts.cred !== undefined) {
     headers.authorization = `Bearer ${opts.cred}`;
   }
