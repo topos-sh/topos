@@ -9,7 +9,7 @@ import { useParams } from "react-router";
  * THIS IS THAT LIST — one record per kind, and the only place any of it is written down. The
  * route table builds its per-kind mounts from it, the rail and the dashboard render their
  * sections from it, the breadcrumb registry registers each page under it, and the publish path
- * reads a new bundle's destination and gate off it. Adding a kind is adding a record here and
+ * reads a new bundle's destination off it. Adding a kind is adding a record here and
  * answering the questions the record asks; it is deliberately NOT a matter of finding every
  * `=== "mcp"` in the app.
  *
@@ -70,8 +70,6 @@ export interface BundleKindEntry {
    * existed still reaches the team, and this field must never be read there.
    */
   webNewDefaultDestination: WebNewDefault;
-  /** Whether a candidate's BYTES are gated before custody (the MCP server-document gate). */
-  hasContentGate: boolean;
   /**
    * WHETHER THIS KIND IS FILES. A skill is a bundle of bytes in the vault, content-addressed, with
    * a version history made of commits. An MCP server is a row in the server catalog: the bundle
@@ -122,7 +120,6 @@ export const BUNDLE_KINDS: readonly BundleKindEntry[] = [
     newPageLabel: "Add from GitHub",
     indexNote: "Published skills appear here automatically.",
     webNewDefaultDestination: "default-channel",
-    hasContentGate: false,
     isFileBundle: true,
     railEmptyNote: "No skills yet.",
     newActionLabel: "Publish a skill from your agent",
@@ -142,7 +139,6 @@ export const BUNDLE_KINDS: readonly BundleKindEntry[] = [
     newPageLabel: "Add an MCP server",
     indexNote: "Delivered as a tool endpoint in each member's agent configs.",
     webNewDefaultDestination: "no-channel",
-    hasContentGate: true,
     isFileBundle: false,
     railEmptyNote: "No MCP servers yet.",
     newActionLabel: "Add an MCP server",
