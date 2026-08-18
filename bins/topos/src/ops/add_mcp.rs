@@ -128,18 +128,16 @@ pub(crate) fn classify_mcp_source(
 /// What `add --kind mcp` answers with: the receipt, plus the delivery half's typed failures.
 ///
 /// The two are separate because they answer separate questions. The RECEIPT says what was
-/// recorded — a durable row, true whatever the configs did. The MESSAGES say what could not be
-/// delivered, and they are what the exit status and `ok` are computed from: an add whose entries
-/// reached no agent at all is not a success, and one that reached some is a success that still
-/// has to exit non-zero (the sweep's own rule) so an agent watching a loop learns something is
-/// not converging.
+/// recorded — a durable row, true whatever the configs did, and it narrates every surface the
+/// converge answered for. The MESSAGES say what could not be delivered, and they are what the
+/// exit status and `ok` are computed from: an add that could not put the server where it was
+/// asked to is not a success, whatever else landed, so an agent watching a loop learns that
+/// something is not converging.
 #[derive(Debug)]
 pub(crate) struct McpAdded {
     pub data: Box<AddData>,
     /// One `failure` per surface the converge could not write.
     pub messages: Vec<topos_types::Message>,
-    /// Every planned surface failed: the row landed and NOTHING was delivered.
-    pub reached_nobody: bool,
 }
 
 /// `topos add --kind mcp <registry-name|https-url> [-g]`. The one door applies immediately with an
@@ -224,14 +222,7 @@ pub(crate) fn add_mcp(
             ));
         }
     };
-    let reached_nobody = messages
-        .iter()
-        .any(|m| m.code.as_deref() == Some("MCP_UNPLACEABLE"));
-    Ok(McpAdded {
-        data,
-        messages,
-        reached_nobody,
-    })
+    Ok(McpAdded { data, messages })
 }
 
 /// The workspace this add shares the server with: the one `--workspace` names, else the single

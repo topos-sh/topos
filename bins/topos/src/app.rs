@@ -2211,25 +2211,6 @@ fn finish_pull(
 
 #[cfg(test)]
 mod sweep_verdict_tests {
-    /// An `add --kind mcp` whose converge failed used to print `ok: true` and exit 0 — the row had
-    /// landed, so the verb called itself done while nothing had been delivered anywhere.
-    #[test]
-    fn an_mcp_add_that_delivered_nothing_is_not_ok_and_a_partial_one_still_exits_non_zero() {
-        let failure = crate::message::failure("MCP_CUSTODY_WRITE_FAILED", "x".to_owned());
-        // Clean: ok, exit 0.
-        assert_eq!(super::mcp_add_verdict(false, &[]), (true, false));
-        // Reached SOME agent, failed on others: still ok (the server is somewhere), exit non-zero.
-        assert_eq!(
-            super::mcp_add_verdict(false, std::slice::from_ref(&failure)),
-            (true, true)
-        );
-        // Reached NOBODY: not ok, exit non-zero.
-        assert_eq!(
-            super::mcp_add_verdict(true, std::slice::from_ref(&failure)),
-            (false, true)
-        );
-    }
-
     /// **A run fails only when an ACT it attempted failed.** A standing not-placed fact — a
     /// capability this build does not have, an entry topos does not own where a placement would go
     /// — is an `advisory`: it prints its line on every run and fails none of them. It used to ride
@@ -2252,12 +2233,6 @@ mod sweep_verdict_tests {
         assert!(!super::sweep_failed(std::slice::from_ref(&standing)));
         assert!(super::sweep_failed(std::slice::from_ref(&broke)));
         assert!(super::sweep_failed(&[standing.clone(), broke]));
-        // The `add` verdict reads the same rule: the row landed, nothing could be placed, nothing
-        // failed — an ordinary success carrying an advisory.
-        assert_eq!(
-            super::mcp_add_verdict(false, std::slice::from_ref(&standing)),
-            (true, false)
-        );
         // And the line still travels: an advisory rides the `--json` message channel exactly like
         // a failure, so an agent that wants to know still reads it.
         let mut envelope = super::render::ok_envelope("update", serde_json::json!({}));
@@ -2709,12 +2684,11 @@ fn finish_add_mcp(
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(ops::McpAdded {
-            data,
-            messages,
-            reached_nobody,
-        }) => {
-            let (ok, failed) = mcp_add_verdict(reached_nobody, &messages);
+        Ok(ops::McpAdded { data, messages }) => {
+            let failed = messages
+                .iter()
+                .any(|m| m.kind == topos_types::MessageKind::Failure);
+            let ok = !failed;
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
@@ -2739,24 +2713,6 @@ fn finish_add_mcp(
     }
 }
 
-/// `(ok, exit-is-failure)` for an `add --kind mcp` — the ONE derivation both surfaces read.
-///
-/// The row is durable, so `ok` follows DELIVERY: an add that reached no agent at all is not a
-/// success with a note about it. A PARTIAL reach keeps `ok: true` — some agent has the server —
-/// and still exits non-zero, the sweep's own rule, so an agent watching a loop learns the run is
-/// not converging instead of reading 0 forever.
-///
-/// Both halves read the message KIND, never the array's length — [`sweep_failed`]'s rule, said
-/// once more here: a run fails only when an act it attempted failed. An add that placed nothing
-/// because nothing could be placed (no node, an entry topos does not own) attempted nothing, so
-/// it is an ordinary success carrying an advisory, and `reached_nobody` is keyed on failures for
-/// the same reason.
-fn mcp_add_verdict(reached_nobody: bool, messages: &[topos_types::Message]) -> (bool, bool) {
-    let failed = messages
-        .iter()
-        .any(|m| m.kind == topos_types::MessageKind::Failure);
-    (!reached_nobody, failed)
-}
 
 /// The multi-`add` finisher — one `add` receipt per imported (skill × harness) combination.
 fn finish_add_many(
