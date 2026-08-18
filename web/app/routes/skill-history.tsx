@@ -4,6 +4,7 @@ import { HistorySection, type HistorySectionData } from "@/components/skill/hist
 import { type PurgeActionData, PurgeSection } from "@/components/skill/purge-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
+import { noFilesRefusal } from "@/lib/api/genesis.server";
 import { requireTypedName } from "@/lib/auth/ceremony.server";
 import {
   notFound,
@@ -11,7 +12,15 @@ import {
   requireReviewer,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
-import { baseOf, bundleNameOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import {
+  type BundleKind,
+  baseOf,
+  bundleNameOf,
+  bundleNoun,
+  bundlePath,
+  kindEntry,
+  useBundleBase,
+} from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
@@ -221,6 +230,14 @@ async function revertAction(
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     return data<RevertActionData>({ status: "error" });
+  }
+  // A KIND WITH NO FILES has no pointer to roll back — the page is not mounted for it, and a
+  // hand-made POST at the other base meets the same answer the lane's door gives.
+  if (!kindEntry(row.kind).isFileBundle) {
+    return data<RevertActionData>({
+      status: "denied",
+      reason: noFilesRefusal(row.kind as BundleKind).message,
+    });
   }
   const short = good.slice(0, 12);
 

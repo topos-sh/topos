@@ -146,6 +146,7 @@ const SERVER_NOT_FOUND: McpGateRefusal = {
 interface LockedServer {
   id: string;
   workspaceId: string | null;
+  registryName: string | null;
   status: string;
   authMode: string | null;
   authNote: string | null;
@@ -162,6 +163,7 @@ async function lockServerInTx(tx: Tx, serverId: string): Promise<LockedServer | 
     .select({
       id: mcpServer.id,
       workspaceId: mcpServer.workspaceId,
+      registryName: mcpServer.registryName,
       status: mcpServer.status,
       authMode: mcpServer.authMode,
       authNote: mcpServer.authNote,
@@ -221,6 +223,19 @@ export async function addMcpRevisionInTx(
   const read = mcpRevisionFacts(write.document);
   if (read.refusal !== null) {
     return { refusal: read.refusal };
+  }
+  // A REVISION IS A VERSION OF *THIS* SERVER. The row's `registry_name` is the identity every
+  // read API resolves by, and the document carries the same name inside it — so a revision whose
+  // document renames the server would leave the catalog keyed by one name while handing out a
+  // document declaring another, and a lookup by either would be wrong. Renaming a server is a
+  // different act from publishing a version of it, and this is not that act.
+  if (server.registryName !== null && server.registryName !== read.facts.registryName) {
+    return {
+      refusal: {
+        code: "MCP_NAME_MISMATCH",
+        message: `this server is ${server.registryName}; a version of it cannot call itself ${read.facts.registryName}`,
+      },
+    };
   }
   if (write.publish) {
     const chore = authNoteRefusal(server);
@@ -323,19 +338,35 @@ export async function createPrivateMcpServer(
   const landed = await inFinalTxOrRefusal<McpServerOutcome, McpServerOutcome>(
     async (tx, refuse) => {
       const serverId = mintMcpServerId();
-      await tx.insert(mcpServer).values({
-        id: serverId,
-        workspaceId: actor.workspaceId,
-        registryName: read.facts.registryName,
-        displayName: details.displayName,
-        description: details.description ?? null,
-        websiteUrl: details.websiteUrl ?? null,
-        icon: details.icon ?? null,
-        authMode: details.authMode,
-        authNote: details.authNote ?? null,
-        scopeMenu: details.scopeMenu ?? null,
-        status: "active",
-      });
+      // ONE NAME, ONE SERVER, inside this workspace: the registry lane resolves a private row by
+      // exactly this name, so a second one under it would make the lookup a coin flip. The
+      // partial unique index is the arbiter — the conflict IS the refusal, so two owners doing
+      // this at once cannot both win, and the second gets an answer instead of a fault.
+      const born = await tx
+        .insert(mcpServer)
+        .values({
+          id: serverId,
+          workspaceId: actor.workspaceId,
+          registryName: read.facts.registryName,
+          displayName: details.displayName,
+          description: details.description ?? null,
+          websiteUrl: details.websiteUrl ?? null,
+          icon: details.icon ?? null,
+          authMode: details.authMode,
+          authNote: details.authNote ?? null,
+          scopeMenu: details.scopeMenu ?? null,
+          status: "active",
+        })
+        .onConflictDoNothing()
+        .returning({ id: mcpServer.id });
+      if (born[0] === undefined) {
+        return refuse({
+          refusal: {
+            code: "MCP_NAME_TAKEN",
+            message: `this workspace already has a server called ${read.facts.registryName}`,
+          },
+        });
+      }
       const added = await addMcpRevisionInTx(tx, serverId, {
         document,
         source: "owner",
@@ -889,9 +920,13 @@ export interface McpCatalogRow {
   transport: string | null;
   revisionId: string;
   upstreamVersion: string;
-  /** The catalog name of the bundle this workspace already connected it as, or null. One
+  /** The catalog name of the ACTIVE bundle this workspace connected it as, or null. One
    *  connection per server per workspace, so this is the answer, not one of several. */
   connectedAs: string | null;
+  /** The connection exists but its bundle is ARCHIVED — the server cannot be added again (the
+   *  one connection is still spoken for) and restoring the archived bundle is what brings it
+   *  back. Never true alongside `connectedAs`. */
+  inArchive: boolean;
 }
 
 // ── The server a bundle connects to, as its page reads it ───────────────────────────────────
@@ -1216,12 +1251,13 @@ export async function connectableMcpServers(
   const rows = await getDb().execute(sql`
     SELECT ms.id AS server_id, ms.registry_name, ms.display_name, ms.description, ms.icon,
            ms.auth_mode, ms.auth_note, r.url, r.transport,
-           r.id AS revision_id, r.upstream_version, b.name AS connected_as
+           r.id AS revision_id, r.upstream_version,
+           CASE WHEN b.status = 'active' THEN b.name END AS connected_as,
+           (b.status = 'archived') AS in_archive
     FROM web.mcp_server ms
     JOIN web.mcp_server_revision r ON r.id = ms.current_revision_id
     LEFT JOIN web.bundle_mcp bm ON bm.server_id = ms.id AND bm.workspace_id = ${actor.workspaceId}
-    LEFT JOIN web.bundle b
-      ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id AND b.status = 'active'
+    LEFT JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
     WHERE ms.status = 'active'
       AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
     ORDER BY lower(ms.display_name)
@@ -1239,5 +1275,6 @@ export async function connectableMcpServers(
     revisionId: row.revision_id as string,
     upstreamVersion: row.upstream_version as string,
     connectedAs: (row.connected_as as string | null) ?? null,
+    inArchive: row.in_archive === true,
   }));
 }

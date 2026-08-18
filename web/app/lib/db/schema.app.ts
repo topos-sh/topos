@@ -540,6 +540,12 @@ export const mcpServer = webSchema.table(
     uniqueIndex("mcp_server_global_registry_name")
       .on(table.registryName)
       .where(sql`workspace_id is null`),
+    // AND THE PRIVATE ONE, per workspace: inside a workspace the registry lane answers
+    // `…/servers/{name}`, and two of its own servers under one name would make that lookup a coin
+    // flip. Scoped to the workspace because the name is only ever addressed inside it.
+    uniqueIndex("mcp_server_private_registry_name")
+      .on(table.workspaceId, table.registryName)
+      .where(sql`workspace_id is not null`),
     index("mcp_server_workspace_idx").on(table.workspaceId),
     check(
       "mcp_server_auth_mode_check",

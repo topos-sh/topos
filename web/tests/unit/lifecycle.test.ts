@@ -152,6 +152,44 @@ describe("unarchiveBundle", () => {
     expect(await queries.unarchiveBundle(owner(), "s_dup1")).toEqual({ outcome: "not_archived" });
     expect(await queries.unarchiveBundle(owner(), "s_nope")).toEqual({ outcome: "unknown_skill" });
   });
+
+  it("refuses a server bundle with no connection left to restore", async () => {
+    const queries = await q();
+    // The shape a migrated database can hold: an archived MCP bundle whose server another
+    // bundle already claims. Restoring it would put a server on the shelf that names nothing.
+    await db.q(
+      `INSERT INTO web.bundle (id, workspace_id, name, base_name, kind, status, archived_at)
+       VALUES ('s_orphan', $1, 'orphan-archived-2026-01-01', 'orphan', 'mcp', 'archived', now())`,
+      [wsId],
+    );
+    expect(await queries.unarchiveBundle(owner(), "s_orphan")).toEqual({ outcome: "no_server" });
+    const rows = await db.q<{ status: string }>(
+      `SELECT status FROM web.bundle WHERE id = 's_orphan'`,
+    );
+    expect(rows[0]?.status).toBe("archived");
+  });
+
+  it("restores a server bundle that kept its connection", async () => {
+    const queries = await q();
+    await db.q(
+      `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
+       VALUES ('mcps_life', 'com.example/life', 'Life', 'none', 'active')`,
+    );
+    await db.q(
+      `INSERT INTO web.bundle (id, workspace_id, name, base_name, kind, status, archived_at)
+       VALUES ('s_kept', $1, 'kept-archived-2026-01-01', 'kept', 'mcp', 'archived', now())`,
+      [wsId],
+    );
+    await db.q(
+      `INSERT INTO web.bundle_mcp (bundle_id, workspace_id, server_id)
+       VALUES ('s_kept', $1, 'mcps_life')`,
+      [wsId],
+    );
+    expect(await queries.unarchiveBundle(owner(), "s_kept")).toEqual({
+      outcome: "unarchived",
+      name: "kept",
+    });
+  });
 });
 
 describe("deleteBundle (archive-first; the byte half degrades honestly without a vault)", () => {
@@ -177,6 +215,28 @@ describe("deleteBundle (archive-first; the byte half degrades honestly without a
       `SELECT 1 FROM web.audit_event WHERE kind = 'skill_deleted' AND subject = 's_main'`,
     );
     expect(audit).toHaveLength(1);
+  });
+
+  it("releases a deleted server's connection, so the same server can be added again", async () => {
+    const queries = await q();
+    await db.q(
+      `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
+       VALUES ('mcps_gone', 'com.example/gone', 'Gone', 'none', 'active')`,
+    );
+    await db.q(
+      `INSERT INTO web.bundle (id, workspace_id, name, base_name, kind, status, archived_at)
+       VALUES ('s_conn', $1, 'conn-archived-2026-01-01', 'conn', 'mcp', 'archived', now())`,
+      [wsId],
+    );
+    await db.q(
+      `INSERT INTO web.bundle_mcp (bundle_id, workspace_id, server_id)
+       VALUES ('s_conn', $1, 'mcps_gone')`,
+      [wsId],
+    );
+    expect((await queries.deleteBundle(owner(), "s_conn")).outcome).toBe("deleted");
+    // The tombstone stays; the connection does not — a deleted bundle holds the workspace's one
+    // connection to nothing.
+    expect(await db.q(`SELECT 1 FROM web.bundle_mcp WHERE bundle_id = 's_conn'`)).toEqual([]);
   });
 });
 

@@ -1,4 +1,4 @@
-import { Form, useNavigation } from "react-router";
+import { Form, useActionData, useNavigation } from "react-router";
 import { McpMark } from "@/components/mcp-mark";
 import { BusyFields, buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
 import type { McpProbeRecord } from "@/lib/mcp/probe-state";
@@ -179,6 +179,14 @@ function EditServerForm({ document }: { document: string }) {
   const navigation = useNavigation();
   const busy =
     navigation.state !== "idle" && navigation.formData?.get("intent") === "edit-mcp-server";
+  // WHY A SAVE DID NOT LAND, where the save was. A document the gate refuses and a catalog
+  // refusal both come back as an answer rather than a fault, and a form that returned to itself
+  // saying nothing would read as a save that silently did nothing.
+  const answer = useActionData<{ intent?: string; status?: string; message?: string }>();
+  const refusal =
+    answer?.intent === "edit-mcp-server" && answer.status === "error"
+      ? (answer.message ?? "That document could not be saved.")
+      : null;
   return (
     <section aria-labelledby="mcp-edit-heading" className="space-y-3">
       <SectionHeading>
@@ -202,6 +210,11 @@ function EditServerForm({ document }: { document: string }) {
               Saving publishes a new version. Machines that already hold the old one move to it on
               their next update.
             </p>
+            {refusal !== null && (
+              <p role="alert" data-testid="mcp-edit-refusal" className="text-red-700 text-sm">
+                {refusal}
+              </p>
+            )}
             <button
               type="submit"
               data-testid="mcp-edit-save"

@@ -1,10 +1,18 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
+import { kindEntry } from "@/lib/bundle-base";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { bundleCapRefusalInTx, isReservedBundleName } from "@/lib/db/queries.custody.server";
 import { reviewsEnableRefused } from "@/lib/db/queries.lane.server";
-import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
+import {
+  bundle,
+  bundleMcp,
+  bundleNameHint,
+  channelBundle,
+  notice,
+  proposal,
+} from "@/lib/db/schema.app";
 import { deleteBundleBytes, purgeVersionBytes } from "@/lib/plane/custody.server";
 
 /**
@@ -203,6 +211,9 @@ export type UnarchiveOutcome =
   | { outcome: "name_taken" }
   | { outcome: "not_archived" }
   | { outcome: "unknown_skill" }
+  /** A bundle whose kind is a catalog entry, with no connection left to restore: it would come
+   * back naming no server and delivering nothing. Adding the server again is the act that works. */
+  | { outcome: "no_server" }
   /** The workspace's bundle limit (`bundles` — ACTIVE rows) is reached: restoring would step
    * over the same cap a genesis meets, so it refuses under the same lock. */
   | { outcome: "bundle_limit" };
@@ -240,6 +251,20 @@ export async function unarchiveBundle(
     // or archive-then-replace-then-unarchive would mint one active bundle over the cap.
     if ((await bundleCapRefusalInTx(tx, actor, bundleId)) !== null) {
       return { outcome: "bundle_limit" } as const;
+    }
+    // A KIND WHOSE DOCUMENT LIVES IN THE CATALOG needs its connection back too. Normally it is
+    // still there (archiving keeps it), but a database that came through the migration can hold
+    // an archived bundle whose server another bundle already claims — restoring that one would
+    // put a server on the shelf that names nothing and delivers nothing.
+    if (!kindEntry(row.kind).isFileBundle) {
+      const connected = await tx
+        .select({ bundleId: bundleMcp.bundleId })
+        .from(bundleMcp)
+        .where(and(eq(bundleMcp.workspaceId, ws), eq(bundleMcp.bundleId, bundleId)))
+        .limit(1);
+      if (connected[0] === undefined) {
+        return { outcome: "no_server" } as const;
+      }
     }
     await tx
       .update(bundle)
@@ -290,6 +315,12 @@ export async function deleteBundle(
       .update(bundle)
       .set({ status: "deleted", deletedAt: new Date() })
       .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)));
+    // The row SURVIVES as a tombstone, so no cascade fires — and a connection left hanging off
+    // one would hold the workspace's single connection to that server forever, refusing every
+    // later attempt to add it back. A deleted bundle connects to nothing.
+    await tx
+      .delete(bundleMcp)
+      .where(and(eq(bundleMcp.workspaceId, ws), eq(bundleMcp.bundleId, bundleId)));
     await auditInTx(tx, {
       workspaceId: ws,
       actor: { userId: actor.userId, display: actor.display },

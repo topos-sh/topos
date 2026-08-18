@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { HEX_64, parsePublishHead, receiptNow } from "@/lib/api/candidate.server";
 import { laneGate } from "@/lib/api/compat.server";
+import { noFilesRefusal } from "@/lib/api/genesis.server";
 import {
   buildReceipt,
   conflictEnvelope,
@@ -10,6 +11,7 @@ import {
 } from "@/lib/api/receipts.server";
 import { badRequest, internalError, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActorPreBody } from "@/lib/auth/guards.server";
+import { type BundleKind, kindEntry } from "@/lib/bundle-base";
 import { auditInTx } from "@/lib/db/identity.server";
 import {
   findReceipt,
@@ -106,6 +108,21 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
       "SKILL_NOT_ACTIVE",
       target.name,
       buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+    );
+    await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
+    return envelopeResponse(envelope);
+  }
+  // A KIND WITH NO FILES has no pointer to move: what it delivers is resolved from the server
+  // catalog. An upgraded database still carries the old custody pointer for such a bundle, and
+  // moving it would answer OK for a change nobody receives.
+  if (!kindEntry(target.kind).isFileBundle) {
+    const refusal = noFilesRefusal(target.kind as BundleKind);
+    const envelope = deniedEnvelope(
+      "revert",
+      refusal.code,
+      target.name,
+      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      { message: refusal.message },
     );
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
     return envelopeResponse(envelope);

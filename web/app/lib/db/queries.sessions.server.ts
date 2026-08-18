@@ -3,6 +3,7 @@ import type { MemberActor, UserActor } from "@/lib/auth/guards.server";
 import { sessionUnexpiredSql } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import type { ReportedHarnessState } from "@/lib/db/queries.lane.server";
+import { MCP_RESOLVED_REVISION } from "@/lib/db/queries.mcp-catalog.server";
 import { bundle, cliSession, sessionBundleState, workspace } from "@/lib/db/schema.app";
 import { planeCurrentPointer } from "@/lib/db/schema.custody";
 
@@ -326,14 +327,22 @@ export async function yourSessionsApplying(
   actor: MemberActor,
   bundleId: string,
 ): Promise<AppliedOnSession[]> {
+  // WHAT THE MACHINE SHOULD BE HOLDING, whichever kind this bundle is: the resolved catalog
+  // revision for a connected server (its pin exactly, else the server's current), the vault
+  // pointer for a file bundle. The CONNECTION comes first, because a bundle that predates the
+  // catalog still carries a pointer nobody is served from any more — and reading that one would
+  // report every machine holding the server as behind, forever.
   const rows = await getDb().execute(sql`
     SELECT cs.id, cs.display_name, st.applied_version_id, st.harness_state,
-           cp.version_id AS current_version_id,
+           COALESCE(${MCP_RESOLVED_REVISION}, cp.version_id) AS current_version_id,
            (extract(epoch from st.reported_at) * 1000)::bigint AS reported_ms
     FROM web.session_bundle_state st
     JOIN web.cli_session cs ON cs.id = st.session_id
     LEFT JOIN plane.current_pointer cp
       ON cp.workspace_id = ${actor.workspaceId} AND cp.bundle_id = st.bundle_id
+    LEFT JOIN web.bundle_mcp bm
+      ON bm.workspace_id = ${actor.workspaceId} AND bm.bundle_id = st.bundle_id
+    LEFT JOIN web.mcp_server ms ON ms.id = bm.server_id
     WHERE cs.workspace_id = ${actor.workspaceId} AND cs.user_id = ${actor.userId}
       AND st.bundle_id = ${bundleId}
     ORDER BY cs.display_name, cs.id

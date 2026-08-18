@@ -841,6 +841,65 @@ describe("what the plane saw when it asked", () => {
   });
 });
 
+describe("a private server's name is the workspace's own, and only one row holds it", () => {
+  it("refuses a second server under a name this workspace already uses", async () => {
+    const { createPrivateMcpServer } = await catalog();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    const document = serverDocument("com.example/twice", "1.0.0");
+    const first = await createPrivateMcpServer(
+      owner,
+      { displayName: "Twice", authMode: null },
+      document,
+    );
+    expect(first.refusal).toBeNull();
+    const second = await createPrivateMcpServer(
+      owner,
+      { displayName: "Twice again", authMode: null },
+      serverDocument("com.example/twice", "2.0.0"),
+    );
+    expect(second.refusal?.code).toBe("MCP_NAME_TAKEN");
+    // The refused create left nothing behind — not the row, not a revision.
+    const rows = await db.q<{ n: number }>(
+      `SELECT count(*)::int AS n FROM web.mcp_server
+       WHERE workspace_id = $1 AND registry_name = 'com.example/twice'`,
+      [wsId],
+    );
+    expect(rows[0]?.n).toBe(1);
+  });
+
+  it("leaves the SAME name free in another workspace — a private name is nobody else's business", async () => {
+    const { createPrivateMcpServer } = await catalog();
+    const elsewhere = await createPrivateMcpServer(
+      asOwner(otherWsId, "u_owner", "Owner"),
+      { displayName: "Theirs", authMode: null },
+      serverDocument("com.example/twice", "1.0.0"),
+    );
+    expect(elsewhere.refusal).toBeNull();
+  });
+
+  it("refuses a revision whose document renames the server it belongs to", async () => {
+    const { createPrivateMcpServer, editPrivateMcpServer } = await catalog();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    const created = await createPrivateMcpServer(
+      owner,
+      { displayName: "Renamer", authMode: null },
+      serverDocument("com.example/renamer", "1.0.0"),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    const renamed = await editPrivateMcpServer(
+      owner,
+      created.serverId,
+      { displayName: "Renamer", authMode: null },
+      serverDocument("com.example/renamed", "2.0.0"),
+    );
+    // The catalog stays keyed by the name it was created under; a version of a server cannot
+    // call itself something else.
+    expect(renamed.refusal?.code).toBe("MCP_NAME_MISMATCH");
+  });
+});
+
 describe("the list a workspace may connect from", () => {
   it("is the catalog's active servers plus this workspace's own, and nobody else's", async () => {
     const { connectableMcpServers } = await catalog();

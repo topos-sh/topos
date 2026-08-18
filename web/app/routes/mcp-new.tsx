@@ -80,6 +80,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       host: hostOf(server.url),
       suggestedName: suggestedNameFor(server.registryName ?? server.displayName),
       connectedAs: server.connectedAs,
+      inArchive: server.inArchive,
     })),
   };
 }
@@ -453,7 +454,19 @@ function ServerPicker({
       </div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {visible.map((server) =>
-          server.connectedAs === null ? (
+          server.inArchive ? (
+            // The one connection this workspace may hold to this server is spoken for by a bundle
+            // in the archive — offering Add here would be offering an act that refuses. Restoring
+            // the archived one is what brings it back, so the row points at the archive.
+            <Link
+              key={server.serverId}
+              to={wsPath("settings/archive")}
+              data-testid="mcp-picker-archived"
+              className="flex items-start gap-2 rounded-lg border border-line-soft bg-panel2 px-3 py-2.5 text-left transition-colors hover:border-line focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+            >
+              <ServerCardBody server={server} chip="in your archive" />
+            </Link>
+          ) : server.connectedAs === null ? (
             <button
               key={server.serverId}
               type="button"
@@ -470,7 +483,7 @@ function ServerPicker({
               data-testid="mcp-picker-added"
               className="flex items-start gap-2 rounded-lg border border-line-soft bg-panel2 px-3 py-2.5 text-left transition-colors hover:border-line focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
             >
-              <ServerCardBody server={server} added />
+              <ServerCardBody server={server} chip="added" />
             </Link>
           ),
         )}
@@ -486,8 +499,9 @@ function ServerPicker({
   );
 }
 
-/** The three lines every row carries, whichever affordance wraps them. */
-function ServerCardBody({ server, added = false }: { server: ServerRow; added?: boolean }) {
+/** The three lines every row carries, whichever affordance wraps them. A `chip` replaces the
+ *  sign-in tier where the row is not on offer — what the reader needs there is why. */
+function ServerCardBody({ server, chip }: { server: ServerRow; chip?: string }) {
   return (
     <>
       {/* Leading, never stacked: the mark rides beside the three lines rather than above them,
@@ -499,7 +513,11 @@ function ServerCardBody({ server, added = false }: { server: ServerRow; added?: 
             {server.displayName}
           </span>
           <span className="shrink-0">
-            {added ? <Chip tone="neutral">added</Chip> : <AuthChip auth={server.authMode} />}
+            {chip === undefined ? (
+              <AuthChip auth={server.authMode} />
+            ) : (
+              <Chip tone="neutral">{chip}</Chip>
+            )}
           </span>
         </span>
         <span className="w-full truncate text-dim text-xs leading-snug">

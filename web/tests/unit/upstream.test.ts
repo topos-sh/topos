@@ -271,6 +271,24 @@ describe("checkBundleUpstream — external changes ALWAYS propose", () => {
   });
 });
 
+describe("the checker is file bundles' own", () => {
+  it("answers no_upstream for a catalog-backed bundle, whatever row it carries", async () => {
+    const upstream = await import("@/lib/db/upstream.server");
+    // An upgraded database can still hold an upstream row from when this kind was files. What it
+    // would produce — a proposal against a version history — is a thing this kind does not have.
+    await seedBundle(db, wsId, "s_mcp_up", "mcp-upstream", { kind: "mcp" });
+    await db.q(
+      `INSERT INTO web.bundle_upstream (bundle_id, workspace_id, host, repo, path, last_seen_commit)
+       VALUES ('s_mcp_up', $1, 'github.com', 'owner/mcp', '', NULL)`,
+      [wsId],
+    );
+    const before = committedBodies.length;
+    expect((await upstream.checkBundleUpstream(wsId, "s_mcp_up")).outcome).toBe("no_upstream");
+    expect(committedBodies).toHaveLength(before);
+    expect(await db.q(`SELECT 1 FROM web.proposal WHERE bundle_id = 's_mcp_up'`)).toHaveLength(0);
+  });
+});
+
 describe("governedCopiesOf — the import preview's dedup lookup", () => {
   it("matches by host+repo, path-first, non-deleted only; a foreign repo answers nothing", async () => {
     const upstream = await import("@/lib/db/upstream.server");

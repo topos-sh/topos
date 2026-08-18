@@ -709,6 +709,7 @@ describe("the picker, on the page", () => {
     host: "acme.example",
     suggestedName: "x",
     connectedAs: null,
+    inArchive: false,
     ...over,
   });
 
@@ -761,6 +762,15 @@ describe("the picker, on the page", () => {
     expect(html).toContain('data-testid="mcp-picker-added"');
     expect(html).toContain('href="/mcp/acme-x"');
     expect(html).toContain(">added<");
+  });
+
+  it("points at the archive for a server whose one connection is archived", async () => {
+    // The connection is spoken for, so Add would refuse; the row says where the answer is.
+    const html = await renderPage([catalogRow({ inArchive: true })]);
+    expect(html).not.toContain('data-testid="mcp-picker-option"');
+    expect(html).toContain('data-testid="mcp-picker-archived"');
+    expect(html).toContain('href="/settings/archive"');
+    expect(html).toContain(">in your archive<");
   });
 });
 

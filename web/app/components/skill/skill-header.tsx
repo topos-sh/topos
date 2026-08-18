@@ -39,11 +39,13 @@ export function SkillHeader({
       <p className="mt-0.5 font-mono text-xs text-faint">
         {ws} / {skill}
         {kind ? ` · ${kind}` : ""}
-        {currentShort
-          ? ` · current ${currentShort}`
-          : kindEntry(kind).isFileBundle
-            ? " · nothing published yet"
-            : ""}
+        {/* A kind with no files has no commit to name — neither a version nor an absence of
+            one is a fact about it, and the page below says what it does deliver. */}
+        {!kindEntry(kind).isFileBundle
+          ? ""
+          : currentShort
+            ? ` · current ${currentShort}`
+            : " · nothing published yet"}
       </p>
     </div>
   );

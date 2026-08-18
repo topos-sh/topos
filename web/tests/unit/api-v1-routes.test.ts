@@ -678,7 +678,8 @@ const BAD_REQUEST_CASES: BadRequestCase[] = [
     path: "/report",
     cred: "mem",
     body: { schema_version: 1, applied: [{ skill_id: "s_alpha", version_id: "short" }] },
-    message: "malformed report entry: version_id must be 64-char lowercase hex",
+    message:
+      "malformed report entry: version_id must be a 64-char lowercase hex commit or a server revision id",
   },
   {
     name: "report — a missing schema_version is a 400",

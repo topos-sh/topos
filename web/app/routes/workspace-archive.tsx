@@ -83,10 +83,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
  * reader cannot follow.
  */
 const MCP_REFUSAL_COPY: Record<string, string> = {
-  mcp_name_taken:
-    "Its registry name isn't free here any more — another active server claims it, or the catalog couldn't be read end to end. Unarchive is refused; retire that server first.",
-  mcp_document_unreadable:
-    "Its server document can't be read, so the registry name it would claim can't be established. Unarchive is refused.",
+  no_server:
+    "It names no server any more, so restoring it would deliver nothing. Add the server again on the MCP servers page.",
 };
 
 async function unarchiveIntent(request: Request, ws: string, formData: FormData) {

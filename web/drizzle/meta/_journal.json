@@ -148,6 +148,13 @@
       "when": 1787110508016,
       "tag": "0020_mcp-probe-and-identity-dropped",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1787113942227,
+      "tag": "0021_mcp-private-registry-name",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,7 @@
 import { gunzipSync } from "node:zlib";
 import { sql } from "drizzle-orm";
 import { storageCapExceeded } from "@/lib/api/storage-quota.server";
+import { CATALOG_BUNDLE_KINDS } from "@/lib/bundle-base";
 import { getDb } from "@/lib/db/index.server";
 import { commitVersion } from "@/lib/plane/custody.server";
 
@@ -412,6 +413,10 @@ export async function checkBundleUpstream(
   // WORKSPACE-BOUND: the caller's authorization covered ONE workspace, so the lookup must
   // never resolve a bundle id from another one (a cross-workspace check would write proposals
   // where the caller holds no seat).
+  // FILE BUNDLES ONLY. What this door produces is a proposal against a version history, and a
+  // kind whose document lives in the server catalog has neither — an upgraded database can still
+  // carry an upstream row from before that was true, and following it would commit bytes nobody
+  // is ever served and open a proposal no page can show.
   const rows = await db.execute(sql`
     SELECT bu.workspace_id, bu.repo, bu.path, bu.last_seen_commit,
            cp.version_id AS current_version_id
@@ -420,6 +425,10 @@ export async function checkBundleUpstream(
     LEFT JOIN plane.current_pointer cp
       ON cp.workspace_id = bu.workspace_id AND cp.bundle_id = bu.bundle_id
     WHERE bu.bundle_id = ${bundleId} AND bu.workspace_id = ${workspaceId}
+      AND b.kind <> ALL(${sql`ARRAY[${sql.join(
+        CATALOG_BUNDLE_KINDS.map((kind) => sql`${kind}`),
+        sql`, `,
+      )}]::text[]`})
   `);
   const row = rows.rows[0] as
     | {

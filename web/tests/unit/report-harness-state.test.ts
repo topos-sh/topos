@@ -132,6 +132,79 @@ describe("the sessions reads carry the block", () => {
   });
 });
 
+describe("what a machine may report holding", () => {
+  /** The door's own answer for one applied row — 204, or the 400 that names the field. */
+  async function put(row: Record<string, unknown>): Promise<number> {
+    const route = await import("@/routes/api.v1.report");
+    const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      body: JSON.stringify({ schema_version: 1, applied: [row] }),
+    });
+    try {
+      return (await route.action({ request, params: { ws: wsId } } as never)).status;
+    } catch (thrown) {
+      if (thrown instanceof Response) {
+        return thrown.status;
+      }
+      throw thrown;
+    }
+  }
+
+  it("takes a commit id for a file bundle and a REVISION id for a connected server", async () => {
+    expect(await put({ skill_id: "s_doc", version_id: "b2".repeat(32) })).toBe(204);
+    // A server's applied handle is the catalog's, not a commit — the whole report would be
+    // rejected over one such row if the door only knew the vault's spelling.
+    const revisionId = `mcpr_${"a".repeat(32)}`;
+    expect(await put({ skill_id: "s_srv", version_id: revisionId })).toBe(204);
+    const rows = await db.q<{ applied_version_id: string }>(
+      `SELECT applied_version_id FROM web.session_bundle_state WHERE bundle_id = 's_srv'`,
+    );
+    expect(rows[0]?.applied_version_id).toBe(revisionId);
+  });
+
+  it("refuses anything that is neither", async () => {
+    expect(await put({ skill_id: "s_doc", version_id: "mcpr_not-hex" })).toBe(400);
+    expect(await put({ skill_id: "s_doc", version_id: "short" })).toBe(400);
+  });
+});
+
+describe("a connected server's machine reads current against the CATALOG", () => {
+  it("matches the resolved revision, not a pointer the bundle does not have", async () => {
+    const sessions = await import("@/lib/db/queries.sessions.server");
+    const actor = asMember(wsId, "u_dev", "owner", "Dev");
+    await db.q(
+      `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+       VALUES ('mcps_fleet', NULL, 'com.example/fleet', 'Fleet', 'none', 'active')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await db.q(
+      `INSERT INTO web.mcp_server_revision
+         (id, server_id, seq, status, upstream_version, document, transport, url, source,
+          published_at, published_by)
+       VALUES ('mcpr_fleet_1', 'mcps_fleet', 1, 'published', '1.0.0', '{"name":"com.example/fleet"}'::jsonb,
+               'streamable-http', 'https://fleet.example/mcp', 'seed', now(), 'Staff')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await db.q(
+      `UPDATE web.mcp_server SET current_revision_id = 'mcpr_fleet_1' WHERE id = 'mcps_fleet'`,
+    );
+    await db.q(
+      `INSERT INTO web.bundle_mcp (bundle_id, workspace_id, server_id) VALUES ('s_srv', $1, 'mcps_fleet')
+       ON CONFLICT (bundle_id) DO NOTHING`,
+      [wsId],
+    );
+
+    expect(await report([{ skillId: "s_srv", versionId: "mcpr_fleet_1" }])).toBe("ok");
+    const held = await sessions.yourSessionsApplying(actor, "s_srv");
+    expect(held[0]?.current).toBe(true);
+
+    // …and a machine on an older revision reads as behind, which is the same rule.
+    expect(await report([{ skillId: "s_srv", versionId: "mcpr_fleet_0" }])).toBe("ok");
+    expect((await sessions.yourSessionsApplying(actor, "s_srv"))[0]?.current).toBe(false);
+  });
+});
+
 describe("the report door shape-checks the block — an authenticated member's 400", () => {
   // The door checks the version spelling too — a REAL 64-hex id, so the harness block is what
   // each case is actually testing.

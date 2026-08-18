@@ -18,13 +18,14 @@ import { ReviewHeader } from "@/components/review/ReviewHeader";
 import { MemberReadOnlyNote } from "@/components/review/ReviewNotes";
 import { TrustPanel } from "@/components/review/TrustPanel";
 import { Card } from "@/components/ui";
+import { noFilesRefusal } from "@/lib/api/genesis.server";
 import {
   notFound,
   requireMember,
   requireMemberInScope,
   requireReviewer,
 } from "@/lib/auth/guards.server";
-import { baseOf, bundleNameOf } from "@/lib/bundle-base";
+import { type BundleKind, baseOf, bundleNameOf, kindEntry } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import {
   inFinalTx,
@@ -389,6 +390,14 @@ async function approveAction(
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     return data<ReviewFormState>({ status: "error" });
+  }
+  // A KIND WITH NO FILES has no proposals to approve — the page is not mounted for it, and a
+  // hand-made POST at the other base meets the same answer the lane's door gives.
+  if (!kindEntry(row.kind).isFileBundle) {
+    return data<ReviewFormState>({
+      status: "denied",
+      message: noFilesRefusal(row.kind as BundleKind).message,
+    });
   }
   const proposal = await proposalByCandidate(actor, row.skillId, versionId);
   if (proposal === undefined || proposal.status !== "open") {

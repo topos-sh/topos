@@ -10,7 +10,15 @@ import { type ReportedHarnessState, reportApplied } from "@/lib/db/queries.lane.
  * installation holds (absence is meaningful), workspace-membership-checked per bundle.
  * Body-capped; a malformed body is a 400 BEFORE the credential resolve.
  */
+/**
+ * WHAT A DEVICE REPORTS HOLDING, in its two shapes. A file bundle holds a VERSION — the vault's
+ * content-addressed commit id. A connected MCP server holds a REVISION of a catalog row, whose id
+ * is this schema's own mint (`mcpr_…`). One field carries both because a report is one snapshot of
+ * one machine, and a row this route cannot parse rejects the WHOLE atomic report — so the shape
+ * check admits the two ids the product actually issues and nothing else.
+ */
 const HEX_64 = /^[0-9a-f]{64}$/;
+const REVISION_ID = /^mcpr_[0-9a-f]{32}$/;
 // The vault's own id rule, mirrored: lowercase path-safe charset, 1–128 bytes.
 const SKILL_ID = /^[a-z0-9_-]{1,128}$/;
 // The harness registry's slug spelling (`claude-code`, `cursor`) and the applied-state word.
@@ -145,8 +153,13 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     if (typeof row.skill_id !== "string" || !SKILL_ID.test(row.skill_id)) {
       return badRequest("malformed report entry: skill_id");
     }
-    if (typeof row.version_id !== "string" || !HEX_64.test(row.version_id)) {
-      return badRequest("malformed report entry: version_id must be 64-char lowercase hex");
+    if (
+      typeof row.version_id !== "string" ||
+      !(HEX_64.test(row.version_id) || REVISION_ID.test(row.version_id))
+    ) {
+      return badRequest(
+        "malformed report entry: version_id must be a 64-char lowercase hex commit or a server revision id",
+      );
     }
     const harnesses = parseHarnesses(row.harnesses);
     if (typeof harnesses === "string") {
