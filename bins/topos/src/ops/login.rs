@@ -1108,6 +1108,7 @@ mod tests {
                 return Err(PlaneError::NotFound);
             }
             Ok(DeliverySnapshot {
+                mcp_servers: Vec::new(),
                 skills: self
                     .names
                     .iter()
@@ -1236,6 +1237,13 @@ mod tests {
             unreachable!()
         }
         fn protect_channel(&self, _w: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn add_mcp_server(
+            &self,
+            _w: &str,
+            _b: topos_types::requests::McpAddRequest,
+        ) -> Result<topos_types::requests::McpAddedData, ClientError> {
             unreachable!()
         }
     }

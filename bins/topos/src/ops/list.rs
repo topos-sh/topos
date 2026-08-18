@@ -3718,7 +3718,7 @@ mod tests {
                 .skills
                 .get(w)
                 .cloned()
-                .unwrap_or(WireSkillIndex { skills: Vec::new() }))
+                .unwrap_or(WireSkillIndex { skills: Vec::new(), mcp_servers: Vec::new() }))
         }
         fn proposals_index(&self, _w: &str) -> Result<WireProposalIndex, ClientError> {
             unreachable!()
@@ -3730,6 +3730,13 @@ mod tests {
             unreachable!()
         }
         fn protect_channel(&self, _w: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn add_mcp_server(
+            &self,
+            _w: &str,
+            _b: topos_types::requests::McpAddRequest,
+        ) -> Result<topos_types::requests::McpAddedData, ClientError> {
             unreachable!()
         }
     }
@@ -3825,6 +3832,7 @@ mod tests {
         skills.insert(
             "w_acme".to_owned(),
             WireSkillIndex {
+                mcp_servers: Vec::new(),
                 skills: vec![
                     catalog_entry("deploy", &"d".repeat(64)),
                     catalog_entry("notes", &"d".repeat(64)),
@@ -3911,6 +3919,7 @@ mod tests {
         skills.insert(
             "w_acme".to_owned(),
             WireSkillIndex {
+                mcp_servers: Vec::new(),
                 skills: vec![catalog_entry("notes", &"d".repeat(64))],
             },
         );
@@ -4009,6 +4018,7 @@ mod tests {
         skills.insert(
             "w_acme".to_owned(),
             WireSkillIndex {
+                mcp_servers: Vec::new(),
                 skills: vec![
                     catalog_entry("deploy", &"d".repeat(64)),
                     catalog_entry("notes", &"d".repeat(64)),

@@ -223,6 +223,7 @@ impl FakePlane {
 }
 pub(super) fn empty_snapshot() -> DeliverySnapshot {
     DeliverySnapshot {
+        mcp_servers: Vec::new(),
         skills: Vec::new(),
         proposals_awaiting: 0,
         notices: Vec::new(),
@@ -277,7 +278,7 @@ impl DeliverySource for FakePlane {
             .map(|r| {
                 (
                     r.skill_id.clone(),
-                    topos_core::digest::to_hex(&r.version_id),
+                    r.version_id.clone(),
                     r.harnesses.clone(),
                 )
             })
@@ -320,6 +321,7 @@ impl DirectorySource for FakeDirectory {
     }
     fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
         Ok(WireSkillIndex {
+            mcp_servers: Vec::new(),
             skills: self.skills.clone(),
         })
     }
@@ -333,6 +335,13 @@ impl DirectorySource for FakeDirectory {
         unreachable!()
     }
     fn protect_channel(&self, _ws: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn add_mcp_server(
+        &self,
+        _w: &str,
+        _b: topos_types::requests::McpAddRequest,
+    ) -> Result<topos_types::requests::McpAddedData, ClientError> {
         unreachable!()
     }
 }

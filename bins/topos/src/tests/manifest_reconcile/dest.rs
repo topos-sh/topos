@@ -506,6 +506,13 @@ impl DirectorySource for ChannelsDropAfterFirst {
     fn protect_channel(&self, ws: &str, c: &str, l: &str) -> Result<(), ClientError> {
         self.inner.protect_channel(ws, c, l)
     }
+    fn add_mcp_server(
+        &self,
+        ws: &str,
+        b: topos_types::requests::McpAddRequest,
+    ) -> Result<topos_types::requests::McpAddedData, ClientError> {
+        self.inner.add_mcp_server(ws, b)
+    }
 }
 
 /// A channel add with `-a` whose expansion FAILS in the delivering reconcile must not borrow an
