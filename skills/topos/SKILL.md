@@ -178,10 +178,11 @@ exclusive spellings.
 
 ## MCP servers (the other kind of bundle)
 
-A bundle whose one file is a `server.json` is a remote MCP tool endpoint: `topos add <name>` from
-the workspace, `topos add --kind mcp <dir>` for a folder. Before adding, publishing, or
-troubleshooting one, read `mcp.md` next to this file — it carries the refusal codes, the per-agent
-placement rules, and the human's after-steps to relay.
+An MCP server is a tool endpoint, and it is not files: `topos add <name>` for one the workspace
+already shares, `topos add --kind mcp <registry name or https link>` to share a new one. It is
+never published, and a folder on this machine is a hand-written `topos.toml` row instead. Before
+adding or troubleshooting one, read `mcp.md` next to this file — it carries the refusal codes, the
+per-agent placement rules, and the human's after-steps to relay.
 
 ## Sharing an improvement back (do this — it is the point)
 

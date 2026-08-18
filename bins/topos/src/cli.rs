@@ -240,11 +240,12 @@ pub(crate) enum Command {
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
         /// Install into this exact folder (repeatable; combined with `-a` the union is the
-        /// destination set). An MCP source takes a known config file instead.
+        /// destination set). An MCP server takes a known config file instead.
         #[arg(long, value_name = "FOLDER")]
         dest: Vec<String>,
-        /// What the source IS: `skill` (the default) or `mcp`, a folder whose root holds a
-        /// server.json. Only needed for a local folder — a workspace bundle carries its own kind.
+        /// What the source IS: `skill` (the default) or `mcp`, a server to share with your
+        /// workspace. Only needed for a new server — one your workspace already shares carries
+        /// its own kind.
         #[arg(long, value_name = "KIND")]
         kind: Option<crate::bundle_kind::BundleKind>,
         /// Manage this folder as a copy of a skill you already have (its name, or its full

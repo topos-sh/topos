@@ -3347,7 +3347,7 @@
           },
           "version_id": {
             "type": "string",
-            "description": "The version this device holds (64-char lowercase hex)."
+            "description": "The version this device holds: a file bundle's commit (64-char lowercase hex), or a\nconnected server's catalog revision (`mcpr_` + 32 lowercase hex). ONE field carries both\nbecause a report is one snapshot of what a machine holds, and what a bundle's version IS\nbelongs to its kind."
           }
         }
       },
@@ -3503,6 +3503,7 @@
           "schema_version",
           "workspace_id",
           "skills",
+          "mcp_servers",
           "notices",
           "proposals_awaiting",
           "staleness_window_ms",
@@ -3515,6 +3516,13 @@
               "$ref": "#/components/schemas/WireDeclined"
             },
             "description": "The caller's DECLINED bundles in this workspace (declined on the web — the everywhere\nstance). A machine's own manifest row may still deliver one; the client reads this list\nto disclose that honestly (\"declined on the web, delivered here by your manifest\")."
+          },
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireDeliveryMcpServer"
+            },
+            "description": "The entitled MCP servers, documents inline (a possibly-empty list). ONE feed, TWO lists:\na bundle's kind decides only what an entitled row is MADE OF, and a connected server is\nmade of its document where a file bundle is made of a version to fetch."
           },
           "notices": {
             "type": "array",
@@ -3544,7 +3552,7 @@
             "items": {
               "$ref": "#/components/schemas/WireDeliverySkill"
             },
-            "description": "The entitled skills — everything this device should have (a possibly-empty list)."
+            "description": "The entitled file bundles — everything this device should have (a possibly-empty list)."
           },
           "staleness_window_ms": {
             "type": "integer",
@@ -3555,6 +3563,70 @@
           "workspace_id": {
             "type": "string",
             "description": "The workspace this delivery is scoped to (echoed from the path)."
+          }
+        }
+      },
+      "WireDeliveryMcpServer": {
+        "type": "object",
+        "description": "One CONNECTED MCP SERVER this device should have — **the document itself**, not a pointer to\nbytes.\n\nA `kind: \"mcp\"` bundle names a row in the server catalog: there is nothing content-addressed to\nfetch and no second round trip to make, so the document rides the delivery it belongs to and the\nmachine caches it beside the revision it came from. `revision_id` is what the device reports\nback as the thing it holds, where a file bundle reports a commit.",
+        "required": [
+          "skill_id",
+          "name",
+          "kind",
+          "revision_id",
+          "document",
+          "updated_at",
+          "via"
+        ],
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The unsigned, advisory display name; absent ⇒ show `name`."
+          },
+          "document": {
+            "description": "The `server.json` verbatim, in the official registry format."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The catalog's bundle kind — `\"mcp\"` for every row of this list. An OPEN string on the wire\nand a CLOSED vocabulary at the server that mints it; a client that does not know the kind a\nrow names refuses that row rather than placing it as something else."
+          },
+          "name": {
+            "type": "string",
+            "description": "The catalog's user-facing name."
+          },
+          "pinned": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "This connection follows ONE revision rather than the server's current. OMITTED when it does\nnot — the wire spells absence by absence, never by `false`."
+          },
+          "revision_id": {
+            "type": "string",
+            "description": "The catalog revision this connection resolves to — a pin, else the server's current. The\ncatalog's own version handle (`mcpr_` + 32 lowercase hex), minted by the server that holds\nthe revision; a client treats it as an opaque string and reports it back verbatim."
+          },
+          "revoked": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The resolved revision was pulled back after it was published. It is STILL SERVED — a pin is\na promise — and the client discloses it. Omitted while the revision stands."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The bundle id (the `<skill>` path segment)."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the resolved revision was published (epoch milliseconds)."
+          },
+          "via": {
+            "$ref": "#/components/schemas/WireVia",
+            "description": "Why this device is entitled to the server (channels ∪ direct)."
           }
         }
       },
@@ -3819,6 +3891,70 @@
           "version_id": {
             "type": "string",
             "description": "The version's commit id (64-char lowercase hex)."
+          }
+        }
+      },
+      "WireMcpIndexEntry": {
+        "type": "object",
+        "description": "One CONNECTED MCP SERVER of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns\nit — the same identity a delivered one carries, plus the catalog lifecycle `status` every index\nrow states.",
+        "required": [
+          "skill_id",
+          "name",
+          "kind",
+          "status",
+          "revision_id",
+          "document",
+          "updated_at"
+        ],
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The unsigned, advisory display name (may be absent)."
+          },
+          "document": {
+            "description": "The `server.json` verbatim, in the official registry format."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The catalog's bundle kind — `\"mcp\"` for every row of this list."
+          },
+          "name": {
+            "type": "string",
+            "description": "The catalog's user-facing name."
+          },
+          "pinned": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "This connection follows ONE revision rather than the server's current. Omitted otherwise."
+          },
+          "revision_id": {
+            "type": "string",
+            "description": "The catalog revision this connection resolves to (see [`WireDeliveryMcpServer::revision_id`])."
+          },
+          "revoked": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The resolved revision was pulled back after publication. Omitted while it stands."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The bundle id (the `<skill>` path segment)."
+          },
+          "status": {
+            "type": "string",
+            "description": "The catalog lifecycle status — `\"active\"` / `\"archived\"`. An OPEN string, deliberately."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the resolved revision was published (epoch milliseconds)."
           }
         }
       },
@@ -4092,15 +4228,23 @@
         "type": "object",
         "description": "`GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),\nauthorized by workspace membership (the `Authorization: Bearer` workspace credential names the\ndevice; catalog\nvisibility == membership, on both cloud and self-host). Metadata only, no bytes; a possibly-empty list\nordered by `skill_id`.",
         "required": [
-          "skills"
+          "skills",
+          "mcp_servers"
         ],
         "properties": {
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireMcpIndexEntry"
+            },
+            "description": "The workspace's connected MCP servers (possibly empty), each with the document it resolves\nto. They are a SEPARATE list because they are made of something else: a file bundle names a\nversion to fetch, a connected server carries its document, and there is no byte lane behind\none to fetch from."
+          },
           "skills": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/WireSkillIndexEntry"
             },
-            "description": "The workspace's skills (possibly empty)."
+            "description": "The workspace's file bundles (possibly empty)."
           }
         }
       },

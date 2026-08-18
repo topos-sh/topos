@@ -224,8 +224,8 @@ topos add [OPTIONS] <SOURCE>
 | `<SOURCE>` | What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo |
 | `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
 | `-a, --agent <SLUG>` | Install for this agent only (a slug like `codex`; repeatable). Recorded on the row, so updates keep the copy where you asked |
-| `--dest <FOLDER>` | Install into this exact folder (repeatable; combined with `-a` the union is the destination set). An MCP source takes a known config file instead |
-| `--kind <KIND>` | What the source IS: `skill` (the default) or `mcp`, a folder whose root holds a server.json. Only needed for a local folder — a workspace bundle carries its own kind |
+| `--dest <FOLDER>` | Install into this exact folder (repeatable; combined with `-a` the union is the destination set). An MCP server takes a known config file instead |
+| `--kind <KIND>` | What the source IS: `skill` (the default) or `mcp`, a server to share with your workspace. Only needed for a new server — one your workspace already shares carries its own kind |
 | `--as <BUNDLE>` | Manage this folder as a copy of a skill you already have (its name, or its full reference). Nothing in the folder changes; updates land here from now on. Folders only |
 | `-g, --global` | Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file |
 | `--yes` | Confirm adding from a GitHub source, after reading what it found (everything else applies immediately, and `--yes` changes nothing there) |

@@ -296,24 +296,28 @@ import with a preview at `<origin>/skills/import`.
 ## Add an MCP server
 
 ```bash
-topos add weather                      # a server your workspace publishes
-topos add --kind mcp ./tools/weather   # a folder holding a server.json
+topos add weather                             # one your workspace already shares
+topos add --kind mcp io.github.acme/weather   # share a new one, and get it here
+topos add --kind mcp https://acme.example/server.json
 ```
 
 An MCP server is a **bundle like any other**: it records the same one line, but your agents get it
-as a tool endpoint in their own MCP config instead of as a skill folder. A workspace bundle needs no
-flag — the catalog records what each bundle is. A local folder needs `--kind mcp`, because a folder
-is just a folder until somebody says what it holds; without the flag, a folder whose root holds a
-`server.json` refuses rather than landing as a skill, and `--kind skill` adopts it as a skill.
+as a tool endpoint in their own MCP config instead of as a skill folder. One your workspace already
+shares needs no flag — the workspace records what each bundle is.
 
-The CLI fetches nothing: a registry name or a link to a `server.json` is refused, pointing at the
-workspace's own **Add an MCP server** page, which takes all three. One governed copy the team can
-review and revert beats a pointer each machine resolved for itself.
+`--kind mcp` is how a NEW one gets shared. The name (or the link) goes to your workspace: the
+server reads the document, rules on whether it may be shared, and answers with the name it shares
+it as — then the row lands here and your agents' configs converge, in the same command. A name your
+install's catalog already carries is a connection any member may make; anything else writes your
+workspace's own server down, which an owner does.
 
-Both doors apply immediately, and the receipt leads with the undo: what the server is, its endpoint,
-whether a sign-in is coming, which agents it reached, and the one `topos remove` that takes it back.
-An adopted folder is left in place, and `remove` never deletes it. What Topos refuses to place, and
-why: [MCP servers](/docs/mcp).
+A folder on your machine holding a `server.json` is not shared at all — it is a line you write in
+your own `topos.toml` (`"~/work/weather" = { kind = "mcp" }`), read fresh on every update. A
+plain `topos add ./that-folder` refuses rather than landing it as a skill, and says both ways out.
+
+An add applies immediately, and the receipt leads with the undo: what the server is, its endpoint,
+whether a sign-in is coming, which agents it reached, and the one `topos remove` that takes it
+back. What Topos refuses to place, and why: [MCP servers](/docs/mcp).
 
 ## Stop receiving
 

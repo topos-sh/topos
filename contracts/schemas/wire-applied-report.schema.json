@@ -40,9 +40,9 @@
           "type": "string"
         },
         "version_id": {
-          "description": "The version this device holds (64-char lowercase hex).",
+          "description": "The version this device holds: a file bundle's commit (64-char lowercase hex), or a\nconnected server's catalog revision (`mcpr_` + 32 lowercase hex). ONE field carries both\nbecause a report is one snapshot of what a machine holds, and what a bundle's version IS\nbelongs to its kind.",
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "pattern": "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"
         }
       },
       "required": [

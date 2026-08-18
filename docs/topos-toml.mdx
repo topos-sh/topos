@@ -157,15 +157,18 @@ is just a folder, so a row pointing at one holding a `server.json` says what it 
 "~/servers/linear" = { kind = "mcp", dest = ["~/.cursor/mcp.json", "~/.codex/config.toml"] }
 ```
 
-`topos add --kind mcp ./tools/weather` writes the first line; the folder's `server.json` is the whole
-bundle, and it lands as an entry in each agent's MCP config rather than as a skill folder — see
+That line is written BY HAND — it is how a server only this machine runs is kept. The folder's
+`server.json` is read fresh on every update, and it lands as an entry in each agent's MCP config
+rather than as a skill folder. A server the whole team gets is shared instead
+(`topos add --kind mcp <its registry name>`), and its row is an ordinary workspace reference — see
 [MCP servers](/docs/mcp).
 
 **A workspace row never spells a kind.** `"topos.sh/acme/weather" = "*"` is the same line whether
-the bundle is a skill or a server: the catalog already records what it is, and a publish of the
-local folder above rewrites the row to exactly that spelling, kind field and all dropped. A GitHub
-row tagged `kind = "mcp"` refuses when the file loads: an MCP server is delivered from a workspace,
-so publish the bundle there and name it by its workspace address instead.
+the bundle is a skill or a server: the workspace already records what it is. A version pin on a
+server row names nothing — what such a row receives is the workspace's own resolution — so it is
+read as absent, silently. A GitHub row tagged `kind = "mcp"` refuses when the file loads: an MCP
+server is delivered from a workspace, so share it there and name it by its workspace address
+instead.
 
 An MCP line's `dest` entries — and a channel line's `mcp_dest` entries — name each agent's own MCP
 config, and they must come from the set
@@ -186,7 +189,7 @@ fine and fails at delivery, per server, naming the channel it came through.
 | `topos add <ref>` | adds one line to the nearest `topos.toml` at or above this folder — with none covering it, refuses |
 | `topos add <ref> -g` | adds one line to `~/.topos/topos.toml` |
 | `topos add ./folder` | adds `"./folder" = "*"` — relative when the folder sits under the file's own folder, absolute when it doesn't |
-| `topos add --kind mcp ./folder` | adds one line carrying `{ kind = "mcp" }` |
+| `topos add --kind mcp <registry name or https link>` | shares the server with your workspace, then adds its workspace reference |
 | `topos add -g @acme` | adds `"topos.sh/acme" = "*"` |
 | `topos add -g <skill>` when an `"off"` line stands | deletes the `"off"` line |
 | `topos remove <skill>` | drops that line — or splits the channel/repo line carrying it |

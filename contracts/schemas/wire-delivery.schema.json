@@ -11,6 +11,13 @@
         "$ref": "#/$defs/WireDeclined"
       }
     },
+    "mcp_servers": {
+      "description": "The entitled MCP servers, documents inline (a possibly-empty list). ONE feed, TWO lists:\na bundle's kind decides only what an entitled row is MADE OF, and a connected server is\nmade of its document where a file bundle is made of a version to fetch.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireDeliveryMcpServer"
+      }
+    },
     "notices": {
       "description": "The unacked, person-scoped notices (verdicts, proposal closures, …).",
       "type": "array",
@@ -36,7 +43,7 @@
       "type": "string"
     },
     "skills": {
-      "description": "The entitled skills — everything this device should have (a possibly-empty list).",
+      "description": "The entitled file bundles — everything this device should have (a possibly-empty list).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/WireDeliverySkill"
@@ -57,6 +64,7 @@
     "schema_version",
     "workspace_id",
     "skills",
+    "mcp_servers",
     "notices",
     "proposals_awaiting",
     "staleness_window_ms",
@@ -79,6 +87,71 @@
       "required": [
         "skill_id",
         "name"
+      ]
+    },
+    "WireDeliveryMcpServer": {
+      "description": "One CONNECTED MCP SERVER this device should have — **the document itself**, not a pointer to\nbytes.\n\nA `kind: \"mcp\"` bundle names a row in the server catalog: there is nothing content-addressed to\nfetch and no second round trip to make, so the document rides the delivery it belongs to and the\nmachine caches it beside the revision it came from. `revision_id` is what the device reports\nback as the thing it holds, where a file bundle reports a commit.",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "description": "The unsigned, advisory display name; absent ⇒ show `name`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "document": {
+          "description": "The `server.json` verbatim, in the official registry format."
+        },
+        "kind": {
+          "description": "The catalog's bundle kind — `\"mcp\"` for every row of this list. An OPEN string on the wire\nand a CLOSED vocabulary at the server that mints it; a client that does not know the kind a\nrow names refuses that row rather than placing it as something else.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The catalog's user-facing name.",
+          "type": "string"
+        },
+        "pinned": {
+          "description": "This connection follows ONE revision rather than the server's current. OMITTED when it does\nnot — the wire spells absence by absence, never by `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "revision_id": {
+          "description": "The catalog revision this connection resolves to — a pin, else the server's current. The\ncatalog's own version handle (`mcpr_` + 32 lowercase hex), minted by the server that holds\nthe revision; a client treats it as an opaque string and reports it back verbatim.",
+          "type": "string",
+          "pattern": "^mcpr_[0-9a-f]{32}$"
+        },
+        "revoked": {
+          "description": "The resolved revision was pulled back after it was published. It is STILL SERVED — a pin is\na promise — and the client discloses it. Omitted while the revision stands.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "skill_id": {
+          "description": "The bundle id (the `<skill>` path segment).",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "When the resolved revision was published (epoch milliseconds).",
+          "type": "integer",
+          "format": "int64"
+        },
+        "via": {
+          "description": "Why this device is entitled to the server (channels ∪ direct).",
+          "$ref": "#/$defs/WireVia"
+        }
+      },
+      "required": [
+        "skill_id",
+        "name",
+        "kind",
+        "revision_id",
+        "document",
+        "updated_at",
+        "via"
       ]
     },
     "WireDeliverySkill": {

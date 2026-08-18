@@ -37,11 +37,11 @@ pub(crate) enum BundleKind {
     #[default]
     #[value(help = "a folder of instructions your agents read (the default)")]
     Skill,
-    /// An MCP server bundle: its one `server.json` is converged into each agent's own MCP config,
-    /// and skill-dir placement must never engage for it.
+    /// An MCP server: a catalog entry the workspace shares, converged into each agent's own MCP
+    /// config. Skill-dir placement must never engage for it.
     #[value(
-        help = "a folder whose root holds a server.json — your agents get it as a tool \
-                    endpoint in their own MCP config"
+        help = "a server your workspace shares — name its registry entry (or link its \
+                    server.json) and your agents get it as a tool endpoint"
     )]
     Mcp,
 }

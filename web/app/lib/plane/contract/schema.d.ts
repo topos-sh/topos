@@ -1194,7 +1194,12 @@ export interface components {
             harnesses?: components["schemas"]["WireHarnessState"][];
             /** @description The skill id (the `<skill>` path segment). */
             skill_id: string;
-            /** @description The version this device holds (64-char lowercase hex). */
+            /**
+             * @description The version this device holds: a file bundle's commit (64-char lowercase hex), or a
+             *     connected server's catalog revision (`mcpr_` + 32 lowercase hex). ONE field carries both
+             *     because a report is one snapshot of what a machine holds, and what a bundle's version IS
+             *     belongs to its kind.
+             */
             version_id: string;
         };
         /**
@@ -1289,6 +1294,12 @@ export interface components {
              *     to disclose that honestly ("declined on the web, delivered here by your manifest").
              */
             declined?: components["schemas"]["WireDeclined"][];
+            /**
+             * @description The entitled MCP servers, documents inline (a possibly-empty list). ONE feed, TWO lists:
+             *     a bundle's kind decides only what an entitled row is MADE OF, and a connected server is
+             *     made of its document where a file bundle is made of a version to fetch.
+             */
+            mcp_servers: components["schemas"]["WireDeliveryMcpServer"][];
             /** @description The unacked, person-scoped notices (verdicts, proposal closures, …). */
             notices: components["schemas"]["WireNotice"][];
             /**
@@ -1307,7 +1318,7 @@ export interface components {
              *     the client skips the workspace quietly and `topos status` shows the wait.
              */
             session_status: string;
-            /** @description The entitled skills — everything this device should have (a possibly-empty list). */
+            /** @description The entitled file bundles — everything this device should have (a possibly-empty list). */
             skills: components["schemas"]["WireDeliverySkill"][];
             /**
              * Format: int64
@@ -1317,6 +1328,54 @@ export interface components {
             staleness_window_ms: number;
             /** @description The workspace this delivery is scoped to (echoed from the path). */
             workspace_id: string;
+        };
+        /**
+         * @description One CONNECTED MCP SERVER this device should have — **the document itself**, not a pointer to
+         *     bytes.
+         *
+         *     A `kind: "mcp"` bundle names a row in the server catalog: there is nothing content-addressed to
+         *     fetch and no second round trip to make, so the document rides the delivery it belongs to and the
+         *     machine caches it beside the revision it came from. `revision_id` is what the device reports
+         *     back as the thing it holds, where a file bundle reports a commit.
+         */
+        WireDeliveryMcpServer: {
+            /** @description The unsigned, advisory display name; absent ⇒ show `name`. */
+            display_name?: string | null;
+            /** @description The `server.json` verbatim, in the official registry format. */
+            document: unknown;
+            /**
+             * @description The catalog's bundle kind — `"mcp"` for every row of this list. An OPEN string on the wire
+             *     and a CLOSED vocabulary at the server that mints it; a client that does not know the kind a
+             *     row names refuses that row rather than placing it as something else.
+             */
+            kind: string;
+            /** @description The catalog's user-facing name. */
+            name: string;
+            /**
+             * @description This connection follows ONE revision rather than the server's current. OMITTED when it does
+             *     not — the wire spells absence by absence, never by `false`.
+             */
+            pinned?: boolean | null;
+            /**
+             * @description The catalog revision this connection resolves to — a pin, else the server's current. The
+             *     catalog's own version handle (`mcpr_` + 32 lowercase hex), minted by the server that holds
+             *     the revision; a client treats it as an opaque string and reports it back verbatim.
+             */
+            revision_id: string;
+            /**
+             * @description The resolved revision was pulled back after it was published. It is STILL SERVED — a pin is
+             *     a promise — and the client discloses it. Omitted while the revision stands.
+             */
+            revoked?: boolean | null;
+            /** @description The bundle id (the `<skill>` path segment). */
+            skill_id: string;
+            /**
+             * Format: int64
+             * @description When the resolved revision was published (epoch milliseconds).
+             */
+            updated_at: number;
+            /** @description Why this device is entitled to the server (channels ∪ direct). */
+            via: components["schemas"]["WireVia"];
         };
         /**
          * @description One skill THIS device should have, in the delivery answer: the catalog identity, the pinned `current`
@@ -1452,6 +1511,36 @@ export interface components {
             purged_by?: string | null;
             /** @description The version's commit id (64-char lowercase hex). */
             version_id: string;
+        };
+        /**
+         * @description One CONNECTED MCP SERVER of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns
+         *     it — the same identity a delivered one carries, plus the catalog lifecycle `status` every index
+         *     row states.
+         */
+        WireMcpIndexEntry: {
+            /** @description The unsigned, advisory display name (may be absent). */
+            display_name?: string | null;
+            /** @description The `server.json` verbatim, in the official registry format. */
+            document: unknown;
+            /** @description The catalog's bundle kind — `"mcp"` for every row of this list. */
+            kind: string;
+            /** @description The catalog's user-facing name. */
+            name: string;
+            /** @description This connection follows ONE revision rather than the server's current. Omitted otherwise. */
+            pinned?: boolean | null;
+            /** @description The catalog revision this connection resolves to (see [`WireDeliveryMcpServer::revision_id`]). */
+            revision_id: string;
+            /** @description The resolved revision was pulled back after publication. Omitted while it stands. */
+            revoked?: boolean | null;
+            /** @description The bundle id (the `<skill>` path segment). */
+            skill_id: string;
+            /** @description The catalog lifecycle status — `"active"` / `"archived"`. An OPEN string, deliberately. */
+            status: string;
+            /**
+             * Format: int64
+             * @description When the resolved revision was published (epoch milliseconds).
+             */
+            updated_at: number;
         };
         /**
          * @description `GET /v1/workspaces/{ws}/me` response — the caller's own membership describe: who you are here,
@@ -1600,7 +1689,14 @@ export interface components {
          *     ordered by `skill_id`.
          */
         WireSkillIndex: {
-            /** @description The workspace's skills (possibly empty). */
+            /**
+             * @description The workspace's connected MCP servers (possibly empty), each with the document it resolves
+             *     to. They are a SEPARATE list because they are made of something else: a file bundle names a
+             *     version to fetch, a connected server carries its document, and there is no byte lane behind
+             *     one to fetch from.
+             */
+            mcp_servers: components["schemas"]["WireMcpIndexEntry"][];
+            /** @description The workspace's file bundles (possibly empty). */
             skills: components["schemas"]["WireSkillIndexEntry"][];
         };
         /**

@@ -38,6 +38,32 @@
       }
     }
   ],
+  "mcp_servers": [
+    {
+      "skill_id": "s_weather",
+      "name": "weather",
+      "kind": "mcp",
+      "revision_id": "mcpr_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "document": {
+        "description": "Current conditions and forecasts for a named place.",
+        "name": "io.github.acme/weather",
+        "remotes": [
+          {
+            "type": "streamable-http",
+            "url": "https://weather.acme.example/mcp"
+          }
+        ],
+        "version": "1.4.0"
+      },
+      "updated_at": 1700000200000,
+      "via": {
+        "channels": [
+          "everyone"
+        ],
+        "direct": false
+      }
+    }
+  ],
   "declined": [
     {
       "skill_id": "s_legacy",

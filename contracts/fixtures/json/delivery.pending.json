@@ -2,6 +2,7 @@
   "schema_version": 1,
   "workspace_id": "w_demo",
   "skills": [],
+  "mcp_servers": [],
   "notices": [],
   "proposals_awaiting": 0,
   "staleness_window_ms": 604800000,

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "McpServerRecord",
+  "description": "`skills/<id>/server.json` — a CONNECTED SERVER's delivered state, and the whole of it: the\ndocument the workspace last delivered, the catalog revision it came from, and the two facts a\nreceipt discloses about that revision.\n\nIt stands where [`Lock`] stands for a file bundle, and it is a different document because a\nconnected server is made of something else. There is no version to fetch, no byte-exact file\nlist to consent to, and no store to render from: the document IS the delivery. Holding it here\nis what keeps the config converge OFFLINE — a machine with no network still heals every agent's\nentry from the last document it was given.",
+  "type": "object",
+  "properties": {
+    "document": {
+      "description": "The `server.json` verbatim, in the official registry format."
+    },
+    "name": {
+      "description": "The catalog name at the last delivery.",
+      "type": "string"
+    },
+    "pinned": {
+      "description": "This connection follows ONE revision rather than the server's current.",
+      "type": "boolean",
+      "default": false
+    },
+    "revision_id": {
+      "description": "The catalog revision the document came from (`mcpr_` + 32 lowercase hex) — the custody\nprovenance every placed entry records, and what this machine reports back as what it holds.",
+      "type": "string",
+      "pattern": "^mcpr_[0-9a-f]{32}$"
+    },
+    "revoked": {
+      "description": "The revision was pulled back after publication. It is still what this machine holds — a pin\nis a promise — and every receipt about the bundle says so.",
+      "type": "boolean",
+      "default": false
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "skill_id": {
+      "description": "The bundle id this record belongs to.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "skill_id",
+    "name",
+    "revision_id",
+    "document"
+  ]
+}

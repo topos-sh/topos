@@ -301,6 +301,12 @@ fn schemas() -> Vec<(&'static str, String)> {
             "persisted-conflict",
             emit(schemars::schema_for!(topos_types::persisted::ConflictState)),
         ),
+        (
+            "persisted-mcp-server",
+            emit(schemars::schema_for!(
+                topos_types::persisted::McpServerRecord
+            )),
+        ),
     ]
 }
 
@@ -1363,8 +1369,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // The per-session delivery answer (`GET /v1/workspaces/{ws}/delivery`): two entitled skills —
     // one via `everyone` only (indirect), one via `ops` + `everyone` WITH a direct assignment and
-    // `reviewed` protection — one declined bundle (the caller's own web stance), one `verdict`
-    // notice carrying its reason, and one open proposal awaiting review.
+    // `reviewed` protection — one CONNECTED SERVER carrying its document inline, one declined
+    // bundle (the caller's own web stance), one `verdict` notice carrying its reason, and one open
+    // proposal awaiting review.
     let delivery_ok = WireDelivery {
         schema_version: 1,
         workspace_id: "w_demo".to_owned(),
@@ -1404,6 +1411,28 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 },
             },
         ],
+        mcp_servers: vec![topos_types::requests::WireDeliveryMcpServer {
+            skill_id: "s_weather".to_owned(),
+            name: "weather".to_owned(),
+            kind: "mcp".to_owned(),
+            display_name: None,
+            revision_id: format!("mcpr_{}", "e".repeat(32)),
+            document: serde_json::json!({
+                "name": "io.github.acme/weather",
+                "description": "Current conditions and forecasts for a named place.",
+                "version": "1.4.0",
+                "remotes": [{ "type": "streamable-http", "url": "https://weather.acme.example/mcp" }],
+            }),
+            pinned: None,
+            revoked: None,
+            updated_at: 1_700_000_200_000,
+            via: WireVia {
+                channels: vec!["everyone".to_owned()],
+                direct: false,
+                assigned_by: None,
+                picked: None,
+            },
+        }],
         declined: vec![topos_types::requests::WireDeclined {
             skill_id: "s_legacy".to_owned(),
             name: "legacy-notes".to_owned(),
@@ -1432,6 +1461,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         schema_version: 1,
         workspace_id: "w_demo".to_owned(),
         skills: vec![],
+        mcp_servers: vec![],
         declined: vec![],
         notices: vec![],
         staleness_window_ms: 604_800_000,
