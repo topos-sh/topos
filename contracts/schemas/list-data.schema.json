@@ -414,7 +414,7 @@
           ]
         },
         "version": {
-          "description": "The applied version (64-hex), when applied locally.",
+          "description": "The applied version, when applied locally: a file bundle's commit (64-hex), or a connected\nserver's catalog revision (`mcpr_…`).",
           "type": [
             "string",
             "null"
@@ -612,7 +612,7 @@
           "type": "string"
         },
         "open_proposals": {
-          "description": "Open, non-stale proposal count on the skill.",
+          "description": "Open, non-stale proposal count on the skill. Always zero for a connected server: what it\nholds is published in the catalog, never proposed to this workspace.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -622,9 +622,9 @@
           "$ref": "#/$defs/RemoteAdoption"
         },
         "version_id": {
-          "description": "The catalog `current` version id (64-char lowercase hex).",
+          "description": "What the workspace shares this bundle AT: a file bundle's `current` commit (64-char\nlowercase hex), or a connected server's catalog revision (`mcpr_` + 32 lowercase hex).",
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "pattern": "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"
         }
       },
       "required": [
@@ -697,7 +697,7 @@
       "type": "object",
       "properties": {
         "bundle_digest": {
-          "description": "The byte-exact consent hash, shown alongside as evidence.",
+          "description": "The byte-exact consent hash, shown alongside as evidence. All-zero for a bundle that has no\nfiles to hash.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
@@ -772,9 +772,9 @@
           ]
         },
         "version_id": {
-          "description": "The approvable `@` token (the commit SHA-256).",
+          "description": "What this row is ON: a file bundle's approvable `@` token (the commit SHA-256), or a\nconnected server's catalog revision (`mcpr_` + 32 lowercase hex). ONE field carries both,\nbecause what a bundle's version IS belongs to its kind — and only the first is a token any\nverb takes.",
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "pattern": "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"
         },
         "workspace_id": {
           "description": "The workspace this skill is followed in (its pointer scope), or `None` for a purely local,\nnever-followed `add`'d skill. Provenance so two same-named skills from different workspaces are\ndistinguishable; `--json` carries it flat, the TTY groups by it.",

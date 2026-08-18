@@ -647,10 +647,15 @@ pub struct RemoteSkill {
     /// the server that mints it. A listing renders it; the rows that DELIVER a bundle branch on
     /// it to choose the delivery mechanics.
     pub kind: String,
-    /// The catalog `current` version id (64-char lowercase hex).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    /// What the workspace shares this bundle AT: a file bundle's `current` commit (64-char
+    /// lowercase hex), or a connected server's catalog revision (`mcpr_` + 32 lowercase hex).
+    #[cfg_attr(
+        feature = "contract-derives",
+        schemars(extend("pattern" = "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"))
+    )]
     pub version_id: String,
-    /// Open, non-stale proposal count on the skill.
+    /// Open, non-stale proposal count on the skill. Always zero for a connected server: what it
+    /// holds is published in the catalog, never proposed to this workspace.
     pub open_proposals: u64,
     /// This machine's adoption state for the skill.
     pub state: RemoteAdoption,
@@ -734,7 +739,8 @@ pub struct ListDetail {
     /// The delivery attribution (`assigned by <name>` / `picked by you`), when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
-    /// The applied version (64-hex), when applied locally.
+    /// The applied version, when applied locally: a file bundle's commit (64-hex), or a connected
+    /// server's catalog revision (`mcpr_…`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// A row's version pin, when one is spelled.
@@ -913,10 +919,17 @@ pub struct SkillEntry {
     /// distinguishable; `--json` carries it flat, the TTY groups by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    /// The approvable `@` token (the commit SHA-256).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    /// What this row is ON: a file bundle's approvable `@` token (the commit SHA-256), or a
+    /// connected server's catalog revision (`mcpr_` + 32 lowercase hex). ONE field carries both,
+    /// because what a bundle's version IS belongs to its kind — and only the first is a token any
+    /// verb takes.
+    #[cfg_attr(
+        feature = "contract-derives",
+        schemars(extend("pattern" = "^([0-9a-f]{64}|mcpr_[0-9a-f]{32})$"))
+    )]
     pub version_id: String,
-    /// The byte-exact consent hash, shown alongside as evidence.
+    /// The byte-exact consent hash, shown alongside as evidence. All-zero for a bundle that has no
+    /// files to hash.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// Local edits ahead of the version this entry is on.

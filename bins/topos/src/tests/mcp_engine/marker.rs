@@ -1,5 +1,5 @@
 //! The durable kind marker: classification survives a lost custody, fails closed without evidence,
-//! a targeted go-back converges configs, and the applied report never claims an empty-map skill.
+//! a targeted update converges configs, and the applied report never claims an empty-map skill.
 
 use std::collections::BTreeSet;
 
@@ -7,40 +7,41 @@ use topos_types::results::TargetOutcome;
 
 use crate::ctx::Ctx;
 use crate::ops;
-use crate::plane::{FetchedVersion, KnownCurrent, PlaneError, PlaneSource, PointerFetch};
 use crate::sessions::{self, SESSION_ACTIVE, Session};
 
 use super::rig::*;
 
-/// Deliver ONE mcp bundle at machine scope over the hermetic slugs, returning the plane + dir the
-/// follow-up sweeps and targeted verbs reuse.
-fn deliver_linear(rig: &Rig, v: &Version) -> (FakePlane, FakeDirectory) {
-    let plane = FakePlane::new().with_version("s_linear", v);
-    plane.serves(vec![delivered_mcp("s_linear", "linear", v)]);
-    let dir = FakeDirectory {
-        skills: vec![mcp_catalog_entry("s_linear", "linear", v)],
-        channels: Vec::new(),
-    };
+/// Deliver ONE connected server at machine scope over the hermetic slugs, returning the plane +
+/// dir the follow-up sweeps and targeted verbs reuse.
+fn deliver_linear(rig: &Rig, s: &ServedServer) -> (FakePlane, FakeDirectory) {
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", s)]);
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
     ));
     (plane, dir)
 }
 
-/// ITEM PAIR (kind fails durable): the store + empty map stand, the LEDGER is gone — a targeted
-/// go-back must still classify the record as config-placed and materialize NO skill dirs. Before
-/// the fix, classification hung on the custody alone: its loss let the skill planner run and
-/// `server.json` landed in skill dirs.
+/// A version id this machine never held — what a person types after `@` when they ask for one.
+fn some_version() -> [u8; 32] {
+    topos_core::digest::sha256(b"a version nobody here has ever held")
+}
+
+/// ITEM PAIR (kind fails durable): the record + empty map stand, the LEDGER is gone — a
+/// version-shaped verb must still classify the record as a connected server and refuse it, rather
+/// than open the skills engine over it. Before the marker, classification hung on the custody
+/// alone: its loss let the skill planner run and `server.json` landed in skill dirs.
+///
+/// The verb is `topos update <name>@<hash>`, the one door that still asks a bundle for a version
+/// of its own: a server's versions are the catalog's, and this machine holds the one it was given.
 #[test]
-fn a_lost_ledger_never_lets_a_targeted_go_back_materialize_skill_dirs() {
+fn a_lost_ledger_never_lets_a_version_verb_treat_a_server_as_a_skill() {
     let rig = Rig::new("lost-custody");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let (plane, dir) = deliver_linear(&rig, &v);
+    let s = served_at("https://mcp.example/linear");
+    let (plane, dir) = deliver_linear(&rig, &s);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
@@ -49,17 +50,23 @@ fn a_lost_ledger_never_lets_a_targeted_go_back_materialize_skill_dirs() {
     std::fs::remove_file(rig.layout().config_custody_path()).unwrap();
     std::fs::remove_file(rig.layout().sync_status_path()).unwrap();
 
-    let out = ops::pull(
+    let err = ops::pull(
         &ctx,
         ops::PullScope::One {
             name: "linear".into(),
             workspace: None,
-            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(some_version())),
             store: ops::StoreScope::Here,
         },
     )
-    .expect("the marker classifies the record; the go-back applies store-only");
-    assert_eq!(out.data.skills.len(), 1);
+    .expect_err("the marker classifies the record, and the kind refuses the verb");
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{}", err.detail());
+    assert!(
+        err.detail().contains("'linear' is an MCP server bundle")
+            && err.detail().contains("`topos list linear`"),
+        "{}",
+        err.detail()
+    );
 
     // NOTHING materialized into skill dirs, and the map still records zero placements.
     assert!(
@@ -82,11 +89,8 @@ fn an_empty_map_with_no_kind_evidence_fails_closed_on_targeted_verbs() {
     let rig = Rig::new("no-evidence");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let (plane, dir) = deliver_linear(&rig, &v);
+    let s = served_at("https://mcp.example/linear");
+    let (plane, dir) = deliver_linear(&rig, &s);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
@@ -100,7 +104,7 @@ fn an_empty_map_with_no_kind_evidence_fails_closed_on_targeted_verbs() {
         ops::PullScope::One {
             name: "linear".into(),
             workspace: None,
-            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(some_version())),
             store: ops::StoreScope::Here,
         },
     ) else {

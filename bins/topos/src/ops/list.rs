@@ -1035,6 +1035,9 @@ fn remote_view(
                     adopted_in: channel_adopted_in(resolved, &s.host, &s.workspace_name, &c.name),
                 })
                 .collect(),
+            // ONE catalog, TWO lists — and a listing shows what the workspace SHARES, so both
+            // are here. What each row's version IS differs by kind (a commit; a catalog
+            // revision), and each list carries its own.
             skills: skills
                 .skills
                 .iter()
@@ -1045,6 +1048,21 @@ fn remote_view(
                     open_proposals: e.open_proposals,
                     state: adoption(resolved, &s.host, &s.workspace_name, &e.name, &e.version_id),
                 })
+                .chain(skills.mcp_servers.iter().map(|e| RemoteSkill {
+                    name: e.name.clone(),
+                    kind: e.kind.clone(),
+                    // A connected server has no proposals: what it holds is published in the
+                    // catalog, not proposed to this workspace.
+                    open_proposals: 0,
+                    state: adoption(
+                        resolved,
+                        &s.host,
+                        &s.workspace_name,
+                        &e.name,
+                        &e.revision_id,
+                    ),
+                    version_id: e.revision_id.clone(),
+                }))
                 .collect(),
         });
     }

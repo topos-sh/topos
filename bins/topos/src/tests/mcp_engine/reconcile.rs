@@ -393,10 +393,7 @@ fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
         src.display()
     ));
     let plane = FakePlane::new();
-    let dir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::default();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let tty = |out: &ops::PullOutcome| {
         crate::render::pull_tty(
