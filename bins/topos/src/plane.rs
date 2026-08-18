@@ -716,7 +716,6 @@ pub(crate) trait ContributeSource {
     /// # Errors
     /// As [`publish`](Self::publish).
     fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError>;
-
 }
 
 // ---------------------------------------------------------------------------------------------

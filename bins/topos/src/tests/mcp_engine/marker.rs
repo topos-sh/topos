@@ -288,20 +288,18 @@ fn a_targeted_update_never_reaches_a_narrowing_excluded_harness() {
     assert_eq!(agents, ["cursor"].into(), "{row:?}");
 }
 
-/// ITEM PAIR (keyless targeted converge skips): with the LEDGER deleted, a targeted go-back has
-/// no ownership record to reuse — it must write NOTHING and say so, leaving the heal to the next
-/// sweep. Before the fix it minted a fresh `topos-local-linear` key and placed a DUPLICATE entry
-/// beside the original `topos-eng-linear` one (now foreign and unremovable).
+/// ITEM PAIR (a keyless targeted converge writes nothing): with the LEDGER deleted, topos can no
+/// longer tell its own config entries from anybody else's — so a targeted `topos update <name>`
+/// must leave every byte where it is and SAY what it found, leaving the heal to a person who
+/// deletes the entry. Before this it minted a fresh key and placed a DUPLICATE entry beside the
+/// original `topos-eng-linear` one (now foreign, and unremovable).
 #[test]
-fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
-    let rig = Rig::new("goback-keyless");
+fn a_deleted_ledger_makes_the_targeted_update_write_nothing_and_say_so() {
+    let rig = Rig::new("targeted-keyless");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let v = mk_version(&[(
-        "server.json",
-        server_json("https://mcp.example/linear").as_bytes(),
-    )]);
-    let (plane, dir) = deliver_linear(&rig, &v);
+    let s = served_at("https://mcp.example/linear");
+    let (plane, dir) = deliver_linear(&rig, &s);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
     let cursor = rig.home.0.join(".cursor/mcp.json");
@@ -314,28 +312,11 @@ fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
     // The failure shape: the ownership record is GONE (the kind marker still classifies).
     std::fs::remove_file(rig.layout().config_custody_path()).unwrap();
 
-    // The converge the go-back hand-runs: zero writes, one honest warning.
-    let sid = crate::id::SkillId::parse("s_linear").unwrap();
-    let (states, warnings) = crate::mcp_engine::converge_bundle_now(&ctx, &sid, "linear");
-    assert!(states.is_empty(), "{states:?}");
-    assert!(
-        crate::message::legacy_lines(&warnings).iter().any(|w| {
-            w.contains("MCP_OWNERSHIP_MISSING") && w.contains("The next 'topos update' restores it")
-        }),
-        "{warnings:?}"
-    );
+    let out = sweep_one(&ctx, &plane, &dir, "linear");
 
-    // And through the whole verb: the configs are byte-identical — no duplicate key appeared.
-    ops::pull(
-        &ctx,
-        ops::PullScope::One {
-            name: "linear".into(),
-            workspace: None,
-            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
-            store: ops::StoreScope::Here,
-        },
-    )
-    .expect("the go-back still applies store-side");
+    // Zero writes — and the standing entries are named as what they now look like from here: a
+    // leftover topos will not claim. The line is re-decided from the files every run, so deleting
+    // the entry ends it.
     let after = (
         std::fs::read(&cursor).unwrap(),
         std::fs::read(&openclaw).unwrap(),
@@ -347,6 +328,13 @@ fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
     assert!(
         !String::from_utf8_lossy(&after.0).contains("topos-local"),
         "no duplicate locally-minted entry"
+    );
+    assert!(
+        crate::message::legacy_lines(&out.advisories)
+            .into_iter()
+            .any(|l| l.contains("MCP_ENTRY_LEFTOVER") && l.contains("topos-eng-linear")),
+        "{:?}",
+        out.advisories
     );
 }
 

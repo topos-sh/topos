@@ -175,16 +175,8 @@ fn write_server_folder(dir: &Path, body: &str) {
 /// record the sweep writes.
 fn record_connected(ctx: &Ctx<'_>, id: &str, name: &str, document: &str) -> crate::id::SkillId {
     let sid = crate::id::SkillId::parse(id).unwrap();
-    crate::mcp_engine::record_server(
-        ctx,
-        &sid,
-        name,
-        REVISION,
-        document.as_bytes(),
-        false,
-        false,
-    )
-    .unwrap();
+    crate::mcp_engine::record_server(ctx, &sid, name, REVISION, document.as_bytes(), false, false)
+        .unwrap();
     crate::bundle_kind::write_kind_marker(ctx, &sid, crate::bundle_kind::BundleKind::Mcp);
     sid
 }
@@ -367,8 +359,10 @@ fn a_folder_refuses_and_spells_the_line_a_machine_local_server_is() {
     assert!(detail.contains("'topos update'"), "{detail}");
     // …and the other half: what sharing this server with the team actually takes.
     assert!(
-        detail.contains("topos add --kind mcp <its registry name or the https link to its \
-                         server.json>"),
+        detail.contains(
+            "topos add --kind mcp <its registry name or the https link to its \
+                         server.json>"
+        ),
         "{detail}"
     );
     // Nothing was asked of the workspace, and nothing was written.
@@ -401,7 +395,11 @@ fn a_workspace_reference_refuses_toward_the_plain_add() {
         "{}",
         err.detail()
     );
-    assert!(err.detail().contains("no `--kind` needed"), "{}", err.detail());
+    assert!(
+        err.detail().contains("no `--kind` needed"),
+        "{}",
+        err.detail()
+    );
     assert!(lane.requests().is_empty(), "nothing was shared");
 }
 
@@ -459,11 +457,18 @@ fn the_two_shared_spellings_reach_the_workspace_verbatim() {
     .expect("the workspace shares it");
     let sent = lane.requests();
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].registry_name.as_deref(), Some("io.github.acme/weather"));
+    assert_eq!(
+        sent[0].registry_name.as_deref(),
+        Some("io.github.acme/weather")
+    );
     assert_eq!(sent[0].document_url, None);
     assert_eq!(sent[0].schema_version, topos_types::WIRE_SCHEMA_VERSION);
 
-    let link = ShareLane::sharing("s_tides", "tides", &good_server().replace("weather", "tides"));
+    let link = ShareLane::sharing(
+        "s_tides",
+        "tides",
+        &good_server().replace("weather", "tides"),
+    );
     ops::add_mcp(
         &ctx,
         &connect(&link, &publishes),
@@ -517,7 +522,10 @@ fn the_workspace_names_the_bundle_and_the_row_and_the_entries_follow() {
     );
     let cursor = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json"))
         .expect("the converge wrote the agent's config");
-    assert!(cursor.contains("https://weather.acme.example/mcp"), "{cursor}");
+    assert!(
+        cursor.contains("https://weather.acme.example/mcp"),
+        "{cursor}"
+    );
 }
 
 /// **A REFUSAL IS THE WORKSPACE'S, WORD FOR WORD.** Whether a document may be shared, whether the
@@ -590,7 +598,10 @@ fn the_workspace_a_share_lands_in_is_named_never_guessed() {
     .expect_err("two workspaces are not one");
     let detail = err.detail();
     assert!(detail.contains("more than one workspace"), "{detail}");
-    assert!(detail.contains(WS_NAME) && detail.contains("ops"), "{detail}");
+    assert!(
+        detail.contains(WS_NAME) && detail.contains("ops"),
+        "{detail}"
+    );
     assert!(detail.contains("--workspace"), "{detail}");
     assert!(lane.requests().is_empty(), "nothing was shared");
 
@@ -606,7 +617,8 @@ fn the_workspace_a_share_lands_in_is_named_never_guessed() {
     .expect("the named workspace takes it");
     assert_eq!(lane.requests().len(), 1);
     assert!(
-        rig.global_text().contains(&format!("\"{HOST}/ops/weather\"")),
+        rig.global_text()
+            .contains(&format!("\"{HOST}/ops/weather\"")),
         "the row names the workspace that was asked: {}",
         rig.global_text()
     );
@@ -766,7 +778,10 @@ fn a_hand_written_local_row_converges_its_entries_on_update() {
 
     // The document is read EVERY run: an edit to the folder reaches the config on the next sweep,
     // with nothing to re-add and no version to publish.
-    write_server_folder(&dir, &good_server().replace("weather.acme", "weather2.acme"));
+    write_server_folder(
+        &dir,
+        &good_server().replace("weather.acme", "weather2.acme"),
+    );
     ops::manifest_update(
         &ctx,
         &connect(&lane, &publishes),
@@ -967,15 +982,8 @@ fn the_version_verbs_refuse_over_a_connected_server() {
     let no_contribute = |_: &str, _: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
         unreachable!("the kind is asked before any write is built")
     };
-    let err = ops::revert(
-        &ctx,
-        &no_contribute,
-        "weather",
-        &"a".repeat(64),
-        true,
-        None,
-    )
-    .expect_err("revert refuses");
+    let err = ops::revert(&ctx, &no_contribute, "weather", &"a".repeat(64), true, None)
+        .expect_err("revert refuses");
     says_it_all(&err, "`revert` publishes an earlier version of");
 
     let err = ops::pull(
@@ -1080,8 +1088,10 @@ fn a_server_folder_at_a_skill_door_refuses_toward_the_kind_it_is() {
     assert_eq!(err.code(), "KIND_REQUIRED");
     let detail = err.detail();
     assert!(
-        detail.contains("is an MCP server, not a skill: its root holds server.json and no \
-                         SKILL.md"),
+        detail.contains(
+            "is an MCP server, not a skill: its root holds server.json and no \
+                         SKILL.md"
+        ),
         "{detail}"
     );
     assert!(detail.contains(r#"= { kind = "mcp" }"#), "{detail}");
@@ -1220,7 +1230,9 @@ fn a_server_record_cannot_be_re_linked_as_a_skill() {
 /// Record `dir` as a placement of `sid` — the one thing that makes a folder resolve to a record.
 fn claim_folder(ctx: &Ctx<'_>, sid: &crate::id::SkillId, dir: &Path) {
     let path = ctx.layout.published(sid).map;
-    let mut map = crate::doc::read_map(ctx.fs, &path).unwrap().expect("the map");
+    let mut map = crate::doc::read_map(ctx.fs, &path)
+        .unwrap()
+        .expect("the map");
     map.placements.push(dir.display().to_string());
     crate::doc::write_map(ctx.fs, &path, &map).unwrap();
 }

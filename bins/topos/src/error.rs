@@ -1196,7 +1196,6 @@ impl ClientError {
             ),
         }
     }
-
 }
 
 impl ClientError {

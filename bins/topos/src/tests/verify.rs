@@ -1326,29 +1326,45 @@ fn closed_https_url() -> String {
     format!("https://127.0.0.1:{port}/mcp")
 }
 
-/// Adopt a local MCP bundle and verify it BY NAME — the resolution, the kind gate, the document
-/// read, the one selection, the dispatch and the whole payload, through the real verb.
+/// Record a CONNECTED SERVER in this scope's store, exactly as a delivery does: the document, the
+/// catalog revision it came from, and the durable kind marker `verify` asks the classifier for.
+/// That record IS the document source — a workspace server has no folder here to read one from.
+fn record_connected(ctx: &Ctx<'_>, id: &str, name: &str, document: &str) {
+    let sid = crate::id::SkillId::parse(id).unwrap();
+    crate::mcp_engine::record_server(
+        ctx,
+        &sid,
+        name,
+        "mcpr_0123456789abcdef0123456789abcdef",
+        document.as_bytes(),
+        false,
+        false,
+    )
+    .unwrap();
+    crate::bundle_kind::write_kind_marker(ctx, &sid, crate::bundle_kind::BundleKind::Mcp);
+}
+
+/// Verify a recorded server BY NAME — the resolution, the kind gate, the document read off the
+/// record, the one selection, the dispatch and the whole payload, through the real verb.
 ///
-/// The verdict here is the not-reachable one, because the bundle gate requires `https` and no stub
-/// in this suite serves TLS. What the four verdicts themselves look like is settled above, against
+/// The verdict here is the not-reachable one, because the selection dials `https` and no stub in
+/// this suite serves TLS. What the four verdicts themselves look like is settled above, against
 /// real sockets and real child processes; what this test is for is everything AROUND the dial.
 #[test]
 fn the_verb_resolves_a_bundle_by_name_and_reports_the_live_verdict() {
     let url = closed_https_url();
     let rig = Rig::new("verb");
     rig.write_manifest();
-    let src = rig.work.0.join("weather");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join("server.json"),
-        format!(
+    let ctx = rig.ctx();
+    record_connected(
+        &ctx,
+        "s_weather",
+        "weather",
+        &format!(
             r#"{{"name":"io.github.acme/weather","description":"Conditions for a named place.",
                 "version":"1.4.0","remotes":[{{"type":"streamable-http","url":"{url}"}}]}}"#
         ),
-    )
-    .unwrap();
-    let ctx = rig.ctx();
-    ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default()).unwrap();
+    );
 
     let data = ops::verify(&ctx, "weather", ops::StoreScope::Here).unwrap();
     assert_eq!(data.name, "weather");

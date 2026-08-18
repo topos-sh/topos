@@ -1546,7 +1546,10 @@ mod tests {
         // The SECOND list: a connected server carries its document, not a version to fetch, and
         // its two flags spell absence by absence.
         assert_eq!(v["mcp_servers"][0]["skill_id"], "s_weather");
-        assert_eq!(v["mcp_servers"][0]["document"]["name"], "io.github.acme/weather");
+        assert_eq!(
+            v["mcp_servers"][0]["document"]["name"],
+            "io.github.acme/weather"
+        );
         assert_eq!(v["mcp_servers"][0]["pinned"], true);
         assert!(v["mcp_servers"][0].get("revoked").is_none());
         assert!(v["mcp_servers"][0].get("display_name").is_none());

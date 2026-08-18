@@ -2138,7 +2138,8 @@ pub(crate) fn record_server(
         let sp = ctx.layout.published(sid);
         // A catalog rename travels: the lock is what every by-name resolution reads, so a record
         // whose server was renamed answers to the new name from the next delivery on.
-        if let Some(mut lock) = crate::doc::read_doc::<topos_types::persisted::Lock>(ctx.fs, &sp.lock)?
+        if let Some(mut lock) =
+            crate::doc::read_doc::<topos_types::persisted::Lock>(ctx.fs, &sp.lock)?
             && lock.name != name
         {
             lock.name = name.to_owned();

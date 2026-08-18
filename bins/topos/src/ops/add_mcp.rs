@@ -204,10 +204,7 @@ pub(crate) fn add_mcp(
         .directory
         .add_mcp_server(&session.workspace_id, request)?;
     // The server shared it; the rest is the ordinary workspace add of the name it gave back.
-    let reference = format!(
-        "{}/{}/{}",
-        session.host, session.workspace_name, added.name
-    );
+    let reference = format!("{}/{}/{}", session.host, session.workspace_name, added.name);
     let outcome = super::reference::add_reference(
         ctx,
         connect,
@@ -227,7 +224,9 @@ pub(crate) fn add_mcp(
             ));
         }
     };
-    let reached_nobody = messages.iter().any(|m| m.code.as_deref() == Some("MCP_UNPLACEABLE"));
+    let reached_nobody = messages
+        .iter()
+        .any(|m| m.code.as_deref() == Some("MCP_UNPLACEABLE"));
     Ok(McpAdded {
         data,
         messages,
@@ -677,5 +676,4 @@ mod tests {
             );
         }
     }
-
 }

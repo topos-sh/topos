@@ -101,12 +101,12 @@ pub(crate) fn verify(
 ///
 /// # Errors
 /// A filesystem failure reading the folder.
-fn local_document(
-    ctx: &Ctx<'_>,
-    placements: &[String],
-) -> Result<Option<Vec<u8>>, ClientError> {
+fn local_document(ctx: &Ctx<'_>, placements: &[String]) -> Result<Option<Vec<u8>>, ClientError> {
     for dir in placements {
-        if let Some(bytes) = ctx.fs.read_opt(&std::path::Path::new(dir).join("server.json"))? {
+        if let Some(bytes) = ctx
+            .fs
+            .read_opt(&std::path::Path::new(dir).join("server.json"))?
+        {
             return Ok(Some(bytes));
         }
     }

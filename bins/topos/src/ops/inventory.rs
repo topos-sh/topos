@@ -487,7 +487,9 @@ fn scope_rows(
         // The row's pin, once — and NONE for a connected server, whatever the row spells. What
         // such a row receives is the catalog's resolution; a hash written on it names nothing, so
         // it is read as absent everywhere at once rather than in each reader's own way.
-        let row_pin = row.pin().filter(|_| row_kind(cache, &row.shape, kind.as_deref()) != Some(BundleKind::Mcp));
+        let row_pin = row
+            .pin()
+            .filter(|_| row_kind(cache, &row.shape, kind.as_deref()) != Some(BundleKind::Mcp));
         let applied = match &row.shape {
             KeyShape::WorkspaceBundle {
                 host,
@@ -507,7 +509,9 @@ fn scope_rows(
                     // the newer version", advice the next `update` correctly refuses to take.
                     // A connected server has no pin to read (see `PlanRow::pin`) — the catalog
                     // resolves what it receives, so the served revision is always the target.
-                    let target = row_pin.clone().unwrap_or_else(|| hit.ds.served_version.clone());
+                    let target = row_pin
+                        .clone()
+                        .unwrap_or_else(|| hit.ds.served_version.clone());
                     applied_for_id(ctx, layout, hit.skill_id, &target)
                 }
                 None => {
@@ -1530,7 +1534,12 @@ fn row_kind(cache: &SyncStatus, shape: &KeyShape, declared: Option<&str>) -> Opt
     else {
         return None;
     };
-    BundleKind::of_tag(cache_lookup(cache, host, workspace, bundle)?.ds.kind.as_deref())
+    BundleKind::of_tag(
+        cache_lookup(cache, host, workspace, bundle)?
+            .ds
+            .kind
+            .as_deref(),
+    )
 }
 
 /// Whether the workspace's last delivery ASSIGNED this bundle to the person (a feed row — a

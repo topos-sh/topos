@@ -3732,11 +3732,10 @@ mod tests {
             }))
         }
         fn skills_index(&self, w: &str) -> Result<WireSkillIndex, ClientError> {
-            Ok(self
-                .skills
-                .get(w)
-                .cloned()
-                .unwrap_or(WireSkillIndex { skills: Vec::new(), mcp_servers: Vec::new() }))
+            Ok(self.skills.get(w).cloned().unwrap_or(WireSkillIndex {
+                skills: Vec::new(),
+                mcp_servers: Vec::new(),
+            }))
         }
         fn proposals_index(&self, _w: &str) -> Result<WireProposalIndex, ClientError> {
             unreachable!()

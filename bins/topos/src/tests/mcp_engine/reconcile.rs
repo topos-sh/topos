@@ -96,8 +96,7 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     let record = server_record(&rig.fs, &rig.layout(), "s_linear").expect("the record");
     assert_eq!(record.revision_id, s.revision_id);
     assert_eq!(
-        record.document["remotes"][0]["url"],
-        "https://mcp.example/linear",
+        record.document["remotes"][0]["url"], "https://mcp.example/linear",
         "{record:?}"
     );
     let sid = crate::id::SkillId::parse("s_linear").unwrap();

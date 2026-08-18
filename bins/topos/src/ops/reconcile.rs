@@ -2862,9 +2862,7 @@ fn reconcile_feed<'a>(
             // the exchange worked — so it never joins the count the summary calls failed. Only an
             // empty SERVE says it: bundles that arrived and were skipped here (an `"off"` row, an
             // explicit claim, a target filter) are a local choice, not an empty workspace.
-            if served.is_empty()
-                && servers.is_empty()
-                && sweep.empty_feeds.insert(address.clone())
+            if served.is_empty() && servers.is_empty() && sweep.empty_feeds.insert(address.clone())
             {
                 sweep.disclosures.push(nothing_assigned_line(&address));
             }

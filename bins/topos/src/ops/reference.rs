@@ -1079,10 +1079,7 @@ fn finish_workspace(
 /// unknown one refused) before any row was written, so a bundle that got this far names a kind
 /// this build delivers.
 fn mcp_bundle(resolved: &Resolved) -> bool {
-    resolved
-        .entry
-        .as_deref()
-        .is_some_and(|e| e.kind.is_mcp())
+    resolved.entry.as_deref().is_some_and(|e| e.kind.is_mcp())
 }
 
 /// The MACHINE folder a `-g` add just landed its own copy in, when a checkout at or above this
@@ -1160,17 +1157,21 @@ fn resolve_workspace(
                     })
                 })
                 .or_else(|| {
-                    catalog.mcp_servers.iter().find(|e| &e.name == bundle).map(|e| {
-                        Ok(CatalogBundle {
-                            skill_id: e.skill_id.clone(),
-                            name: e.name.clone(),
-                            kind: add_kind(&e.kind, &e.name)?,
-                            version_id: e.revision_id.clone(),
-                            // A connected server holds no files, so there is no consent digest to
-                            // state — and stating a zero one would look like an answer.
-                            bundle_digest: None,
+                    catalog
+                        .mcp_servers
+                        .iter()
+                        .find(|e| &e.name == bundle)
+                        .map(|e| {
+                            Ok(CatalogBundle {
+                                skill_id: e.skill_id.clone(),
+                                name: e.name.clone(),
+                                kind: add_kind(&e.kind, &e.name)?,
+                                version_id: e.revision_id.clone(),
+                                // A connected server holds no files, so there is no consent digest to
+                                // state — and stating a zero one would look like an answer.
+                                bundle_digest: None,
+                            })
                         })
-                    })
                 });
             let entry = found.ok_or_else(|| {
                 ClientError::NotAvailable(format!(

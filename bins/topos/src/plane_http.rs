@@ -1614,7 +1614,10 @@ impl DirectorySource for UreqDeviceClient {
         let value = serde_json::to_value(&body)
             .map_err(|e| ClientError::Corrupt(format!("mcp server body: {e}")))?;
         let credential = self.credential_for(workspace_id)?;
-        let url = format!("{}/v1/workspaces/{}/mcp-servers", self.base_url, workspace_id);
+        let url = format!(
+            "{}/v1/workspaces/{}/mcp-servers",
+            self.base_url, workspace_id
+        );
         let (status, bytes) = self.post_json_auth(&url, credential, &value, "add mcp server")?;
         map_mcp_add_envelope(&self.host(), status, &bytes)
     }
@@ -1651,9 +1654,9 @@ fn map_mcp_add_envelope(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let code = error.map_or_else(|| "DENIED".to_owned(), |e| e.code);
-        return Err(ClientError::InvalidArgument(
-            said.unwrap_or_else(|| format!("the server refused this server ({code})")),
-        ));
+        return Err(ClientError::InvalidArgument(said.unwrap_or_else(|| {
+            format!("the server refused this server ({code})")
+        })));
     }
     serde_json::from_value(env.data)
         .map_err(|e| ClientError::WireInvalid(format!("mcp server data is malformed: {e}")))
