@@ -7,7 +7,8 @@
  * of words, and no line here is ever a claim about whether you have a version.
  */
 
-/** The four things one probe can conclude. Stored verbatim in `web.mcp_probe.outcome`. */
+/** The four things one probe can conclude. Stored verbatim on the revision it is about
+ *  (`web.mcp_server_revision.probe_outcome`). */
 export type McpProbeOutcome =
   | "responding"
   | "sign_in_required"
@@ -15,8 +16,8 @@ export type McpProbeOutcome =
   | "not_responding";
 
 /**
- * The two things `not_verifiable` can MEAN, stored verbatim in `web.mcp_probe.detail` and read
- * back by the line below. One word for both was a wrong claim half the time: a public hostname
+ * The two things `not_verifiable` can MEAN, filed with the outcome and read back by the line
+ * below. One word for both was a wrong claim half the time: a public hostname
  * with a typo in it, or one that only resolves inside somebody else's network, was reported as a
  * private address — and a reader sent looking for a firewall finds nothing to fix.
  */
