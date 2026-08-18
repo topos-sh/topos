@@ -120,6 +120,10 @@ const SCHEMAS: &[(&str, &str)] = &[
         include_str!("../../../contracts/schemas/persisted-lock.schema.json"),
     ),
     (
+        "persisted-mcp-server",
+        include_str!("../../../contracts/schemas/persisted-mcp-server.schema.json"),
+    ),
+    (
         "persisted-map",
         include_str!("../../../contracts/schemas/persisted-map.schema.json"),
     ),

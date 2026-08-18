@@ -64,6 +64,15 @@ pub(crate) fn verify(
     name: &str,
     scope: StoreScope,
 ) -> Result<VerifyData, ClientError> {
+    // A server only THIS MACHINE runs is a line in a recipe and nothing else — no version was ever
+    // received for it and no record files it — so the recipe is where its name resolves. Asked
+    // FIRST, because a row is the whole record of such a server and the store has nothing to say
+    // about one; a shared server has no such row and falls through to the ordinary resolution.
+    if let Some(bytes) = local_row_server(ctx, name, scope)? {
+        let doc = mcp_render::parse_server_json(&bytes)
+            .map_err(|e| ClientError::Corrupt(format!("{name}: {e}")))?;
+        return Ok(data_for(name, &check(&doc)?));
+    }
     let (layout, sid, lock) = super::resolve_skill_in_scope(ctx, name, None, scope)?;
     let sctx = super::pull::ctx_with_layout(ctx, &layout);
     // The kind is asked of the ONE classification chain; an indeterminate record over an MCP verb
@@ -78,36 +87,70 @@ pub(crate) fn verify(
     }
     // A local row's folder holds its own document; a workspace server's is the record this scope
     // was last given. Either way there is one document, read from where that kind keeps it.
-    let bytes = match crate::mcp_engine::recorded_server(&sctx, &sid)? {
-        Some(recorded) => recorded.document,
-        None => match local_document(&sctx, &placements)? {
-            Some(bytes) => bytes,
-            None => {
-                return Err(ClientError::InvalidArgument(format!(
-                    "'{}' has no server document on this machine yet — run `topos update` first",
-                    lock.name
-                )));
-            }
-        },
+    let Some(recorded) = crate::mcp_engine::recorded_server(&sctx, &sid)? else {
+        return Err(ClientError::InvalidArgument(format!(
+            "'{}' has no server document on this machine yet — run `topos update` first",
+            lock.name
+        )));
     };
+    let bytes = recorded.document;
     let doc = mcp_render::parse_server_json(&bytes)
         .map_err(|e| ClientError::Corrupt(format!("{}: {e}", lock.name)))?;
     Ok(data_for(&lock.name, &check(&doc)?))
 }
 
-/// A LOCAL row's document: the `server.json` at the root of the folder its record was adopted at.
-/// `None` when no recorded folder holds one, which is the same "nothing to verify" the caller
-/// answers for a workspace server with no record.
+/// A LOCAL row's document: the `server.json` at the root of the folder a `kind = "mcp"` row in
+/// this invocation's recipe points at. `None` when no such row answers to `name`.
+///
+/// The recipe is read the way the sweep reads it — the machine's own file, and (bare) the project
+/// file covering this folder — so the server this verifies is the one this scope's next `update`
+/// would place. A row whose folder is gone, or holds no `server.json`, answers `None` and falls
+/// through: the store's own refusal for an unknown name is the honest one.
 ///
 /// # Errors
-/// A filesystem failure reading the folder.
-fn local_document(ctx: &Ctx<'_>, placements: &[String]) -> Result<Option<Vec<u8>>, ClientError> {
-    for dir in placements {
-        if let Some(bytes) = ctx
-            .fs
-            .read_opt(&std::path::Path::new(dir).join("server.json"))?
-        {
-            return Ok(Some(bytes));
+/// A recipe the grammar refuses, or a filesystem failure reading the folder.
+fn local_row_server(
+    ctx: &Ctx<'_>,
+    name: &str,
+    scope: StoreScope,
+) -> Result<Option<Vec<u8>>, ClientError> {
+    let mut plans = vec![(
+        ctx.layout.home().to_path_buf(),
+        crate::manifest::scopes::person_plan(ctx.fs, &ctx.layout)?,
+    )];
+    if scope == StoreScope::Here
+        && let Some(cwd) = ctx.roots.as_ref().and_then(|r| r.cwd.clone())
+        && let Some((dir, plan)) = crate::manifest::scopes::nearest_project_plan(
+            ctx.fs,
+            &cwd,
+            ctx.roots.as_ref().map(|r| r.home.as_path()),
+        )?
+    {
+        plans.insert(0, (dir, plan));
+    }
+    for (base, plan) in plans {
+        for row in &plan.things {
+            let crate::manifest::keys::KeyShape::LocalPath { raw } = &row.shape else {
+                continue;
+            };
+            if row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Mcp)
+                || row.display_name() != name
+            {
+                continue;
+            }
+            let dir = if let Some(rest) = raw.strip_prefix("~/") {
+                ctx.roots.as_ref().map_or_else(
+                    || std::path::PathBuf::from(raw),
+                    |r| r.home.join(rest),
+                )
+            } else if std::path::Path::new(raw).is_absolute() {
+                std::path::PathBuf::from(raw)
+            } else {
+                base.join(raw.trim_start_matches("./"))
+            };
+            if let Some(bytes) = ctx.fs.read_opt(&dir.join("server.json"))? {
+                return Ok(Some(bytes));
+            }
         }
     }
     Ok(None)

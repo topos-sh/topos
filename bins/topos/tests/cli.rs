@@ -1543,19 +1543,18 @@ fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
     )
     .unwrap();
 
-    let out = hermetic(&[
-        "--json",
-        "add",
-        "-g",
-        "--kind",
-        "mcp",
-        bundle.to_str().unwrap(),
-    ]);
-    assert!(
-        out.status.success(),
-        "the server bundle adopts: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    // A server only THIS machine runs is a line in the machine's own recipe — nothing is shared,
+    // so there is nobody to ask and no record to mint, and `verify` reads the row the same way
+    // the next `update` would.
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("topos.toml"),
+        format!(
+            "[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n",
+            bundle.to_str().unwrap()
+        ),
+    )
+    .unwrap();
 
     let out = hermetic(&["--json", "verify", "weather"]);
     assert_eq!(
