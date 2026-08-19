@@ -214,15 +214,16 @@ pub(crate) enum Command {
     /// catalogs of the workspaces you are connected to — when only a workspace has it, that is
     /// what you get. A GitHub source shows what it found and waits for `--yes`, every time — a
     /// skill is instructions your agent will follow, and that listing is there to be read.
-    /// `add topos` restores the built-in topos skill. `--kind mcp` says the source is an MCP
-    /// SERVER instead — a folder whose root holds a `server.json` — and your agents get it as a
-    /// tool endpoint in their own MCP config rather than as a skill folder; it applies
-    /// immediately, and the receipt leads with the undo, which names the folder you added
-    /// (`topos remove -g <folder>` for a machine-wide add). A folder that is
-    /// plainly a server bundle refuses without the flag rather than landing as a skill, and
-    /// `--kind skill` on one adopts it as a skill anyway. Anything your workspace publishes needs
-    /// no flag at all — the catalog already records what each bundle is. By default a skill
-    /// reaches every agent on the machine;
+    /// `add topos` restores the built-in topos skill. `--kind mcp` SHARES AN MCP SERVER with your
+    /// workspace and gets it here in the same command: the source is its registry name
+    /// (`io.github.acme/weather`) or an https link to its `server.json`, and the workspace reads
+    /// the document, rules on it, and answers with the name it shares the server as — your agents
+    /// then get it as a tool endpoint in their own MCP config rather than as a skill folder. A
+    /// server your workspace already shares needs no flag at all. A server only THIS machine runs
+    /// is a line you write in your own `topos.toml` (`"./weather" = { kind = "mcp" }`), so a
+    /// folder is not something `--kind mcp` takes; a folder that is plainly a server bundle
+    /// refuses on the plain `add` rather than landing as a skill, and `--kind skill` on one adopts
+    /// it as a skill anyway. By default a skill reaches every agent on the machine;
     /// `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>`
     /// (repeatable) installs into an exact folder — together they freeze the row to exactly
     /// those destinations, recorded in the file so updates keep landing there. For an MCP
