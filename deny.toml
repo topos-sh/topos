@@ -10,12 +10,10 @@
 version = 2
 yanked = "deny"
 ignore = [
-    # RUSTSEC-2023-0071 ("Marvin Attack" — RSA private-key decryption timing; no fixed release exists).
     # `rsa` sits in Cargo.lock ONLY as sqlx-mysql's dep (sqlx's macro machinery resolves every backend
     # into the lock; no mysql feature is enabled, so the crate is never compiled here). The advisory's
     # timing channel requires RSA private-key decryption, and no RSA private key exists anywhere in
     # this workspace (all signing here is Ed25519).
-    { id = "RUSTSEC-2023-0071", reason = "rsa is lock-only via sqlx-mysql (never compiled); no RSA private-key operations in the workspace" },
 ]
 
 [licenses]
