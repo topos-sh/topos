@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor, SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
@@ -815,11 +815,12 @@ async function acceptPrecedenceRefusal(
  * refused unless the caller passes `override` — the deliberate staff act that says "yes, move it
  * anyway", recorded on the audit line so the crossing is never silent.
  *
- * THE SERVER'S OTHER CANDIDATES leave with the same act. Once a person has answered this server's
- * proposal, the versions that were queued behind it — the older ones the sweep filed on earlier
- * runs — are not still awaiting a decision, so they move to `superseded` in the same transaction: a
- * terminal state that is neither published nor a candidate. Nobody rejected them, so they are not
- * `rejected`; they were overtaken, and the accept's own audit line counts them.
+ * THE OLDER CANDIDATES leave with the same act. Once a person has answered this server's proposal,
+ * the versions queued BEHIND it — the ones the sweep filed on earlier runs, ordered by `seq` — are
+ * not still awaiting a decision, so they move to `superseded` in the same transaction: a terminal
+ * state that is neither published nor a candidate. Nobody rejected them, so they are not `rejected`;
+ * they were overtaken, and the accept's own audit line counts them. A NEWER candidate — one the
+ * sweep landed after this one was queued — is a live proposal and is left untouched.
  */
 export async function acceptMcpRevision(
   staff: McpCatalogStaff,
@@ -877,10 +878,14 @@ export async function acceptMcpRevision(
           ...(found.server.status === "candidate" ? { status: "active" as const } : {}),
         })
         .where(eq(mcpServer.id, found.server.id));
-      // The proposals queued behind this one leave the queue: a person answered this server, so the
-      // OTHER candidates on it are `superseded` — overtaken, not rejected, and no longer waiting.
-      // `decided_at` stays null: that column is the mark of a decision ABOUT a revision (a reject),
-      // and being overtaken is not one; who accepted, and when, is on the audit line below.
+      // The proposals queued BEHIND this one leave the queue: a person answered this server, so the
+      // OLDER candidates on it are `superseded` — overtaken, not rejected, and no longer waiting.
+      // "Behind" is by `seq` (monotonic per server under this lock), so ONLY candidates filed before
+      // the accepted one go: a NEWER candidate the sweep landed while this was being reviewed is a
+      // live proposal that must survive — superseding it would lose it for good, since the sweep
+      // will not re-file a registry version it already holds. `decided_at` stays null: that column
+      // marks a decision ABOUT a revision (a reject), and being overtaken is not one; who accepted,
+      // and when, is on the audit line below.
       const superseded = await tx
         .update(mcpServerRevision)
         .set({ status: "superseded" })
@@ -888,7 +893,7 @@ export async function acceptMcpRevision(
           and(
             eq(mcpServerRevision.serverId, found.server.id),
             eq(mcpServerRevision.status, "candidate"),
-            ne(mcpServerRevision.id, revisionId),
+            lt(mcpServerRevision.seq, found.revision.seq),
           ),
         )
         .returning({ id: mcpServerRevision.id });

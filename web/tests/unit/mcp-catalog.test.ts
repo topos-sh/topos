@@ -659,6 +659,46 @@ describe("accepting one candidate clears the server's other candidates", () => {
     expect(audit[0]?.details.superseded).toBe(2);
   });
 
+  it("leaves a candidate NEWER than the accepted one untouched — only older ones are superseded", async () => {
+    const serverId = await seedGlobalServer("mcps_super_race", "com.example/super-race", {
+      status: "candidate",
+    });
+    // v1 (oldest), v2, then v3 — as though the sweep landed v3 while v2 was under review.
+    const v1 = await addRevision(serverId, {
+      document: serverDocument("com.example/super-race", "1.0.1"),
+      source: "registry",
+      publish: false,
+    });
+    const v2 = await addRevision(serverId, {
+      document: serverDocument("com.example/super-race", "1.0.2"),
+      source: "registry",
+      publish: false,
+    });
+    const v3 = await addRevision(serverId, {
+      document: serverDocument("com.example/super-race", "1.0.3"),
+      source: "registry",
+      publish: false,
+    });
+    if (v1.refusal !== null || v2.refusal !== null || v3.refusal !== null) {
+      throw new Error("the fixture revisions did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    // Accept the MIDDLE one — a stale accept, or a deliberate pick of a version that is not newest.
+    const accepted = await acceptMcpRevision(staff, v2.revisionId);
+    expect(accepted.refusal, accepted.refusal?.message).toBeNull();
+    expect(await revisionStatus(v2.revisionId)).toBe("published");
+    expect(await currentRevisionOf(serverId)).toBe(v2.revisionId);
+    // The older one is superseded; the NEWER one stays a live candidate — losing it would be
+    // permanent, since the sweep never re-files a registry version it already holds.
+    expect(await revisionStatus(v1.revisionId)).toBe("superseded");
+    expect(await revisionStatus(v3.revisionId)).toBe("candidate");
+    const audit = await db.q<{ details: { superseded?: number } }>(
+      `SELECT details FROM web.audit_event WHERE kind = 'mcp_revision_published' AND subject = $1`,
+      [v2.revisionId],
+    );
+    expect(audit[0]?.details.superseded).toBe(1);
+  });
+
   it("counts nothing when the accepted revision was the only candidate", async () => {
     const serverId = await seedGlobalServer("mcps_super_solo", "com.example/super-solo", {
       status: "candidate",
