@@ -1186,6 +1186,91 @@ export async function publishedCatalogVersions(registryName: string): Promise<Mc
   return registryRowsOf(rows.rows as Record<string, unknown>[]);
 }
 
+// ── The tracked set: what an upstream sweep is allowed to ask about ──────────────────────────
+
+/** One version of a tracked server, as the sweep compares it against upstream's listing. */
+export interface McpTrackedVersion {
+  revisionId: string;
+  upstreamVersion: string;
+  source: string;
+  status: string;
+  /**
+   * The stored document, but ONLY for a revision that came FROM upstream. A seed row and a staff
+   * correction are this install's own statements about a server — comparing them with upstream's
+   * document would report a difference on every sweep and mean nothing by it — so they arrive
+   * null, which says "there is nothing here for you to compare".
+   */
+  document: Record<string, unknown> | null;
+}
+
+/** One global catalog entry a sweep may ask upstream about, with everything it already holds. */
+export interface McpTrackedServer {
+  serverId: string;
+  registryName: string;
+  status: string;
+  /** Every version this catalog holds for the server, newest revision first. */
+  held: McpTrackedVersion[];
+}
+
+/**
+ * THE TRACKED SET — the global catalog rows that exist upstream, with the versions already held.
+ *
+ * This is the whole input to an upstream sweep, and its shape is the reason a sweep can never
+ * wander: a sweep asks about THESE names and no others, because the tracked set IS the catalog
+ * rather than a query over somebody else's registry. A workspace's private server is not here (it
+ * is nobody's upstream), and neither is a global row with no `registry_name` — a row that exists
+ * only here has no upstream to be swept from.
+ *
+ * A DELISTED row is not here either. Delisting is the deliberate act of taking a server off offer,
+ * and a sweep that kept filing new candidates against one would be re-opening a decision somebody
+ * already made.
+ *
+ * `held` carries every version, whatever its source, because "is this version new to us" is a
+ * question about the CATALOG, not about upstream: a version this install already seeded is a
+ * version it holds, and pulling upstream's own document for it would be offering to replace an
+ * editorial row with a copy nobody asked for.
+ */
+export async function trackedCatalogServers(): Promise<McpTrackedServer[]> {
+  const rows = await getDb().execute(sql`
+    SELECT ms.id AS server_id, ms.registry_name, ms.status,
+           r.id AS revision_id, r.upstream_version, r.source, r.status AS revision_status, r.seq,
+           CASE WHEN r.source = 'registry' THEN r.document END AS document
+    FROM web.mcp_server ms
+    LEFT JOIN web.mcp_server_revision r ON r.server_id = ms.id
+    WHERE ms.workspace_id IS NULL
+      AND ms.registry_name IS NOT NULL
+      AND ms.status <> 'delisted'
+    ORDER BY ms.registry_name, r.seq DESC
+  `);
+  const byServer = new Map<string, McpTrackedServer>();
+  for (const raw of rows.rows as Record<string, unknown>[]) {
+    const serverId = raw.server_id as string;
+    let entry = byServer.get(serverId);
+    if (entry === undefined) {
+      entry = {
+        serverId,
+        registryName: raw.registry_name as string,
+        status: raw.status as string,
+        held: [],
+      };
+      byServer.set(serverId, entry);
+    }
+    // The LEFT JOIN answers one all-null revision for a server that has none yet — a row pulled in
+    // whose first candidate has not landed. That is a tracked server with an empty history, not a
+    // history with a hole in it.
+    if (raw.revision_id !== null && raw.revision_id !== undefined) {
+      entry.held.push({
+        revisionId: raw.revision_id as string,
+        upstreamVersion: raw.upstream_version as string,
+        source: raw.source as string,
+        status: raw.revision_status as string,
+        document: (raw.document as Record<string, unknown> | null) ?? null,
+      });
+    }
+  }
+  return [...byServer.values()];
+}
+
 /**
  * WHAT ONE WORKSPACE RUNS — its live connections, each resolved exactly as delivery resolves it
  * (a pin, else the server's current), plus its own private servers.

@@ -913,3 +913,77 @@ describe("the list a workspace may connect from", () => {
     expect(names).not.toContain("com.example/candidate");
   });
 });
+
+describe("the tracked set an upstream sweep reads", () => {
+  it("is the global rows that exist upstream, with everything already held", async () => {
+    const { trackedCatalogServers } = await catalog();
+    await seedGlobalServer("mcps_tracked", "com.example/tracked");
+    const first = await addRevision("mcps_tracked", {
+      document: serverDocument("com.example/tracked", "1.0.0"),
+      source: "registry",
+      publish: true,
+    });
+    const second = await addRevision("mcps_tracked", {
+      document: serverDocument("com.example/tracked", "2.0.0"),
+      source: "registry",
+      publish: false,
+    });
+    if (first.refusal !== null || second.refusal !== null) {
+      throw new Error("the fixture revisions did not land");
+    }
+
+    const tracked = await trackedCatalogServers();
+    const entry = tracked.find((row) => row.registryName === "com.example/tracked");
+    expect(entry?.serverId).toBe("mcps_tracked");
+    // Newest revision first, both versions present whatever their status — a candidate awaiting a
+    // decision is still a version this catalog holds, so a sweep must not file it again.
+    expect(entry?.held.map((v) => v.upstreamVersion)).toEqual(["2.0.0", "1.0.0"]);
+    expect(entry?.held[0]?.status).toBe("candidate");
+    // What came from upstream carries its document, so a sweep can see whether upstream changed it.
+    expect((entry?.held[0]?.document as { version?: string } | null)?.version).toBe("2.0.0");
+  });
+
+  it("carries no document for a version this install wrote itself", async () => {
+    const { trackedCatalogServers } = await catalog();
+    await seedGlobalServer("mcps_ours", "com.example/ours");
+    await addRevision("mcps_ours", {
+      document: serverDocument("com.example/ours", "1.0.0"),
+      source: "seed",
+      publish: true,
+    });
+    const entry = (await trackedCatalogServers()).find(
+      (row) => row.registryName === "com.example/ours",
+    );
+    // A seed row is this install's own editorial statement; upstream never said it, so there is
+    // nothing for a sweep to compare and the column says so.
+    expect(entry?.held[0]?.source).toBe("seed");
+    expect(entry?.held[0]?.document).toBeNull();
+  });
+
+  it("holds a pulled-in row with no revisions yet, as an empty history", async () => {
+    const { trackedCatalogServers } = await catalog();
+    await seedGlobalServer("mcps_fresh", "com.example/fresh", { status: "candidate" });
+    const entry = (await trackedCatalogServers()).find(
+      (row) => row.registryName === "com.example/fresh",
+    );
+    expect(entry?.status).toBe("candidate");
+    expect(entry?.held).toEqual([]);
+  });
+
+  it("leaves out private servers, nameless rows and anything delisted", async () => {
+    const { trackedCatalogServers } = await catalog();
+    await seedGlobalServer("mcps_gone", "com.example/withdrawn", { status: "delisted" });
+    await db.q(
+      `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
+       VALUES ('mcps_nameless', NULL, 'Nameless', 'none', 'active')`,
+    );
+    const names = (await trackedCatalogServers()).map((row) => row.registryName);
+    // Delisting is a decision; a sweep that kept filing candidates would re-open it.
+    expect(names).not.toContain("com.example/withdrawn");
+    // A private server is nobody's upstream, and a row with no name has none to be swept from.
+    expect(names).not.toContain("com.example/theirs");
+    expect(names).not.toContain(null);
+    // The seeded catalog IS the tracked set — it is what this install already stands behind.
+    expect(names).toContain("com.github/mcp");
+  });
+});
