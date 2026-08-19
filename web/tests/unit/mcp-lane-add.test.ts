@@ -71,7 +71,13 @@ async function post(
       authorization: `Bearer ${bearer}`,
       "content-type": "application/json",
     }),
-    body: JSON.stringify(body),
+    // Every caller states the contract version it speaks; a test that omits it is testing the
+    // refusal, and one below does exactly that.
+    body: JSON.stringify(
+      typeof body === "object" && body !== null && !("schema_version" in body)
+        ? { schema_version: 1, ...body }
+        : body,
+    ),
   });
   let response: Response;
   try {
@@ -302,6 +308,24 @@ describe("the body, and the misses", () => {
 
   it("naming NEITHER is a bad request", async () => {
     expect((await post("sn_owner", {})).status).toBe(400);
+  });
+
+  it("a body that states no contract version is a bad request", async () => {
+    // The version is what makes a future incompatible body refusable; a caller that does not
+    // state this one is not speaking it.
+    const answer = await post("sn_owner", {
+      schema_version: 2,
+      registry_name: "io.github.acme/offered",
+    });
+    expect(answer.status).toBe(400);
+    expect(
+      (
+        await post("sn_owner", {
+          registry_name: "io.github.acme/offered",
+          schema_version: undefined,
+        })
+      ).status,
+    ).toBe(400);
   });
 
   it("a GET on the served path is the uniform 404, byte-identical to a miss", async () => {

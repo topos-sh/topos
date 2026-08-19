@@ -197,6 +197,13 @@ pub(crate) fn add_mcp(
             )));
         }
     };
+    // REFUSAL-FIRST, and the refusals that are purely LOCAL come first of all: which file this
+    // row would land in, and whether the `-a`/`--dest` selection names config files this scope
+    // can edit. Both are answered without asking anybody. Asking the workspace first would leave
+    // a server shared with the whole team by a command that then failed and recorded nothing —
+    // a side effect nobody asked for and no receipt names.
+    let scope = medit::add_scope(ctx, global)?;
+    selection.mcp_entries(scope.target.scope)?;
     let session = pick_session(ctx, workspace)?;
     let added = (connect)(&session)
         .directory

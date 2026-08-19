@@ -62,7 +62,16 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (typeof parsed !== "object" || parsed === null) {
     return badRequest("malformed mcp server body");
   }
-  const body = parsed as { registry_name?: unknown; document_url?: unknown };
+  const body = parsed as {
+    schema_version?: unknown;
+    registry_name?: unknown;
+    document_url?: unknown;
+  };
+  // The body is a VERSIONED contract, and the version is what makes a future incompatible one
+  // refusable. A caller that does not state this one is not speaking it.
+  if (body.schema_version !== 1) {
+    return badRequest("malformed mcp server body: schema_version");
+  }
   const registryName = body.registry_name;
   const documentUrl = body.document_url;
   if (registryName !== undefined && typeof registryName !== "string") {
@@ -95,6 +104,17 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
         to: NO_CHANNEL,
       });
       if (connected.refusal !== null) {
+        // TWO CALLERS, ONE CONNECTION. Both read no standing bundle, one insert wins, and the
+        // loser is told the connection already exists — which is the answer it asked for, so it
+        // gets the bundle rather than a refusal. The unique index is the arbiter either way.
+        const raced = await connectedMcpBundle(actor, registryName);
+        if (raced !== null) {
+          return okDataEnvelope("mcp", {
+            skill_id: raced.bundleId,
+            name: raced.name,
+            created: false,
+          });
+        }
         return deniedCodeEnvelope("mcp", connected.refusal.code, connected.refusal.message);
       }
       return okDataEnvelope("mcp", {
