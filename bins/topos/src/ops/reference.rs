@@ -280,7 +280,12 @@ fn add_workspace(
         },
         None => set_data(&resolved.name),
     };
-    let pin = parsed.pin.clone();
+    // A CONNECTED SERVER has no version a row could pin: what it receives is the workspace's own
+    // resolution, and a commit hash written on such a row names nothing on either side of the
+    // wire. The reconcile reads one as ABSENT, silently — so the row this add writes carries none
+    // either, and the receipt states the revision the bundle actually gets rather than a pin
+    // nothing would ever honour.
+    let pin = parsed.pin.clone().filter(|_| !mcp_kind);
     let value = match (&pin, dest_entries.is_empty()) {
         (Some(p), true) => EntryValue::Pin(p.clone()),
         (None, true) => EntryValue::Star,
