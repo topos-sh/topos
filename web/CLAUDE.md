@@ -161,6 +161,12 @@ caller.
   A boot backfill (`app/lib/db/mcp-backfill.server.ts`) connects every MCP bundle written before
   the catalog existed — the name lives in the vault's bytes, so it runs where bytes are readable,
   before the first request; what it cannot read is NAMED in the log, never skipped silently.
+  **The lane a MACHINE shares one through** (`api.v1.mcp-servers.ts`): a registry name or an https
+  link goes over the wire and every ruling is made here, so the terminal and the form answer alike.
+  A name the catalog carries is a CONNECTION (any member; asking twice answers with the bundle
+  that already stands); anything else fetches the document over the guarded transport and writes
+  the workspace's OWN server down, which is an owner's act. Either way the connection rests on NO
+  CHANNEL, the same ruling the form keeps.
 - **Signed-in:** dashboard (skills and MCP servers as separate sections) · bundle browser +
   lifecycle ceremonies (a skill's tabs: Current · Proposals · History · owner Settings; a server's
   face carries the server, what this workspace receives, and its revisions instead, and mounts
