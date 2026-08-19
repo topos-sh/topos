@@ -81,3 +81,10 @@ export function appEnv(): Record<string, string> {
     TOPOS_MAIL_SMTP_FROM: "Topos E2E <topos@e2e.test>",
   };
 }
+
+/**
+ * The product token an emulated device sends on the CLI lane. Mirrors MIN_CLI_VERSION in
+ * app/lib/api/compat.server.ts (not imported: specs must not load server modules); when the
+ * floor moves, lane calls refuse with the 426 that names the new floor, and this is the line.
+ */
+export const CLI_USER_AGENT = "topos/0.1.42";

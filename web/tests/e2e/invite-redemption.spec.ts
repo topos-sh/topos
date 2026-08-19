@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { expect, type Page, test } from "@playwright/test";
-import { MEMBER_EMAIL } from "./env";
+import { CLI_USER_AGENT, MEMBER_EMAIL } from "./env";
 import {
   adminQuery,
   ensureAccount,
@@ -342,7 +342,7 @@ test("a skill-hinted invitation frames, subscribes, and lands on the skill", asy
   );
 
   const resp = await page.request.post(`/api/v1/workspaces/${ws.id}/invitations`, {
-    headers: { Authorization: `Bearer ${credential}` },
+    headers: { Authorization: `Bearer ${credential}`, "user-agent": CLI_USER_AGENT },
     data: { emails: [email], skill: skillName },
   });
   expect(resp.ok(), `skill-hinted invite failed: ${resp.status()} ${await resp.text()}`).toBe(true);

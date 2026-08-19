@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { BASE_URL, MEMBER_EMAIL, WORKSPACE_ADDRESS } from "./env";
+import { BASE_URL, CLI_USER_AGENT, MEMBER_EMAIL, WORKSPACE_ADDRESS } from "./env";
 import { adminQuery, latestMail, theWorkspace } from "./seed";
 import { signIn } from "./sign-in";
 
@@ -31,6 +31,7 @@ async function startLoginFlow(
   opts: { redirect?: "loopback" } = {},
 ): Promise<LoginFlowStart> {
   const response = await page.request.post("/api/v1/login/authorize", {
+    headers: { "user-agent": CLI_USER_AGENT },
     data: {
       requested_name: requestedName,
       preselect: WORKSPACE_ADDRESS,
@@ -53,6 +54,7 @@ async function pollLoginFlow(
   workspace?: { name: string };
 }> {
   const response = await page.request.post("/api/v1/login/token", {
+    headers: { "user-agent": CLI_USER_AGENT },
     data: { device_code: deviceCode },
   });
   expect(response.ok()).toBe(true);

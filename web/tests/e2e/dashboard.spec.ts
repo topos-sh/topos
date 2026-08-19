@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import { SKILL_MD_V1 } from "../fixtures/plane/data.mjs";
-import { MEMBER_EMAIL } from "./env";
+import { CLI_USER_AGENT, MEMBER_EMAIL } from "./env";
 import {
   adminQuery,
   ensureBundle,
@@ -64,7 +64,7 @@ test("HERO: a device publish lands the catalog row the dashboard renders — and
   };
   const response = await page.request.post("/api/v1/publish", {
     data: body,
-    headers: { authorization: `Bearer ${CREDENTIAL}` },
+    headers: { authorization: `Bearer ${CREDENTIAL}`, "user-agent": CLI_USER_AGENT },
   });
   expect(response.ok(), await response.text()).toBe(true);
   const envelope = (await response.json()) as {
@@ -99,7 +99,7 @@ test("HERO: a device publish lands the catalog row the dashboard renders — and
   // The op receipt: the SAME op_id + the SAME bytes replays the stored envelope verbatim.
   const replay = await page.request.post("/api/v1/publish", {
     data: body,
-    headers: { authorization: `Bearer ${CREDENTIAL}` },
+    headers: { authorization: `Bearer ${CREDENTIAL}`, "user-agent": CLI_USER_AGENT },
   });
   expect(replay.ok()).toBe(true);
   expect(await replay.json()).toEqual(envelope);
@@ -116,7 +116,7 @@ test("a wrong credential is the uniform wire 404 — no oracle on the door", asy
       expected: 0,
       candidate: { files: [], parents: [], author: "a", message: "" },
     },
-    headers: { authorization: "Bearer not-a-credential" },
+    headers: { authorization: "Bearer not-a-credential", "user-agent": CLI_USER_AGENT },
   });
   expect(miss.status()).toBe(404);
   const body = (await miss.json()) as { ok: boolean; error: { code: string } };
