@@ -13,10 +13,13 @@ whole point of the tool. Topos borrows the trust model of a git host plus CI —
   request (never a caller-asserted id). Revocation is a row change, effective immediately — an ended
   session is gone the instant the row commits, severable by both sides (the client's `logout`, the owner's
   sessions page); rotation is logout + login.
-- **Versions are content-addressed.** A version's identity IS the sha256 of its bytes; what you pin is
-  exactly what you get. The client re-verifies the byte-exact digest on every apply, so corruption or
-  tampering in transit or storage is structurally visible — a mismatch is a loud integrity error, never a
-  silent overwrite.
+- **File-bundle versions are content-addressed.** A skill version's identity IS the sha256 of its bytes;
+  what you pin is exactly what you get. The client re-verifies the byte-exact digest on every apply, so
+  corruption or tampering in transit or storage is structurally visible — a mismatch is a loud integrity
+  error, never a silent overwrite. MCP server definitions are not byte artifacts and carry no digest:
+  each is a database row with an append-only revision history, every change attributed and audited, and
+  what a hash could not promise for them — that the server behind a URL behaves tomorrow as it did
+  today — nothing else can either.
 - **No anonymous writes.** Every mutation is attributed to a person or session identity and recorded as a
   durable receipt plus an audit event, with all-outcome idempotency — a retried write replays its original
   result and never double-applies.
