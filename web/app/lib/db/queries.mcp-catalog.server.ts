@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor, SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
@@ -17,6 +17,7 @@ import {
 import { bundleMcp, mcpServer, mcpServerRevision } from "@/lib/db/schema.app";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
 import {
+  isSeedPlaceholder,
   isStaffAuthoredSource,
   isStrictlyNewer,
   type McpPrecedenceFacts,
@@ -754,12 +755,16 @@ async function precedenceReadInTx(
 
 /**
  * THE PRECEDENCE GUARD, at accept. This is what makes reading older-schema upstream documents safe:
- * an UPSTREAM candidate never displaces what this install already offers unless it is strictly
- * newer, and never displaces a version this install AUTHORED (a seed, a staff correction, an
- * owner's edit) at all — a hand-written row is this catalog's own statement, not a slot for
- * upstream to fill. Either bar is cleared only by a deliberate staff override, which the accept
- * records. A candidate this install authored is not "an upstream candidate" and is not guarded
- * here; a server with nothing current yet has nothing to protect.
+ * an UPSTREAM candidate never displaces a version a PERSON authored here (a staff correction, an
+ * owner's edit) at all — a hand-written row is this catalog's own statement, not a slot for upstream
+ * to fill — and never displaces a real non-seed prior it does not better. Either bar is cleared only
+ * by a deliberate staff override, which the accept records.
+ *
+ * A SEED PLACEHOLDER current is neither bar. The migration stamps every curated server with a
+ * placeholder version under `source = 'seed'`, so it is a starting point waiting for a real
+ * document, not a decision to protect or a version to be judged "behind" — the first real candidate
+ * freely supersedes it, with no override. A candidate this install authored is not "an upstream
+ * candidate" and is not guarded here; a server with nothing current yet has nothing to protect.
  *
  * Returns the refusal precedence WOULD raise, or null — the caller both enforces it (absent an
  * override) and, when overridden, records which bar was crossed.
@@ -778,6 +783,10 @@ async function acceptPrecedenceRefusal(
   }
   const current = await precedenceReadInTx(tx, server.currentRevisionId);
   if (current === null) {
+    return null;
+  }
+  // A seed placeholder is freely superseded — no bar, no override, no semver comparison.
+  if (isSeedPlaceholder(current.source)) {
     return null;
   }
   if (isStaffAuthoredSource(current.source)) {
@@ -802,9 +811,15 @@ async function acceptPrecedenceRefusal(
  * people receive — there is no workspace review of a catalog server, by design.
  *
  * PRECEDENCE stands between a candidate and the pointer: an upstream candidate that is not strictly
- * newer than the current, or any upstream candidate over a version this install authored, is
+ * newer than the current, or any upstream candidate over a version a person authored here, is
  * refused unless the caller passes `override` — the deliberate staff act that says "yes, move it
  * anyway", recorded on the audit line so the crossing is never silent.
+ *
+ * THE SERVER'S OTHER CANDIDATES leave with the same act. Once a person has answered this server's
+ * proposal, the versions that were queued behind it — the older ones the sweep filed on earlier
+ * runs — are not still awaiting a decision, so they move to `superseded` in the same transaction: a
+ * terminal state that is neither published nor a candidate. Nobody rejected them, so they are not
+ * `rejected`; they were overtaken, and the accept's own audit line counts them.
  */
 export async function acceptMcpRevision(
   staff: McpCatalogStaff,
@@ -850,9 +865,10 @@ export async function acceptMcpRevision(
       if (precedence !== null && options.override !== true) {
         return refuse({ refusal: precedence });
       }
+      const now = new Date();
       await tx
         .update(mcpServerRevision)
-        .set({ status: "published", publishedAt: new Date(), publishedBy: staff.display })
+        .set({ status: "published", publishedAt: now, publishedBy: staff.display })
         .where(eq(mcpServerRevision.id, revisionId));
       await tx
         .update(mcpServer)
@@ -861,10 +877,26 @@ export async function acceptMcpRevision(
           ...(found.server.status === "candidate" ? { status: "active" as const } : {}),
         })
         .where(eq(mcpServer.id, found.server.id));
+      // The proposals queued behind this one leave the queue: a person answered this server, so the
+      // OTHER candidates on it are `superseded` — overtaken, not rejected, and no longer waiting.
+      // `decided_at` stays null: that column is the mark of a decision ABOUT a revision (a reject),
+      // and being overtaken is not one; who accepted, and when, is on the audit line below.
+      const superseded = await tx
+        .update(mcpServerRevision)
+        .set({ status: "superseded" })
+        .where(
+          and(
+            eq(mcpServerRevision.serverId, found.server.id),
+            eq(mcpServerRevision.status, "candidate"),
+            ne(mcpServerRevision.id, revisionId),
+          ),
+        )
+        .returning({ id: mcpServerRevision.id });
       await auditCatalogInTx(tx, staff, "mcp_revision_published", revisionId, {
         serverId: found.server.id,
         seq: found.revision.seq,
         ...(precedence !== null ? { overrode: precedence.code } : {}),
+        ...(superseded.length > 0 ? { superseded: superseded.length } : {}),
       });
       return { refusal: null, revisionId, serverId: found.server.id };
     },

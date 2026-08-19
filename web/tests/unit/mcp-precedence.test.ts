@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   compareServerVersion,
+  isSeedPlaceholder,
   isStaffAuthoredSource,
   isStrictlyNewer,
   type McpPrecedenceFacts,
@@ -94,11 +95,22 @@ describe("strictly newer", () => {
   });
 });
 
-describe("which sources this install authored", () => {
-  it("a seed, a staff correction and an owner's edit are protected; upstream is not", () => {
-    expect(isStaffAuthoredSource("seed")).toBe(true);
+describe("which sources a person authored", () => {
+  it("a staff correction and an owner's edit are protected; upstream and a seed are not", () => {
     expect(isStaffAuthoredSource("staff")).toBe(true);
     expect(isStaffAuthoredSource("owner")).toBe(true);
     expect(isStaffAuthoredSource("registry")).toBe(false);
+    // A seed is a placeholder the migration stamped, not a decision a person made — so it does not
+    // stand between upstream and the pointer, and any candidate freely supersedes it.
+    expect(isStaffAuthoredSource("seed")).toBe(false);
+  });
+});
+
+describe("which current is a seed placeholder", () => {
+  it("only a seed is one — a staff, owner or upstream current is a real prior", () => {
+    expect(isSeedPlaceholder("seed")).toBe(true);
+    expect(isSeedPlaceholder("staff")).toBe(false);
+    expect(isSeedPlaceholder("owner")).toBe(false);
+    expect(isSeedPlaceholder("registry")).toBe(false);
   });
 });

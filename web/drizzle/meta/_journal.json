@@ -169,6 +169,13 @@
       "when": 1787200100000,
       "tag": "0023_mcp-revision-id-shape",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1787200200000,
+      "tag": "0024_mcp-revision-superseded",
+      "breakpoints": true
     }
   ]
 }

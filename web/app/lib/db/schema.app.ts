@@ -643,9 +643,12 @@ export const mcpServerRevision = webSchema.table(
       .on(table.serverId, table.upstreamVersion)
       .where(sql`source = 'registry'`),
     index("mcp_server_revision_server_idx").on(table.serverId, table.status),
+    // `superseded` is a candidate that was overtaken: accepting one version moves the server's other
+    // pending candidates here in the same transaction — terminal, neither published nor a candidate,
+    // and distinct from `rejected` because nobody decided against it.
     check(
       "mcp_server_revision_status_check",
-      sql`${table.status} in ('candidate', 'published', 'rejected', 'revoked')`,
+      sql`${table.status} in ('candidate', 'published', 'rejected', 'revoked', 'superseded')`,
     ),
     check(
       "mcp_server_revision_source_check",

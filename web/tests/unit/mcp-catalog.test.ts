@@ -537,17 +537,45 @@ describe("precedence guards the accept", () => {
     expect(await currentRevisionOf(serverId)).toBe(newer.revisionId);
   });
 
-  it("never auto-supersedes a version this install authored, even by a newer upstream one", async () => {
+  it("never auto-supersedes a version a PERSON authored here, even by a newer upstream one", async () => {
+    const serverId = await seedGlobalServer("mcps_prec_staff", "com.example/prec-staff");
+    // The current is a staff correction — this install's own hand-authored statement.
+    const authored = await addRevision(serverId, {
+      document: serverDocument("com.example/prec-staff", "1.0.0"),
+      source: "staff",
+      publish: true,
+    });
+    const upstream = await addRevision(serverId, {
+      // Strictly newer by version — and still not enough to move the pointer on its own.
+      document: serverDocument("com.example/prec-staff", "2.0.0"),
+      source: "registry",
+      publish: false,
+    });
+    if (authored.refusal !== null || upstream.refusal !== null) {
+      throw new Error("the fixture revisions did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    const refused = await acceptMcpRevision(staff, upstream.revisionId);
+    expect(refused.refusal?.code).toBe("MCP_PRECEDENCE_PROTECTED");
+    expect(await currentRevisionOf(serverId)).toBe(authored.revisionId);
+    // Staff may still take it, deliberately.
+    const overridden = await acceptMcpRevision(staff, upstream.revisionId, { override: true });
+    expect(overridden.refusal).toBeNull();
+    expect(await currentRevisionOf(serverId)).toBe(upstream.revisionId);
+  });
+
+  it("lets any candidate freely supersede a SEED placeholder current — no override, even older", async () => {
     const serverId = await seedGlobalServer("mcps_prec_seed", "com.example/prec-seed");
-    // The current is this install's own editorial statement about the server.
+    // The current is a SEED placeholder — the version the migration stamped, not a decision.
     const seeded = await addRevision(serverId, {
       document: serverDocument("com.example/prec-seed", "1.0.0"),
       source: "seed",
       publish: true,
     });
+    // Upstream's real version is OLDER by semver, yet it still moves the pointer: a seed is a
+    // placeholder to be replaced the moment a real document arrives, never a prior to move back from.
     const upstream = await addRevision(serverId, {
-      // Strictly newer by version — and still not enough to move the pointer on its own.
-      document: serverDocument("com.example/prec-seed", "2.0.0"),
+      document: serverDocument("com.example/prec-seed", "0.0.1"),
       source: "registry",
       publish: false,
     });
@@ -555,13 +583,101 @@ describe("precedence guards the accept", () => {
       throw new Error("the fixture revisions did not land");
     }
     const { acceptMcpRevision } = await catalog();
-    const refused = await acceptMcpRevision(staff, upstream.revisionId);
-    expect(refused.refusal?.code).toBe("MCP_PRECEDENCE_PROTECTED");
-    expect(await currentRevisionOf(serverId)).toBe(seeded.revisionId);
-    // Staff may still take it, deliberately.
-    const overridden = await acceptMcpRevision(staff, upstream.revisionId, { override: true });
-    expect(overridden.refusal).toBeNull();
+    // A plain accept — no override — succeeds, and the candidate becomes what the catalog offers.
+    const accepted = await acceptMcpRevision(staff, upstream.revisionId);
+    expect(accepted.refusal, accepted.refusal?.message).toBeNull();
     expect(await currentRevisionOf(serverId)).toBe(upstream.revisionId);
+    // The audit line records no override, because none was needed.
+    const audit = await db.q<{ details: { overrode?: string } }>(
+      `SELECT details FROM web.audit_event WHERE kind = 'mcp_revision_published' AND subject = $1`,
+      [upstream.revisionId],
+    );
+    expect(audit[0]?.details.overrode).toBeUndefined();
+  });
+});
+
+/**
+ * ACCEPTING ONE CANDIDATE CLEARS THE SERVER'S OTHERS. A person answered this server's proposal, so
+ * the versions the sweep filed behind it are not still awaiting a decision — they move to
+ * `superseded` in the same act: gone from the queue, but not `rejected`, because nobody said no.
+ */
+describe("accepting one candidate clears the server's other candidates", () => {
+  const staff = { display: "Staff" } as const;
+
+  it("supersedes the accepted server's other pending candidates, and only that server's", async () => {
+    const serverId = await seedGlobalServer("mcps_super", "com.example/super", {
+      status: "candidate",
+    });
+    // Three candidates the sweep filed on successive runs — oldest first.
+    const v1 = await addRevision(serverId, {
+      document: serverDocument("com.example/super", "1.0.1"),
+      source: "registry",
+      publish: false,
+    });
+    const v2 = await addRevision(serverId, {
+      document: serverDocument("com.example/super", "1.0.2"),
+      source: "registry",
+      publish: false,
+    });
+    const v3 = await addRevision(serverId, {
+      document: serverDocument("com.example/super", "1.0.3"),
+      source: "registry",
+      publish: false,
+    });
+    // A second server's candidate must be untouched: supersession is scoped to the accepted server.
+    const otherId = await seedGlobalServer("mcps_super_other", "com.example/super-other", {
+      status: "candidate",
+    });
+    const other = await addRevision(otherId, {
+      document: serverDocument("com.example/super-other", "1.0.0"),
+      source: "registry",
+      publish: false,
+    });
+    if (
+      v1.refusal !== null ||
+      v2.refusal !== null ||
+      v3.refusal !== null ||
+      other.refusal !== null
+    ) {
+      throw new Error("the fixture revisions did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    const accepted = await acceptMcpRevision(staff, v3.revisionId);
+    expect(accepted.refusal, accepted.refusal?.message).toBeNull();
+    // The accepted one is published and current; the two behind it are superseded — not rejected.
+    expect(await revisionStatus(v3.revisionId)).toBe("published");
+    expect(await currentRevisionOf(serverId)).toBe(v3.revisionId);
+    expect(await revisionStatus(v1.revisionId)).toBe("superseded");
+    expect(await revisionStatus(v2.revisionId)).toBe("superseded");
+    // The other server's candidate is left exactly where it was.
+    expect(await revisionStatus(other.revisionId)).toBe("candidate");
+    // The accept's audit line counts the two it overtook.
+    const audit = await db.q<{ details: { superseded?: number } }>(
+      `SELECT details FROM web.audit_event WHERE kind = 'mcp_revision_published' AND subject = $1`,
+      [v3.revisionId],
+    );
+    expect(audit[0]?.details.superseded).toBe(2);
+  });
+
+  it("counts nothing when the accepted revision was the only candidate", async () => {
+    const serverId = await seedGlobalServer("mcps_super_solo", "com.example/super-solo", {
+      status: "candidate",
+    });
+    const only = await addRevision(serverId, {
+      document: serverDocument("com.example/super-solo", "1.0.0"),
+      source: "registry",
+      publish: false,
+    });
+    if (only.refusal !== null) {
+      throw new Error("the fixture revision did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    expect((await acceptMcpRevision(staff, only.revisionId)).refusal).toBeNull();
+    const audit = await db.q<{ details: { superseded?: number } }>(
+      `SELECT details FROM web.audit_event WHERE kind = 'mcp_revision_published' AND subject = $1`,
+      [only.revisionId],
+    );
+    expect(audit[0]?.details.superseded).toBeUndefined();
   });
 });
 

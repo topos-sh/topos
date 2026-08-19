@@ -16,7 +16,8 @@
  * This module is PURE comparison, shared by the two places precedence is decided: the upstream
  * sweep (which files a version it cannot better than ours as informational, never as a downgrade)
  * and the accept door (which refuses to move the pointer onto one that is not strictly newer, or
- * onto anything at all over a version this install authored, without a deliberate override).
+ * onto anything at all over a version a PERSON authored here, without a deliberate override — a
+ * seed PLACEHOLDER is neither, and any candidate freely supersedes it).
  */
 
 /** The facts precedence reads off one revision — nothing about its schema or its prose. */
@@ -31,15 +32,31 @@ export interface McpPrecedenceFacts {
 }
 
 /**
- * The sources a current revision can carry that this install AUTHORED — a hand-seeded catalog
- * entry, a staff correction, an owner's private edit. Upstream never supersedes one of these on
- * its own; that is a deliberate act with a person's name on it.
+ * The sources a current revision can carry that a PERSON authored — a staff correction, an owner's
+ * private edit. Upstream never supersedes one of these on its own; that is a deliberate act with a
+ * person's name on it, and displacing it takes a deliberate override.
+ *
+ * A `seed` is deliberately NOT here. The catalog's migration stamps every curated server with a
+ * placeholder version under `source = 'seed'` — a starting point, not a decision somebody made — so
+ * it is a thing to be replaced the moment a real upstream document arrives, never a statement to
+ * protect. `isSeedPlaceholder` names that case for the two callers that must let any candidate pass.
  */
-const STAFF_AUTHORED_SOURCES: ReadonlySet<string> = new Set(["staff", "owner", "seed"]);
+const STAFF_AUTHORED_SOURCES: ReadonlySet<string> = new Set(["staff", "owner"]);
 
-/** Was this revision written by this install rather than pulled from upstream? */
+/** Was this revision written by a PERSON here, rather than pulled from upstream or seeded? */
 export function isStaffAuthoredSource(source: string): boolean {
   return STAFF_AUTHORED_SOURCES.has(source);
+}
+
+/**
+ * Is this current a SEED PLACEHOLDER — the version the catalog's migration stamped on a curated
+ * server before any real document arrived? Such a current is freely superseded by any candidate: it
+ * never requires an override and never causes an upstream version to be judged "behind", because
+ * there is no real prior to move backward from. The accept guard and the upstream sweep both read
+ * this to let a first real document land.
+ */
+export function isSeedPlaceholder(source: string): boolean {
+  return source === "seed";
 }
 
 interface ParsedVersion {
