@@ -273,8 +273,19 @@ jobs:
         run: bun run build && bun run check:bundle
       - name: unit tests
         run: bunx vitest run
+      # The browser binary comes off a CDN that intermittently stalls a connection open
+      # forever; an unbounded download once wedged a release for over an hour. Bound each try
+      # and retry, so a stalled fetch is killed and restarted instead of hanging the gate.
       - name: install chromium
-        run: bunx playwright install --with-deps chromium
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 300 bunx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::chromium install attempt ${attempt} stalled or failed; retrying"
+          done
+          echo "::error::chromium install failed after 3 attempts"
+          exit 1
       # The database must exist BEFORE the suite: Playwright launches the web servers ahead of
       # globalSetup, and the served app's readiness probe is a database-backed /healthz.
       - name: e2e
