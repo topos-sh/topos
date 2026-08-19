@@ -30,6 +30,11 @@ cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -f "$CO
 COOKIES="$(mktemp)"
 EMPTY_ENV="$(mktemp)"
 trap cleanup EXIT
+# HOW A REAL CLIENT IDENTIFIES ITSELF on the session lane. The server holds a CLI floor by this
+# header, and the floor now sits above the release that taught the CLI to send it — so a caller
+# that names no version is provably older than the floor and gets the 426. Every lane probe below
+# therefore says what it is, exactly as the binary does.
+CLIENT_UA="topos/$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
 
 # ── the missing secrets refuse AT PARSE TIME ─────────────────────────────────────────────────────────
 # Before anything is built: with the two secrets unset, `config` must FAIL and say which variable is
@@ -145,6 +150,7 @@ echo "PASS: both card faces answer, byte-identical, with the app-rooted api base
 # ── the session lane answers the uniform miss on an unknown credential ───────────────────────────────
 echo "== probing the session lane with an unknown bearer =="
 lane="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "User-Agent: $CLIENT_UA" \
   -H 'Authorization: Bearer smoke-unknown-credential' \
   http://localhost:3000/api/v1/workspaces/ws-smoke-unknown/delivery || true)"
 if [ "$lane" != "404" ]; then
@@ -152,6 +158,20 @@ if [ "$lane" != "404" ]; then
   exit 1
 fi
 echo "PASS: the session lane answers the uniform 404."
+
+# ── …and it holds its floor against a client that cannot name itself ──────────────────────────────────
+# The floor is above the release that started sending a version, so silence is proof of age. This
+# is the same request as the one above minus the identification, and the answer must differ.
+echo "== probing the session lane with no client version =="
+floor="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H 'User-Agent: smoke-probe' \
+  -H 'Authorization: Bearer smoke-unknown-credential' \
+  http://localhost:3000/api/v1/workspaces/ws-smoke-unknown/delivery || true)"
+if [ "$floor" != "426" ]; then
+  echo "FAIL: an unidentified caller answered '$floor', wanted the 426 the floor owes it"
+  exit 1
+fi
+echo "PASS: the session lane refuses a client it cannot speak to."
 
 # ── THE CLAIM CEREMONY: the preset code seats a first owner ──────────────────────────────────────────
 echo "== claiming the workspace with the preset setup code =="
