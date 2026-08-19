@@ -2702,6 +2702,94 @@ mod tests {
         });
     }
 
+    /// **A CONNECTED SERVER's row reads its VERSION off its own record, and reads `behind` against
+    /// the revision the workspace serves.** Such a bundle holds no files: there is no lock to
+    /// carry a commit, no work tree to scan for a draft, and no placement to be blocked on. What
+    /// it holds is one catalog revision, and that is the whole of what a row can honestly say.
+    #[test]
+    fn a_connected_servers_row_reads_the_revision_it_holds_and_whether_it_is_behind() {
+        const HELD: &str = "mcpr_0123456789abcdef0123456789abcdef";
+        const SERVED: &str = "mcpr_fedcba9876543210fedcba9876543210";
+
+        let record = |home: &TempHome, revision: &str| {
+            with_ctx(home, None, |ctx| {
+                let sid =
+                    crate::id::SkillId::parse("topos_000000000000000000000000000000ab").unwrap();
+                crate::mcp_engine::record_server(
+                    ctx,
+                    &sid,
+                    "weather",
+                    revision,
+                    br#"{"name":"io.test/weather"}"#,
+                    false,
+                    false,
+                )
+                .unwrap();
+                crate::bundle_kind::write_kind_marker(
+                    ctx,
+                    &sid,
+                    crate::bundle_kind::BundleKind::Mcp,
+                );
+            });
+        };
+
+        // AT the served revision: applied, and the row names the revision it holds.
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.global("[bundles]\n\"topos.sh/acme/weather\" = \"*\"\n");
+        record(&home, HELD);
+        let row = |home: &TempHome, cwd: &std::path::Path, served: &str| {
+            home.cache(
+                "w_acme",
+                "topos.sh",
+                "acme",
+                vec![(
+                    "topos_000000000000000000000000000000ab".to_owned(),
+                    DeliveredSkill {
+                        name: "weather".to_owned(),
+                        review_required: false,
+                        served_version: served.to_owned(),
+                        withdrawn: false,
+                        via_channels: vec!["everyone".to_owned()],
+                        via_manifest: false,
+                        assigned_by: None,
+                        kind: Some("mcp".to_owned()),
+                        harness_states: Vec::new(),
+                        picked: true,
+                    },
+                )],
+                Vec::new(),
+            );
+            with_ctx(home, Some(cwd), |ctx| {
+                let (all, cache) = read_sources(ctx).unwrap();
+                let r = resolve(ctx, &all, &cache).unwrap();
+                let row = r
+                    .scopes
+                    .iter()
+                    .flat_map(|s| s.rows.iter())
+                    .find(|row| row.name == "weather")
+                    .expect("the server's row");
+                (
+                    row.version.clone(),
+                    row.digest.clone(),
+                    row.placements.clone(),
+                    row.state,
+                )
+            })
+        };
+        let (version, digest, placements, state) = row(&home, &cwd, HELD);
+        assert_eq!(version.as_deref(), Some(HELD), "the revision it holds");
+        assert_eq!(digest, None, "a bundle with no files states no digest");
+        assert!(placements.is_empty(), "and no placement folders");
+        assert_eq!(state, StatusItemState::Applied);
+
+        // The catalog moved: the same record, a different served revision, and the row says so.
+        let (version, _, _, state) = row(&home, &cwd, SERVED);
+        assert_eq!(version.as_deref(), Some(HELD));
+        assert_eq!(state, StatusItemState::Behind);
+    }
+
     /// A LOCAL mcp row's config entries live in its OWN custody record and NOWHERE else — no
     /// workspace delivers the bundle, so no delivery cache can describe it. The deep answer reads
     /// them there instead of saying "no agent config entries recorded yet" about entries this very
