@@ -210,6 +210,23 @@ describe("the accepted summary", () => {
   });
 });
 
+describe("a real document on an older official schema", () => {
+  /**
+   * A verbatim registry entry declaring `$schema` `2025-10-17` — an older revision than this build's
+   * canonical `2025-12-11`. The structural gate reads the same fields at the same paths whatever the
+   * schema line says, so this document passes it UNCHANGED. That the catalog also stores such a
+   * document (its `$schema` is on the allowlist) is proved database-side; here we prove the gate the
+   * allowlist sits in front of never needed loosening to admit it.
+   */
+  it("passes the structural gate unchanged — the schema line is not a structural rule", () => {
+    const result = validateServerJson(bytesOf("valid/registry-2025-10-17.json"));
+    expect(result.ok, result.ok === false ? `${result.code} ${result.message}` : "").toBe(true);
+    expect(result.ok === true && result.summary.name).toBe("ai.exa/exa");
+    expect(result.ok === true && result.summary.transport).toBe("streamable-http");
+    expect(result.ok === true && result.summary.url).toBe("https://mcp.exa.ai/mcp");
+  });
+});
+
 describe("the exact-version grammars", () => {
   /**
    * Probe for probe, the SAME table the client's suite drives. A grammar that answered differently

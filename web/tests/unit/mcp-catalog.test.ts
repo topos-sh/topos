@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
 import { validateCandidateFiles } from "@/lib/mcp/validate.server";
@@ -422,6 +424,144 @@ describe("the schema a document declares", () => {
       [serverId],
     );
     expect(rows.map((r) => r.schema_version)).toEqual([known, null]);
+  });
+
+  it("accepts the earlier official revisions the registry actually serves", async () => {
+    const { KNOWN_MCP_SCHEMA_VERSIONS } = await catalog();
+    const url = (rev: string) =>
+      `https://static.modelcontextprotocol.io/schemas/${rev}/server.schema.json`;
+    // Every official revision the registry publishes under is on the allowlist. Reading them is the
+    // point: the registry is stuck on old formats, and refusing them would make the sweep see zero.
+    for (const rev of ["2025-09-16", "2025-09-29", "2025-10-17", "2025-12-11"]) {
+      expect(KNOWN_MCP_SCHEMA_VERSIONS).toContain(url(rev));
+    }
+  });
+
+  it("stores a VERBATIM registry document declaring an older schema, and remembers the schema", async () => {
+    // A real entry fetched from registry.modelcontextprotocol.io, `$schema` 2025-10-17 — older than
+    // this build's canonical 2025-12-11. Its structural shape is one this gate already accepts, so
+    // only the allowlist ever stood between it and the catalog. Filed against a self-maintained row
+    // (null registry_name) so the document's own name governs, and nothing collides with the seed.
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(__dirname, "..", "fixtures", "mcp", "valid", "registry-2025-10-17.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    await db.q(
+      `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
+       VALUES ('mcps_real_1017', NULL, 'Exa', 'none', 'active')`,
+    );
+    const added = await addRevision("mcps_real_1017", {
+      document: doc,
+      source: "registry",
+      publish: false,
+    });
+    expect(added.refusal, added.refusal?.message).toBeNull();
+    const rows = await db.q<{ schema_version: string | null; upstream_version: string }>(
+      `SELECT schema_version, upstream_version FROM web.mcp_server_revision WHERE server_id = $1`,
+      ["mcps_real_1017"],
+    );
+    expect(rows[0]?.schema_version).toBe(
+      "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+    );
+    expect(rows[0]?.upstream_version).toBe("3.1.3");
+  });
+});
+
+/**
+ * PRECEDENCE AT ACCEPT — the guarantee that makes reading older-schema upstream documents safe: an
+ * upstream candidate moves the pointer only when it is strictly newer, and never displaces a version
+ * this install authored without a deliberate override. Capability (server version, protocol) is what
+ * counts; the `$schema` string never is.
+ */
+describe("precedence guards the accept", () => {
+  const staff = { display: "Staff" } as const;
+
+  it("refuses an upstream candidate that is not newer than the current, then honors an override", async () => {
+    const serverId = await seedGlobalServer("mcps_prec_older", "com.example/prec-older");
+    const current = await addRevision(serverId, {
+      document: serverDocument("com.example/prec-older", "2.0.0"),
+      source: "registry",
+      publish: true,
+    });
+    const older = await addRevision(serverId, {
+      document: serverDocument("com.example/prec-older", "1.5.0"),
+      source: "registry",
+      publish: false,
+    });
+    if (current.refusal !== null || older.refusal !== null) {
+      throw new Error("the fixture revisions did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    const refused = await acceptMcpRevision(staff, older.revisionId);
+    expect(refused.refusal?.code).toBe("MCP_PRECEDENCE_NOT_NEWER");
+    // The pointer did not move — a downgrade is not accepted by asking.
+    expect(await currentRevisionOf(serverId)).toBe(current.revisionId);
+    // A deliberate override moves it, and the audit line remembers what bar it crossed.
+    const overridden = await acceptMcpRevision(staff, older.revisionId, { override: true });
+    expect(overridden.refusal).toBeNull();
+    expect(await currentRevisionOf(serverId)).toBe(older.revisionId);
+    const audit = await db.q<{ details: { overrode?: string } }>(
+      `SELECT details FROM web.audit_event WHERE kind = 'mcp_revision_published' AND subject = $1`,
+      [older.revisionId],
+    );
+    expect(audit[0]?.details.overrode).toBe("MCP_PRECEDENCE_NOT_NEWER");
+  });
+
+  it("accepts a strictly-newer upstream version even on an OLDER schema — the schema never blocks it", async () => {
+    const schema = (rev: string) =>
+      `https://static.modelcontextprotocol.io/schemas/${rev}/server.schema.json`;
+    const serverId = await seedGlobalServer("mcps_prec_newer", "com.example/prec-newer");
+    const current = await addRevision(serverId, {
+      document: serverDocument("com.example/prec-newer", "1.0.0", {
+        $schema: schema("2025-12-11"),
+      }),
+      source: "registry",
+      publish: true,
+    });
+    const newer = await addRevision(serverId, {
+      // A newer server version carried on an OLDER schema revision — still a real update.
+      document: serverDocument("com.example/prec-newer", "2.0.0", {
+        $schema: schema("2025-09-16"),
+      }),
+      source: "registry",
+      publish: false,
+    });
+    if (current.refusal !== null || newer.refusal !== null) {
+      throw new Error("the fixture revisions did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    const accepted = await acceptMcpRevision(staff, newer.revisionId);
+    expect(accepted.refusal, accepted.refusal?.message).toBeNull();
+    expect(await currentRevisionOf(serverId)).toBe(newer.revisionId);
+  });
+
+  it("never auto-supersedes a version this install authored, even by a newer upstream one", async () => {
+    const serverId = await seedGlobalServer("mcps_prec_seed", "com.example/prec-seed");
+    // The current is this install's own editorial statement about the server.
+    const seeded = await addRevision(serverId, {
+      document: serverDocument("com.example/prec-seed", "1.0.0"),
+      source: "seed",
+      publish: true,
+    });
+    const upstream = await addRevision(serverId, {
+      // Strictly newer by version — and still not enough to move the pointer on its own.
+      document: serverDocument("com.example/prec-seed", "2.0.0"),
+      source: "registry",
+      publish: false,
+    });
+    if (seeded.refusal !== null || upstream.refusal !== null) {
+      throw new Error("the fixture revisions did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    const refused = await acceptMcpRevision(staff, upstream.revisionId);
+    expect(refused.refusal?.code).toBe("MCP_PRECEDENCE_PROTECTED");
+    expect(await currentRevisionOf(serverId)).toBe(seeded.revisionId);
+    // Staff may still take it, deliberately.
+    const overridden = await acceptMcpRevision(staff, upstream.revisionId, { override: true });
+    expect(overridden.refusal).toBeNull();
+    expect(await currentRevisionOf(serverId)).toBe(upstream.revisionId);
   });
 });
 
@@ -941,6 +1081,10 @@ describe("the tracked set an upstream sweep reads", () => {
     expect(entry?.held[0]?.status).toBe("candidate");
     // What came from upstream carries its document, so a sweep can see whether upstream changed it.
     expect((entry?.held[0]?.document as { version?: string } | null)?.version).toBe("2.0.0");
+    // The version ON OFFER is the published one — what precedence weighs an upstream candidate
+    // against, so the sweep never files a downgrade as if it were an update.
+    expect(entry?.current?.upstreamVersion).toBe("1.0.0");
+    expect(entry?.current?.source).toBe("registry");
   });
 
   it("carries no document for a version this install wrote itself", async () => {

@@ -141,6 +141,30 @@ beforeAll(async () => {
     document("io.github.acme/private", "1.0.0"),
     { current: true },
   );
+
+  // A SELF-MAINTAINED global server: staff maintain it, the official registry has no such name, so
+  // its `registry_name` is null. It is a first-class member of the feed, addressed by the name
+  // inside its own document.
+  await db.q(
+    `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+     VALUES ('mcps_e_self', NULL, NULL, 'Internal Notes', 'manual', 'active')`,
+  );
+  await db.q(
+    `UPDATE web.mcp_server SET auth_note = 'Ask ops for a token.' WHERE id = 'mcps_e_self'`,
+  );
+  await seedRevision(
+    "mcps_e_self",
+    mcpRevisionId("self_1"),
+    1,
+    document("sh.topos/internal-notes", "0.9.0"),
+  );
+  await seedRevision(
+    "mcps_e_self",
+    mcpRevisionId("self_2"),
+    2,
+    document("sh.topos/internal-notes", "1.0.0"),
+    { current: true },
+  );
 }, 60000);
 
 afterAll(async () => {
@@ -252,6 +276,45 @@ describe("one server's history", () => {
     const res = await get("/mcp-catalog/v0.1/servers/io.github.acme/nope/versions");
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ title: "Not Found", status: 404 });
+  });
+});
+
+describe("a self-maintained server (no upstream name)", () => {
+  const ENCODED = encodeURIComponent("sh.topos/internal-notes");
+
+  it("appears in the feed, addressed by the name inside its own document", async () => {
+    const res = await get("/mcp-catalog/v0.1/servers?limit=100");
+    const body = (await res.json()) as {
+      servers: { server: { name: string; version: string }; _meta: Record<string, unknown> }[];
+    };
+    const self = body.servers.find((s) => s.server.name === "sh.topos/internal-notes");
+    // A subregistry offering what the official registry lacks is the value-add — it is on the shelf.
+    expect(self).toBeDefined();
+    expect(self?.server.version).toBe("1.0.0");
+    // The curation this catalog adds still rides under our namespace, upstream name or not.
+    const meta = self?._meta as { "sh.topos/catalog": Record<string, unknown> };
+    expect(meta["sh.topos/catalog"]).toMatchObject({ status: "published", isLatest: true });
+  });
+
+  it("resolves its /versions by that document name, newest first", async () => {
+    const res = await get(`/mcp-catalog/v0.1/servers/${ENCODED}/versions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      servers: {
+        server: { version: string };
+        _meta: { "sh.topos/catalog": { isLatest: boolean } };
+      }[];
+    };
+    expect(body.servers.map((s) => s.server.version)).toEqual(["1.0.0", "0.9.0"]);
+    expect(body.servers[0]?._meta["sh.topos/catalog"].isLatest).toBe(true);
+    expect(body.servers[1]?._meta["sh.topos/catalog"].isLatest).toBe(false);
+  });
+
+  it("`latest` and a named version both resolve by that document name", async () => {
+    const latest = await get(`/mcp-catalog/v0.1/servers/${ENCODED}/versions/latest`);
+    expect(((await latest.json()) as { server: { version: string } }).server.version).toBe("1.0.0");
+    const named = await get(`/mcp-catalog/v0.1/servers/${ENCODED}/versions/0.9.0`);
+    expect(((await named.json()) as { server: { version: string } }).server.version).toBe("0.9.0");
   });
 });
 
