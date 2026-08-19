@@ -172,6 +172,39 @@ describe("connecting a server the catalog already offers", () => {
   });
 });
 
+describe("one name, two rows", () => {
+  it("the WORKSPACE'S OWN server wins over a global one of the same name", async () => {
+    // Inside a workspace, the workspace's answer is the answer — the same precedence the registry
+    // lane's single-name read keeps. A name that resolved to two rows by whichever sorted first
+    // would connect a different document than the page shows.
+    await db.q(
+      `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+       VALUES ('mcps_own', $1, 'io.github.acme/twice', 'Ours', 'none', 'active')`,
+      [wsId],
+    );
+    await seedCatalogServer("mcps_global_twice", "io.github.acme/twice");
+    const { addMcpRevisionInTx } = await import("@/lib/db/queries.mcp-catalog.server");
+    const { getDb } = await import("@/lib/db/index.server");
+    const own = await getDb().transaction((tx) =>
+      addMcpRevisionInTx(tx, "mcps_own", {
+        document: serverDocument("io.github.acme/twice", "9.9.9"),
+        source: "owner",
+        publish: true,
+        attribution: "Owner",
+      }),
+    );
+    expect(own.refusal).toBeNull();
+
+    const answer = await post("sn_mem", { registry_name: "io.github.acme/twice" });
+    expect(answer.status).toBe(200);
+    const connected = await db.q<{ server_id: string }>(
+      `SELECT server_id FROM web.bundle_mcp WHERE bundle_id = $1`,
+      [dataOf(answer.body).skill_id as string],
+    );
+    expect(connected[0]?.server_id).toBe("mcps_own");
+  });
+});
+
 describe("a server the catalog does NOT offer", () => {
   it("is an owner's ruling — a member is refused by name, and nothing is written", async () => {
     upstream = { text: JSON.stringify(serverDocument("io.github.acme/private-one")) };

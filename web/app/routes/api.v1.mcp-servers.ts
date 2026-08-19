@@ -5,7 +5,7 @@ import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.serv
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { NO_CHANNEL } from "@/lib/db/queries.custody.server";
 import {
-  connectableMcpServers,
+  connectableMcpServerByName,
   connectedMcpBundle,
   connectMcpServer,
   createPrivateMcpServer,
@@ -85,15 +85,13 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
         created: false,
       });
     }
-    const offered = (await connectableMcpServers(actor)).find(
-      (row) => row.registryName === registryName,
-    );
-    if (offered !== undefined) {
+    const offered = await connectableMcpServerByName(actor, registryName);
+    if (offered !== null) {
       const connected = await connectMcpServer(actor, {
         serverId: offered.serverId,
         // The name a machine will `topos add` it by — the same one the web form suggests, so a
         // server shared from a terminal and one shared from a browser answer to one word.
-        displayName: suggestedNameFor(offered.registryName ?? offered.displayName),
+        displayName: suggestedNameFor(registryName),
         to: NO_CHANNEL,
       });
       if (connected.refusal !== null) {

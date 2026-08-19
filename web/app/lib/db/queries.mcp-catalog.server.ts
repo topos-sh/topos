@@ -1227,6 +1227,31 @@ export async function workspaceRegistryServer(
 }
 
 /**
+ * WHICH SERVER a registry name names for this workspace, when one is connectable: the
+ * workspace's OWN row first, then the global catalog's — the same precedence the registry lane's
+ * single-name read keeps, because inside a workspace the workspace's answer is the answer. A
+ * name that resolves to two rows must never be a coin flip between two documents.
+ */
+export async function connectableMcpServerByName(
+  actor: MemberActor | SessionActor,
+  registryName: string,
+): Promise<{ serverId: string; displayName: string } | null> {
+  const rows = await getDb().execute(sql`
+    SELECT ms.id AS server_id, ms.display_name
+    FROM web.mcp_server ms
+    WHERE ms.registry_name = ${registryName}
+      AND ms.status = 'active'
+      AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
+    ORDER BY (ms.workspace_id IS NULL), ms.id
+    LIMIT 1
+  `);
+  const row = (rows.rows as Record<string, unknown>[])[0];
+  return row === undefined
+    ? null
+    : { serverId: row.server_id as string, displayName: row.display_name as string };
+}
+
+/**
  * The bundle a workspace ALREADY connects a catalog server through, by the server's registry
  * name — `null` when it connects none. The idempotent half of the lane's connect: asking twice
  * for the same server is not a mistake to refuse, it is a question with an answer.
