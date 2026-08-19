@@ -43,20 +43,32 @@ export function isStaffAuthoredSource(source: string): boolean {
 }
 
 interface ParsedVersion {
-  /** The dotted numeric release identifiers, e.g. `1.2.3` → `[1, 2, 3]`. */
-  release: number[];
+  /** The dotted numeric release identifiers, kept as decimal STRINGS so an identifier past the
+   *  safe-integer range still orders losslessly — e.g. `1.2.3` → `["1", "2", "3"]`. */
+  release: string[];
   /** The dot-separated pre-release identifiers, or null for a plain release. */
   prerelease: string[] | null;
 }
 
+/** A run of one or more decimal digits, nothing else. */
+const NUMERIC = /^\d+$/;
+/** One pre-release identifier's alphabet — the semver set, and non-empty. */
+const PRERELEASE_ID = /^[0-9A-Za-z-]+$/;
+
 /**
  * Parse the subset of the version grammar the registry publishes under — a `vX.Y.Z` release with
- * an optional `-prerelease`, build metadata (`+…`) discarded as semver says it must be. A version
- * whose release core is not numeric is not one this can order, and returns null so the caller
- * keeps what it already holds rather than guessing.
+ * an optional `-prerelease`, build metadata (`+…`) discarded as semver says it must be.
+ *
+ * MALFORMED IS AMBIGUOUS, NOT A RELEASE. A non-numeric release identifier, a trailing dash with no
+ * pre-release after it (`2.0.0-`), or a pre-release with an empty/illegal identifier all return
+ * null — the caller reads that as "cannot say" and keeps what it already holds rather than letting
+ * a broken label read as a clean release that could supersede a real one.
  */
 function parseVersion(raw: string): ParsedVersion | null {
   let text = raw.trim();
+  if (text === "") {
+    return null;
+  }
   if (text.startsWith("v") || text.startsWith("V")) {
     text = text.slice(1);
   }
@@ -66,36 +78,60 @@ function parseVersion(raw: string): ParsedVersion | null {
   }
   const dash = text.indexOf("-");
   const core = dash >= 0 ? text.slice(0, dash) : text;
-  const pre = dash >= 0 ? text.slice(dash + 1) : "";
-  const parts = core.split(".");
-  const release: number[] = [];
-  for (const part of parts) {
-    if (!/^\d+$/.test(part)) {
+  // `null` = no pre-release at all; `""` = a dash with nothing after it, which is malformed.
+  const pre = dash >= 0 ? text.slice(dash + 1) : null;
+  const release: string[] = [];
+  for (const part of core.split(".")) {
+    if (!NUMERIC.test(part)) {
       return null;
     }
-    release.push(Number(part));
+    release.push(part);
   }
   if (release.length === 0) {
     return null;
   }
-  return { release, prerelease: pre.length === 0 ? null : pre.split(".") };
+  let prerelease: string[] | null = null;
+  if (pre !== null) {
+    if (pre.length === 0) {
+      return null;
+    }
+    const ids = pre.split(".");
+    for (const id of ids) {
+      if (!PRERELEASE_ID.test(id)) {
+        return null;
+      }
+    }
+    prerelease = ids;
+  }
+  return { release, prerelease };
+}
+
+/** Order two non-negative decimal strings by MAGNITUDE, losslessly — no `Number`, so identifiers
+ * past `Number.MAX_SAFE_INTEGER` still compare correctly. */
+function compareNumeric(a: string, b: string): number {
+  const x = a.replace(/^0+(?=\d)/, "");
+  const y = b.replace(/^0+(?=\d)/, "");
+  if (x.length !== y.length) {
+    return x.length < y.length ? -1 : 1;
+  }
+  return x === y ? 0 : x < y ? -1 : 1;
 }
 
 /** Compare two release cores, padding the shorter with zeros — `1.2` and `1.2.0` are one. */
-function compareRelease(a: number[], b: number[]): number {
+function compareRelease(a: string[], b: string[]): number {
   const width = Math.max(a.length, b.length);
   for (let i = 0; i < width; i += 1) {
-    const x = a[i] ?? 0;
-    const y = b[i] ?? 0;
-    if (x !== y) {
-      return x < y ? -1 : 1;
+    const cmp = compareNumeric(a[i] ?? "0", b[i] ?? "0");
+    if (cmp !== 0) {
+      return cmp;
     }
   }
   return 0;
 }
 
-/** Semver pre-release ordering: a release outranks any pre-release of it; identifiers compare
- * numerically when both are numeric, and a shorter run of identifiers is the smaller one. */
+/** Semver pre-release ordering: a release outranks any pre-release of it; numeric identifiers
+ * compare by magnitude (losslessly), numeric outranks nothing and is outranked by alphanumeric,
+ * and a shorter run of identifiers is the smaller one. */
 function comparePrerelease(a: string[] | null, b: string[] | null): number {
   if (a === null && b === null) {
     return 0;
@@ -116,12 +152,12 @@ function comparePrerelease(a: string[] | null, b: string[] | null): number {
     if (y === undefined) {
       return 1;
     }
-    const xNum = /^\d+$/.test(x);
-    const yNum = /^\d+$/.test(y);
+    const xNum = NUMERIC.test(x);
+    const yNum = NUMERIC.test(y);
     if (xNum && yNum) {
-      const diff = Number(x) - Number(y);
-      if (diff !== 0) {
-        return diff < 0 ? -1 : 1;
+      const cmp = compareNumeric(x, y);
+      if (cmp !== 0) {
+        return cmp;
       }
     } else if (xNum) {
       return -1;

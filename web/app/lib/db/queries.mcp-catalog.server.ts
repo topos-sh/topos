@@ -1285,16 +1285,25 @@ export async function publishedCatalogServers(page: {
  * unaddressable here, which is the same as saying the feed offers no such server.
  */
 export async function publishedCatalogVersions(name: string): Promise<McpRegistryRow[]> {
+  // ONE SERVER, then its history — never a predicate that could match two. A named row is preferred
+  // over a self-maintained one that derives the same name from its document, so a single coherent
+  // history (and a single `isLatest`) is returned even if a name ever resolved to both.
   const rows = await getDb().execute(sql`
+    WITH target AS (
+      SELECT ms.id
+      FROM web.mcp_server ms
+      JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
+      WHERE ms.workspace_id IS NULL AND ms.status = 'active'
+        AND COALESCE(ms.registry_name, cur.document->>'name') = ${name}
+      ORDER BY (ms.registry_name IS NULL), ms.id
+      LIMIT 1
+    )
     SELECT ms.id AS server_id, ms.registry_name, ms.auth_mode, ms.auth_note, ms.scope_menu,
            r.id AS revision_id, r.document, r.status, r.published_at,
            (r.id = ms.current_revision_id) AS is_latest
     FROM web.mcp_server ms
-    JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
     JOIN web.mcp_server_revision r ON r.server_id = ms.id
-    WHERE ms.workspace_id IS NULL AND ms.status = 'active'
-      AND COALESCE(ms.registry_name, cur.document->>'name') = ${name}
-      AND r.status = 'published'
+    WHERE ms.id = (SELECT id FROM target) AND r.status = 'published'
     ORDER BY r.seq DESC
   `);
   return registryRowsOf(rows.rows as Record<string, unknown>[]);
@@ -1454,7 +1463,7 @@ export async function workspaceRegistryServer(
 ): Promise<McpRegistryRow | null> {
   const rows = await getDb().execute(sql`
     ${workspaceRegistrySelect(actor.workspaceId)}
-      AND ms.registry_name = ${registryName}
+      AND COALESCE(ms.registry_name, r.document->>'name') = ${registryName}
     ORDER BY (ms.workspace_id IS NULL), ms.id
     LIMIT 1
   `);
@@ -1462,10 +1471,14 @@ export async function workspaceRegistryServer(
 }
 
 /**
- * WHICH SERVER a registry name names for this workspace, when one is connectable: the
- * workspace's OWN row first, then the global catalog's — the same precedence the registry lane's
- * single-name read keeps, because inside a workspace the workspace's answer is the answer. A
- * name that resolves to two rows must never be a coin flip between two documents.
+ * WHICH SERVER a name names for this workspace, when one is connectable: the workspace's OWN row
+ * first, then the global catalog's — the same precedence the registry lane's single-name read
+ * keeps, because inside a workspace the workspace's answer is the answer. A name that resolves to
+ * two rows must never be a coin flip between two documents.
+ *
+ * A SELF-MAINTAINED global row (no `registry_name`) is addressed by the name inside its current
+ * document, exactly as the feed addresses it — so a catalog server stays connectable by the name a
+ * person knows it by even once it has no upstream name.
  */
 export async function connectableMcpServerByName(
   actor: MemberActor | SessionActor,
@@ -1474,7 +1487,8 @@ export async function connectableMcpServerByName(
   const rows = await getDb().execute(sql`
     SELECT ms.id AS server_id, ms.display_name
     FROM web.mcp_server ms
-    WHERE ms.registry_name = ${registryName}
+    LEFT JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
+    WHERE COALESCE(ms.registry_name, cur.document->>'name') = ${registryName}
       AND ms.status = 'active'
       AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
     ORDER BY (ms.workspace_id IS NULL), ms.id
@@ -1500,7 +1514,8 @@ export async function connectedMcpBundle(
     FROM web.mcp_server ms
     JOIN web.bundle_mcp bm ON bm.server_id = ms.id AND bm.workspace_id = ${actor.workspaceId}
     JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
-    WHERE ms.registry_name = ${registryName}
+    LEFT JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
+    WHERE COALESCE(ms.registry_name, cur.document->>'name') = ${registryName}
       AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
       AND b.status = 'active'
     ORDER BY (ms.workspace_id IS NULL), ms.id
@@ -1525,8 +1540,7 @@ function workspaceRegistrySelect(workspaceId: string) {
       WHERE c.workspace_id = ${workspaceId}
     ) bm ON bm.server_id = ms.id
     JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
-    WHERE ms.registry_name IS NOT NULL
-      AND (bm.server_id IS NOT NULL
+    WHERE (bm.server_id IS NOT NULL
            OR (ms.workspace_id = ${workspaceId} AND ms.status = 'active'))
   `;
 }

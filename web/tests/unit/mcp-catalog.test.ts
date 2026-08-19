@@ -1054,6 +1054,41 @@ describe("the list a workspace may connect from", () => {
   });
 });
 
+describe("a self-maintained catalog server (no upstream name)", () => {
+  it("stays connectable and served in the workspace lane, keyed by its document name", async () => {
+    const { connectMcpServer, connectableMcpServerByName, workspaceRegistryServer } =
+      await catalog();
+    // The shape reconciliation leaves behind: a global catalog row with no registry_name.
+    await db.q(
+      `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
+       VALUES ('mcps_selfmaint', NULL, 'Self Maintained', 'none', 'active')`,
+    );
+    const published = await addRevision("mcps_selfmaint", {
+      document: serverDocument("com.example/self-maintained", "1.0.0"),
+      source: "staff",
+      publish: true,
+    });
+    if (published.refusal !== null) {
+      throw new Error(published.refusal.message);
+    }
+    const member = asMember(wsId, "u_mem", "member", "Member");
+    // Resolvable by the name inside its document, though it carries no upstream name.
+    const resolved = await connectableMcpServerByName(member, "com.example/self-maintained");
+    expect(resolved?.serverId).toBe("mcps_selfmaint");
+    const connected = await connectMcpServer(member, {
+      serverId: "mcps_selfmaint",
+      displayName: "Self Maintained",
+      to: null,
+    });
+    expect(connected.refusal).toBeNull();
+    // And the workspace's own registry lane serves it under that same name.
+    const inLane = await workspaceRegistryServer(member, "com.example/self-maintained");
+    expect((inLane?.document as { name?: string } | undefined)?.name).toBe(
+      "com.example/self-maintained",
+    );
+  });
+});
+
 describe("the tracked set an upstream sweep reads", () => {
   it("is the global rows that exist upstream, with everything already held", async () => {
     const { trackedCatalogServers } = await catalog();

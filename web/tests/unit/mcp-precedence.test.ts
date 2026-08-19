@@ -39,6 +39,22 @@ describe("ordering server versions", () => {
     expect(compareServerVersion("nightly", "1.0.0")).toBeNull();
     expect(compareServerVersion("1.0.0", "")).toBeNull();
   });
+
+  it("treats a malformed label as ambiguous, never as a clean release", () => {
+    // A trailing dash is an empty pre-release — not `2.0.0`, and it must not be able to supersede.
+    expect(compareServerVersion("2.0.0-", "1.0.0")).toBeNull();
+    expect(compareServerVersion("1.0.0-", "1.0.0")).toBeNull();
+    // An empty pre-release identifier is malformed too.
+    expect(compareServerVersion("1.0.0-rc.", "1.0.0")).toBeNull();
+    expect(compareServerVersion("1.0.0-a..b", "1.0.0")).toBeNull();
+  });
+
+  it("orders identifiers past the safe-integer range losslessly", () => {
+    // 20 digits vs 19 — `Number` would collapse both, this compares by magnitude.
+    expect(compareServerVersion("1.0.10000000000000000000", "1.0.9999999999999999999")).toBe(1);
+    expect(compareServerVersion("1.0.99999999999999999999", "1.0.99999999999999999998")).toBe(1);
+    expect(compareServerVersion("1.0.99999999999999999999", "1.0.99999999999999999999")).toBe(0);
+  });
 });
 
 describe("strictly newer", () => {
@@ -70,6 +86,11 @@ describe("strictly newer", () => {
     expect(isStrictlyNewer(facts("1.0.0", null), facts("1.0.0", ["2025-06-18"]))).toBe(false);
     expect(isStrictlyNewer(facts("1.0.0", ["2025-06-18"]), facts("1.0.0", null))).toBe(false);
     expect(isStrictlyNewer(facts("rolling"), facts("1.0.0"))).toBe(false);
+  });
+
+  it("a malformed candidate label never supersedes a real release", () => {
+    expect(isStrictlyNewer(facts("2.0.0-"), facts("1.0.0"))).toBe(false);
+    expect(isStrictlyNewer(facts("1.0.0-rc."), facts("1.0.0"))).toBe(false);
   });
 });
 
