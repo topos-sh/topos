@@ -28,16 +28,19 @@ what only a cross-crate composed run can prove.
   governance-transferring genesis publish → project-manifest delivery → silent fast-forward →
   protect/review → the person-scope feed lane and its `-g` arms → the owner-side session end),
   plus the deny/logout arms.
-- **`tests/mcp_e2e.rs`** — the `kind = "mcp"` bundle loop: `add --kind mcp` adopting a local
-  `server.json` folder, the publish that makes it a catalog bundle (witnessed on the row, the
-  delivery lane, and the workspace's registry-shape read API), a second member's sweep landing the
-  entry in ALL SIX MCP-capable agents' configs in their exact dialects, the applied report's
-  per-agent states reaching the workspace, removal converging every surface back to the person's
-  own bytes, a hand-edited entry left DRIFTED and disclosed, project scope reaching the four
-  project surfaces alone, and the two kinds coexisting under one skills root. Drives the REAL CLI
-  BINARY as a subprocess over a fake `$HOME` — harness detection and the config surfaces resolve
-  against the environment, so only a real process proves them (the fixture rig still owns the
-  browser login; both halves share one `~/.topos`).
+- **`tests/mcp_e2e.rs`** — the CONNECTED-SERVER loop: `add --kind mcp <registry name>` sharing a
+  server the install's catalog carries (witnessed on the bundle row, its connection to the global
+  server, the delivery lane's second list with the document inline, and the workspace's
+  registry-shape read API), a second member adding it by name and sweeping the entry into ALL SIX
+  MCP-capable agents' configs in their exact dialects, the applied report carrying the catalog
+  REVISION back to the workspace, removal converging every surface back, a hand-edited entry left
+  DRIFTED and disclosed, project scope reaching the four project surfaces alone, the two kinds
+  coexisting under one skills root, a curated channel finally delivering the server through the
+  feed, `publish` refused over a bundle that has no files, and — with the app killed — the entries
+  healing from the machine's own record alone. Drives the REAL CLI BINARY as a subprocess over a
+  fake `$HOME` — harness detection and the config surfaces resolve against the environment, so
+  only a real process proves them (the fixture rig still owns the browser login; both halves share
+  one `~/.topos`).
 - **`tests/conflict_e2e.rs`** — the MERGE-CONFLICT loop, a state only a composed run reaches (the
   diverged apply class is reachable only through a workspace delivery): three bundles published,
   edited by a second person, republished over the SAME lines, then merged by an ordinary `topos

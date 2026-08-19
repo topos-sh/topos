@@ -974,6 +974,15 @@ fn enrolled_publish(
     let transport: &dyn crate::plane::ContributeSource = &*lane.transports.contribute;
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+    // WHAT THE KIND CAN SERVE — the describe's own guard, asked again here because the apply is
+    // reachable without it (`--yes`) and a connected server has no work tree to look for.
+    if let Some(refusal) = crate::bundle_kind::refuse_file_verb(
+        crate::bundle_kind::FileVerb::Publish,
+        skill_name,
+        crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill(),
+    ) {
+        return Err(refusal);
+    }
 
     // Scan the live draft ONCE under the lock → the byte-exact digest the plane re-derives. When a
     // `@<digest>` pin is present, gate here (refuse on mismatch — the disclosure/integrity gate, never a

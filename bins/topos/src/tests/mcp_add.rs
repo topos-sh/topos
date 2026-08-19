@@ -1625,12 +1625,13 @@ fn publish_through(
     )
 }
 
-/// **THE KIND RIDES THE WIRE, AND NOTHING LOCAL RULES ON IT.** What a workspace will accept for a
-/// bundle is the workspace's ruling — one gate, where the bundle lives, answering every surface
-/// alike — so the client's whole job is to say what the bundle IS: the op record carries the kind,
-/// the wire body carries it, and the receipt names it.
+/// **A CONNECTED SERVER HAS NO FILES, SO THERE IS NOTHING TO PUBLISH — and the verb says that
+/// rather than sending an empty candidate to be told so.** `publish` ships a bundle's placed
+/// files; the durable kind marker in front of the verb already says this bundle places none, so
+/// the refusal is the whole outcome and nothing reaches the wire. Reaching for a work tree first
+/// would fail as "your own state is unreadable", which is a sentence about the wrong thing.
 #[test]
-fn the_bundle_kind_rides_the_wal_onto_the_wire_and_the_receipt() {
+fn a_connected_servers_publish_refuses_by_kind_and_sends_nothing() {
     let rig = Rig::new("pub-kind");
     rig.seed_session();
     rig.write_global("[bundles]\n");
@@ -1646,33 +1647,21 @@ fn the_bundle_kind_rides_the_wal_onto_the_wire_and_the_receipt() {
 
     let lane = ShareLane::default();
     let publishes = RecordingPublish::default();
-    let outcome = publish_through(&ctx, &lane, &publishes, "weather").unwrap();
-    let ops::PublishOutcome::Published(published) = outcome else {
-        panic!("the publish LANDED");
-    };
-    assert_eq!(
-        published.kind.as_deref(),
-        Some("mcp"),
-        "the receipt names the kind"
+    let err = publish_through(&ctx, &lane, &publishes, "weather").unwrap_err();
+    let said = err.to_string();
+    assert!(
+        said.contains("is an MCP server bundle") && said.contains("`publish` ships"),
+        "the refusal names what publish acts on and what this bundle is: {said}"
     );
-    let sent = publishes.seen.lock().unwrap().clone();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(
-        sent[0].kind.as_deref(),
-        Some("mcp"),
-        "the wire carries the kind"
+    assert!(
+        publishes.seen.lock().unwrap().is_empty(),
+        "a refusal is the whole outcome — nothing was sent"
     );
-
-    // The governance transfer rewrote the local path row to the workspace reference — from here the
-    // catalog is the authority on what this bundle is.
+    // …and the row is exactly where it was: a refused publish transfers no governance.
     let text = rig.global_text();
     assert!(
-        text.contains(&format!("\"{HOST}/{WS_NAME}/weather\" = \"*\"")),
-        "{text}"
-    );
-    assert!(
-        !text.contains(&dir.display().to_string()),
-        "the path row is gone: {text}"
+        text.contains(&dir.display().to_string()),
+        "the path row stands: {text}"
     );
 }
 

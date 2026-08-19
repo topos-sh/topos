@@ -933,12 +933,24 @@ fn the_connected_server_loop_across_six_agents() {
     assert_the_six_dialects(&home);
 
     // ── 12. there are no files, so there is nothing to publish ──────────────────────────────────
+    // REFUSAL-FIRST, and refused HERE: `publish` ships a bundle's placed files, the kind marker on
+    // this machine already says there are none, and nothing is sent. The workspace would refuse it
+    // too — but a round trip to be told what the record in front of the verb already says is one
+    // trip too many, and a candidate built from a work tree that does not exist would fail as
+    // "your own state is unreadable" long before it could ask.
     let refused = author
         .run(&root, &["publish", BUNDLE, "--yes", "--json"])
         .refusal("publish over a connected server");
     assert_eq!(
-        refused["error"]["code"], "KIND_HAS_NO_FILES",
-        "the workspace refuses the verb by the bundle's KIND: {refused}"
+        refused["error"]["code"], "INVALID_ARGUMENT",
+        "the verb refuses by the bundle's KIND: {refused}"
+    );
+    let said = refused["error"]["context"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        said.contains("is an MCP server bundle") && said.contains("`publish` ships"),
+        "the refusal names what publish acts on and what this bundle is: {said}"
     );
     assert_eq!(
         resolved_revision(&stack),
