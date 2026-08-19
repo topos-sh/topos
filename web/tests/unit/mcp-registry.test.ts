@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import {
   bootWorkspace,
   createScratchDb,
@@ -133,8 +134,8 @@ beforeAll(async () => {
 
   // A catalog server the workspace follows at its current revision.
   await seedServer("mcps_weather", "io.github.acme/weather", { authMode: "oauth" });
-  await seedRevision("mcps_weather", "mcpr_weather_1", 1, WEATHER_OLD);
-  await seedRevision("mcps_weather", "mcpr_weather_2", 2, WEATHER, { current: true });
+  await seedRevision("mcps_weather", mcpRevisionId("weather_1"), 1, WEATHER_OLD);
+  await seedRevision("mcps_weather", mcpRevisionId("weather_2"), 2, WEATHER, { current: true });
   await seedBundle(db, wsId, "s_weather", "weather", { kind: "mcp", withPointer: false });
   await connect("s_weather", "mcps_weather");
 
@@ -143,20 +144,20 @@ beforeAll(async () => {
     authMode: "manual",
     authNote: "Mint a token in the tides console first.",
   });
-  await seedRevision("mcps_tides", "mcpr_tides_1", 1, TIDES);
+  await seedRevision("mcps_tides", mcpRevisionId("tides_1"), 1, TIDES);
   await seedRevision(
     "mcps_tides",
-    "mcpr_tides_2",
+    mcpRevisionId("tides_2"),
     2,
     document("io.github.acme/tides", "0.3.0", "https://tides.acme.example/mcp"),
     { current: true },
   );
   await seedBundle(db, wsId, "s_tides", "tides", { kind: "mcp", withPointer: false });
-  await connect("s_tides", "mcps_tides", "mcpr_tides_1");
+  await connect("s_tides", "mcps_tides", mcpRevisionId("tides_1"));
 
   // The workspace's OWN server, private and connected — nobody else's lane may show it.
   await seedServer("mcps_files", "io.github.acme/files", { workspaceId: wsId, authMode: null });
-  await seedRevision("mcps_files", "mcpr_files_1", 1, FILES, { current: true });
+  await seedRevision("mcps_files", mcpRevisionId("files_1"), 1, FILES, { current: true });
   await seedBundle(db, wsId, "s_files", "files", { kind: "mcp", withPointer: false });
   await connect("s_files", "mcps_files");
 
@@ -166,7 +167,7 @@ beforeAll(async () => {
   await seedServer("mcps_other", "io.github.acme/unconnected");
   await seedRevision(
     "mcps_other",
-    "mcpr_other_1",
+    mcpRevisionId("other_1"),
     1,
     document("io.github.acme/unconnected", "1.0.0", "https://other.acme.example/mcp"),
     { current: true },
@@ -174,7 +175,7 @@ beforeAll(async () => {
   await seedServer("mcps_gone", "io.github.acme/gone");
   await seedRevision(
     "mcps_gone",
-    "mcpr_gone_1",
+    mcpRevisionId("gone_1"),
     1,
     document("io.github.acme/gone", "1.0.0", "https://gone.acme.example/mcp"),
     { current: true },

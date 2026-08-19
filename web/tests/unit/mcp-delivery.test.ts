@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import {
   assignBundleRow,
   bootWorkspace,
@@ -109,18 +110,18 @@ beforeAll(async () => {
 
   // The catalog's own server, followed at its current revision.
   await seedServer("mcps_glob", "com.example/global", null);
-  await seedRevision("mcps_glob", "mcpr_glob_1", 1, "1.0.0");
-  await seedRevision("mcps_glob", "mcpr_glob_2", 2, "2.0.0", { current: true });
+  await seedRevision("mcps_glob", mcpRevisionId("glob_1"), 1, "1.0.0");
+  await seedRevision("mcps_glob", mcpRevisionId("glob_2"), 2, "2.0.0", { current: true });
   await seedBundle(db, ws, "b_glob", "global-server", { kind: "mcp", withPointer: false });
   await connect("b_glob", "mcps_glob");
   await assignBundleRow(db, ws, "b_glob", MEMBER);
 
   // The same catalog server, PINNED by another workspace bundle — to a revision since revoked.
   await seedServer("mcps_pin", "com.example/pinned", null);
-  await seedRevision("mcps_pin", "mcpr_pin_1", 1, "1.0.0", { status: "revoked" });
-  await seedRevision("mcps_pin", "mcpr_pin_2", 2, "2.0.0", { current: true });
+  await seedRevision("mcps_pin", mcpRevisionId("pin_1"), 1, "1.0.0", { status: "revoked" });
+  await seedRevision("mcps_pin", mcpRevisionId("pin_2"), 2, "2.0.0", { current: true });
   await seedBundle(db, ws, "b_pin", "pinned-server", { kind: "mcp", withPointer: false });
-  await connect("b_pin", "mcps_pin", "mcpr_pin_1");
+  await connect("b_pin", "mcps_pin", mcpRevisionId("pin_1"));
   await assignBundleRow(db, ws, "b_pin", MEMBER);
 
   // A server with nothing published — a connection that resolves to nothing.
@@ -144,7 +145,7 @@ describe("delivery serves a connected server whole", () => {
     const body = await (await lane()).deliveryFor(member());
     const served = body.mcp_servers.find((row) => row.skill_id === "b_glob");
     expect(served).toBeDefined();
-    expect(served?.revision_id).toBe("mcpr_glob_2");
+    expect(served?.revision_id).toBe(mcpRevisionId("glob_2"));
     expect(served?.document).toMatchObject({ name: "com.example/global", version: "2.0.0" });
     expect(served?.name).toBe("global-server");
     expect(served?.kind).toBe("mcp");
@@ -158,7 +159,7 @@ describe("delivery serves a connected server whole", () => {
   it("follows a pin, revoked or not, and says which", async () => {
     const body = await (await lane()).deliveryFor(member());
     const served = body.mcp_servers.find((row) => row.skill_id === "b_pin");
-    expect(served?.revision_id).toBe("mcpr_pin_1");
+    expect(served?.revision_id).toBe(mcpRevisionId("pin_1"));
     expect(served?.document).toMatchObject({ version: "1.0.0" });
     expect(served?.pinned).toBe(true);
     expect(served?.revoked).toBe(true);

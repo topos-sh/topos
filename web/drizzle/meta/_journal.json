@@ -162,6 +162,13 @@
       "when": 1787200000000,
       "tag": "0022_mcp-seeded-ids-reshaped",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1787126562153,
+      "tag": "0023_mcp-revision-id-shape",
+      "breakpoints": true
     }
   ]
 }

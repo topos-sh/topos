@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import { bootWorkspace, createScratchDb, type ScratchDb } from "./helpers/scratch-db";
 
 /**
@@ -91,13 +92,13 @@ beforeAll(async () => {
   await seedServer("mcps_a_weather", "io.github.acme/weather", { authMode: "oauth" });
   await seedRevision(
     "mcps_a_weather",
-    "mcpr_weather_1",
+    mcpRevisionId("weather_1"),
     1,
     document("io.github.acme/weather", "1.0.0"),
   );
   await seedRevision(
     "mcps_a_weather",
-    "mcpr_weather_2",
+    mcpRevisionId("weather_2"),
     2,
     document("io.github.acme/weather", "2.0.0"),
     { current: true },
@@ -105,7 +106,7 @@ beforeAll(async () => {
   // …whose second revision was pulled back after publication.
   await seedRevision(
     "mcps_a_weather",
-    "mcpr_weather_x",
+    mcpRevisionId("weather_x"),
     3,
     document("io.github.acme/weather", "1.5.0"),
     { status: "revoked" },
@@ -113,15 +114,21 @@ beforeAll(async () => {
 
   // A second published global server, so the list has something to page over.
   await seedServer("mcps_b_tides", "io.github.acme/tides");
-  await seedRevision("mcps_b_tides", "mcpr_tides_1", 1, document("io.github.acme/tides", "0.1.0"), {
-    current: true,
-  });
+  await seedRevision(
+    "mcps_b_tides",
+    mcpRevisionId("tides_1"),
+    1,
+    document("io.github.acme/tides", "0.1.0"),
+    {
+      current: true,
+    },
+  );
 
   // Everything the feed must refuse to carry.
   await seedServer("mcps_c_candidate", "io.github.acme/candidate", { status: "candidate" });
   await seedRevision(
     "mcps_c_candidate",
-    "mcpr_candidate_1",
+    mcpRevisionId("candidate_1"),
     1,
     document("io.github.acme/candidate", "1.0.0"),
     { status: "candidate" },
@@ -129,7 +136,7 @@ beforeAll(async () => {
   await seedServer("mcps_d_private", "io.github.acme/private", { workspaceId: wsId });
   await seedRevision(
     "mcps_d_private",
-    "mcpr_private_1",
+    mcpRevisionId("private_1"),
     1,
     document("io.github.acme/private", "1.0.0"),
     { current: true },

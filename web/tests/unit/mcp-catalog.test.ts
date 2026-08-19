@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
 import { validateCandidateFiles } from "@/lib/mcp/validate.server";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import {
   asMember,
   asOwner,
@@ -233,7 +234,7 @@ describe("a version is upstream's promise, and only upstream's", () => {
       db.q(
         `INSERT INTO web.mcp_server_revision
            (id, server_id, seq, status, upstream_version, document, source)
-         VALUES ('mcpr_raw', 'mcps_ver', 99, 'candidate', '1.2.3', '{}'::jsonb, 'registry')`,
+         VALUES ('${mcpRevisionId("raw")}', 'mcps_ver', 99, 'candidate', '1.2.3', '{}'::jsonb, 'registry')`,
       ),
     ).rejects.toThrow(/mcp_server_revision_upstream_version/);
   });

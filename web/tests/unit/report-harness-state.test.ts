@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import { laneHeaders } from "./helpers/lane";
 import {
   asMember,
@@ -186,12 +187,12 @@ describe("a connected server's machine reads current against the CATALOG", () =>
       `INSERT INTO web.mcp_server_revision
          (id, server_id, seq, status, upstream_version, document, transport, url, source,
           published_at, published_by)
-       VALUES ('mcpr_fleet_1', 'mcps_fleet', 1, 'published', '1.0.0', '{"name":"com.example/fleet"}'::jsonb,
+       VALUES ('${mcpRevisionId("fleet_1")}', 'mcps_fleet', 1, 'published', '1.0.0', '{"name":"com.example/fleet"}'::jsonb,
                'streamable-http', 'https://fleet.example/mcp', 'seed', now(), 'Staff')
        ON CONFLICT (id) DO NOTHING`,
     );
     await db.q(
-      `UPDATE web.mcp_server SET current_revision_id = 'mcpr_fleet_1' WHERE id = 'mcps_fleet'`,
+      `UPDATE web.mcp_server SET current_revision_id = '${mcpRevisionId("fleet_1")}' WHERE id = 'mcps_fleet'`,
     );
     await db.q(
       `INSERT INTO web.bundle_mcp (bundle_id, workspace_id, server_id) VALUES ('s_srv', $1, 'mcps_fleet')
@@ -199,12 +200,12 @@ describe("a connected server's machine reads current against the CATALOG", () =>
       [wsId],
     );
 
-    expect(await report([{ skillId: "s_srv", versionId: "mcpr_fleet_1" }])).toBe("ok");
+    expect(await report([{ skillId: "s_srv", versionId: mcpRevisionId("fleet_1") }])).toBe("ok");
     const held = await sessions.yourSessionsApplying(actor, "s_srv");
     expect(held[0]?.current).toBe(true);
 
     // …and a machine on an older revision reads as behind, which is the same rule.
-    expect(await report([{ skillId: "s_srv", versionId: "mcpr_fleet_0" }])).toBe("ok");
+    expect(await report([{ skillId: "s_srv", versionId: mcpRevisionId("fleet_0") }])).toBe("ok");
     expect((await sessions.yourSessionsApplying(actor, "s_srv"))[0]?.current).toBe(false);
   });
 });

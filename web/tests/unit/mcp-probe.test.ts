@@ -7,6 +7,7 @@ import {
   probeEndpoint,
 } from "@/lib/mcp/probe.server";
 import { probeStateLine } from "@/lib/mcp/probe-state";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import { bootWorkspace, createScratchDb, type ScratchDb } from "./helpers/scratch-db";
 
 /**
@@ -349,17 +350,17 @@ async function probeStateOf(revisionId: string) {
 
 describe("recording what was seen", () => {
   it("writes the answer onto the revision, and a re-probe replaces it", async () => {
-    await seedRevision("mcps_one", "mcpr_one");
-    const target = { revisionId: "mcpr_one", endpoint: "https://93.184.216.34/mcp" };
+    await seedRevision("mcps_one", mcpRevisionId("one"));
+    const target = { revisionId: mcpRevisionId("one"), endpoint: "https://93.184.216.34/mcp" };
 
     await probeAndRecord(target, answer(200, OK_INITIALIZE));
-    let state = await probeStateOf("mcpr_one");
+    let state = await probeStateOf(mcpRevisionId("one"));
     expect(state.outcome).toBe("responding");
     expect(state.detail).toBe(null);
     expect(state.probedAt).not.toBe(null);
 
     await probeAndRecord(target, answer(503, "down"));
-    state = await probeStateOf("mcpr_one");
+    state = await probeStateOf(mcpRevisionId("one"));
     expect(state.outcome).toBe("not_responding");
     expect(state.detail).toBe("answered 503");
     // The line a surface renders reads from exactly those two facts.
@@ -373,38 +374,50 @@ describe("recording what was seen", () => {
   });
 
   it("asks nothing about a package-only document, and records nothing for it", async () => {
-    await seedRevision("mcps_pkg", "mcpr_pkg");
+    await seedRevision("mcps_pkg", mcpRevisionId("pkg"));
     const transport = vi.fn<ProbeTransport>();
-    const verdict = await probeAndRecord({ revisionId: "mcpr_pkg", endpoint: null }, transport);
+    const verdict = await probeAndRecord(
+      { revisionId: mcpRevisionId("pkg"), endpoint: null },
+      transport,
+    );
     expect(verdict).toBe(null);
     expect(transport).not.toHaveBeenCalled();
-    expect(await probeStateOf("mcpr_pkg")).toMatchObject({ outcome: null, probedAt: null });
+    expect(await probeStateOf(mcpRevisionId("pkg"))).toMatchObject({
+      outcome: null,
+      probedAt: null,
+    });
   });
 
   it("a revision that is no longer there costs nothing — the act it followed is durable", async () => {
     await expect(
       probeAndRecord(
-        { revisionId: "mcpr_gone", endpoint: "https://93.184.216.34/mcp" },
+        { revisionId: mcpRevisionId("gone"), endpoint: "https://93.184.216.34/mcp" },
         answer(200, OK_INITIALIZE),
       ),
     ).resolves.toEqual({ outcome: "responding", detail: null });
-    expect(await probeStateOf("mcpr_gone")).toMatchObject({ outcome: null });
+    expect(await probeStateOf(mcpRevisionId("gone"))).toMatchObject({ outcome: null });
   });
 
   it("swallows a transport that throws something unexpected", async () => {
-    await seedRevision("mcps_boom", "mcpr_boom");
+    await seedRevision("mcps_boom", mcpRevisionId("boom"));
     const exploding: ProbeTransport = () => {
       throw new TypeError("not a function");
     };
     await expect(
-      probeAndRecord({ revisionId: "mcpr_boom", endpoint: "https://93.184.216.34/mcp" }, exploding),
+      probeAndRecord(
+        { revisionId: mcpRevisionId("boom"), endpoint: "https://93.184.216.34/mcp" },
+        exploding,
+      ),
     ).resolves.toEqual({ outcome: "not_responding", detail: "no answer" });
   });
 
   it("fires without being waited on, and cannot reject", async () => {
     const { scheduleRevisionProbe } = await import("@/lib/mcp/probe.server");
     expect(() =>
-      scheduleRevisionProbe({ revisionId: "mcpr_absent", endpoint: "https://127.0.0.1/mcp" }),
+      scheduleRevisionProbe({
+        revisionId: mcpRevisionId("absent"),
+        endpoint: "https://127.0.0.1/mcp",
+      }),
     ).not.toThrow();
   });
 });

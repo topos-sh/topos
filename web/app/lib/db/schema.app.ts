@@ -629,6 +629,13 @@ export const mcpServerRevision = webSchema.table(
   },
   (table) => [
     unique("mcp_server_revision_seq_unique").on(table.serverId, table.seq),
+    // THE ID'S SHAPE IS LOAD-BEARING, so the database holds it rather than trusting every writer
+    // to. A revision id TRAVELS: a machine reports back the revision it holds, and the door that
+    // receives that report accepts the minted shape and nothing else — so a row written with any
+    // other spelling would have that machine's WHOLE applied report refused, taking every other
+    // bundle on it along, on every update, forever. A seed, a hand-run repair and a future
+    // importer all write ids; this is the one place that answers for all of them.
+    check("mcp_server_revision_id_shape_check", sql`${table.id} ~ '^mcpr_[0-9a-f]{32}$'`),
     // Composite-FK target: a pointer or a pin names a revision OF THE SERVER it belongs to.
     unique("mcp_server_revision_id_server_unique").on(table.id, table.serverId),
     // One document per upstream version — for documents that came from upstream. See above.

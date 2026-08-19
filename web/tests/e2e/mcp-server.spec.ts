@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import { adminQuery, theWorkspace } from "./seed";
 import { gotoSettled } from "./sign-in";
 
@@ -108,8 +109,8 @@ test.beforeAll(async () => {
     authMode: "manual",
     authNote: "Mint a token in the e2e console first.",
   });
-  await seedRevision(CATALOG.serverId, "e2e_mcpr_cat_1", 1, "1.0.0");
-  await seedRevision(CATALOG.serverId, "e2e_mcpr_cat_2", 2, "2.0.0", {
+  await seedRevision(CATALOG.serverId, mcpRevisionId("e2e_cat_1"), 1, "1.0.0");
+  await seedRevision(CATALOG.serverId, mcpRevisionId("e2e_cat_2"), 2, "2.0.0", {
     current: true,
     url: "https://catalog.e2e.example/mcp",
   });
@@ -117,14 +118,16 @@ test.beforeAll(async () => {
 
   // The same shape, PINNED to a version that has since been withdrawn.
   await seedServer("e2e_mcps_pinned", "io.github.e2e/pinned", { authMode: "oauth" });
-  await seedRevision(PINNED.serverId, "e2e_mcpr_pin_1", 1, "1.0.0", { status: "revoked" });
-  await seedRevision(PINNED.serverId, "e2e_mcpr_pin_2", 2, "2.0.0", { current: true });
-  await connect(PINNED.bundleId, PINNED.name, PINNED.serverId, "e2e_mcpr_pin_1");
+  await seedRevision(PINNED.serverId, mcpRevisionId("e2e_pin_1"), 1, "1.0.0", {
+    status: "revoked",
+  });
+  await seedRevision(PINNED.serverId, mcpRevisionId("e2e_pin_2"), 2, "2.0.0", { current: true });
+  await connect(PINNED.bundleId, PINNED.name, PINNED.serverId, mcpRevisionId("e2e_pin_1"));
 
   // The workspace's OWN server — the one an owner may edit.
   const ws = await theWorkspace();
   await seedServer("e2e_mcps_own", "io.github.e2e/own", { workspaceId: ws.id, authMode: null });
-  await seedRevision(OWN.serverId, "e2e_mcpr_own_1", 1, "1.0.0", {
+  await seedRevision(OWN.serverId, mcpRevisionId("e2e_own_1"), 1, "1.0.0", {
     current: true,
     url: "https://own.e2e.example/mcp",
   });

@@ -7,6 +7,7 @@ import {
   StaticRouterProvider,
 } from "react-router";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mcpRevisionId } from "../helpers/mcp-ids";
 import {
   bootWorkspace,
   createScratchDb,
@@ -141,7 +142,7 @@ async function seedServer(
       opts.status ?? "active",
     ],
   );
-  const revisionId = `${id}_r1`;
+  const revisionId = mcpRevisionId(`${id}_r1`);
   const published = opts.publish !== false;
   await db.q(
     `INSERT INTO web.mcp_server_revision
