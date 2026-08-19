@@ -1163,15 +1163,14 @@ pub(crate) fn detach_bundle_rows(io: &ScopeIo<'_>, bundle_id: &str) -> Vec<Messa
 }
 
 /// The per-scope MCP converge lock (`locks/mcp.lock`, blocking): every entry point that runs the
-/// custody + config read-modify-write — the sweep's [`converge`], add's inline converge, a
-/// targeted go-back's / accept's [`converge_bundle_now`], and [`remove_bundle`] — serializes on it, so two
-/// processes can never interleave a read-modify-write over the same scope's configs.
+/// custody + config read-modify-write — the sweep's [`converge`] (which a targeted `update` and
+/// an `add` reach through the same narrowed reconcile) and [`remove_bundle`] — serializes on it,
+/// so two processes can never interleave a read-modify-write over the same scope's configs.
 ///
 /// LOCK ORDER, fixed: the sweep already holds `locks/currency.lock` when it converges, so this
 /// lock is strictly INNER — taken only inside [`converge`]/[`remove_bundle`], released on return,
 /// and NOTHING acquires another lock while holding it. No path takes it twice: the two holders
-/// never call each other, and [`converge_bundle_now`] reads custody only ADVISORILY (deriving its
-/// reach) before its one `converge` call takes the lock and re-reads authoritatively.
+/// never call each other.
 ///
 /// **This lock does NOT serialize against the per-skill flock, and does not need to.** The two lock
 /// domains own DIFFERENT FILES, and every file has exactly one writer: `map.json` (a bundle's dir

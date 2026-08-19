@@ -248,9 +248,8 @@ fn add_workspace(
     // A `--kind` word that CONTRADICTS the catalog is refused, never quietly overruled. The
     // catalog is the authority on what a workspace bundle is, so the flag can only ever agree with
     // it or be wrong — and being wrong mattered: `--kind skill` on a server bundle used to deliver
-    // a tool endpoint into the person's agents without a word, while the local-folder door refuses
-    // the same mistake by name. Silence still means "whatever the catalog says", which is why the
-    // flag is unnecessary here at all.
+    // a tool endpoint into the person's agents without a word. Silence still means "whatever the
+    // catalog says", which is why the flag is unnecessary here at all.
     if let (Some(said), Some(actual)) = (declared, kind)
         && said != actual
     {
