@@ -273,18 +273,29 @@ jobs:
         run: bun run build && bun run check:bundle
       - name: unit tests
         run: bunx vitest run
-      # The browser binary comes off a CDN that intermittently stalls a connection open
-      # forever; an unbounded download once wedged a release for over an hour. Bound each try
-      # and retry, so a stalled fetch is killed and restarted instead of hanging the gate.
+      # Two independent flakes live in this one command, so it is split in two. The apt system
+      # deps (install-deps) stall on a slow mirror and MUST NOT be killed mid-run — a timeout that
+      # kills apt orphans its lock and dooms every retry ("Could not get lock"); instead retry and
+      # clear a stale lock between tries. The browser binary (install) comes off a CDN that once
+      # held a connection open for over an hour, so THAT is the part bounded by a timeout and
+      # retried — killing a download is safe, killing apt is not.
       - name: install chromium
         run: |
+          deps_ok=0
           for attempt in 1 2 3; do
-            if timeout 300 bunx playwright install --with-deps chromium; then
-              exit 0
-            fi
-            echo "::warning::chromium install attempt ${attempt} stalled or failed; retrying"
+            if sudo bunx playwright install-deps chromium; then deps_ok=1; break; fi
+            echo "::warning::system-deps attempt ${attempt} failed; clearing apt locks"
+            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock \
+              /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend 2>/dev/null || true
+            sudo dpkg --configure -a 2>/dev/null || true
+            sleep 20
           done
-          echo "::error::chromium install failed after 3 attempts"
+          [ "$deps_ok" = 1 ] || { echo "::error::playwright system deps failed after 3 attempts"; exit 1; }
+          for attempt in 1 2 3; do
+            if timeout 300 bunx playwright install chromium; then exit 0; fi
+            echo "::warning::browser download attempt ${attempt} stalled or failed; retrying"
+          done
+          echo "::error::chromium browser download failed after 3 attempts"
           exit 1
       # The database must exist BEFORE the suite: Playwright launches the web servers ahead of
       # globalSetup, and the served app's readiness probe is a database-backed /healthz.
