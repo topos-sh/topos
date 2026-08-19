@@ -283,7 +283,7 @@ jobs:
         run: |
           deps_ok=0
           for attempt in 1 2 3; do
-            if sudo bunx playwright install-deps chromium; then deps_ok=1; break; fi
+            if bunx playwright install-deps chromium; then deps_ok=1; break; fi
             echo "::warning::system-deps attempt ${attempt} failed; clearing apt locks"
             sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock \
               /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend 2>/dev/null || true
