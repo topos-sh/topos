@@ -65,13 +65,12 @@ test.beforeEach(async () => {
     `delete from web.bundle where id in (
        select bm.bundle_id from web.bundle_mcp bm
        join web.mcp_server ms on ms.id = bm.server_id
-       where ms.registry_name = $1)`,
+       where ms.name = $1)`,
     [SERVER_NAME],
   );
-  await adminQuery(
-    `delete from web.mcp_server where workspace_id is not null and registry_name = $1`,
-    [SERVER_NAME],
-  );
+  await adminQuery(`delete from web.mcp_server where workspace_id is not null and name = $1`, [
+    SERVER_NAME,
+  ]);
 });
 
 test("choosing a server opens its dialog with no request, and adding it connects", async ({
@@ -205,10 +204,9 @@ test("write down a server the catalog does not carry, preview it, add it", async
   ]);
   expect(rows[0]?.kind).toBe("mcp");
   expect(
-    await adminQuery(
-      `select 1 from web.mcp_server where registry_name = $1 and workspace_id is not null`,
-      [SERVER_NAME],
-    ),
+    await adminQuery(`select 1 from web.mcp_server where name = $1 and workspace_id is not null`, [
+      SERVER_NAME,
+    ]),
   ).toHaveLength(1);
 
   // And the dashboard lists it under MCP servers, with its kind, like any other bundle.

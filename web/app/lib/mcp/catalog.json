@@ -1,0 +1,991 @@
+[
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "ai.exa/exa",
+    "title": "Exa",
+    "description": "Semantic web search via Exa.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.exa.ai/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "app.linear/linear",
+    "title": "Linear",
+    "description": "Issues, projects and cycles in Linear.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.linear.app/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "linear",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "co.alphavantage/mcp",
+    "title": "Alpha Vantage",
+    "description": "Market data and financial indicators from Alpha Vantage.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.alphavantage.co/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "co.huggingface/hf-mcp-server",
+    "title": "Hugging Face",
+    "description": "Models, datasets and Spaces on the Hugging Face Hub.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://huggingface.co/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "icon": "huggingface",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.airtable/mcp",
+    "title": "Airtable",
+    "description": "Bases, tables and records in Airtable.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.airtable.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "airtable",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.amazon.aws/knowledge",
+    "title": "AWS Knowledge",
+    "description": "AWS documentation and API references.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://knowledge-mcp.global.api.aws"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.amplitude/mcp-server",
+    "title": "Amplitude",
+    "description": "Product analytics in Amplitude.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.amplitude.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.apify/mcp",
+    "title": "Apify",
+    "description": "Run scrapers and automation actors on Apify.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.apify.com/"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.asana/mcp",
+    "title": "Asana",
+    "description": "Tasks, projects and portfolios in Asana.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.asana.com/v2/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "manual",
+        "authNote": "Needs an OAuth app your admin registers with Asana — agents can't sign in by themselves.",
+        "icon": "asana",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.atlassian/atlassian-mcp-server",
+    "title": "Atlassian",
+    "description": "Jira issues and Confluence pages, through Atlassian's Rovo server.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.atlassian.com/v1/mcp/authv2"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "atlassian",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.brightdata/mcp",
+    "title": "Bright Data",
+    "description": "Web data collection through Bright Data.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.brightdata.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.calendly/mcp",
+    "title": "Calendly",
+    "description": "Scheduling links and booked events in Calendly.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.calendly.com/"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "calendly",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.canva/mcp",
+    "title": "Canva",
+    "description": "Designs, folders and brand assets in Canva.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.canva.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.clickup/mcp",
+    "title": "ClickUp",
+    "description": "Tasks, lists and docs in a ClickUp workspace.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.clickup.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "clickup",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.cloudflare.mcp/mcp",
+    "title": "Cloudflare Docs",
+    "description": "Search Cloudflare's product documentation.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://docs.mcp.cloudflare.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "icon": "cloudflare",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.context7/mcp",
+    "title": "Context7",
+    "description": "Up-to-date documentation and code examples for libraries.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.context7.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.datadoghq/mcp",
+    "title": "Datadog",
+    "description": "Metrics, monitors and incidents in Datadog.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.datadoghq.com/v1/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "datadog",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.deepwiki/mcp",
+    "title": "DeepWiki",
+    "description": "Ask questions about any public GitHub repository.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.deepwiki.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.dropbox/mcp",
+    "title": "Dropbox",
+    "description": "Files and folders in a Dropbox account.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.dropbox.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "dropbox",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.figma.mcp/mcp",
+    "title": "Figma",
+    "description": "Design files, components and variables in Figma.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.figma.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "figma",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.github/mcp",
+    "title": "GitHub",
+    "description": "Repositories, issues, pull requests and code search on GitHub.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://api.githubcopilot.com/mcp/"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "manual",
+        "authNote": "Needs a GitHub personal access token per person — agents can't sign in by themselves.",
+        "icon": "github",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.gitlab/mcp",
+    "title": "GitLab",
+    "description": "Projects, issues and merge requests on GitLab.com.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://gitlab.com/api/v4/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "gitlab",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.grafana/mcp",
+    "title": "Grafana Cloud",
+    "description": "Dashboards, datasources and alerts in Grafana Cloud.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.grafana.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "grafana",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.heroku/mcp",
+    "title": "Heroku",
+    "description": "Apps, pipelines and add-ons on Heroku.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.heroku.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.intercom/mcp",
+    "title": "Intercom",
+    "description": "Conversations, contacts and help articles in Intercom.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.intercom.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "intercom",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.langchain/langsmith",
+    "title": "LangSmith",
+    "description": "Traces, datasets and prompts in LangSmith.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://api.smith.langchain.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "langchain",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.microsoft.learn/mcp",
+    "title": "Microsoft Learn",
+    "description": "Search Microsoft and Azure technical documentation.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://learn.microsoft.com/api/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.mixpanel/mcp",
+    "title": "Mixpanel",
+    "description": "Product analytics in Mixpanel.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.mixpanel.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "mixpanel",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.monday/monday.com",
+    "title": "monday.com",
+    "description": "Boards, items and docs in monday.com.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.monday.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.netlify/mcp",
+    "title": "Netlify",
+    "description": "Sites, deploys and build logs on Netlify.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://netlify-mcp.netlify.app/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "netlify",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.newrelic/mcp-server",
+    "title": "New Relic",
+    "description": "Telemetry, alerts and dashboards in New Relic.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.newrelic.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "newrelic",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.notion/mcp",
+    "title": "Notion",
+    "description": "Pages, databases and comments in a Notion workspace.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.notion.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "notion",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.pagerduty/mcp",
+    "title": "PagerDuty",
+    "description": "Incidents, services and on-call schedules in PagerDuty.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.pagerduty.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "manual",
+        "authNote": "Needs a PagerDuty API token per person — agents can't sign in by themselves.",
+        "icon": "pagerduty",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.paypal.mcp/mcp",
+    "title": "PayPal",
+    "description": "Payments, invoices and orders in PayPal.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.paypal.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "paypal",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.posthog/mcp",
+    "title": "PostHog",
+    "description": "Product analytics, feature flags and session replay in PostHog.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.posthog.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "posthog",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.postman/postman-mcp-server",
+    "title": "Postman",
+    "description": "Collections, APIs and workspaces in Postman.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.postman.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "postman",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.railway/mcp",
+    "title": "Railway",
+    "description": "Services, deployments and logs on Railway.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.railway.com/"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "railway",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.slack/mcp",
+    "title": "Slack",
+    "description": "Messages, channels and files in a Slack workspace.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.slack.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "manual",
+        "authNote": "Needs a Slack app your admin registers — agents can't sign in by themselves.",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.squareup/mcp",
+    "title": "Square",
+    "description": "Payments, catalog and customers in Square.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.squareup.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "square",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.stripe/mcp",
+    "title": "Stripe",
+    "description": "Customers, payments, subscriptions and invoices in Stripe.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.stripe.com"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "stripe",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.supabase/mcp",
+    "title": "Supabase",
+    "description": "Projects, database schema and logs on Supabase.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.supabase.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "supabase",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.tavily/mcp",
+    "title": "Tavily",
+    "description": "Web search and content extraction for agents via Tavily.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.tavily.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.vercel/vercel-mcp",
+    "title": "Vercel",
+    "description": "Projects, deployments and logs on Vercel.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.vercel.com"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "vercel",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.webflow/mcp",
+    "title": "Webflow",
+    "description": "Sites, CMS collections and pages in Webflow.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.webflow.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "webflow",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.wix/mcp",
+    "title": "Wix",
+    "description": "Sites and business data in Wix.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.wix.com/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "wix",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "dev.firecrawl/mcp",
+    "title": "Firecrawl",
+    "description": "Scrape and crawl web pages into clean, agent-readable text.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.firecrawl.dev/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "none",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "io.sanity.www/mcp",
+    "title": "Sanity",
+    "description": "Content, schemas and datasets in Sanity.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.sanity.io"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "sanity",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "io.sentry/mcp",
+    "title": "Sentry",
+    "description": "Errors, issues and releases in Sentry.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.sentry.dev/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "sentry",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "net.todoist/mcp",
+    "title": "Todoist",
+    "description": "Tasks and projects in Todoist.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://ai.todoist.net/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "todoist",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  },
+  {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "tech.neon/mcp",
+    "title": "Neon",
+    "description": "Postgres projects, branches and queries on Neon.",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.neon.tech/mcp"
+      }
+    ],
+    "_meta": {
+      "sh.topos/catalog": {
+        "authTier": "oauth",
+        "icon": "neon",
+        "curatedBy": "Topos",
+        "lastVerified": "2026-08-19"
+      }
+    }
+  }
+]

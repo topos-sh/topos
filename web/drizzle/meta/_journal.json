@@ -183,6 +183,13 @@
       "when": 1787200300000,
       "tag": "0025_mcp-version-nullable",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1787200400000,
+      "tag": "0026_mcp-catalog-file",
+      "breakpoints": true
     }
   ]
 }

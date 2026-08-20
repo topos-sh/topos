@@ -179,16 +179,15 @@ describe("a connected server's machine reads current against the CATALOG", () =>
     const sessions = await import("@/lib/db/queries.sessions.server");
     const actor = asMember(wsId, "u_dev", "owner", "Dev");
     await db.q(
-      `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+      `INSERT INTO web.mcp_server (id, workspace_id, name, display_name, auth_mode, status)
        VALUES ('mcps_fleet', NULL, 'com.example/fleet', 'Fleet', 'none', 'active')
        ON CONFLICT (id) DO NOTHING`,
     );
     await db.q(
       `INSERT INTO web.mcp_server_revision
-         (id, server_id, seq, status, upstream_version, document, transport, url, source,
-          published_at, published_by)
-       VALUES ('${mcpRevisionId("fleet_1")}', 'mcps_fleet', 1, 'published', '1.0.0', '{"name":"com.example/fleet"}'::jsonb,
-               'streamable-http', 'https://fleet.example/mcp', 'seed', now(), 'Staff')
+         (id, server_id, seq, upstream_version, document, transport, url, published_at, published_by)
+       VALUES ('${mcpRevisionId("fleet_1")}', 'mcps_fleet', 1, '1.0.0', '{"name":"com.example/fleet"}'::jsonb,
+               'streamable-http', 'https://fleet.example/mcp', now(), 'Staff')
        ON CONFLICT (id) DO NOTHING`,
     );
     await db.q(

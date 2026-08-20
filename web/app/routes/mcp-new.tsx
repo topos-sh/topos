@@ -70,7 +70,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     role: actor.role,
     servers: servers.map((server) => ({
       serverId: server.serverId,
-      registryName: server.registryName,
+      name: server.name,
       displayName: server.displayName,
       description: server.description,
       icon: server.icon,
@@ -79,7 +79,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       url: server.url,
       transport: server.transport,
       host: hostOf(server.url),
-      suggestedName: suggestedNameFor(server.registryName ?? server.displayName),
+      suggestedName: suggestedNameFor(server.name ?? server.displayName),
       connectedAs: server.connectedAs,
       inArchive: server.inArchive,
     })),
@@ -407,7 +407,7 @@ function matches(server: ServerRow, query: string): boolean {
   if (needle.length === 0) {
     return true;
   }
-  return `${server.displayName} ${server.description ?? ""} ${server.host} ${server.registryName ?? ""}`
+  return `${server.displayName} ${server.description ?? ""} ${server.host} ${server.name ?? ""}`
     .toLowerCase()
     .includes(needle);
 }
@@ -592,7 +592,7 @@ function AddServerDialog({
                 the first thing on the block rather than a name to re-read. */}
             <McpMark logo={server.icon ?? undefined} className="size-4" />
             <span className="font-mono text-[13px] text-ink">
-              {server.registryName ?? server.displayName}
+              {server.name ?? server.displayName}
             </span>
             {server.transport !== null && <Chip tone="neutral">{server.transport}</Chip>}
             <AuthChip auth={server.authMode} />

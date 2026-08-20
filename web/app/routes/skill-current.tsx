@@ -144,7 +144,7 @@ function serverViewOf(
   return {
     serverId: server.serverId,
     isPrivate: server.isPrivate,
-    registryName: server.registryName,
+    name: server.name,
     displayName: server.displayName,
     description: server.description,
     websiteUrl: server.websiteUrl,
@@ -159,7 +159,6 @@ function serverViewOf(
         : {
             revisionId: server.resolved.revisionId,
             upstreamVersion: server.resolved.upstreamVersion,
-            status: server.resolved.status,
             url: server.resolved.url,
             transport: server.resolved.transport,
             document: canonicalServerJson(server.resolved.document),
@@ -169,8 +168,7 @@ function serverViewOf(
       revisionId: revision.revisionId,
       seq: revision.seq,
       upstreamVersion: revision.upstreamVersion,
-      status: revision.status,
-      source: revision.source,
+      state: revision.state,
       publishedAt: revision.publishedAt === null ? null : revision.publishedAt.toISOString(),
       publishedBy: revision.publishedBy,
     })),

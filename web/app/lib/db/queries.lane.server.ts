@@ -199,7 +199,7 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
                (extract(epoch from cp.moved_at) * 1000)::bigint AS updated_at,
                vd.bundle_digest AS current_digest,
                -- The catalog half: the revision this connection resolves to, and its document.
-               r.id AS revision_id, r.document AS document, r.status AS revision_status,
+               r.id AS revision_id, r.document AS document,
                (bm.pinned_revision_id IS NOT NULL) AS pinned,
                (extract(epoch from r.published_at) * 1000)::bigint AS revision_at,
                COALESCE((
@@ -277,7 +277,6 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
             revision_id: r.revision_id as string,
             document: r.document as Record<string, unknown>,
             ...(r.pinned === true ? { pinned: true as const } : {}),
-            ...(r.revision_status === "revoked" ? { revoked: true as const } : {}),
             updated_at: Number(r.revision_at),
             via: via(r),
           });
@@ -944,7 +943,7 @@ export async function laneMcpServersIndex(actor: SessionActor): Promise<LaneMcpI
   const ws = actor.workspaceId;
   const rows = await getDb().execute(sql`
     SELECT b.id AS skill_id, b.name, b.kind, b.status, b.display_name,
-           r.id AS revision_id, r.document, r.status AS revision_status,
+           r.id AS revision_id, r.document,
            (bm.pinned_revision_id IS NOT NULL) AS pinned,
            (extract(epoch from r.published_at) * 1000)::bigint AS revision_at
     FROM web.bundle_mcp bm
@@ -963,7 +962,6 @@ export async function laneMcpServersIndex(actor: SessionActor): Promise<LaneMcpI
     revision_id: r.revision_id as string,
     document: r.document as Record<string, unknown>,
     ...(r.pinned === true ? { pinned: true as const } : {}),
-    ...(r.revision_status === "revoked" ? { revoked: true as const } : {}),
     updated_at: Number(r.revision_at),
   }));
 }

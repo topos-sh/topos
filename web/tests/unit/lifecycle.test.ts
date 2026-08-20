@@ -172,7 +172,7 @@ describe("unarchiveBundle", () => {
   it("restores a server bundle that kept its connection", async () => {
     const queries = await q();
     await db.q(
-      `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
+      `INSERT INTO web.mcp_server (id, name, display_name, auth_mode, status)
        VALUES ('mcps_life', 'com.example/life', 'Life', 'none', 'active')`,
     );
     await db.q(
@@ -220,7 +220,7 @@ describe("deleteBundle (archive-first; the byte half degrades honestly without a
   it("releases a deleted server's connection, so the same server can be added again", async () => {
     const queries = await q();
     await db.q(
-      `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
+      `INSERT INTO web.mcp_server (id, name, display_name, auth_mode, status)
        VALUES ('mcps_gone', 'com.example/gone', 'Gone', 'none', 'active')`,
     );
     await db.q(

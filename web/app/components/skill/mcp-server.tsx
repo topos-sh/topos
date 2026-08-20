@@ -16,7 +16,7 @@ import { probeStateLine } from "@/lib/mcp/probe-state";
 export interface McpServerView {
   serverId: string;
   isPrivate: boolean;
-  registryName: string | null;
+  name: string | null;
   displayName: string;
   description: string | null;
   websiteUrl: string | null;
@@ -29,7 +29,6 @@ export interface McpServerView {
     revisionId: string;
     /** The version delivered here, or NULL when the revision names none (shown as "unversioned"). */
     upstreamVersion: string | null;
-    status: string;
     url: string | null;
     transport: string | null;
     document: string;
@@ -40,8 +39,8 @@ export interface McpServerView {
     seq: number;
     /** The revision's version, or NULL when it named none (shown as "unversioned"). */
     upstreamVersion: string | null;
-    status: string;
-    source: string;
+    /** Where it stands: `current` · `proposal` · `history` · `dismissed`. */
+    state: string;
     publishedAt: string | null;
     publishedBy: string | null;
   }[];
@@ -90,7 +89,7 @@ export function McpServerPanel({ server, isOwner }: { server: McpServerView; isO
           >
             <McpMark logo={server.icon ?? undefined} className="size-4" />
             <span className="font-mono text-[13px] text-ink">
-              {server.registryName ?? server.displayName}
+              {server.name ?? server.displayName}
             </span>
             {server.resolved?.transport !== null && server.resolved !== null && (
               <Chip tone="neutral">{server.resolved.transport}</Chip>
@@ -126,17 +125,9 @@ export function McpServerPanel({ server, isOwner }: { server: McpServerView; isO
                 Nothing is published for this server yet, so it delivers nothing.
               </p>
             ) : (
-              <>
-                <p className="text-dim text-sm">
-                  {followingLine(server.pinnedRevisionId, server.resolved.upstreamVersion)}
-                </p>
-                {server.resolved.status === "revoked" && (
-                  <p className="text-amber-800 text-sm" data-testid="mcp-revoked">
-                    This version was withdrawn after it was published. It is still being delivered
-                    here, because the pin asked for exactly it.
-                  </p>
-                )}
-              </>
+              <p className="text-dim text-sm">
+                {followingLine(server.pinnedRevisionId, server.resolved.upstreamVersion)}
+              </p>
             )}
           </div>
         </Card>
@@ -174,7 +165,9 @@ function RevisionList({ server }: { server: McpServerView }) {
               {revision.revisionId === server.resolved?.revisionId && (
                 <Chip tone="accent">delivered here</Chip>
               )}
-              {revision.status !== "published" && <Chip tone="neutral">{revision.status}</Chip>}
+              {(revision.state === "proposal" || revision.state === "dismissed") && (
+                <Chip tone="neutral">{revision.state}</Chip>
+              )}
               <span className="ml-auto text-faint text-xs">
                 {revision.publishedBy === null
                   ? `revision ${revision.seq}`

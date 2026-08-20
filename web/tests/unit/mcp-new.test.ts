@@ -126,38 +126,26 @@ async function post(fields: Record<string, string>): Promise<ActionResult> {
   throw result;
 }
 
-/** A catalog server: global unless a workspace is named, published unless told otherwise. */
+/** A catalog server: public unless a workspace is named, its revision made current unless told
+ *  otherwise (an un-promoted revision leaves the server with nothing on offer). */
 async function seedServer(
   id: string,
-  registryName: string,
+  name: string,
   opts: { status?: string; publish?: boolean; authMode?: string | null } = {},
 ): Promise<void> {
   await db.q(
-    `INSERT INTO web.mcp_server (id, registry_name, display_name, description, auth_mode, status)
+    `INSERT INTO web.mcp_server (id, name, display_name, description, auth_mode, status)
      VALUES ($1, $2, $2, 'A server for the suite.', $3, $4)`,
-    [
-      id,
-      registryName,
-      opts.authMode === undefined ? "none" : opts.authMode,
-      opts.status ?? "active",
-    ],
+    [id, name, opts.authMode === undefined ? "none" : opts.authMode, opts.status ?? "active"],
   );
   const revisionId = mcpRevisionId(`${id}_r1`);
   const published = opts.publish !== false;
   await db.q(
     `INSERT INTO web.mcp_server_revision
-       (id, server_id, seq, status, upstream_version, document, transport, url, source,
-        published_at, published_by)
-     VALUES ($1, $2, 1, $3, '1.0.0', $4::jsonb, 'streamable-http',
-             'https://acme.example/mcp', 'seed',
-             CASE WHEN $3 = 'published' THEN now() END,
-             CASE WHEN $3 = 'published' THEN 'Staff' END)`,
-    [
-      revisionId,
-      id,
-      published ? "published" : "candidate",
-      JSON.stringify({ ...WEATHER, name: registryName }),
-    ],
+       (id, server_id, seq, upstream_version, document, transport, url, published_at, published_by)
+     VALUES ($1, $2, 1, '1.0.0', $3::jsonb, 'streamable-http', 'https://acme.example/mcp',
+             CASE WHEN $4 THEN now() END, CASE WHEN $4 THEN 'Staff' END)`,
+    [revisionId, id, JSON.stringify({ ...WEATHER, name }), published],
   );
   if (published) {
     await db.q(`UPDATE web.mcp_server SET current_revision_id = $2 WHERE id = $1`, [
@@ -345,7 +333,7 @@ describe("connecting a catalog server", () => {
 
   it("refuses a server the catalog does not offer, and says nothing else about it", async () => {
     await seedServer("mcps_cand", "io.github.acme/candidate", {
-      status: "candidate",
+      status: "delisted",
       publish: false,
     });
     for (const serverId of ["mcps_cand", "mcps_absent"]) {
@@ -382,11 +370,11 @@ describe("writing down a server the catalog does not carry", () => {
     const bundle = await bundleNamed("private-one");
     const rows = await db.q<{
       workspace_id: string | null;
-      registry_name: string;
+      name: string;
       auth_mode: string | null;
       document: Record<string, unknown>;
     }>(
-      `SELECT ms.workspace_id, ms.registry_name, ms.auth_mode, r.document
+      `SELECT ms.workspace_id, ms.name, ms.auth_mode, r.document
        FROM web.bundle_mcp bm
        JOIN web.mcp_server ms ON ms.id = bm.server_id
        JOIN web.mcp_server_revision r ON r.id = ms.current_revision_id
@@ -395,7 +383,7 @@ describe("writing down a server the catalog does not carry", () => {
     );
     // PRIVATE to this workspace, exported nowhere.
     expect(rows[0]?.workspace_id).toBe(wsId);
-    expect(rows[0]?.registry_name).toBe("io.github.acme/private");
+    expect(rows[0]?.name).toBe("io.github.acme/private");
     expect(rows[0]?.document).toMatchObject({ name: "io.github.acme/private" });
     // NOTHING IS CLAIMED about the sign-in: nobody checked it, so the row says nothing.
     expect(rows[0]?.auth_mode).toBe(null);
@@ -422,9 +410,7 @@ describe("writing down a server the catalog does not carry", () => {
     expect(body.code).toBe("MCP_SECRET_REFUSED");
     expect(await bundleNamed("doctored")).toBeUndefined();
     expect(
-      await db.q(`SELECT id FROM web.mcp_server WHERE registry_name = $1`, [
-        "io.github.acme/doctored",
-      ]),
+      await db.q(`SELECT id FROM web.mcp_server WHERE name = $1`, ["io.github.acme/doctored"]),
     ).toEqual([]);
   });
 

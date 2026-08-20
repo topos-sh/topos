@@ -476,56 +476,63 @@ export const versionUpstream = webSchema.table(
  *
  * GLOBAL AND PRIVATE ARE ONE TABLE, told apart by `workspace_id`:
  *
- *  · NULL — the global catalog. Staff-curated, staff-published, and the only rows the feed
- *    exports. Their `registry_name` is unique among them (the partial index below), because
- *    that name is what the read API keys on and a second claimant would make a lookup a coin
- *    flip.
+ *  · NULL — the generic/public catalog. Its rows come from the committed catalog file (a boot
+ *    sync reconciles the file into these rows) or are added by staff. Their `name` is unique
+ *    among them (the partial index below), because that reverse-DNS name is the identity every
+ *    surface resolves by and a second claimant would make a lookup a coin flip.
  *  · SET — private to that workspace, created and edited by its owners, never exported. Two
- *    workspaces may hold the same `registry_name` privately: neither is addressed by anyone
- *    else, so neither can shadow the other.
+ *    workspaces may hold the same `name` privately: neither is addressed by anyone else, so
+ *    neither can shadow the other.
  *
- * `auth_mode` is STAFF-VERIFIED TRUTH, never a vendor's claim: `oauth` means the endpoint's own
+ * `manually_curated` is the ONE bit that decides how a public row tracks the file. A row nobody
+ * has touched in the panel tracks the file automatically — each new file version becomes its
+ * `current`. Once a staff member edits or promotes it, the row is manually curated and future
+ * file versions land as NON-CURRENT proposals for staff to promote. A self-hosted install has no
+ * panel, so it never sets this, and always tracks the file. Private rows carry it false and
+ * ignore it — an owner's own server has no file to track.
+ *
+ * `auth_mode` is VERIFIED TRUTH, never a vendor's claim: `oauth` means the endpoint's own
  * discovery chain was walked and its authorization server advertises dynamic client
  * registration, so an agent finishes the sign-in alone. `manual` means it costs a person a
  * one-time step per machine, and `auth_note` is the one line saying what that step is. NULL is
- * the honest fourth state — nobody has established it yet, which is what a swept-in candidate
- * and a document that declared nothing both are — and a global row carrying it is not
- * publishable. `scope_menu` records the scope options that verification found — data this
+ * the honest fourth state — nobody has established it yet — and a row carrying it is not
+ * promotable to `current`. `scope_menu` records the scope options verification found — data this
  * release, enforced by nothing yet.
  *
  * `current_revision_id` is the pointer people receive. It is moved in the SAME transaction as
- * the revision insert that earns it, under a FOR UPDATE lock on this row — the fenced-invariant
- * pattern the rest of this schema uses. The composite key below pins the pointer to a revision
- * OF THIS SERVER; that it also points at a PUBLISHED one is the transaction's rule, because
- * Postgres has no foreign key to a partial index.
+ * the revision that earns it, under a FOR UPDATE lock on this row — the fenced-invariant pattern
+ * the rest of this schema uses, and the ONE promotion function is the only writer of it. The
+ * composite key below pins the pointer to a revision OF THIS SERVER.
  */
 export const mcpServer = webSchema.table(
   "mcp_server",
   {
     id: text("id").primaryKey(),
-    /** NULL = the global catalog; set = private to that workspace. */
+    /** NULL = the generic/public catalog; set = private to that workspace. */
     workspaceId: text("workspace_id").references(() => workspace.id, { onDelete: "cascade" }),
-    /** The official registry identity (`io.github.acme/foo`) — set wherever the server exists
-     *  upstream, and the key the read API resolves. */
-    registryName: text("registry_name"),
+    /** The reverse-DNS identity (`io.github.acme/foo`) — the key every surface resolves by, and
+     *  what the catalog file declares a server under. */
+    name: text("name"),
     displayName: text("display_name").notNull(),
     description: text("description"),
     websiteUrl: text("website_url"),
     /** The brand mark this row flies, by KEY — never an image, never a remote URL. */
     icon: text("icon"),
     /**
-     * The sign-in tier somebody ESTABLISHED, or NULL for a server where nobody has yet — a
-     * candidate a sweep pulled in, a document that declared nothing. Null is never rendered as
-     * `none`: "the publisher said nothing" and "this server asks for nothing" are different
-     * claims, and only one of them was made.
+     * The sign-in tier somebody ESTABLISHED, or NULL for a server where nobody has yet. Null is
+     * never rendered as `none`: "the publisher said nothing" and "this server asks for nothing"
+     * are different claims, and only one of them was made.
      */
     authMode: text("auth_mode"),
     /** What the person must do first, for a `manual` row — the whole reason such a row may
      *  stand in a catalog people receive from. */
     authNote: text("auth_note"),
     scopeMenu: jsonb("scope_menu"),
-    /** `candidate` is pulled in for evaluation and published to nobody. */
-    status: text("status").default("candidate").notNull(),
+    /** `active` = on offer; `delisted` = deliberately taken off offer (relisting is its own act). */
+    status: text("status").default("active").notNull(),
+    /** A staff edit or promote flips this true; a file version then proposes instead of advancing.
+     *  A self-hosted install never sets it, so it always tracks the file. */
+    manuallyCurated: boolean("manually_curated").default(false).notNull(),
     currentRevisionId: text("current_revision_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
@@ -534,30 +541,25 @@ export const mcpServer = webSchema.table(
       .notNull(),
   },
   (table) => [
-    // THE GLOBAL NAMESPACE, as an index: one global row per registry name. Partial, so a
-    // workspace's private server never collides with the catalog's or with another
-    // workspace's — nobody addresses a private row by that name but its own workspace.
-    uniqueIndex("mcp_server_global_registry_name")
-      .on(table.registryName)
-      .where(sql`workspace_id is null`),
-    // AND THE PRIVATE ONE, per workspace: inside a workspace the registry lane answers
-    // `…/servers/{name}`, and two of its own servers under one name would make that lookup a coin
-    // flip. Scoped to the workspace because the name is only ever addressed inside it.
-    uniqueIndex("mcp_server_private_registry_name")
-      .on(table.workspaceId, table.registryName)
+    // THE PUBLIC NAMESPACE, as an index: one public row per name. Partial, so a workspace's
+    // private server never collides with the catalog's or with another workspace's — nobody
+    // addresses a private row by that name but its own workspace.
+    uniqueIndex("mcp_server_public_name").on(table.name).where(sql`workspace_id is null`),
+    // AND THE PRIVATE ONE, per workspace: two of a workspace's own servers under one name would
+    // make its lookup a coin flip. Scoped to the workspace because the name is only ever
+    // addressed inside it.
+    uniqueIndex("mcp_server_private_name")
+      .on(table.workspaceId, table.name)
       .where(sql`workspace_id is not null`),
     index("mcp_server_workspace_idx").on(table.workspaceId),
     check(
       "mcp_server_auth_mode_check",
       sql`${table.authMode} is null or ${table.authMode} in ('none', 'oauth', 'manual')`,
     ),
-    check("mcp_server_status_check", sql`${table.status} in ('candidate', 'active', 'delisted')`),
-    // A registry name is `namespace/name` — the shape the official format requires, as a
-    // tripwire (the document gate is where a name is really judged).
-    check(
-      "mcp_server_registry_name_check",
-      sql`${table.registryName} is null or ${table.registryName} ~ '^[^/]+/[^/]+$'`,
-    ),
+    check("mcp_server_status_check", sql`${table.status} in ('active', 'delisted')`),
+    // A name is `namespace/name` — the shape the official format requires, as a tripwire (the
+    // document gate is where a name is really judged).
+    check("mcp_server_name_check", sql`${table.name} is null or ${table.name} ~ '^[^/]+/[^/]+$'`),
     foreignKey({
       name: "mcp_server_current_revision_fk",
       columns: [table.currentRevisionId, table.id],
@@ -569,20 +571,19 @@ export const mcpServer = webSchema.table(
 /**
  * A SERVER'S VERSION HISTORY — append-only, immutable once written, one stream per server.
  *
- * Maturity is a STATUS, not a branch: a sweep lands `candidate` rows, staff turn one into
- * `published` (and only a published revision is ever pointed at), a `rejected` one records that
- * the decision was made and what it was, and `revoked` is the pull-back of something that was
- * published — pinned connections are flagged in the UI rather than silently moved off it.
+ * MATURITY IS THE POINTER, NOT A COLUMN. The revision `mcp_server.current_revision_id` names is
+ * the one people receive; every other revision is a proposal or history, told apart by `seq`
+ * against the current (a higher seq than the current is a pending proposal, a lower one is
+ * history). The single terminal state a revision carries of its own is `dismissed_at` — a staff
+ * member declined this proposal, so it stops showing and the file re-offering the same document
+ * never re-proposes it.
  *
  * `upstream_version` is the version string inside the document, and it is NULLABLE — null means
  * "no known version", the honest state of an editorial or self-maintained server whose document
  * carries no `version` field (we never fabricate one just to fill the column). Its uniqueness is
- * PARTIAL — `source = 'registry'` only. Upstream promises one document per version and a second
- * one under the same number is upstream contradicting itself, which this refuses; a registry
- * revision therefore always carries a real version, and Postgres treats nulls as distinct anyway,
- * so a versionless editorial row never trips the index. A staff correction or an owner's edit of a
- * private server is a NEW revision of the same version string (or of none) by design, and would
- * have nothing to gain from a fresh number nobody upstream would recognize.
+ * PARTIAL — `upstream_version IS NOT NULL` only. A document that names a version promises one
+ * document per version, and a second under the same number is a contradiction this refuses; a
+ * versionless revision is exempt, and Postgres treats nulls as distinct anyway.
  *
  * `schema_version` is the document's own `$schema`. The vocabulary of the ones this tier
  * understands lives in CODE, not in a CHECK here, and deliberately: supporting a newer schema is
@@ -606,7 +607,6 @@ export const mcpServerRevision = webSchema.table(
       .references((): AnyPgColumn => mcpServer.id, { onDelete: "cascade" }),
     /** Monotonic per server, from 1 — the history's reading order, minted under the row lock. */
     seq: integer("seq").notNull(),
-    status: text("status").default("candidate").notNull(),
     /** The `version` inside the document (never this row's own numbering); NULL when the document
      *  names none — an editorial or self-maintained server we never stamped a fake version on. */
     upstreamVersion: text("upstream_version"),
@@ -623,14 +623,16 @@ export const mcpServerRevision = webSchema.table(
     /** What automatic verification concluded: the format gate's result and the auth reprobe,
      *  including the whole OAuth discovery-chain walk that a claim of `oauth` rests on. */
     verification: jsonb("verification"),
-    source: text("source").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    /** When this revision was last moved to `current`, and by whom — set by the ONE promotion
+     *  function. A revision never promoted carries neither. */
     publishedAt: timestamp("published_at", { withTimezone: true }),
     /** Attribution as display text — the catalog outlives whichever account acted. */
     publishedBy: text("published_by"),
-    decidedAt: timestamp("decided_at", { withTimezone: true }),
-    decidedBy: text("decided_by"),
-    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    /** A staff member declined this proposal — terminal, so it stops showing and the file never
+     *  re-proposes the same document. */
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+    dismissedBy: text("dismissed_by"),
   },
   (table) => [
     unique("mcp_server_revision_seq_unique").on(table.serverId, table.seq),
@@ -638,27 +640,16 @@ export const mcpServerRevision = webSchema.table(
     // to. A revision id TRAVELS: a machine reports back the revision it holds, and the door that
     // receives that report accepts the minted shape and nothing else — so a row written with any
     // other spelling would have that machine's WHOLE applied report refused, taking every other
-    // bundle on it along, on every update, forever. A seed, a hand-run repair and a future
-    // importer all write ids; this is the one place that answers for all of them.
+    // bundle on it along, on every update, forever. The catalog sync, a hand-run repair and a
+    // future importer all write ids; this is the one place that answers for all of them.
     check("mcp_server_revision_id_shape_check", sql`${table.id} ~ '^mcpr_[0-9a-f]{32}$'`),
     // Composite-FK target: a pointer or a pin names a revision OF THE SERVER it belongs to.
     unique("mcp_server_revision_id_server_unique").on(table.id, table.serverId),
-    // One document per upstream version — for documents that came from upstream. See above.
+    // One document per version — for documents that name one. A versionless revision is exempt.
     uniqueIndex("mcp_server_revision_upstream_version")
       .on(table.serverId, table.upstreamVersion)
-      .where(sql`source = 'registry'`),
-    index("mcp_server_revision_server_idx").on(table.serverId, table.status),
-    // `superseded` is a candidate that was overtaken: accepting one version moves the server's other
-    // pending candidates here in the same transaction — terminal, neither published nor a candidate,
-    // and distinct from `rejected` because nobody decided against it.
-    check(
-      "mcp_server_revision_status_check",
-      sql`${table.status} in ('candidate', 'published', 'rejected', 'revoked', 'superseded')`,
-    ),
-    check(
-      "mcp_server_revision_source_check",
-      sql`${table.source} in ('registry', 'staff', 'owner', 'seed')`,
-    ),
+      .where(sql`upstream_version is not null`),
+    index("mcp_server_revision_server_idx").on(table.serverId),
     check("mcp_server_revision_seq_check", sql`${table.seq} >= 1`),
     // The probe's vocabulary, shared with the delivery-independent report it has always been.
     check(
@@ -675,27 +666,15 @@ export const mcpServerRevision = webSchema.table(
       sql`(${table.url} is null) = (${table.transport} is null)`,
     ),
     check("mcp_server_revision_url_check", sql`${table.url} is null or ${table.url} ~ '^https://'`),
-    // Published-ness is a fact with a time on it: a revocation PULLS BACK something that was
-    // published, so it keeps the timestamp that says it once was.
-    check(
-      "mcp_server_revision_published_check",
-      sql`(${table.status} in ('published', 'revoked')) = (${table.publishedAt} is not null)`,
-    ),
+    // Attribution rides with the promotion stamp: set together or not at all.
     check(
       "mcp_server_revision_published_by_check",
       sql`(${table.publishedAt} is null) = (${table.publishedBy} is null)`,
     ),
+    // A dismissal is a fact with a name on it: set together or not at all.
     check(
-      "mcp_server_revision_rejected_check",
-      sql`(${table.status} = 'rejected') = (${table.decidedAt} is not null)`,
-    ),
-    check(
-      "mcp_server_revision_decided_by_check",
-      sql`(${table.decidedAt} is null) = (${table.decidedBy} is null)`,
-    ),
-    check(
-      "mcp_server_revision_revoked_check",
-      sql`(${table.status} = 'revoked') = (${table.revokedAt} is not null)`,
+      "mcp_server_revision_dismissed_by_check",
+      sql`(${table.dismissedAt} is null) = (${table.dismissedBy} is null)`,
     ),
   ],
 );

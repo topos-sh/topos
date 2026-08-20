@@ -9,6 +9,7 @@ import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import { cardResponse } from "@/lib/card.server";
 import { ensureSetup } from "@/lib/db/identity.server";
 import { backfillMcpConnectionsAtBoot } from "@/lib/db/mcp-backfill.server";
+import { syncMcpCatalogAtBoot } from "@/lib/db/mcp-catalog-sync.server";
 import { runMigrations } from "@/lib/db/migrate.server";
 import { armUpstreamChecker } from "@/lib/db/upstream.server";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
@@ -76,6 +77,11 @@ export const handleError = Sentry.createSentryHandleError({ logErrors: true });
  * first request 500'd (`relation "web.workspace" does not exist`) before the gate ever ran.
  */
 await runMigrations();
+// Reconcile the committed catalog file into the public MCP servers — before the first request,
+// because a public server nobody synced delivers nothing. Idempotent; a settled catalog no-ops.
+// It runs BEFORE the backfill so a pre-catalog bundle can connect to a server the file just
+// declared, rather than getting a private copy of a server the catalog already carries.
+await syncMcpCatalogAtBoot();
 // The one step the migrations above cannot do themselves: connecting every MCP bundle that
 // already exists to the server it names. The name lives inside the vault's bytes, which no
 // statement can read — so it runs here, still BEFORE the first request, because a bundle without

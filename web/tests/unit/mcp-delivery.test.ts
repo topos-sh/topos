@@ -16,8 +16,8 @@ import {
  * The lane used to answer one question for every kind — here is a pointer, go fetch the bytes.
  * A server has no bytes to fetch, so it is answered in full: the document rides the delivery and
  * the revision id is the handle a device reports back. The suite holds the three resolutions
- * apart (a pin, a server's current, a private server's own), proves a revoked revision is still
- * served rather than silently moved off, and proves the two lists never overlap.
+ * apart (a pin behind the current, a server's current, a server with nothing current), and proves
+ * the two lists never overlap.
  */
 
 let db: ScratchDb;
@@ -49,40 +49,33 @@ function document(name: string, version: string): Record<string, unknown> {
   };
 }
 
-/** A server row: global when `workspaceId` is null, otherwise that workspace's own. */
-async function seedServer(id: string, registryName: string, workspaceId: string | null) {
+/** A server row: public when `workspaceId` is null, otherwise that workspace's own. */
+async function seedServer(id: string, name: string, workspaceId: string | null) {
   await db.q(
-    `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+    `INSERT INTO web.mcp_server (id, workspace_id, name, display_name, auth_mode, status)
      VALUES ($1, $2, $3, $3, 'none', 'active')`,
-    [id, workspaceId, registryName],
+    [id, workspaceId, name],
   );
 }
 
-/** One revision, and (when published) the pointer move that makes it the one people receive. */
+/** One revision, and (when current) the pointer move that makes it the one people receive. A
+ *  revision that was ever on offer carries the promotion stamp — every one seeded here has been. */
 async function seedRevision(
   serverId: string,
   id: string,
   seq: number,
   version: string,
-  opts: { status?: "published" | "revoked" | "candidate"; current?: boolean } = {},
+  opts: { current?: boolean } = {},
 ) {
-  const status = opts.status ?? "published";
-  const registryName = (
-    await db.q<{ registry_name: string }>(
-      `SELECT registry_name FROM web.mcp_server WHERE id = $1`,
-      [serverId],
-    )
-  )[0]?.registry_name as string;
+  const name = (
+    await db.q<{ name: string }>(`SELECT name FROM web.mcp_server WHERE id = $1`, [serverId])
+  )[0]?.name as string;
   await db.q(
     `INSERT INTO web.mcp_server_revision
-       (id, server_id, seq, status, upstream_version, document, transport, url, source,
-        published_at, published_by, revoked_at)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'streamable-http', 'https://mcp.example.com/mcp',
-             'seed',
-             CASE WHEN $4 IN ('published', 'revoked') THEN now() END,
-             CASE WHEN $4 IN ('published', 'revoked') THEN 'Staff' END,
-             CASE WHEN $4 = 'revoked' THEN now() END)`,
-    [id, serverId, seq, status, version, JSON.stringify(document(registryName, version))],
+       (id, server_id, seq, upstream_version, document, transport, url, published_at, published_by)
+     VALUES ($1, $2, $3, $4, $5::jsonb, 'streamable-http', 'https://mcp.example.com/mcp',
+             now(), 'Staff')`,
+    [id, serverId, seq, version, JSON.stringify(document(name, version))],
   );
   if (opts.current === true) {
     await db.q(`UPDATE web.mcp_server SET current_revision_id = $2 WHERE id = $1`, [serverId, id]);
@@ -116,9 +109,9 @@ beforeAll(async () => {
   await connect("b_glob", "mcps_glob");
   await assignBundleRow(db, ws, "b_glob", MEMBER);
 
-  // The same catalog server, PINNED by another workspace bundle — to a revision since revoked.
+  // The same catalog server, PINNED by another workspace bundle — to a revision behind the current.
   await seedServer("mcps_pin", "com.example/pinned", null);
-  await seedRevision("mcps_pin", mcpRevisionId("pin_1"), 1, "1.0.0", { status: "revoked" });
+  await seedRevision("mcps_pin", mcpRevisionId("pin_1"), 1, "1.0.0");
   await seedRevision("mcps_pin", mcpRevisionId("pin_2"), 2, "2.0.0", { current: true });
   await seedBundle(db, ws, "b_pin", "pinned-server", { kind: "mcp", withPointer: false });
   await connect("b_pin", "mcps_pin", mcpRevisionId("pin_1"));
@@ -156,13 +149,12 @@ describe("delivery serves a connected server whole", () => {
     expect(served?.via.direct).toBe(true);
   });
 
-  it("follows a pin, revoked or not, and says which", async () => {
+  it("follows a pin to a revision behind the current, and says it is pinned", async () => {
     const body = await (await lane()).deliveryFor(member());
     const served = body.mcp_servers.find((row) => row.skill_id === "b_pin");
     expect(served?.revision_id).toBe(mcpRevisionId("pin_1"));
     expect(served?.document).toMatchObject({ version: "1.0.0" });
     expect(served?.pinned).toBe(true);
-    expect(served?.revoked).toBe(true);
   });
 
   it("says nothing at all about a server with nothing published", async () => {

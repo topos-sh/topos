@@ -309,17 +309,16 @@ afterAll(async () => {
 /** A server row and one revision of it — the shape a probe is asked about. */
 async function seedRevision(serverId: string, revisionId: string): Promise<void> {
   await db.q(
-    `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+    `INSERT INTO web.mcp_server (id, workspace_id, name, display_name, auth_mode, status)
      VALUES ($1, $2, $3, $3, 'none', 'active')
      ON CONFLICT (id) DO NOTHING`,
     [serverId, wsId, `io.github.acme/${serverId}`],
   );
   await db.q(
     `INSERT INTO web.mcp_server_revision
-       (id, server_id, seq, status, upstream_version, document, transport, url, source,
-        published_at, published_by)
-     VALUES ($1, $2, 1, 'published', '1.0.0', $3::jsonb, 'streamable-http',
-             'https://acme.example/mcp', 'owner', now(), 'Owner')`,
+       (id, server_id, seq, upstream_version, document, transport, url, published_at, published_by)
+     VALUES ($1, $2, 1, '1.0.0', $3::jsonb, 'streamable-http',
+             'https://acme.example/mcp', now(), 'Owner')`,
     [
       revisionId,
       serverId,

@@ -41,14 +41,6 @@ const serverSchema = z.object({
   /** The `/api/v1` door's rate belt (the vault's own belt retired with its public listener). */
   TOPOS_WEB_RATELIMIT: z.enum(["on", "off"]).default("on"),
   /**
-   * Whether this deployment PUBLISHES its global MCP catalog at `/mcp-catalog/v0.1/servers` —
-   * the read-only feed another install can sync from. OFF by default: serving a feed is a
-   * decision about what other people's installs should follow, and an install whose catalog is
-   * its own team's business must not become a source because it runs this code. The rows it
-   * would serve are the global, published ones only; nothing private is exportable at all.
-   */
-  TOPOS_MCP_CATALOG_FEED: z.enum(["on", "off"]).default("off"),
-  /**
    * The app's PUBLIC origin — the base every client-visible URL rides (resource addresses, the
    * protocol card's `api_base_url` = this origin + `/api`, the invite/share lines) and the
    * canonical host a browser on an alias origin is redirected to. Behind a TLS-terminating

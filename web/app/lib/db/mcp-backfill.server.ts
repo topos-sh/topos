@@ -2,7 +2,11 @@ import { sql } from "drizzle-orm";
 import { mintMcpServerId } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { inFinalTxOrRefusal } from "@/lib/db/queries.custody.server";
-import { addMcpRevisionInTx } from "@/lib/db/queries.mcp-catalog.server";
+import {
+  addMcpRevisionInTx,
+  lockServerInTx,
+  promoteMcpRevisionInTx,
+} from "@/lib/db/queries.mcp-catalog.server";
 import { bundleMcp, mcpServer } from "@/lib/db/schema.app";
 import { serverDocumentOf } from "@/lib/mcp/catalog.server";
 
@@ -97,11 +101,11 @@ async function pendingBundles(): Promise<PendingBundle[]> {
   return rows.rows as unknown as PendingBundle[];
 }
 
-/** The global catalog row serving this registry name, or null. */
-async function globalServerNamed(registryName: string): Promise<string | null> {
+/** The public catalog row serving this name, or null. */
+async function globalServerNamed(name: string): Promise<string | null> {
   const rows = await getDb().execute(sql`
     SELECT id FROM web.mcp_server
-    WHERE workspace_id IS NULL AND status = 'active' AND registry_name = ${registryName}
+    WHERE workspace_id IS NULL AND status = 'active' AND name = ${name}
     LIMIT 1
   `);
   const row = rows.rows[0] as { id: string } | undefined;
@@ -130,7 +134,7 @@ async function connectExisting(row: PendingBundle, serverId: string): Promise<bo
 async function privatizeDocument(
   row: PendingBundle,
   document: Record<string, unknown>,
-  registryName: string,
+  name: string,
 ): Promise<"connected" | "refused" | "contested"> {
   const landed = await inFinalTxOrRefusal<"connected", "refused" | "contested">(
     async (tx, stop) => {
@@ -138,7 +142,7 @@ async function privatizeDocument(
       await tx.insert(mcpServer).values({
         id: serverId,
         workspaceId: row.workspace_id,
-        registryName,
+        name,
         displayName: row.display_name ?? row.name,
         description: typeof document.description === "string" ? document.description : null,
         // Nothing was ever established about this server's sign-in here, and a migration is not
@@ -146,16 +150,17 @@ async function privatizeDocument(
         authMode: null,
         status: "active",
       });
-      const added = await addMcpRevisionInTx(tx, serverId, {
-        document,
-        // The workspace's own document, written by its own people — which is what `owner` means
-        // here; `seed` is the catalog's own rows and this is not one of them.
-        source: "owner",
-        publish: true,
-        // Nobody did this: the same word the birth rows of a workspace use.
-        attribution: "system",
-      });
+      const added = await addMcpRevisionInTx(tx, serverId, { document });
       if (added.refusal !== null) {
+        return stop("refused");
+      }
+      const server = await lockServerInTx(tx, serverId);
+      if (server === undefined) {
+        return stop("refused");
+      }
+      // Nobody did this: the same word the birth rows of a workspace use.
+      const promoted = await promoteMcpRevisionInTx(tx, server, added.revisionId, "system");
+      if (promoted !== null) {
         return stop("refused");
       }
       const written = await tx
@@ -192,12 +197,12 @@ export async function backfillMcpConnections(): Promise<McpBackfillReport> {
       serverDocumentOf(row.workspace_id, row.bundle_id, row.version_id),
       DOCUMENT_READ_TIMEOUT_MS,
     );
-    const registryName = typeof document?.name === "string" ? document.name : null;
-    if (document === null || registryName === null) {
+    const serverName = typeof document?.name === "string" ? document.name : null;
+    if (document === null || serverName === null) {
       report.unreadable.push(where);
       continue;
     }
-    const global = await globalServerNamed(registryName);
+    const global = await globalServerNamed(serverName);
     if (global !== null) {
       if (await connectExisting(row, global)) {
         report.connected += 1;
@@ -206,7 +211,7 @@ export async function backfillMcpConnections(): Promise<McpBackfillReport> {
       }
       continue;
     }
-    const landed = await privatizeDocument(row, document, registryName);
+    const landed = await privatizeDocument(row, document, serverName);
     if (landed === "connected") {
       report.privatized += 1;
     } else if (landed === "contested") {

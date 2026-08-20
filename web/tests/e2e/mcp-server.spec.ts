@@ -8,7 +8,7 @@ import { gotoSettled } from "./sign-in";
  *
  * What it has to answer, in order: what the server IS (its address, how a person signs in,
  * whether anything answered when this plane last asked), what THIS WORKSPACE receives (the
- * current version, or a pin — and when a pinned version has been withdrawn, that too), and the
+ * current version, or a pin to one behind it), and the
  * version history behind it. For a server the workspace wrote down itself, an owner edits the
  * document here, and every save is a new version rather than a rewrite of one already delivered.
  */
@@ -34,15 +34,15 @@ function document(name: string, version: string | null, url: string): string {
 
 async function seedServer(
   id: string,
-  registryName: string,
+  serverName: string,
   opts: { workspaceId?: string | null; authMode?: string | null; authNote?: string | null } = {},
 ): Promise<void> {
   await adminQuery(
-    `insert into web.mcp_server (id, workspace_id, registry_name, display_name, description,
+    `insert into web.mcp_server (id, workspace_id, name, display_name, description,
                                  auth_mode, auth_note, status)
      values ($1, $2, $3, $3, 'A server for the suite.', $4, $5, 'active')
      on conflict (id) do nothing`,
-    [id, opts.workspaceId ?? null, registryName, opts.authMode ?? "none", opts.authNote ?? null],
+    [id, opts.workspaceId ?? null, serverName, opts.authMode ?? "none", opts.authNote ?? null],
   );
 }
 
@@ -51,31 +51,19 @@ async function seedRevision(
   id: string,
   seq: number,
   version: string | null,
-  opts: { current?: boolean; status?: "published" | "revoked"; url?: string } = {},
+  opts: { current?: boolean; url?: string } = {},
 ): Promise<void> {
-  const registryName = (
-    await adminQuery<{ registry_name: string }>(
-      `select registry_name from web.mcp_server where id = $1`,
-      [serverId],
-    )
-  )[0]?.registry_name as string;
+  const serverName = (
+    await adminQuery<{ name: string }>(`select name from web.mcp_server where id = $1`, [serverId])
+  )[0]?.name as string;
   const url = opts.url ?? "https://acme.example/mcp";
+  // Every revision seeded here has been on offer, so it carries the promotion stamp.
   await adminQuery(
     `insert into web.mcp_server_revision
-       (id, server_id, seq, status, upstream_version, document, transport, url, source,
-        published_at, published_by, revoked_at)
-     values ($1, $2, $3, $4, $5, $6::jsonb, 'streamable-http', $7, 'seed',
-             now(), 'Staff', case when $4 = 'revoked' then now() end)
+       (id, server_id, seq, upstream_version, document, transport, url, published_at, published_by)
+     values ($1, $2, $3, $4, $5::jsonb, 'streamable-http', $6, now(), 'Staff')
      on conflict (id) do nothing`,
-    [
-      id,
-      serverId,
-      seq,
-      opts.status ?? "published",
-      version,
-      document(registryName, version, url),
-      url,
-    ],
+    [id, serverId, seq, version, document(serverName, version, url), url],
   );
   if (opts.current === true) {
     await adminQuery(`update web.mcp_server set current_revision_id = $2 where id = $1`, [
@@ -124,9 +112,7 @@ test.beforeAll(async () => {
 
   // The same shape, PINNED to a version that has since been withdrawn.
   await seedServer("e2e_mcps_pinned", "io.github.e2e/pinned", { authMode: "oauth" });
-  await seedRevision(PINNED.serverId, mcpRevisionId("e2e_pin_1"), 1, "1.0.0", {
-    status: "revoked",
-  });
+  await seedRevision(PINNED.serverId, mcpRevisionId("e2e_pin_1"), 1, "1.0.0");
   await seedRevision(PINNED.serverId, mcpRevisionId("e2e_pin_2"), 2, "2.0.0", { current: true });
   await connect(PINNED.bundleId, PINNED.name, PINNED.serverId, mcpRevisionId("e2e_pin_1"));
 
@@ -181,10 +167,11 @@ test("says what the server is, what this workspace receives, and which versions 
   await expect(tabs.getByRole("link", { name: "Proposals" })).toHaveCount(0);
 });
 
-test("a pin is honored, and a withdrawn pin says so", async ({ page }) => {
+test("a pin is honored — a connection follows the revision it named, behind the current", async ({
+  page,
+}) => {
   await gotoSettled(page, `/mcp/${PINNED.name}`);
   await expect(page.getByTestId("mcp-connection")).toContainText("Pinned to 1.0.0.");
-  await expect(page.getByTestId("mcp-revoked")).toContainText("withdrawn after it was published");
 });
 
 test("a version-less server reads as unversioned, never as a fabricated number", async ({

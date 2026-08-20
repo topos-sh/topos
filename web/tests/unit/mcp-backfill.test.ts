@@ -149,29 +149,26 @@ describe("the connection backfill", () => {
   }, 30_000);
 
   it("the catalog's own server is what the matching bundle connects to", async () => {
-    const rows = await db.q<{ server_id: string; registry_name: string; workspace_id: string }>(
-      `SELECT m.server_id, s.registry_name, s.workspace_id
+    const rows = await db.q<{ server_id: string; name: string; workspace_id: string }>(
+      `SELECT m.server_id, s.name, s.workspace_id
        FROM web.bundle_mcp m JOIN web.mcp_server s ON s.id = m.server_id
        WHERE m.bundle_id = 's_github'`,
     );
-    expect(rows[0]?.registry_name).toBe("com.github/mcp");
-    // The GLOBAL row: null workspace. The bundle now receives what staff publish.
+    expect(rows[0]?.name).toBe("com.github/mcp");
+    // The PUBLIC row: null workspace. The bundle now receives what the catalog carries.
     expect(rows[0]?.workspace_id).toBeNull();
   });
 
   it("an unmatched document becomes the workspace's own server, holding its own bytes", async () => {
     const rows = await db.q<{
       workspace_id: string;
-      registry_name: string;
+      name: string;
       auth_mode: string | null;
       status: string;
       document: Record<string, unknown>;
-      revision_status: string;
-      source: string;
       published_by: string | null;
     }>(
-      `SELECT s.workspace_id, s.registry_name, s.auth_mode, s.status,
-              r.document, r.status AS revision_status, r.source, r.published_by
+      `SELECT s.workspace_id, s.name, s.auth_mode, s.status, r.document, r.published_by
        FROM web.bundle_mcp m
        JOIN web.mcp_server s ON s.id = m.server_id
        JOIN web.mcp_server_revision r ON r.id = s.current_revision_id
@@ -179,13 +176,12 @@ describe("the connection backfill", () => {
     );
     const row = rows[0];
     expect(row?.workspace_id).toBe(wsId);
-    expect(row?.registry_name).toBe("com.example/internal");
+    expect(row?.name).toBe("com.example/internal");
     // Nothing was ever established about this server's sign-in, and the migration does not guess.
     expect(row?.auth_mode).toBeNull();
     expect(row?.status).toBe("active");
     expect(row?.document.version).toBe("3.1.4");
-    expect(row?.revision_status).toBe("published");
-    expect(row?.source).toBe("owner");
+    // The current revision carries the promotion stamp the ONE promotion function wrote.
     expect(row?.published_by).toBe("system");
   });
 
@@ -227,7 +223,7 @@ describe("the connection backfill", () => {
     expect(report.privatized).toBe(0);
     expect(report.refused).toEqual([`${wsId}/refused`]);
     const servers = await db.q(
-      `SELECT id FROM web.mcp_server WHERE registry_name = 'com.example/from-the-future'`,
+      `SELECT id FROM web.mcp_server WHERE name = 'com.example/from-the-future'`,
     );
     expect(servers).toEqual([]);
   }, 30_000);

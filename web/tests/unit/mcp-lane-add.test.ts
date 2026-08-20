@@ -110,24 +110,40 @@ function serverDocument(name: string, version = "1.0.0"): Record<string, unknown
   };
 }
 
-/** A GLOBAL catalog server with one published revision — what a member may connect. */
-async function seedCatalogServer(id: string, registryName: string): Promise<void> {
-  await db.q(
-    `INSERT INTO web.mcp_server (id, registry_name, display_name, auth_mode, status)
-     VALUES ($1, $2, $2, 'none', 'active')`,
-    [id, registryName],
+/** Append a revision and promote it to `current` — the two writes a seed helper needs. */
+async function seedCurrentRevision(
+  serverId: string,
+  document: Record<string, unknown>,
+  by = "Suite",
+): Promise<void> {
+  const { addMcpRevisionInTx, lockServerInTx, promoteMcpRevisionInTx } = await import(
+    "@/lib/db/queries.mcp-catalog.server"
   );
-  const { addMcpRevisionInTx } = await import("@/lib/db/queries.mcp-catalog.server");
   const { getDb } = await import("@/lib/db/index.server");
-  const written = await getDb().transaction((tx) =>
-    addMcpRevisionInTx(tx, id, {
-      document: serverDocument(registryName),
-      source: "seed",
-      publish: true,
-      attribution: "Suite",
-    }),
+  await getDb().transaction(async (tx) => {
+    const added = await addMcpRevisionInTx(tx, serverId, { document });
+    expect(added.refusal).toBeNull();
+    if (added.refusal !== null) {
+      return;
+    }
+    const server = await lockServerInTx(tx, serverId);
+    expect(server).toBeDefined();
+    if (server === undefined) {
+      return;
+    }
+    const promoted = await promoteMcpRevisionInTx(tx, server, added.revisionId, by);
+    expect(promoted).toBeNull();
+  });
+}
+
+/** A PUBLIC catalog server with one current revision — what a member may connect. */
+async function seedCatalogServer(id: string, name: string): Promise<void> {
+  await db.q(
+    `INSERT INTO web.mcp_server (id, name, display_name, auth_mode, status)
+     VALUES ($1, $2, $2, 'none', 'active')`,
+    [id, name],
   );
-  expect(written.refusal).toBeNull();
+  await seedCurrentRevision(id, serverDocument(name));
 }
 
 beforeAll(async () => {
@@ -184,22 +200,12 @@ describe("one name, two rows", () => {
     // lane's single-name read keeps. A name that resolved to two rows by whichever sorted first
     // would connect a different document than the page shows.
     await db.q(
-      `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+      `INSERT INTO web.mcp_server (id, workspace_id, name, display_name, auth_mode, status)
        VALUES ('mcps_own', $1, 'io.github.acme/twice', 'Ours', 'none', 'active')`,
       [wsId],
     );
     await seedCatalogServer("mcps_global_twice", "io.github.acme/twice");
-    const { addMcpRevisionInTx } = await import("@/lib/db/queries.mcp-catalog.server");
-    const { getDb } = await import("@/lib/db/index.server");
-    const own = await getDb().transaction((tx) =>
-      addMcpRevisionInTx(tx, "mcps_own", {
-        document: serverDocument("io.github.acme/twice", "9.9.9"),
-        source: "owner",
-        publish: true,
-        attribution: "Owner",
-      }),
-    );
-    expect(own.refusal).toBeNull();
+    await seedCurrentRevision("mcps_own", serverDocument("io.github.acme/twice", "9.9.9"), "Owner");
 
     const answer = await post("sn_mem", { registry_name: "io.github.acme/twice" });
     expect(answer.status).toBe(200);
@@ -219,7 +225,7 @@ describe("a server the catalog does NOT offer", () => {
     expect(answer.body.ok).toBe(false);
     expect(errorCodeOf(answer.body)).toBe("OWNER_ROLE_REQUIRED");
     const rows = await db.q<{ n: string }>(
-      `SELECT COUNT(*) AS n FROM web.mcp_server WHERE registry_name = $1`,
+      `SELECT COUNT(*) AS n FROM web.mcp_server WHERE name = $1`,
       ["io.github.acme/private-one"],
     );
     expect(Number(rows[0]?.n)).toBe(0);
@@ -232,7 +238,7 @@ describe("a server the catalog does NOT offer", () => {
     expect(answer.body.ok).toBe(true);
     expect(dataOf(answer.body).created).toBe(true);
     const rows = await db.q<{ workspace_id: string | null }>(
-      `SELECT workspace_id FROM web.mcp_server WHERE registry_name = $1`,
+      `SELECT workspace_id FROM web.mcp_server WHERE name = $1`,
       ["io.github.acme/private-two"],
     );
     expect(rows[0]?.workspace_id).toBe(wsId);
@@ -262,7 +268,7 @@ describe("a version is demanded of a registry read, but not of an author's own d
     expect(answer.body.ok).toBe(false);
     expect(errorCodeOf(answer.body)).toBe("MCP_INVALID");
     const rows = await db.q<{ n: string }>(
-      `SELECT COUNT(*) AS n FROM web.mcp_server WHERE registry_name = $1`,
+      `SELECT COUNT(*) AS n FROM web.mcp_server WHERE name = $1`,
       ["io.github.acme/reg-noversion"],
     );
     expect(Number(rows[0]?.n)).toBe(0);
@@ -276,7 +282,7 @@ describe("a version is demanded of a registry read, but not of an author's own d
     const rows = await db.q<{ upstream_version: string | null }>(
       `SELECT r.upstream_version
        FROM web.mcp_server s JOIN web.mcp_server_revision r ON r.id = s.current_revision_id
-       WHERE s.registry_name = $1`,
+       WHERE s.name = $1`,
       ["io.github.acme/link-noversion"],
     );
     expect(rows[0]?.upstream_version).toBeNull();
@@ -310,7 +316,7 @@ describe("the document gate rules, and its words are the ones the machine render
     expect(answer.body.ok).toBe(false);
     expect(errorCodeOf(answer.body)).toBe("MCP_NO_STREAMABLE_REMOTE");
     const rows = await db.q<{ n: string }>(
-      `SELECT COUNT(*) AS n FROM web.mcp_server WHERE registry_name = $1`,
+      `SELECT COUNT(*) AS n FROM web.mcp_server WHERE name = $1`,
       ["io.github.acme/empty"],
     );
     expect(Number(rows[0]?.n)).toBe(0);

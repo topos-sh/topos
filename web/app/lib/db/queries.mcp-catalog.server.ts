@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor, SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
@@ -16,11 +16,6 @@ import {
 } from "@/lib/db/queries.custody.server";
 import { bundleMcp, mcpServer, mcpServerRevision } from "@/lib/db/schema.app";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
-import {
-  isStaffAuthoredSource,
-  isStrictlyNewer,
-  type McpPrecedenceFacts,
-} from "@/lib/mcp/precedence.server";
 import type { McpProbeOutcome, McpProbeRecord } from "@/lib/mcp/probe-state";
 import type { McpGateRefusal } from "@/lib/mcp/publish-gate.server";
 import { validateServerJson } from "@/lib/mcp/validate.server";
@@ -36,10 +31,16 @@ import { validateServerJson } from "@/lib/mcp/validate.server";
  * "one document per upstream version" rule a decision rather than a race; the partial unique
  * index behind it is the backstop, not the mechanism.
  *
- * WHO MAY WRITE WHAT is the other shape. Global rows (`workspace_id IS NULL`) are staff's: they
- * are the catalog everyone connects to, so no workspace publishes into them. Private rows are
- * their workspace owner's, edited the same way — each save is a new revision and a pointer move,
- * never an edit of bytes somebody already received. Members connect; they never publish.
+ * WHO MAY WRITE WHAT is the other shape. Public rows (`workspace_id IS NULL`) are the generic
+ * catalog: the boot sync reconciles the committed file into them, and staff may add or curate
+ * them — no workspace publishes into them. Private rows are their workspace owner's, edited the
+ * same way — each save is a new revision and a pointer move, never an edit of bytes somebody
+ * already received. Members connect; they never publish.
+ *
+ * PROMOTION — moving `current` — is written ONCE, in `promoteMcpRevisionInTx`. Every path that
+ * makes a revision the thing people receive (an owner's save, the file sync's auto-advance, a
+ * staff promote) goes through it, so the compatibility gate a later increment adds has one seam
+ * to sit behind rather than three.
  *
  * Refusals are the house shape (`McpGateRefusal`): a code a caller may branch on and a sentence a
  * person reads. Nothing here throws to say no — a refusal is an answer, and an exception inside a
@@ -59,15 +60,11 @@ type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
  * A document declaring NO `$schema` is not refused: it is a document that made no claim, which is
  * what a hand-written one and this install's own constructions are.
  *
- * THE SCHEMA IS A METADATA FORMAT, NOT A FRESHNESS SIGNAL. Every one of these revisions was read
+ * THE SCHEMA IS A METADATA FORMAT, NOT A FRESHNESS SIGNAL. Every one of these revisions is read
  * against the extraction below and changes nothing it reads: the same `name`, `description`,
- * `version`, remotes and packages, at the same paths. An older revision on this list is not an
- * older or a worse server — the official registry is stuck on earlier formats, and every server
- * it serves today declares one of the earlier ones. Accepting them is what lets this catalog SEE
- * what upstream offers; whether a swept document ever DISPLACES what this install already holds is
- * decided by precedence on the server version and protocol support, never by the schema string
- * (see the precedence guard in `@/lib/mcp/precedence`). Still fail-closed: this is an explicit
- * allowlist of the revisions the registry actually publishes under, not "any official host".
+ * `version`, remotes and packages, at the same paths. An older schema on this list is not an older
+ * or a worse document — a hand-authored or a self-maintained document may declare any of them. It
+ * is an explicit allowlist of the revisions this build knows how to read, not "any official host".
  */
 export const KNOWN_MCP_SCHEMA_VERSIONS: readonly string[] = [
   "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
@@ -76,9 +73,6 @@ export const KNOWN_MCP_SCHEMA_VERSIONS: readonly string[] = [
   "https://static.modelcontextprotocol.io/schemas/2025-09-16/server.schema.json",
 ];
 
-/** Where a revision's document came from — the fact the version-uniqueness rule reads. */
-export type McpRevisionSource = "registry" | "staff" | "owner" | "seed";
-
 /** A server's sign-in tier, as VERIFIED here — never as a vendor claims it. */
 export type McpAuthMode = "none" | "oauth" | "manual";
 
@@ -86,8 +80,8 @@ export type McpAuthMode = "none" | "oauth" | "manual";
 
 /** What a stored revision carries beside its document, all of it read out of the document. */
 export interface McpRevisionFacts {
-  /** The embedded registry name — the server's identity upstream and here. */
-  registryName: string;
+  /** The embedded reverse-DNS name — the server's identity. */
+  name: string;
   /** The `version` inside the document, or NULL when it names none (an editorial/self-maintained
    *  server we never stamped a fake version on). Registry documents always carry a real one. */
   upstreamVersion: string | null;
@@ -147,7 +141,7 @@ export function mcpRevisionFacts(
   return {
     refusal: null,
     facts: {
-      registryName: validated.summary.name,
+      name: validated.summary.name,
       upstreamVersion: validated.summary.version,
       schemaVersion: typeof declared === "string" ? declared : null,
       transport: validated.summary.transport,
@@ -156,51 +150,48 @@ export function mcpRevisionFacts(
   };
 }
 
-// ── The one write: a revision, and the pointer that may move with it ────────────────────────
+// ── The two writes: append a revision, and (separately) promote one to current ──────────────
 
 /** What one revision write says. */
 export interface McpRevisionWrite {
   document: Record<string, unknown>;
-  source: McpRevisionSource;
-  /** Publish it and make it the server's `current` in this same transaction. */
-  publish: boolean;
-  /** Display text recorded on a published revision — the catalog outlives every account. */
-  attribution: string;
 }
 
 export type McpRevisionOutcome =
   | { refusal: McpGateRefusal }
-  | { refusal: null; revisionId: string; seq: number; published: boolean };
+  | { refusal: null; revisionId: string; seq: number };
 
 const SERVER_NOT_FOUND: McpGateRefusal = {
   code: "MCP_SERVER_NOT_FOUND",
   message: "no such server",
 };
 
-interface LockedServer {
+export interface LockedServer {
   id: string;
   workspaceId: string | null;
-  registryName: string | null;
+  name: string | null;
   status: string;
   authMode: string | null;
   authNote: string | null;
+  manuallyCurated: boolean;
   currentRevisionId: string | null;
 }
 
 /**
  * TAKE THE FENCE. Every write below starts here: the server row is pinned for the rest of the
- * transaction, so the seq mint, the version-uniqueness decision and the pointer move all see one
- * consistent server and a concurrent writer waits rather than interleaves.
+ * transaction, so the seq mint and the pointer move see one consistent server and a concurrent
+ * writer waits rather than interleaves.
  */
-async function lockServerInTx(tx: Tx, serverId: string): Promise<LockedServer | undefined> {
+export async function lockServerInTx(tx: Tx, serverId: string): Promise<LockedServer | undefined> {
   const rows = await tx
     .select({
       id: mcpServer.id,
       workspaceId: mcpServer.workspaceId,
-      registryName: mcpServer.registryName,
+      name: mcpServer.name,
       status: mcpServer.status,
       authMode: mcpServer.authMode,
       authNote: mcpServer.authNote,
+      manuallyCurated: mcpServer.manuallyCurated,
       currentRevisionId: mcpServer.currentRevisionId,
     })
     .from(mcpServer)
@@ -213,8 +204,7 @@ async function lockServerInTx(tx: Tx, serverId: string): Promise<LockedServer | 
 /**
  * A `manual` server with no note is a chore with no instructions — the one thing this catalog
  * refuses to hand anybody. Checked where it MATTERS (the moment a revision becomes something
- * people receive) rather than as a column constraint: a candidate pulled in by a sweep is allowed
- * to be a half-known thing, which is what `candidate` means.
+ * people receive, i.e. promotion) rather than as a column constraint.
  */
 function authNoteRefusal(
   server: Pick<LockedServer, "authMode" | "authNote">,
@@ -233,17 +223,12 @@ function authNoteRefusal(
 }
 
 /**
- * ADD A REVISION, inside the caller's transaction and behind the server's own lock.
+ * ADD A REVISION — append one, non-current, inside the caller's transaction behind the server's
+ * lock. It never moves the pointer: promotion is a separate, single decision
+ * (`promoteMcpRevisionInTx`), because a file version is a proposal until something says otherwise.
  *
- * Publishing is part of this write, not a step after it: a published revision that is not yet
- * anybody's `current` is a version people cannot receive, and a `current` naming a revision that
- * is not published is the pointer promising something the row does not say. Both are states this
- * function refuses to leave behind, so the two writes commit together or not at all.
- *
- * `source = 'registry'` also carries upstream's promise that a version names one document: a
- * second registry-sourced revision of a version already held is refused here (under the lock, so
- * the check is a decision), and the partial unique index stands behind that decision. A staff
- * correction or an owner's edit is a NEW revision of the same version string by design.
+ * The document's name must match the server's — a revision is a version OF THIS server, and one
+ * that renamed it would leave the catalog keyed by one name while handing out another.
  */
 export async function addMcpRevisionInTx(
   tx: Tx,
@@ -254,46 +239,32 @@ export async function addMcpRevisionInTx(
   if (server === undefined) {
     return { refusal: SERVER_NOT_FOUND };
   }
-  // Only a REGISTRY document is held to carrying a version — upstream mandates one, and a missing
-  // version there is upstream giving us less than it promised. Everything we author ourselves may
-  // honestly have none.
-  const read = mcpRevisionFacts(write.document, {
-    requireVersion: write.source === "registry",
-  });
+  // We author every catalog document ourselves now (the file, an owner, a staff edit), so a
+  // missing version is honest rather than a shortfall — never fabricated.
+  const read = mcpRevisionFacts(write.document, { requireVersion: false });
   if (read.refusal !== null) {
     return { refusal: read.refusal };
   }
-  // A REVISION IS A VERSION OF *THIS* SERVER. The row's `registry_name` is the identity every
-  // read API resolves by, and the document carries the same name inside it — so a revision whose
-  // document renames the server would leave the catalog keyed by one name while handing out a
-  // document declaring another, and a lookup by either would be wrong. Renaming a server is a
-  // different act from publishing a version of it, and this is not that act.
-  if (server.registryName !== null && server.registryName !== read.facts.registryName) {
+  if (server.name !== null && server.name !== read.facts.name) {
     return {
       refusal: {
         code: "MCP_NAME_MISMATCH",
-        message: `this server is ${server.registryName}; a version of it cannot call itself ${read.facts.registryName}`,
+        message: `this server is ${server.name}; a version of it cannot call itself ${read.facts.name}`,
       },
     };
   }
-  if (write.publish) {
-    const chore = authNoteRefusal(server);
-    if (chore !== null) {
-      return { refusal: chore };
-    }
-  }
-  // A registry document always carries a version (required above), so the one-document-per-version
-  // rule has a real key to compare — the `!== null` both narrows the type and states that fact.
-  const registryVersion = read.facts.upstreamVersion;
-  if (write.source === "registry" && registryVersion !== null) {
+  // ONE DOCUMENT PER VERSION, when a document names one — the clean refusal the partial unique
+  // index stands behind. A versionless document is exempt (null is distinct), which is why the
+  // file's versionless revisions append freely.
+  const version = read.facts.upstreamVersion;
+  if (version !== null) {
     const held = await tx
       .select({ id: mcpServerRevision.id })
       .from(mcpServerRevision)
       .where(
         and(
           eq(mcpServerRevision.serverId, serverId),
-          eq(mcpServerRevision.upstreamVersion, registryVersion),
-          eq(mcpServerRevision.source, "registry"),
+          eq(mcpServerRevision.upstreamVersion, version),
         ),
       )
       .limit(1);
@@ -301,7 +272,7 @@ export async function addMcpRevisionInTx(
       return {
         refusal: {
           code: "MCP_VERSION_HELD",
-          message: `version ${registryVersion} of this server is already recorded from upstream`,
+          message: `version ${version} of this server is already recorded`,
         },
       };
     }
@@ -312,33 +283,51 @@ export async function addMcpRevisionInTx(
     .where(eq(mcpServerRevision.serverId, serverId));
   const seq = next[0]?.seq ?? 1;
   const revisionId = mintMcpRevisionId();
-  const now = new Date();
   await tx.insert(mcpServerRevision).values({
     id: revisionId,
     serverId,
     seq,
-    status: write.publish ? "published" : "candidate",
     upstreamVersion: read.facts.upstreamVersion,
     schemaVersion: read.facts.schemaVersion,
     document: write.document,
     transport: read.facts.transport,
     url: read.facts.url,
-    source: write.source,
-    ...(write.publish ? { publishedAt: now, publishedBy: write.attribution } : {}),
   });
-  if (write.publish) {
-    await tx
-      .update(mcpServer)
-      .set({
-        currentRevisionId: revisionId,
-        // A server people can now receive is not a candidate any more. A DELISTED one stays
-        // delisted: publishing a correction to something deliberately withdrawn does not put it
-        // back on offer — relisting is its own act.
-        ...(server.status === "candidate" ? { status: "active" as const } : {}),
-      })
-      .where(eq(mcpServer.id, serverId));
+  return { refusal: null, revisionId, seq };
+}
+
+/**
+ * PROMOTE ONE REVISION TO `current` — the ONE place the pointer moves, whichever path asked (an
+ * owner's save, the file sync's auto-advance, a staff promote). Routing every promotion here is
+ * what lets a later increment add a gateway-compatibility gate in one seam: a version the client
+ * cannot place would be held as a proposal instead of promoted, so a live workspace is never
+ * broken by an incompatible update. THE GATE IS NOT BUILT YET (there is no gateway) — this is the
+ * seam it will sit in.
+ *
+ * The caller holds the server's lock (from `lockServerInTx` / `addMcpRevisionInTx`) and passes the
+ * `server` it read under it. A `manual` server still needs its one line before anyone receives it.
+ * The `published_at`/`published_by` stamp records WHEN this revision last became current and by
+ * whom — history, not a status.
+ */
+export async function promoteMcpRevisionInTx(
+  tx: Tx,
+  server: LockedServer,
+  revisionId: string,
+  by: string,
+): Promise<McpGateRefusal | null> {
+  const chore = authNoteRefusal(server);
+  if (chore !== null) {
+    return chore;
   }
-  return { refusal: null, revisionId, seq, published: write.publish };
+  await tx
+    .update(mcpServerRevision)
+    .set({ publishedAt: new Date(), publishedBy: by })
+    .where(and(eq(mcpServerRevision.id, revisionId), eq(mcpServerRevision.serverId, server.id)));
+  await tx
+    .update(mcpServer)
+    .set({ currentRevisionId: revisionId })
+    .where(eq(mcpServer.id, server.id));
+  return null;
 }
 
 // ── Private servers: an owner's own, created and edited by the same mechanism ────────────────
@@ -371,10 +360,9 @@ export type McpServerOutcome =
 /**
  * CREATE A PRIVATE SERVER — a workspace's own, visible to nobody else and exported nowhere.
  *
- * The document is stored exactly as a catalog document is, through the same write: the private
- * half of the table is not a second mechanism, it is the same one with a workspace on the row.
- * The first revision is published immediately, because an owner writing down their own server has
- * nobody to be reviewed by.
+ * The document is stored exactly as a catalog document is, through the same write. The first
+ * revision is promoted immediately, because an owner writing down their own server has nobody to
+ * be reviewed by.
  */
 export async function createPrivateMcpServer(
   actor: McpServerAuthor,
@@ -390,16 +378,15 @@ export async function createPrivateMcpServer(
   const landed = await inFinalTxOrRefusal<McpServerOutcome, McpServerOutcome>(
     async (tx, refuse) => {
       const serverId = mintMcpServerId();
-      // ONE NAME, ONE SERVER, inside this workspace: the registry lane resolves a private row by
-      // exactly this name, so a second one under it would make the lookup a coin flip. The
-      // partial unique index is the arbiter — the conflict IS the refusal, so two owners doing
-      // this at once cannot both win, and the second gets an answer instead of a fault.
+      // ONE NAME, ONE SERVER, inside this workspace: two private rows under one name would make a
+      // lookup a coin flip. The partial unique index is the arbiter — the conflict IS the refusal,
+      // so two owners doing this at once cannot both win, and the second gets an answer.
       const born = await tx
         .insert(mcpServer)
         .values({
           id: serverId,
           workspaceId: actor.workspaceId,
-          registryName: read.facts.registryName,
+          name: read.facts.name,
           displayName: details.displayName,
           description: details.description ?? null,
           websiteUrl: details.websiteUrl ?? null,
@@ -415,18 +402,22 @@ export async function createPrivateMcpServer(
         return refuse({
           refusal: {
             code: "MCP_NAME_TAKEN",
-            message: `this workspace already has a server called ${read.facts.registryName}`,
+            message: `this workspace already has a server called ${read.facts.name}`,
           },
         });
       }
-      const added = await addMcpRevisionInTx(tx, serverId, {
-        document,
-        source: "owner",
-        publish: true,
-        attribution: actor.display,
-      });
+      const added = await addMcpRevisionInTx(tx, serverId, { document });
       if (added.refusal !== null) {
         return refuse({ refusal: added.refusal });
+      }
+      // The lock the add took is this transaction's; re-read the server under it for promotion.
+      const server = await lockServerInTx(tx, serverId);
+      if (server === undefined) {
+        return refuse({ refusal: SERVER_NOT_FOUND });
+      }
+      const promoted = await promoteMcpRevisionInTx(tx, server, added.revisionId, actor.display);
+      if (promoted !== null) {
+        return refuse({ refusal: promoted });
       }
       await auditInTx(tx, {
         workspaceId: actor.workspaceId,
@@ -434,7 +425,7 @@ export async function createPrivateMcpServer(
         kind: "mcp_server_created",
         subject: serverId,
         outcome: "ok",
-        details: { registryName: read.facts.registryName, name: details.displayName },
+        details: { name: read.facts.name, displayName: details.displayName },
       });
       return { refusal: null, serverId, revisionId: added.revisionId };
     },
@@ -443,14 +434,14 @@ export async function createPrivateMcpServer(
 }
 
 /**
- * EDIT A PRIVATE SERVER — which is to say, publish a new revision of it.
+ * EDIT A PRIVATE SERVER — which is to say, promote a new revision of it.
  *
  * Nothing already delivered is rewritten: the old revision stays exactly as it was and the
  * pointer moves to the new one, so a machine that took the previous document can still be told
  * which one it holds. The editorial columns are the row's own and are updated in place — they
  * describe the SERVER, not any one version of its document.
  *
- * A global row refuses here, and so does another workspace's private one: both answer as "no such
+ * A public row refuses here, and so does another workspace's private one: both answer as "no such
  * server", because the answer to "may I edit this" must not double as a way to learn it exists.
  */
 export async function editPrivateMcpServer(
@@ -477,14 +468,19 @@ export async function editPrivateMcpServer(
           scopeMenu: details.scopeMenu ?? null,
         })
         .where(eq(mcpServer.id, serverId));
-      const added = await addMcpRevisionInTx(tx, serverId, {
-        document,
-        source: "owner",
-        publish: true,
-        attribution: actor.display,
-      });
+      const added = await addMcpRevisionInTx(tx, serverId, { document });
       if (added.refusal !== null) {
         return refuse({ refusal: added.refusal });
+      }
+      // Promote against the server as edited — the auth note just written is what the manual-note
+      // gate must see, so re-read it under the lock this transaction already holds.
+      const edited = await lockServerInTx(tx, serverId);
+      if (edited === undefined) {
+        return refuse({ refusal: SERVER_NOT_FOUND });
+      }
+      const promoted = await promoteMcpRevisionInTx(tx, edited, added.revisionId, actor.display);
+      if (promoted !== null) {
+        return refuse({ refusal: promoted });
       }
       await auditInTx(tx, {
         workspaceId: actor.workspaceId,
@@ -492,7 +488,7 @@ export async function editPrivateMcpServer(
         kind: "mcp_server_edited",
         subject: serverId,
         outcome: "ok",
-        details: { revisionId: added.revisionId, name: details.displayName },
+        details: { revisionId: added.revisionId, displayName: details.displayName },
       });
       return { refusal: null, serverId, revisionId: added.revisionId };
     },
@@ -561,6 +557,9 @@ export async function connectMcpServer(
       }
       const pinnedRevisionId = request.pinnedRevisionId ?? null;
       if (pinnedRevisionId !== null) {
+        // A pin names a revision OF THIS SERVER that a staff member has not dismissed. It need not
+        // be the current one — a pin is the deliberate choice to follow one revision and keep
+        // following it.
         const pinned = await tx
           .select({ id: mcpServerRevision.id })
           .from(mcpServerRevision)
@@ -568,7 +567,7 @@ export async function connectMcpServer(
             and(
               eq(mcpServerRevision.id, pinnedRevisionId),
               eq(mcpServerRevision.serverId, server.id),
-              eq(mcpServerRevision.status, "published"),
+              isNull(mcpServerRevision.dismissedAt),
             ),
           )
           .limit(1);
@@ -584,7 +583,7 @@ export async function connectMcpServer(
         return refuse({
           refusal: {
             code: "MCP_NOTHING_PUBLISHED",
-            message: "this server has no published version yet, so there is nothing to deliver",
+            message: "this server has no current version yet, so there is nothing to deliver",
           },
         });
       }
@@ -662,12 +661,12 @@ export async function connectMcpServer(
  */
 export const MCP_RESOLVED_REVISION = sql`COALESCE(bm.pinned_revision_id, ms.current_revision_id)`;
 
-// ── Staff decisions on the global catalog ────────────────────────────────────────────────────
+// ── Staff decisions on the public catalog (promote a proposal, dismiss one) ──────────────────
 
 /**
  * WHO ACTED, when the act is staff's.
  *
- * NOT a branded actor, and it cannot be: the guards mint proof of a SEAT, and the global catalog
+ * NOT a branded actor, and it cannot be: the guards mint proof of a SEAT, and the public catalog
  * has no workspace to hold a seat in. This tier holds no staff identity at all — the back-office
  * that does gates these calls and hands down the attribution, which is recorded as display text
  * on the revision and on a workspace-less audit row (the ledger already carries those: a login
@@ -689,8 +688,8 @@ const REVISION_NOT_FOUND: McpGateRefusal = {
 interface LockedRevision {
   id: string;
   serverId: string;
-  status: string;
   seq: number;
+  dismissedAt: Date | null;
 }
 
 /** The revision, read under its server's lock — so a decision and a pointer move are one act. */
@@ -698,21 +697,15 @@ async function revisionUnderLock(
   tx: Tx,
   revisionId: string,
 ): Promise<{ revision: LockedRevision; server: LockedServer } | undefined> {
-  const rows = await tx
-    .select({
-      id: mcpServerRevision.id,
-      serverId: mcpServerRevision.serverId,
-      status: mcpServerRevision.status,
-      seq: mcpServerRevision.seq,
-    })
+  const first = await tx
+    .select({ serverId: mcpServerRevision.serverId })
     .from(mcpServerRevision)
     .where(eq(mcpServerRevision.id, revisionId))
     .limit(1);
-  const revision = rows[0];
-  if (revision === undefined) {
+  if (first[0] === undefined) {
     return undefined;
   }
-  const server = await lockServerInTx(tx, revision.serverId);
+  const server = await lockServerInTx(tx, first[0].serverId);
   if (server === undefined) {
     return undefined;
   }
@@ -722,8 +715,8 @@ async function revisionUnderLock(
     .select({
       id: mcpServerRevision.id,
       serverId: mcpServerRevision.serverId,
-      status: mcpServerRevision.status,
       seq: mcpServerRevision.seq,
+      dismissedAt: mcpServerRevision.dismissedAt,
     })
     .from(mcpServerRevision)
     .where(eq(mcpServerRevision.id, revisionId))
@@ -731,8 +724,8 @@ async function revisionUnderLock(
   return fresh[0] === undefined ? undefined : { revision: fresh[0], server };
 }
 
-/** Staff acts on the global catalog only — a workspace's private server is its owner's. */
-function globalOnlyRefusal(server: LockedServer): McpGateRefusal | null {
+/** Staff acts on the public catalog only — a workspace's private server is its owner's. */
+function publicOnlyRefusal(server: LockedServer): McpGateRefusal | null {
   return server.workspaceId === null ? null : REVISION_NOT_FOUND;
 }
 
@@ -755,109 +748,23 @@ async function auditCatalogInTx(
   });
 }
 
-/** One revision's precedence facts and its source, read under the accept lock. */
-async function precedenceReadInTx(
-  tx: Tx,
-  revisionId: string,
-): Promise<{ facts: McpPrecedenceFacts; source: string } | null> {
-  const rows = await tx
-    .select({
-      upstreamVersion: mcpServerRevision.upstreamVersion,
-      protocolVersions: mcpServerRevision.protocolVersions,
-      source: mcpServerRevision.source,
-    })
-    .from(mcpServerRevision)
-    .where(eq(mcpServerRevision.id, revisionId))
-    .limit(1);
-  const row = rows[0];
-  return row === undefined
-    ? null
-    : {
-        facts: { version: row.upstreamVersion, protocolVersions: row.protocolVersions },
-        source: row.source,
-      };
+/**
+ * MARK A PUBLIC SERVER MANUALLY CURATED — a staff member has taken it in hand, so it stops
+ * tracking the file automatically and future file versions land as proposals. Called by every
+ * staff act that touches a public row (an edit, a promote, a dismiss).
+ */
+async function markManuallyCuratedInTx(tx: Tx, serverId: string): Promise<void> {
+  await tx.update(mcpServer).set({ manuallyCurated: true }).where(eq(mcpServer.id, serverId));
 }
 
 /**
- * THE PRECEDENCE GUARD, at accept. This is what makes reading older-schema upstream documents safe:
- * an UPSTREAM candidate never displaces a version a PERSON authored here (a staff correction, an
- * owner's edit) at all — a hand-written row is this catalog's own statement, not a slot for upstream
- * to fill — and never displaces a real prior it does not better. Either bar is cleared only by a
- * deliberate staff override, which the accept records.
- *
- * A CURRENT WITH NO COMPARABLE VERSION is neither bar. A seed placeholder — or any editorial row
- * this catalog holds without a real version — carries a NULL version, which is a starting point
- * waiting for a real document, not a decision to protect or a number to be judged "behind": the
- * first real candidate freely supersedes it, with no override and no comparison. (This is the
- * general rule the old seed special-case falls out of, now that a seed row honestly carries no
- * version.) A candidate this install authored is not "an upstream candidate" and is not guarded
- * here; a server with nothing current yet has nothing to protect.
- *
- * Returns the refusal precedence WOULD raise, or null — the caller both enforces it (absent an
- * override) and, when overridden, records which bar was crossed.
+ * PROMOTE a proposal to `current` — a staff act, and the moment a public server becomes manually
+ * curated (it now tracks staff's hand, not the file's). The pointer move itself goes through the
+ * ONE promotion function, so the gateway gate a later increment adds covers a staff promote too.
  */
-async function acceptPrecedenceRefusal(
-  tx: Tx,
-  server: LockedServer,
-  candidateRevisionId: string,
-): Promise<McpGateRefusal | null> {
-  if (server.currentRevisionId === null) {
-    return null;
-  }
-  const candidate = await precedenceReadInTx(tx, candidateRevisionId);
-  if (candidate === null || candidate.source !== "registry") {
-    return null;
-  }
-  const current = await precedenceReadInTx(tx, server.currentRevisionId);
-  if (current === null) {
-    return null;
-  }
-  // A person's own statement is protected whatever its version — provenance, not a number, is the
-  // bar; upstream displaces it only by a deliberate override.
-  if (isStaffAuthoredSource(current.source)) {
-    return {
-      code: "MCP_PRECEDENCE_PROTECTED",
-      message:
-        "this server's current version is one this catalog maintains, not one it took from upstream — replacing it with an upstream document is a deliberate override",
-    };
-  }
-  // No comparable version to move backward from — a seed placeholder, or any versionless editorial
-  // current — is freely superseded: no bar, no override, no semver comparison.
-  if (current.facts.version === null) {
-    return null;
-  }
-  // Two real versions: an upstream candidate must be strictly newer, or moving the pointer is a
-  // downgrade, which is a deliberate override.
-  if (!isStrictlyNewer(candidate.facts, current.facts)) {
-    return {
-      code: "MCP_PRECEDENCE_NOT_NEWER",
-      message: `this upstream version (${candidate.facts.version}) is not newer than the one on offer (${current.facts.version}) — accepting it would move the catalog backward, which is a deliberate override`,
-    };
-  }
-  return null;
-}
-
-/**
- * ACCEPT a candidate: it becomes published and the server's `current` in one transaction, and the
- * server itself stops being a candidate. This is the only way a global revision becomes something
- * people receive — there is no workspace review of a catalog server, by design.
- *
- * PRECEDENCE stands between a candidate and the pointer: an upstream candidate that is not strictly
- * newer than the current, or any upstream candidate over a version a person authored here, is
- * refused unless the caller passes `override` — the deliberate staff act that says "yes, move it
- * anyway", recorded on the audit line so the crossing is never silent.
- *
- * THE OLDER CANDIDATES leave with the same act. Once a person has answered this server's proposal,
- * the versions queued BEHIND it — the ones the sweep filed on earlier runs, ordered by `seq` — are
- * not still awaiting a decision, so they move to `superseded` in the same transaction: a terminal
- * state that is neither published nor a candidate. Nobody rejected them, so they are not `rejected`;
- * they were overtaken, and the accept's own audit line counts them. A NEWER candidate — one the
- * sweep landed after this one was queued — is a live proposal and is left untouched.
- */
-export async function acceptMcpRevision(
+export async function promoteMcpRevision(
   staff: McpCatalogStaff,
   revisionId: string,
-  options: { override?: boolean } = {},
 ): Promise<McpDecisionOutcome> {
   const landed = await inFinalTxOrRefusal<McpDecisionOutcome, McpDecisionOutcome>(
     async (tx, refuse) => {
@@ -865,113 +772,45 @@ export async function acceptMcpRevision(
       if (found === undefined) {
         return refuse({ refusal: REVISION_NOT_FOUND });
       }
-      const foreign = globalOnlyRefusal(found.server);
+      const foreign = publicOnlyRefusal(found.server);
       if (foreign !== null) {
         return refuse({ refusal: foreign });
       }
-      if (found.revision.status !== "candidate") {
+      if (found.revision.dismissedAt !== null) {
         return refuse({
           refusal: {
-            code: "MCP_REVISION_DECIDED",
-            message: `this revision is already ${found.revision.status}`,
+            code: "MCP_REVISION_DISMISSED",
+            message: "this proposal was dismissed, so it cannot be promoted",
           },
         });
       }
-      // A catalog row states how a person gets in. Publishing one where nobody established that
-      // yet would put the catalog's name behind a fact it does not have.
+      if (found.server.currentRevisionId === revisionId) {
+        return refuse({
+          refusal: {
+            code: "MCP_REVISION_CURRENT",
+            message: "this revision is already the one on offer",
+          },
+        });
+      }
+      // A catalog row states how a person gets in. Promoting one where nobody established that yet
+      // would put the catalog's name behind a fact it does not have.
       if (found.server.authMode === null) {
         return refuse({
           refusal: {
             code: "MCP_AUTH_MODE_REQUIRED",
             message:
-              "this server's sign-in has not been established yet, and the catalog does not publish what it has not checked",
+              "this server's sign-in has not been established yet, and the catalog does not offer what it has not checked",
           },
         });
       }
-      const chore = authNoteRefusal(found.server);
-      if (chore !== null) {
-        return refuse({ refusal: chore });
+      const promoted = await promoteMcpRevisionInTx(tx, found.server, revisionId, staff.display);
+      if (promoted !== null) {
+        return refuse({ refusal: promoted });
       }
-      // NEVER A DOWNGRADE, and never a silent supersession of a hand-authored row — unless a staff
-      // override says so, in which case the bar it crossed is on the audit line.
-      const precedence = await acceptPrecedenceRefusal(tx, found.server, revisionId);
-      if (precedence !== null && options.override !== true) {
-        return refuse({ refusal: precedence });
-      }
-      const now = new Date();
-      await tx
-        .update(mcpServerRevision)
-        .set({ status: "published", publishedAt: now, publishedBy: staff.display })
-        .where(eq(mcpServerRevision.id, revisionId));
-      await tx
-        .update(mcpServer)
-        .set({
-          currentRevisionId: revisionId,
-          ...(found.server.status === "candidate" ? { status: "active" as const } : {}),
-        })
-        .where(eq(mcpServer.id, found.server.id));
-      // The proposals queued BEHIND this one leave the queue: a person answered this server, so the
-      // OLDER candidates on it are `superseded` — overtaken, not rejected, and no longer waiting.
-      // "Behind" is by `seq` (monotonic per server under this lock), so ONLY candidates filed before
-      // the accepted one go: a NEWER candidate the sweep landed while this was being reviewed is a
-      // live proposal that must survive — superseding it would lose it for good, since the sweep
-      // will not re-file a registry version it already holds. `decided_at` stays null: that column
-      // marks a decision ABOUT a revision (a reject), and being overtaken is not one; who accepted,
-      // and when, is on the audit line below.
-      const superseded = await tx
-        .update(mcpServerRevision)
-        .set({ status: "superseded" })
-        .where(
-          and(
-            eq(mcpServerRevision.serverId, found.server.id),
-            eq(mcpServerRevision.status, "candidate"),
-            lt(mcpServerRevision.seq, found.revision.seq),
-          ),
-        )
-        .returning({ id: mcpServerRevision.id });
-      await auditCatalogInTx(tx, staff, "mcp_revision_published", revisionId, {
+      await markManuallyCuratedInTx(tx, found.server.id);
+      await auditCatalogInTx(tx, staff, "mcp_revision_promoted", revisionId, {
         serverId: found.server.id,
         seq: found.revision.seq,
-        ...(precedence !== null ? { overrode: precedence.code } : {}),
-        ...(superseded.length > 0 ? { superseded: superseded.length } : {}),
-      });
-      return { refusal: null, revisionId, serverId: found.server.id };
-    },
-  );
-  return landed.refused !== null ? landed.refused : landed.value;
-}
-
-/** REJECT a candidate: the decision is recorded, the row stays, nothing is ever pointed at it. */
-export async function rejectMcpRevision(
-  staff: McpCatalogStaff,
-  revisionId: string,
-  reason: string | null = null,
-): Promise<McpDecisionOutcome> {
-  const landed = await inFinalTxOrRefusal<McpDecisionOutcome, McpDecisionOutcome>(
-    async (tx, refuse) => {
-      const found = await revisionUnderLock(tx, revisionId);
-      if (found === undefined) {
-        return refuse({ refusal: REVISION_NOT_FOUND });
-      }
-      const foreign = globalOnlyRefusal(found.server);
-      if (foreign !== null) {
-        return refuse({ refusal: foreign });
-      }
-      if (found.revision.status !== "candidate") {
-        return refuse({
-          refusal: {
-            code: "MCP_REVISION_DECIDED",
-            message: `this revision is already ${found.revision.status}`,
-          },
-        });
-      }
-      await tx
-        .update(mcpServerRevision)
-        .set({ status: "rejected", decidedAt: new Date(), decidedBy: staff.display })
-        .where(eq(mcpServerRevision.id, revisionId));
-      await auditCatalogInTx(tx, staff, "mcp_revision_rejected", revisionId, {
-        serverId: found.server.id,
-        ...(reason === null ? {} : { reason }),
       });
       return { refusal: null, revisionId, serverId: found.server.id };
     },
@@ -980,18 +819,12 @@ export async function rejectMcpRevision(
 }
 
 /**
- * REVOKE a published revision — the pull-back.
- *
- * Two things happen and neither is a deletion. The revision is marked revoked, keeping the
- * `published_at` that says it once was served. And if it was the server's `current`, the pointer
- * falls back to the newest revision still published, or to nothing when none is left: the point
- * of a revocation is that the thing stops being handed out, so leaving the pointer on it would
- * make the act cosmetic.
- *
- * A connection PINNED to the revoked revision is not moved. It asked for exactly that document,
- * and the honest answer is to keep serving it and say it was pulled back.
+ * DISMISS a proposal — a terminal decline. The revision stays as history, but `dismissed_at` marks
+ * it so it stops showing as pending and the file re-offering the same document never re-proposes
+ * it. The current revision is never touched (you cannot dismiss what is on offer). Dismissing also
+ * makes the server manually curated: a staff member has ruled on it.
  */
-export async function revokeMcpRevision(
+export async function dismissMcpRevision(
   staff: McpCatalogStaff,
   revisionId: string,
   reason: string | null = null,
@@ -1002,40 +835,32 @@ export async function revokeMcpRevision(
       if (found === undefined) {
         return refuse({ refusal: REVISION_NOT_FOUND });
       }
-      const foreign = globalOnlyRefusal(found.server);
+      const foreign = publicOnlyRefusal(found.server);
       if (foreign !== null) {
         return refuse({ refusal: foreign });
       }
-      if (found.revision.status !== "published") {
+      if (found.server.currentRevisionId === revisionId) {
         return refuse({
           refusal: {
-            code: "MCP_REVISION_NOT_PUBLISHED",
-            message: "only a published revision can be pulled back",
+            code: "MCP_REVISION_CURRENT",
+            message: "the version on offer cannot be dismissed — promote another first",
+          },
+        });
+      }
+      if (found.revision.dismissedAt !== null) {
+        return refuse({
+          refusal: {
+            code: "MCP_REVISION_DISMISSED",
+            message: "this proposal is already dismissed",
           },
         });
       }
       await tx
         .update(mcpServerRevision)
-        .set({ status: "revoked", revokedAt: new Date() })
+        .set({ dismissedAt: new Date(), dismissedBy: staff.display })
         .where(eq(mcpServerRevision.id, revisionId));
-      if (found.server.currentRevisionId === revisionId) {
-        const fallback = await tx
-          .select({ id: mcpServerRevision.id })
-          .from(mcpServerRevision)
-          .where(
-            and(
-              eq(mcpServerRevision.serverId, found.server.id),
-              eq(mcpServerRevision.status, "published"),
-            ),
-          )
-          .orderBy(desc(mcpServerRevision.seq))
-          .limit(1);
-        await tx
-          .update(mcpServer)
-          .set({ currentRevisionId: fallback[0]?.id ?? null })
-          .where(eq(mcpServer.id, found.server.id));
-      }
-      await auditCatalogInTx(tx, staff, "mcp_revision_revoked", revisionId, {
+      await markManuallyCuratedInTx(tx, found.server.id);
+      await auditCatalogInTx(tx, staff, "mcp_revision_dismissed", revisionId, {
         serverId: found.server.id,
         ...(reason === null ? {} : { reason }),
       });
@@ -1085,7 +910,7 @@ export async function recordMcpRevisionProbe(
 /** A catalog row as a surface renders it, with the version it currently offers. */
 export interface McpCatalogRow {
   serverId: string;
-  registryName: string | null;
+  name: string | null;
   displayName: string;
   description: string | null;
   icon: string | null;
@@ -1107,17 +932,24 @@ export interface McpCatalogRow {
 
 // ── The server a bundle connects to, as its page reads it ───────────────────────────────────
 
+/**
+ * Where a revision stands relative to the pointer — derived, never stored:
+ *  · `current` — the one the server offers right now;
+ *  · `proposal` — a later revision (a file update, or a staff draft) awaiting promotion;
+ *  · `history` — a revision that was current before, or an older one behind the current;
+ *  · `dismissed` — a proposal a staff member declined (terminal).
+ */
+export type McpRevisionState = "current" | "proposal" | "history" | "dismissed";
+
 /** One revision on the history a server's page lists. */
 export interface McpRevisionRow {
   revisionId: string;
   seq: number;
   /** The `version` this revision stored, or NULL when it named none. */
   upstreamVersion: string | null;
-  status: string;
-  source: string;
+  state: McpRevisionState;
   publishedAt: Date | null;
   publishedBy: string | null;
-  revokedAt: Date | null;
 }
 
 /** Everything a connected server's page shows, in one read. */
@@ -1126,7 +958,7 @@ export interface McpServerFace {
   serverId: string;
   /** The workspace's OWN server — the one an owner may edit. */
   isPrivate: boolean;
-  registryName: string | null;
+  name: string | null;
   displayName: string;
   description: string | null;
   websiteUrl: string | null;
@@ -1136,12 +968,12 @@ export interface McpServerFace {
   /** The connection follows ONE revision rather than the server's current. */
   pinnedRevisionId: string | null;
   currentRevisionId: string | null;
-  /** What this workspace's machines receive — null when the server has published nothing. */
+  /** What this workspace's machines receive — null when the server has nothing current. */
   resolved: {
     revisionId: string;
     /** The version this workspace's machines receive, or NULL when the revision names none. */
     upstreamVersion: string | null;
-    status: string;
+    state: McpRevisionState;
     url: string | null;
     transport: string | null;
     document: Record<string, unknown>;
@@ -1168,12 +1000,30 @@ function probeRecordOf(row: {
   };
 }
 
+/** Where one revision stands, given the current pointer and the current's seq. */
+function revisionStateOf(
+  revisionId: string,
+  seq: number,
+  dismissedAt: unknown,
+  currentRevisionId: string | null,
+  currentSeq: number | null,
+): McpRevisionState {
+  if (dismissedAt !== null && dismissedAt !== undefined) {
+    return "dismissed";
+  }
+  if (revisionId === currentRevisionId) {
+    return "current";
+  }
+  return currentSeq !== null && seq > currentSeq ? "proposal" : "history";
+}
+
 /**
  * THE SERVER BEHIND ONE BUNDLE. Workspace-scoped through the connection row, so a bundle id from
  * another workspace resolves to nothing — the same answer an id that names no server gets.
  *
- * A PRIVATE server's history is all of it; a CATALOG server's is the published part, because a
- * candidate awaiting a staff decision is not something a workspace is being offered.
+ * A PRIVATE server's history is all of it; a PUBLIC server's is the part that has been on offer
+ * (a revision with a promotion stamp), because a file proposal awaiting a staff decision is a
+ * staff concern, not something the workspace is being offered.
  */
 export async function mcpServerFace(
   actor: MemberActor | SessionActor,
@@ -1181,12 +1031,14 @@ export async function mcpServerFace(
 ): Promise<McpServerFace | null> {
   const rows = await getDb().execute(sql`
     SELECT bm.bundle_id, bm.server_id, bm.pinned_revision_id,
-           ms.workspace_id, ms.registry_name, ms.display_name, ms.description, ms.website_url,
+           ms.workspace_id, ms.name, ms.display_name, ms.description, ms.website_url,
            ms.icon, ms.auth_mode, ms.auth_note, ms.current_revision_id,
-           r.id AS revision_id, r.upstream_version, r.status, r.url, r.transport, r.document,
-           r.probe_outcome, r.probed_at, r.verification
+           curr.seq AS current_seq,
+           r.id AS revision_id, r.seq, r.upstream_version, r.dismissed_at, r.url, r.transport,
+           r.document, r.probe_outcome, r.probed_at, r.verification
     FROM web.bundle_mcp bm
     JOIN web.mcp_server ms ON ms.id = bm.server_id
+    LEFT JOIN web.mcp_server_revision curr ON curr.id = ms.current_revision_id
     LEFT JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
     WHERE bm.workspace_id = ${actor.workspaceId} AND bm.bundle_id = ${bundleId}
     LIMIT 1
@@ -1196,19 +1048,21 @@ export async function mcpServerFace(
     return null;
   }
   const isPrivate = row.workspace_id !== null;
+  const currentRevisionId = (row.current_revision_id as string | null) ?? null;
+  const currentSeq = row.current_seq === null ? null : Number(row.current_seq);
   const history = await getDb().execute(sql`
-    SELECT r.id AS revision_id, r.seq, r.upstream_version, r.status, r.source,
-           r.published_at, r.published_by, r.revoked_at
+    SELECT r.id AS revision_id, r.seq, r.upstream_version, r.dismissed_at,
+           r.published_at, r.published_by
     FROM web.mcp_server_revision r
     WHERE r.server_id = ${row.server_id as string}
-      AND (${isPrivate} OR r.status IN ('published', 'revoked'))
+      AND (${isPrivate} OR r.published_at IS NOT NULL)
     ORDER BY r.seq DESC
   `);
   return {
     bundleId: row.bundle_id as string,
     serverId: row.server_id as string,
     isPrivate,
-    registryName: (row.registry_name as string | null) ?? null,
+    name: (row.name as string | null) ?? null,
     displayName: row.display_name as string,
     description: (row.description as string | null) ?? null,
     websiteUrl: (row.website_url as string | null) ?? null,
@@ -1216,14 +1070,20 @@ export async function mcpServerFace(
     authMode: (row.auth_mode as string | null) ?? null,
     authNote: (row.auth_note as string | null) ?? null,
     pinnedRevisionId: (row.pinned_revision_id as string | null) ?? null,
-    currentRevisionId: (row.current_revision_id as string | null) ?? null,
+    currentRevisionId,
     resolved:
       row.revision_id === null || row.revision_id === undefined
         ? null
         : {
             revisionId: row.revision_id as string,
             upstreamVersion: (row.upstream_version as string | null) ?? null,
-            status: row.status as string,
+            state: revisionStateOf(
+              row.revision_id as string,
+              Number(row.seq),
+              row.dismissed_at,
+              currentRevisionId,
+              currentSeq,
+            ),
             url: (row.url as string | null) ?? null,
             transport: (row.transport as string | null) ?? null,
             document: row.document as Record<string, unknown>,
@@ -1239,330 +1099,36 @@ export async function mcpServerFace(
       revisionId: rev.revision_id as string,
       seq: Number(rev.seq),
       upstreamVersion: (rev.upstream_version as string | null) ?? null,
-      status: rev.status as string,
-      source: rev.source as string,
+      state: revisionStateOf(
+        rev.revision_id as string,
+        Number(rev.seq),
+        rev.dismissed_at,
+        currentRevisionId,
+        currentSeq,
+      ),
       publishedAt: rev.published_at === null ? null : new Date(rev.published_at as string),
       publishedBy: (rev.published_by as string | null) ?? null,
-      revokedAt: rev.revoked_at === null ? null : new Date(rev.revoked_at as string),
     })),
   };
 }
 
-// ── The registry reads: one server, one document, one page of them ──────────────────────────
-
-/**
- * One server as a REGISTRY ANSWER: the document, plus the facts this catalog adds to it. Both
- * lanes read the same shape — what differs is which rows they may see, never how a row is told.
- */
-export interface McpRegistryRow {
-  serverId: string;
-  /** The upstream name, or null for a self-maintained row the feed addresses by its document
-   *  name. Absent from the wire either way — the serializer reads the name off the document. */
-  registryName: string | null;
-  authMode: string | null;
-  authNote: string | null;
-  scopeMenu: unknown;
-  revisionId: string;
-  document: Record<string, unknown>;
-  /** `published`, or `revoked` for a pin still being honored. */
-  status: string;
-  publishedAt: Date | null;
-  /** Whether this revision is the one the server currently offers. */
-  isLatest: boolean;
-}
-
-/** One page of registry rows: what was asked for, plus the cursor to ask again with. */
-export interface McpRegistryPage {
-  rows: McpRegistryRow[];
-  /** The opaque cursor a caller passes back for the next page, or null at the end. */
-  nextCursor: string | null;
-}
-
-/** How many rows one page carries when the caller names no size, and the ceiling on asking. */
-export const MCP_REGISTRY_PAGE_DEFAULT = 50;
-export const MCP_REGISTRY_PAGE_MAX = 100;
-
-/** The page size a caller's `limit` really gets — a garbage value reads as none given. */
-export function mcpRegistryLimit(raw: string | null): number {
-  const asked = Number(raw);
-  if (!Number.isInteger(asked) || asked < 1) {
-    return MCP_REGISTRY_PAGE_DEFAULT;
-  }
-  return Math.min(asked, MCP_REGISTRY_PAGE_MAX);
-}
-
-function registryRowsOf(rows: Record<string, unknown>[]): McpRegistryRow[] {
-  return rows.map((row) => ({
-    serverId: row.server_id as string,
-    registryName: (row.registry_name as string | null) ?? null,
-    authMode: (row.auth_mode as string | null) ?? null,
-    authNote: (row.auth_note as string | null) ?? null,
-    scopeMenu: row.scope_menu ?? null,
-    revisionId: row.revision_id as string,
-    document: row.document as Record<string, unknown>,
-    status: row.status as string,
-    publishedAt: row.published_at === null ? null : new Date(row.published_at as string),
-    isLatest: row.is_latest === true,
-  }));
-}
-
-/** Cut one over-read page down to size and say whether there is more. */
-function paged(rows: McpRegistryRow[], limit: number): McpRegistryPage {
-  const more = rows.length > limit;
-  const page = more ? rows.slice(0, limit) : rows;
-  return { rows: page, nextCursor: more ? (page.at(-1)?.serverId ?? null) : null };
-}
-
-/**
- * THE PUBLIC FEED'S ROWS — the global catalog's published servers, and nothing else.
- *
- * A private server is nobody else's business and is not here; neither is a candidate, a delisted
- * row, or a revision staff pulled back. What this returns is exactly what this install stands
- * behind, which is the only thing another install should be able to sync.
- *
- * A SELF-MAINTAINED SERVER (`registry_name IS NULL`) is a first-class member of this shelf. A
- * subregistry offering servers the official registry lacks is the whole value this feed adds, so
- * the predicate is on being a PUBLISHED GLOBAL row — never on carrying an upstream name. Such a
- * row is addressed in the feed by the name inside its own document (see below); the serializer
- * already serves that document verbatim, so nothing else about the answer changes.
- */
-export async function publishedCatalogServers(page: {
-  cursor?: string | null;
-  limit?: number;
-}): Promise<McpRegistryPage> {
-  const limit = page.limit ?? MCP_REGISTRY_PAGE_DEFAULT;
-  const cursor = page.cursor ?? null;
-  const rows = await getDb().execute(sql`
-    SELECT ms.id AS server_id, ms.registry_name, ms.auth_mode, ms.auth_note, ms.scope_menu,
-           r.id AS revision_id, r.document, r.status, r.published_at, true AS is_latest
-    FROM web.mcp_server ms
-    JOIN web.mcp_server_revision r ON r.id = ms.current_revision_id
-    WHERE ms.workspace_id IS NULL AND ms.status = 'active'
-      AND r.status = 'published'
-      AND (${cursor}::text IS NULL OR ms.id > ${cursor})
-    ORDER BY ms.id
-    LIMIT ${limit + 1}
-  `);
-  return paged(registryRowsOf(rows.rows as Record<string, unknown>[]), limit);
-}
-
-/**
- * ONE GLOBAL SERVER'S PUBLISHED HISTORY, newest first — the feed's versions answer. A revision
- * that was rejected, never decided, or pulled back is absent: the feed lists what is on offer.
- *
- * THE KEY THE FEED URL CARRIES is the server's upstream `registry_name` where it has one, and the
- * name inside its CURRENT document where it does not — a self-maintained server is addressed by
- * the same name the list answer shows for it (`server.name`). The current revision is joined for
- * exactly that fallback; a self-maintained row with nothing published has no current and so is
- * unaddressable here, which is the same as saying the feed offers no such server.
- */
-export async function publishedCatalogVersions(name: string): Promise<McpRegistryRow[]> {
-  // ONE SERVER, then its history — never a predicate that could match two. A named row is preferred
-  // over a self-maintained one that derives the same name from its document, so a single coherent
-  // history (and a single `isLatest`) is returned even if a name ever resolved to both.
-  const rows = await getDb().execute(sql`
-    WITH target AS (
-      SELECT ms.id
-      FROM web.mcp_server ms
-      JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
-      WHERE ms.workspace_id IS NULL AND ms.status = 'active'
-        AND COALESCE(ms.registry_name, cur.document->>'name') = ${name}
-      ORDER BY (ms.registry_name IS NULL), ms.id
-      LIMIT 1
-    )
-    SELECT ms.id AS server_id, ms.registry_name, ms.auth_mode, ms.auth_note, ms.scope_menu,
-           r.id AS revision_id, r.document, r.status, r.published_at,
-           (r.id = ms.current_revision_id) AS is_latest
-    FROM web.mcp_server ms
-    JOIN web.mcp_server_revision r ON r.server_id = ms.id
-    WHERE ms.id = (SELECT id FROM target) AND r.status = 'published'
-    ORDER BY r.seq DESC
-  `);
-  return registryRowsOf(rows.rows as Record<string, unknown>[]);
-}
-
-// ── The tracked set: what an upstream sweep is allowed to ask about ──────────────────────────
-
-/** One version of a tracked server, as the sweep compares it against upstream's listing. */
-export interface McpTrackedVersion {
-  revisionId: string;
-  /** The stored `version`, or NULL when this revision named none. */
-  upstreamVersion: string | null;
-  source: string;
-  status: string;
-  /** The MCP protocol revisions a probe captured for this version — the precedence tie-break's
-   *  input, null when none was captured. */
-  protocolVersions: unknown;
-  /**
-   * The stored document, but ONLY for a revision that came FROM upstream. A seed row and a staff
-   * correction are this install's own statements about a server — comparing them with upstream's
-   * document would report a difference on every sweep and mean nothing by it — so they arrive
-   * null, which says "there is nothing here for you to compare".
-   */
-  document: Record<string, unknown> | null;
-}
-
-/** The revision a tracked server currently offers — what an upstream candidate is weighed against
- *  by precedence, so the sweep never files a downgrade as if it were an update. Null when the
- *  server has published nothing yet. */
-export interface McpTrackedCurrent {
-  revisionId: string;
-  /** The version on offer, or NULL when the current revision names none. */
-  upstreamVersion: string | null;
-  protocolVersions: unknown;
-  source: string;
-}
-
-/** One global catalog entry a sweep may ask upstream about, with everything it already holds. */
-export interface McpTrackedServer {
-  serverId: string;
-  registryName: string;
-  status: string;
-  /** The version on offer right now — precedence weighs an upstream candidate against this. */
-  current: McpTrackedCurrent | null;
-  /** Every version this catalog holds for the server, newest revision first. */
-  held: McpTrackedVersion[];
-}
-
-/**
- * THE TRACKED SET — the global catalog rows that exist upstream, with the versions already held.
- *
- * This is the whole input to an upstream sweep, and its shape is the reason a sweep can never
- * wander: a sweep asks about THESE names and no others, because the tracked set IS the catalog
- * rather than a query over somebody else's registry. A workspace's private server is not here (it
- * is nobody's upstream), and neither is a global row with no `registry_name` — a row that exists
- * only here has no upstream to be swept from.
- *
- * A DELISTED row is not here either. Delisting is the deliberate act of taking a server off offer,
- * and a sweep that kept filing new candidates against one would be re-opening a decision somebody
- * already made.
- *
- * `held` carries every version, whatever its source, because "is this version new to us" is a
- * question about the CATALOG, not about upstream: a version this install already seeded is a
- * version it holds, and pulling upstream's own document for it would be offering to replace an
- * editorial row with a copy nobody asked for.
- */
-export async function trackedCatalogServers(): Promise<McpTrackedServer[]> {
-  const rows = await getDb().execute(sql`
-    SELECT ms.id AS server_id, ms.registry_name, ms.status, ms.current_revision_id,
-           r.id AS revision_id, r.upstream_version, r.source, r.status AS revision_status, r.seq,
-           r.protocol_versions,
-           CASE WHEN r.source = 'registry' THEN r.document END AS document
-    FROM web.mcp_server ms
-    LEFT JOIN web.mcp_server_revision r ON r.server_id = ms.id
-    WHERE ms.workspace_id IS NULL
-      AND ms.registry_name IS NOT NULL
-      AND ms.status <> 'delisted'
-    ORDER BY ms.registry_name, r.seq DESC
-  `);
-  const byServer = new Map<string, McpTrackedServer>();
-  const currentRevisionOf = new Map<string, string | null>();
-  for (const raw of rows.rows as Record<string, unknown>[]) {
-    const serverId = raw.server_id as string;
-    let entry = byServer.get(serverId);
-    if (entry === undefined) {
-      entry = {
-        serverId,
-        registryName: raw.registry_name as string,
-        status: raw.status as string,
-        current: null,
-        held: [],
-      };
-      byServer.set(serverId, entry);
-      currentRevisionOf.set(serverId, (raw.current_revision_id as string | null) ?? null);
-    }
-    // The LEFT JOIN answers one all-null revision for a server that has none yet — a row pulled in
-    // whose first candidate has not landed. That is a tracked server with an empty history, not a
-    // history with a hole in it.
-    if (raw.revision_id !== null && raw.revision_id !== undefined) {
-      entry.held.push({
-        revisionId: raw.revision_id as string,
-        upstreamVersion: (raw.upstream_version as string | null) ?? null,
-        source: raw.source as string,
-        status: raw.revision_status as string,
-        protocolVersions: raw.protocol_versions ?? null,
-        document: (raw.document as Record<string, unknown> | null) ?? null,
-      });
-    }
-  }
-  // The current revision is one of the held ones (the pointer names a revision of this server), so
-  // precedence's input is read out of what is already loaded rather than a second query.
-  for (const entry of byServer.values()) {
-    const currentId = currentRevisionOf.get(entry.serverId) ?? null;
-    const held =
-      currentId === null ? undefined : entry.held.find((v) => v.revisionId === currentId);
-    entry.current =
-      held === undefined
-        ? null
-        : {
-            revisionId: held.revisionId,
-            upstreamVersion: held.upstreamVersion,
-            protocolVersions: held.protocolVersions,
-            source: held.source,
-          };
-  }
-  return [...byServer.values()];
-}
-
-/**
- * WHAT ONE WORKSPACE RUNS — its live connections, each resolved exactly as delivery resolves it
- * (a pin, else the server's current), plus its own private servers.
- *
- * The two overlap by design: a private server is normally connected, and the connection's
- * resolution wins there, so a workspace reading this lane sees the document its machines are
- * actually being handed rather than a second opinion about it.
- */
-export async function workspaceRegistryServers(
-  actor: MemberActor | SessionActor,
-  page: { cursor?: string | null; limit?: number },
-): Promise<McpRegistryPage> {
-  const limit = page.limit ?? MCP_REGISTRY_PAGE_DEFAULT;
-  const cursor = page.cursor ?? null;
-  const rows = await getDb().execute(sql`
-    ${workspaceRegistrySelect(actor.workspaceId)}
-      AND (${cursor}::text IS NULL OR ms.id > ${cursor})
-    ORDER BY ms.id
-    LIMIT ${limit + 1}
-  `);
-  return paged(registryRowsOf(rows.rows as Record<string, unknown>[]), limit);
-}
-
-/**
- * The same read for ONE embedded name. A workspace's OWN server outranks a global one carrying
- * the same name: inside a workspace, the workspace's answer is the answer.
- */
-export async function workspaceRegistryServer(
-  actor: MemberActor | SessionActor,
-  registryName: string,
-): Promise<McpRegistryRow | null> {
-  const rows = await getDb().execute(sql`
-    ${workspaceRegistrySelect(actor.workspaceId)}
-      AND COALESCE(ms.registry_name, r.document->>'name') = ${registryName}
-    ORDER BY (ms.workspace_id IS NULL), ms.id
-    LIMIT 1
-  `);
-  return registryRowsOf(rows.rows as Record<string, unknown>[])[0] ?? null;
-}
-
 /**
  * WHICH SERVER a name names for this workspace, when one is connectable: the workspace's OWN row
- * first, then the global catalog's — the same precedence the registry lane's single-name read
- * keeps, because inside a workspace the workspace's answer is the answer. A name that resolves to
- * two rows must never be a coin flip between two documents.
+ * first, then the public catalog's — because inside a workspace the workspace's answer is the
+ * answer. A name that resolves to two rows must never be a coin flip between two documents.
  *
- * A SELF-MAINTAINED global row (no `registry_name`) is addressed by the name inside its current
- * document, exactly as the feed addresses it — so a catalog server stays connectable by the name a
- * person knows it by even once it has no upstream name.
+ * A server with no `name` on the row is addressed by the name inside its current document, so a
+ * catalog server stays connectable by the name a person knows it by.
  */
 export async function connectableMcpServerByName(
   actor: MemberActor | SessionActor,
-  registryName: string,
+  serverName: string,
 ): Promise<{ serverId: string; displayName: string } | null> {
   const rows = await getDb().execute(sql`
     SELECT ms.id AS server_id, ms.display_name
     FROM web.mcp_server ms
     LEFT JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
-    WHERE COALESCE(ms.registry_name, cur.document->>'name') = ${registryName}
+    WHERE COALESCE(ms.name, cur.document->>'name') = ${serverName}
       AND ms.status = 'active'
       AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
     ORDER BY (ms.workspace_id IS NULL), ms.id
@@ -1575,13 +1141,13 @@ export async function connectableMcpServerByName(
 }
 
 /**
- * The bundle a workspace ALREADY connects a catalog server through, by the server's registry
- * name — `null` when it connects none. The idempotent half of the lane's connect: asking twice
- * for the same server is not a mistake to refuse, it is a question with an answer.
+ * The bundle a workspace ALREADY connects a catalog server through, by the server's name — `null`
+ * when it connects none. The idempotent half of the lane's connect: asking twice for the same
+ * server is not a mistake to refuse, it is a question with an answer.
  */
 export async function connectedMcpBundle(
   actor: MemberActor | SessionActor,
-  registryName: string,
+  serverName: string,
 ): Promise<{ bundleId: string; name: string } | null> {
   const rows = await getDb().execute(sql`
     SELECT b.id AS bundle_id, b.name
@@ -1589,7 +1155,7 @@ export async function connectedMcpBundle(
     JOIN web.bundle_mcp bm ON bm.server_id = ms.id AND bm.workspace_id = ${actor.workspaceId}
     JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
     LEFT JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
-    WHERE COALESCE(ms.registry_name, cur.document->>'name') = ${registryName}
+    WHERE COALESCE(ms.name, cur.document->>'name') = ${serverName}
       AND (ms.workspace_id IS NULL OR ms.workspace_id = ${actor.workspaceId})
       AND b.status = 'active'
     ORDER BY (ms.workspace_id IS NULL), ms.id
@@ -1599,28 +1165,8 @@ export async function connectedMcpBundle(
   return row === undefined ? null : { bundleId: row.bundle_id as string, name: row.name as string };
 }
 
-/** The workspace lane's one FROM/WHERE, written once for the list and the single read. */
-function workspaceRegistrySelect(workspaceId: string) {
-  return sql`
-    SELECT ms.id AS server_id, ms.registry_name, ms.auth_mode, ms.auth_note, ms.scope_menu,
-           r.id AS revision_id, r.document, r.status, r.published_at,
-           (r.id = ms.current_revision_id) AS is_latest
-    FROM web.mcp_server ms
-    LEFT JOIN (
-      SELECT c.server_id, c.pinned_revision_id
-      FROM web.bundle_mcp c
-      JOIN web.bundle b
-        ON b.id = c.bundle_id AND b.workspace_id = c.workspace_id AND b.status = 'active'
-      WHERE c.workspace_id = ${workspaceId}
-    ) bm ON bm.server_id = ms.id
-    JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
-    WHERE (bm.server_id IS NOT NULL
-           OR (ms.workspace_id = ${workspaceId} AND ms.status = 'active'))
-  `;
-}
-
 /**
- * WHAT A WORKSPACE MAY CONNECT: the global catalog's active servers plus its own private ones,
+ * WHAT A WORKSPACE MAY CONNECT: the public catalog's active servers plus its own private ones,
  * each with the document its `current` names. The order is the one a person scans — display name,
  * case-insensitively — and it is the same list for every member, because a seat reads the whole
  * catalog.
@@ -1629,7 +1175,7 @@ export async function connectableMcpServers(
   actor: MemberActor | SessionActor,
 ): Promise<McpCatalogRow[]> {
   const rows = await getDb().execute(sql`
-    SELECT ms.id AS server_id, ms.registry_name, ms.display_name, ms.description, ms.icon,
+    SELECT ms.id AS server_id, ms.name, ms.display_name, ms.description, ms.icon,
            ms.auth_mode, ms.auth_note, r.url, r.transport,
            r.id AS revision_id, r.upstream_version,
            CASE WHEN b.status = 'active' THEN b.name END AS connected_as,
@@ -1644,7 +1190,7 @@ export async function connectableMcpServers(
   `);
   return (rows.rows as Record<string, unknown>[]).map((row) => ({
     serverId: row.server_id as string,
-    registryName: (row.registry_name as string | null) ?? null,
+    name: (row.name as string | null) ?? null,
     displayName: row.display_name as string,
     description: (row.description as string | null) ?? null,
     icon: (row.icon as string | null) ?? null,
