@@ -34,6 +34,18 @@ CREATE UNIQUE INDEX "mcp_server_private_name" ON "web"."mcp_server" USING btree 
 -- as a non-current proposal. A self-hosted install has no panel, so it never sets this.
 ALTER TABLE "web"."mcp_server" ADD COLUMN "manually_curated" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 
+-- BACKFILL curation from the old provenance BEFORE dropping `source`: a public server whose CURRENT
+-- revision was not the seed's own row (a staff member accepted an upstream candidate, or wrote a
+-- correction) is a decision the file must not silently undo. Marking it curated makes the boot sync
+-- treat future file versions as proposals rather than promoting one over the staff choice. The seed
+-- rows carry `source = 'seed'`, so an untouched public server stays uncurated and tracks the file.
+UPDATE "web"."mcp_server" ms SET "manually_curated" = true
+WHERE ms."workspace_id" IS NULL
+  AND EXISTS (
+    SELECT 1 FROM "web"."mcp_server_revision" r
+    WHERE r."id" = ms."current_revision_id" AND r."source" <> 'seed'
+  );--> statement-breakpoint
+
 -- ── mcp_server_revision ─────────────────────────────────────────────────────────────────────
 
 -- The one terminal state that remains: a staff-declined proposal. A `rejected` candidate carried
@@ -60,6 +72,21 @@ ALTER TABLE "web"."mcp_server_revision" DROP COLUMN "source";--> statement-break
 ALTER TABLE "web"."mcp_server_revision" DROP COLUMN "decided_at";--> statement-breakpoint
 ALTER TABLE "web"."mcp_server_revision" DROP COLUMN "decided_by";--> statement-breakpoint
 ALTER TABLE "web"."mcp_server_revision" DROP COLUMN "revoked_at";--> statement-breakpoint
+
+-- The new index covers ANY non-null version, where the old one covered only source='registry'. So a
+-- server that legitimately carried two revisions of one version (a staff/owner edit that kept the
+-- number) would break the index build. Null the version on all but the newest such revision FIRST —
+-- a versionless revision is exempt from the index, and the honest state of a document whose version
+-- another revision now owns. This never touches a server with one revision per version.
+UPDATE "web"."mcp_server_revision" r
+SET "upstream_version" = NULL
+WHERE r."upstream_version" IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM "web"."mcp_server_revision" r2
+    WHERE r2."server_id" = r."server_id"
+      AND r2."upstream_version" = r."upstream_version"
+      AND r2."seq" > r."seq"
+  );--> statement-breakpoint
 CREATE UNIQUE INDEX "mcp_server_revision_upstream_version" ON "web"."mcp_server_revision" USING btree ("server_id","upstream_version") WHERE upstream_version is not null;--> statement-breakpoint
 CREATE INDEX "mcp_server_revision_server_idx" ON "web"."mcp_server_revision" USING btree ("server_id");--> statement-breakpoint
 ALTER TABLE "web"."mcp_server_revision" ADD CONSTRAINT "mcp_server_revision_dismissed_by_check" CHECK (("web"."mcp_server_revision"."dismissed_at" is null) = ("web"."mcp_server_revision"."dismissed_by" is null));

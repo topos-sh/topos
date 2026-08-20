@@ -1112,6 +1112,121 @@ export async function mcpServerFace(
   };
 }
 
+// ── The workspace registry read lane: what THIS WORKSPACE runs, in the official read shape ──
+
+/**
+ * One server as a REGISTRY ANSWER: the document, plus the facts this catalog adds under its own
+ * `_meta` key. The lane serves what a workspace RUNS — the revision its connection resolves to.
+ */
+export interface McpRegistryRow {
+  serverId: string;
+  /** The reverse-DNS name, or null for a row addressed by the name inside its document. Absent
+   *  from the wire — the serializer reads the name off the document. */
+  name: string | null;
+  authMode: string | null;
+  authNote: string | null;
+  scopeMenu: unknown;
+  revisionId: string;
+  document: Record<string, unknown>;
+  /** Whether this revision is the one the server currently offers. */
+  isLatest: boolean;
+}
+
+/** One page of registry rows: what was asked for, plus the cursor to ask again with. */
+export interface McpRegistryPage {
+  rows: McpRegistryRow[];
+  nextCursor: string | null;
+}
+
+/** How many rows one page carries when the caller names no size, and the ceiling on asking. */
+export const MCP_REGISTRY_PAGE_DEFAULT = 50;
+export const MCP_REGISTRY_PAGE_MAX = 100;
+
+/** The page size a caller's `limit` really gets — a garbage value reads as none given. */
+export function mcpRegistryLimit(raw: string | null): number {
+  const asked = Number(raw);
+  if (!Number.isInteger(asked) || asked < 1) {
+    return MCP_REGISTRY_PAGE_DEFAULT;
+  }
+  return Math.min(asked, MCP_REGISTRY_PAGE_MAX);
+}
+
+function registryRowsOf(rows: Record<string, unknown>[]): McpRegistryRow[] {
+  return rows.map((row) => ({
+    serverId: row.server_id as string,
+    name: (row.name as string | null) ?? null,
+    authMode: (row.auth_mode as string | null) ?? null,
+    authNote: (row.auth_note as string | null) ?? null,
+    scopeMenu: row.scope_menu ?? null,
+    revisionId: row.revision_id as string,
+    document: row.document as Record<string, unknown>,
+    isLatest: row.is_latest === true,
+  }));
+}
+
+/** Cut one over-read page down to size and say whether there is more. */
+function paged(rows: McpRegistryRow[], limit: number): McpRegistryPage {
+  const more = rows.length > limit;
+  const page = more ? rows.slice(0, limit) : rows;
+  return { rows: page, nextCursor: more ? (page.at(-1)?.serverId ?? null) : null };
+}
+
+/** The workspace lane's one FROM/WHERE, written once for the list and the single read. */
+function workspaceRegistrySelect(workspaceId: string) {
+  return sql`
+    SELECT ms.id AS server_id, ms.name, ms.auth_mode, ms.auth_note, ms.scope_menu,
+           r.id AS revision_id, r.document,
+           (r.id = ms.current_revision_id) AS is_latest
+    FROM web.mcp_server ms
+    LEFT JOIN (
+      SELECT c.server_id, c.pinned_revision_id
+      FROM web.bundle_mcp c
+      JOIN web.bundle b
+        ON b.id = c.bundle_id AND b.workspace_id = c.workspace_id AND b.status = 'active'
+      WHERE c.workspace_id = ${workspaceId}
+    ) bm ON bm.server_id = ms.id
+    JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
+    WHERE (bm.server_id IS NOT NULL
+           OR (ms.workspace_id = ${workspaceId} AND ms.status = 'active'))
+  `;
+}
+
+/**
+ * WHAT ONE WORKSPACE RUNS — its live connections, each resolved exactly as delivery resolves it
+ * (a pin, else the server's current), plus its own private servers.
+ */
+export async function workspaceRegistryServers(
+  actor: MemberActor | SessionActor,
+  page: { cursor?: string | null; limit?: number },
+): Promise<McpRegistryPage> {
+  const limit = page.limit ?? MCP_REGISTRY_PAGE_DEFAULT;
+  const cursor = page.cursor ?? null;
+  const rows = await getDb().execute(sql`
+    ${workspaceRegistrySelect(actor.workspaceId)}
+      AND (${cursor}::text IS NULL OR ms.id > ${cursor})
+    ORDER BY ms.id
+    LIMIT ${limit + 1}
+  `);
+  return paged(registryRowsOf(rows.rows as Record<string, unknown>[]), limit);
+}
+
+/**
+ * The same read for ONE embedded name. A workspace's OWN server outranks a public one carrying the
+ * same name: inside a workspace, the workspace's answer is the answer.
+ */
+export async function workspaceRegistryServer(
+  actor: MemberActor | SessionActor,
+  serverName: string,
+): Promise<McpRegistryRow | null> {
+  const rows = await getDb().execute(sql`
+    ${workspaceRegistrySelect(actor.workspaceId)}
+      AND COALESCE(ms.name, r.document->>'name') = ${serverName}
+    ORDER BY (ms.workspace_id IS NULL), ms.id
+    LIMIT 1
+  `);
+  return registryRowsOf(rows.rows as Record<string, unknown>[])[0] ?? null;
+}
+
 /**
  * WHICH SERVER a name names for this workspace, when one is connectable: the workspace's OWN row
  * first, then the public catalog's — because inside a workspace the workspace's answer is the

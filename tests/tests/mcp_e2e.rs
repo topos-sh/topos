@@ -431,7 +431,7 @@ fn the_connected_server_loop_across_six_agents() {
     );
     assert_eq!(
         stack.text_witness(&format!(
-            "SELECT ms.registry_name || ' ' || coalesce(ms.workspace_id, 'global')
+            "SELECT ms.name || ' ' || coalesce(ms.workspace_id, 'global')
              FROM web.bundle b
              JOIN web.bundle_mcp bm ON bm.bundle_id = b.id
              JOIN web.mcp_server ms ON ms.id = bm.server_id

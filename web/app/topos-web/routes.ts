@@ -165,6 +165,14 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     ]),
     route("api/v1/*", file("api.v1.$.ts")),
     route("api/memberships", file("api.memberships.ts")),
+    // THE WORKSPACE'S MCP REGISTRY — the official read API (`v0.1`) served over this
+    // workspace's `kind: 'mcp'` catalog, so an agent already pointed at a registry can be
+    // pointed here instead. Workspace-scoped in BOTH grammars (origin-rooted in single, under
+    // the `/:ws` slug in multi) and member-gated by either door, cookie or bearer. ONE splat
+    // module owns the three shapes: the list, a name's versions, and its latest — the server
+    // NAME carries a percent-encoded slash, so the module parses the raw path rather than a
+    // decoded param.
+    route(faceSub(tenancy, "registry/v0.1/*"), file("mcp-registry.ts")),
     // The door into the product (a bare `/app`), then the two signed-in layouts.
     route("app", file("app-entry.tsx")),
     layout(file("face-shell.tsx"), faceChildren),

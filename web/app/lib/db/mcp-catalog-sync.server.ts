@@ -4,6 +4,7 @@ import { getDb } from "@/lib/db/index.server";
 import {
   addMcpRevisionInTx,
   lockServerInTx,
+  mcpRevisionFacts,
   promoteMcpRevisionInTx,
 } from "@/lib/db/queries.mcp-catalog.server";
 import { mcpServer, mcpServerRevision } from "@/lib/db/schema.app";
@@ -39,6 +40,9 @@ const CATALOG_META_KEY = "sh.topos/catalog";
 const DELIVERED_AUTH_KEY = "sh.topos/auth";
 /** Attribution recorded on a revision the sync promotes — the file is the author. */
 const CURATED_BY = "Topos";
+/** The sign-in tiers a public catalog entry may carry — a public server the catalog offers must
+ *  state one somebody verified, never leave it unestablished. */
+const AUTH_TIERS: ReadonlySet<string> = new Set(["none", "oauth", "manual"]);
 
 type Json = Record<string, unknown>;
 
@@ -47,6 +51,17 @@ interface CatalogEditorial {
   authNote?: unknown;
   scopeHints?: unknown;
   icon?: unknown;
+}
+
+/** The editorial columns a public server row carries — computed from the file entry. */
+interface EditorialColumns {
+  displayName: string;
+  description: string | null;
+  websiteUrl: string | null;
+  icon: string | null;
+  authMode: string | null;
+  authNote: string | null;
+  scopeMenu: unknown;
 }
 
 /** What the sync did — the operator's account of one pass. */
@@ -121,8 +136,13 @@ export function deliveredDocumentOf(entry: Json): Json {
   const doc: Json = {
     name: entry.name,
     description: entry.description,
-    remotes: entry.remotes,
   };
+  // Only ever set a key that has a value: an own `remotes: undefined` (a package-only entry) would
+  // read as null to the content comparison while jsonb drops it, so every boot would see the same
+  // document as new. remotes and packages are added ONLY when the entry has them.
+  if (Array.isArray(entry.remotes)) {
+    doc.remotes = entry.remotes;
+  }
   if (Array.isArray(entry.packages)) {
     doc.packages = entry.packages;
   }
@@ -171,17 +191,49 @@ async function syncOneEntry(
 ): Promise<void> {
   const editorial = editorialOf(entry);
   const doc = deliveredDocumentOf(entry);
-  const columns = {
+  const authTier = asString(editorial.authTier);
+  const columns: EditorialColumns = {
     displayName: displayNameFor(entry),
     description: asString(entry.description),
     websiteUrl: asString(entry.websiteUrl),
     icon: asString(editorial.icon),
-    authMode: asString(editorial.authTier),
+    authMode: authTier,
     authNote: asString(editorial.authNote),
     scopeMenu: editorial.scopeHints ?? null,
   };
 
-  await getDb().transaction(async (tx) => {
+  // VALIDATE BEFORE WRITING ANYTHING. A public server the catalog offers must state a verified
+  // sign-in tier, and its document must pass the same gate a pasted one answers to — checked here,
+  // so a bad entry never leaves a public row with no current revision behind (which the MCP
+  // backfill could then connect a legacy bundle to, delivering nothing).
+  if (authTier === null || !AUTH_TIERS.has(authTier)) {
+    report.refused.push(name);
+    return;
+  }
+  if (mcpRevisionFacts(doc, { requireVersion: false }).refusal !== null) {
+    report.refused.push(name);
+    return;
+  }
+
+  try {
+    await reconcileOneEntry(name, doc, columns, report);
+  } catch {
+    // A refusal inside the transaction rolled it back — no half-built row commits. Name it.
+    report.refused.push(name);
+  }
+}
+
+/** One entry's committed outcome — applied to the report AFTER the transaction commits, so a
+ *  rolled-back transaction never leaves a counter naming a row that was never written. */
+type SyncOutcome = "created-promoted" | "promoted" | "proposed" | "unchanged" | "dismissedSkipped";
+
+async function reconcileOneEntry(
+  name: string,
+  doc: Json,
+  columns: EditorialColumns,
+  report: McpCatalogSyncReport,
+): Promise<void> {
+  const outcome = await getDb().transaction<SyncOutcome>(async (tx) => {
     const found = await tx
       .select({ id: mcpServer.id })
       .from(mcpServer)
@@ -189,8 +241,9 @@ async function syncOneEntry(
       .limit(1)
       .for("update");
 
+    const isNew = found[0] === undefined;
     let serverId: string;
-    if (found[0] === undefined) {
+    if (isNew) {
       serverId = mintMcpServerId();
       await tx.insert(mcpServer).values({
         id: serverId,
@@ -200,24 +253,23 @@ async function syncOneEntry(
         status: "active",
         manuallyCurated: false,
       });
-      report.created += 1;
     } else {
-      serverId = found[0].id;
+      serverId = found[0]?.id as string;
     }
 
     let server = await lockServerInTx(tx, serverId);
     if (server === undefined) {
-      return;
+      throw new Error("server vanished under its own lock");
     }
 
     // Editorial rows describe the SERVER, not a version — refreshed from the file while a server
     // still tracks it, but LEFT ALONE once a staff member has taken it in hand (curated), so
     // curation is never quietly undone by a boot.
-    if (!server.manuallyCurated && found[0] !== undefined) {
+    if (!server.manuallyCurated && !isNew) {
       await tx.update(mcpServer).set(columns).where(eq(mcpServer.id, serverId));
       server = await lockServerInTx(tx, serverId);
       if (server === undefined) {
-        return;
+        throw new Error("server vanished under its own lock");
       }
     }
 
@@ -233,17 +285,17 @@ async function syncOneEntry(
 
     // A document a staff member already dismissed stays dismissed and is never re-offered.
     if (match !== undefined && match.dismissedAt !== null) {
-      report.dismissedSkipped += 1;
-      return;
+      return "dismissedSkipped";
     }
 
     let targetId = match?.id ?? null;
     let appended = false;
     if (targetId === null) {
+      // Pre-validated in the caller, so a refusal here is an unexpected state — throw to ROLL BACK
+      // rather than commit a server row with no current revision.
       const added = await addMcpRevisionInTx(tx, serverId, { document: doc });
       if (added.refusal !== null) {
-        report.refused.push(name);
-        return;
+        throw new Error(`revision refused: ${added.refusal.code}`);
       }
       targetId = added.revisionId;
       appended = true;
@@ -252,26 +304,32 @@ async function syncOneEntry(
     if (server.manuallyCurated) {
       // The file proposes; a staff member promotes. A new document is a proposal, an existing one
       // is nothing to do.
-      if (appended) {
-        report.proposed += 1;
-      } else {
-        report.unchanged += 1;
-      }
-      return;
+      return appended ? "proposed" : "unchanged";
     }
 
     // Untouched by staff → track the file: advance `current` to this document.
     if (targetId === server.currentRevisionId) {
-      report.unchanged += 1;
-      return;
+      return "unchanged";
     }
     const refusal = await promoteMcpRevisionInTx(tx, server, targetId, CURATED_BY);
     if (refusal !== null) {
-      report.refused.push(name);
-      return;
+      throw new Error(`promotion refused: ${refusal.code}`);
     }
-    report.promoted += 1;
+    return isNew ? "created-promoted" : "promoted";
   });
+
+  if (outcome === "created-promoted") {
+    report.created += 1;
+    report.promoted += 1;
+  } else if (outcome === "promoted") {
+    report.promoted += 1;
+  } else if (outcome === "proposed") {
+    report.proposed += 1;
+  } else if (outcome === "dismissedSkipped") {
+    report.dismissedSkipped += 1;
+  } else {
+    report.unchanged += 1;
+  }
 }
 
 /**

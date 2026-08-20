@@ -188,3 +188,18 @@ describe("the file only adds", () => {
     expect(row?.current_revision_id).not.toBeNull();
   });
 });
+
+describe("the committed catalog file", () => {
+  it("reconciles clean against the migration seed — every entry is already present", async () => {
+    // The migrations stood the same servers up (the seed the file was generated from), so the
+    // FIRST sync of the real file against a settled database must be a no-op: nothing created,
+    // nothing promoted, every entry read as already reconciled. This is the production
+    // idempotency guarantee, and it also proves every committed document passes the gate.
+    const { syncMcpCatalog } = await import("@/lib/db/mcp-catalog-sync.server");
+    const report = await syncMcpCatalog();
+    expect(report.refused).toEqual([]);
+    expect(report.created).toBe(0);
+    expect(report.promoted).toBe(0);
+    expect(report.unchanged).toBeGreaterThan(0);
+  });
+});
