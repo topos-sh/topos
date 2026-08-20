@@ -217,7 +217,7 @@
   {
     "file": "invalid/missing-version.json",
     "verdict": "MCP_INVALID",
-    "note": "version is required; without it there is nothing to compare a later publish against."
+    "note": "The default gate is registry-grade and requires a version; a non-registry door relaxes it (requireVersion:false), but the shared vectors pin the strict default."
   },
   {
     "file": "invalid/not-json.txt",

@@ -57,7 +57,9 @@ pub(crate) struct ServerDoc {
     pub name: String,
     /// The one-line description the document states.
     pub description: String,
-    /// The version string the document states.
+    /// The version string the document states — EMPTY when it names none (an editorial or
+    /// self-maintained server we never stamped a fake version on). A receipt reads the empty as
+    /// "no version" and prints none, rather than a bare `v` in front of nothing.
     pub version: String,
     /// The FIRST `streamable-http` remote with a url, and its literal headers.
     pub remote: Option<RemoteEndpoint>,
@@ -223,6 +225,8 @@ pub(crate) fn parse_server_json(bytes: &[u8]) -> Result<ServerDoc, String> {
     Ok(ServerDoc {
         name: text("name"),
         description: text("description"),
+        // A missing `version` reads as empty — a server that names none. The receipt renders the
+        // empty as no version at all, never a bare `v`; nothing here fabricates a stand-in.
         version: text("version"),
         remote,
         packages,

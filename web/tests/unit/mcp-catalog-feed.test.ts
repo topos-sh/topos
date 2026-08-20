@@ -27,6 +27,15 @@ function document(name: string, version: string): Record<string, unknown> {
   };
 }
 
+/** The honest shape of a server we never stamped a version on — no `version` key at all. */
+function versionlessDocument(name: string): Record<string, unknown> {
+  return {
+    name,
+    description: `Everything about ${name}.`,
+    remotes: [{ type: "streamable-http", url: "https://acme.example/mcp" }],
+  };
+}
+
 async function get(path: string): Promise<Response> {
   const { loader } = await import("@/routes/mcp-catalog-feed");
   try {
@@ -77,7 +86,15 @@ async function seedRevision(
              CASE WHEN $4 IN ('published', 'revoked') THEN now() END,
              CASE WHEN $4 IN ('published', 'revoked') THEN 'Staff' END,
              CASE WHEN $4 = 'revoked' THEN now() END)`,
-    [id, serverId, seq, status, String(doc.version), JSON.stringify(doc)],
+    [
+      id,
+      serverId,
+      seq,
+      status,
+      // A document that names no version stores a NULL column — never the string "undefined".
+      doc.version === undefined ? null : String(doc.version),
+      JSON.stringify(doc),
+    ],
   );
   if (opts.current === true) {
     await db.q(`UPDATE web.mcp_server SET current_revision_id = $2 WHERE id = $1`, [serverId, id]);
@@ -163,6 +180,20 @@ beforeAll(async () => {
     mcpRevisionId("self_2"),
     2,
     document("sh.topos/internal-notes", "1.0.0"),
+    { current: true },
+  );
+
+  // A VERSION-LESS self-maintained server: it names no version at all. The feed must serve it
+  // without inventing one — no `version` key on the document, `latest` resolving its single current.
+  await db.q(
+    `INSERT INTO web.mcp_server (id, workspace_id, registry_name, display_name, auth_mode, status)
+     VALUES ('mcps_f_unversioned', NULL, NULL, 'Unversioned', 'none', 'active')`,
+  );
+  await seedRevision(
+    "mcps_f_unversioned",
+    mcpRevisionId("unversioned_1"),
+    1,
+    versionlessDocument("sh.topos/unversioned"),
     { current: true },
   );
 }, 60000);
@@ -315,6 +346,48 @@ describe("a self-maintained server (no upstream name)", () => {
     expect(((await latest.json()) as { server: { version: string } }).server.version).toBe("1.0.0");
     const named = await get(`/mcp-catalog/v0.1/servers/${ENCODED}/versions/0.9.0`);
     expect(((await named.json()) as { server: { version: string } }).server.version).toBe("0.9.0");
+  });
+});
+
+describe("a version-less server (no version at all)", () => {
+  const ENCODED = encodeURIComponent("sh.topos/unversioned");
+
+  it("appears in the feed with no version key — never a fabricated number", async () => {
+    const res = await get("/mcp-catalog/v0.1/servers?limit=100");
+    const body = (await res.json()) as {
+      servers: { server: { name: string; version?: string } }[];
+    };
+    const self = body.servers.find((s) => s.server.name === "sh.topos/unversioned");
+    expect(self).toBeDefined();
+    // The document is served verbatim, and it never carried a version — so the wire carries none.
+    expect(self?.server.version).toBeUndefined();
+    expect(Object.hasOwn(self?.server ?? {}, "version")).toBe(false);
+  });
+
+  it("resolves /versions and /versions/latest to its one current document, no version invented", async () => {
+    const versions = await get(`/mcp-catalog/v0.1/servers/${ENCODED}/versions`);
+    expect(versions.status).toBe(200);
+    const list = (await versions.json()) as {
+      servers: {
+        server: { name: string; version?: string };
+        _meta: { "sh.topos/catalog": { isLatest: boolean } };
+      }[];
+    };
+    expect(list.servers).toHaveLength(1);
+    expect(list.servers[0]?.server.version).toBeUndefined();
+    expect(list.servers[0]?._meta["sh.topos/catalog"].isLatest).toBe(true);
+
+    const latest = await get(`/mcp-catalog/v0.1/servers/${ENCODED}/versions/latest`);
+    expect(latest.status).toBe(200);
+    const latestBody = (await latest.json()) as { server: { name: string; version?: string } };
+    expect(latestBody.server.name).toBe("sh.topos/unversioned");
+    expect(latestBody.server.version).toBeUndefined();
+  });
+
+  it("a numbered version selector matches nothing on a version-less server — the registry's 404", async () => {
+    const res = await get(`/mcp-catalog/v0.1/servers/${ENCODED}/versions/1.0.0`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ title: "Not Found", status: 404 });
   });
 });
 

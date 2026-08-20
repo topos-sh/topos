@@ -18,6 +18,7 @@ import {
   connectableMcpServers,
   connectMcpServer,
   createPrivateMcpServer,
+  mcpRevisionFacts,
 } from "@/lib/db/queries.mcp-catalog.server";
 import {
   canonicalServerJson,
@@ -200,9 +201,25 @@ export async function action({ request, params }: ActionFunctionArgs) {
       );
     }
     const document = canonicalize(text);
-    const validated = validateServerJson(document);
+    // FIRST the document gate: it reads the raw bytes and answers MCP_INVALID for anything that is
+    // not a well-formed server.json (malformed JSON included — a paste is often that), so nothing
+    // below ever parses bytes the gate has not vouched for. A registry read must carry a version;
+    // a URL or a paste is the author's own and may omit it.
+    const validated = validateServerJson(document, {
+      requireVersion: source.kind === "registry",
+    });
     if (!validated.ok) {
       return refusal("preview", validated.message, validated.code);
+    }
+    // THEN the catalog's fact gate — the one `create` lands through — so the preview never offers an
+    // add that cannot land: a document declaring an official schema that itself requires a version,
+    // or a schema this build cannot read, is refused here in the same words the write would use.
+    // The bytes parsed cleanly above, so this parse cannot throw.
+    const landing = mcpRevisionFacts(JSON.parse(document) as Record<string, unknown>, {
+      requireVersion: source.kind === "registry",
+    });
+    if (landing.refusal !== null) {
+      return refusal("preview", landing.refusal.message, landing.refusal.code);
     }
     return data<PreviewData>({
       form: "preview",
@@ -256,7 +273,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
     // encoding, which normalizes line endings, so trusting the bytes back would make what is
     // stored depend on the browser rather than on the document.
     const document = canonicalize(posted);
-    const validated = validateServerJson(document);
+    // The custom arm writes this workspace's OWN server: a missing version is a truthful state, not
+    // a refusal, and the create write below stores it as such.
+    const validated = validateServerJson(document, { requireVersion: false });
     if (!validated.ok) {
       return refusal("create", validated.message, validated.code);
     }
@@ -848,7 +867,7 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
       <Card className="space-y-3 px-4 py-3">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="font-mono text-[13px] text-ink">{summary.name}</span>
-          <span className="text-faint text-xs">{summary.version}</span>
+          <span className="text-faint text-xs">{summary.version ?? "unversioned"}</span>
           {summary.transport !== null && <Chip tone="neutral">{summary.transport}</Chip>}
         </div>
         <p className="text-dim text-sm">{summary.description}</p>

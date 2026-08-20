@@ -55,6 +55,20 @@ function serverDocument(
   };
 }
 
+/** The same, but with NO `version` field — the honest shape of an editorial/self-maintained
+ *  server we never stamped a fake version on. */
+function versionlessDocument(
+  name: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    name,
+    description: "A server for the suite.",
+    remotes: [{ type: "streamable-http", url: "https://mcp.example.com/mcp" }],
+    ...extra,
+  };
+}
+
 /** A global catalog row with no revisions yet — the shape a sweep's pull-in leaves behind. */
 async function seedGlobalServer(
   id: string,
@@ -154,12 +168,17 @@ describe("the seeded catalog", () => {
     );
     const failures: string[] = [];
     for (const row of rows) {
-      const validated = validateCandidateFiles([
-        {
-          path: "server.json",
-          bytes: new TextEncoder().encode(canonicalServerJson(row.document)),
-        },
-      ]);
+      // The seed is editorial, not registry-sourced, so it is held to the same door those servers
+      // enter through — one that does NOT demand a version, because the curated list never had one.
+      const validated = validateCandidateFiles(
+        [
+          {
+            path: "server.json",
+            bytes: new TextEncoder().encode(canonicalServerJson(row.document)),
+          },
+        ],
+        { requireVersion: false },
+      );
       if (!validated.ok) {
         failures.push(`${row.registry_name}: ${validated.code} ${validated.message}`);
       } else if (validated.summary.name !== row.registry_name) {
@@ -167,6 +186,29 @@ describe("the seeded catalog", () => {
       }
     }
     expect(failures).toEqual([]);
+  });
+
+  it("stamps no fabricated version: every seeded revision is null, and its document names none", async () => {
+    // The migration undid the placeholder `1.0.0` — the honest end state is a null column and a
+    // document with no `version` key, never a made-up number to keep the column non-null. And the
+    // `$schema` that REQUIRED a version comes off with it (schema_version too), so the document is
+    // not left declaring a schema it now violates — a schema-aware client reading the feed accepts it.
+    const rows = await db.q<{
+      upstream_version: string | null;
+      schema_version: string | null;
+      has_version: boolean;
+      has_schema: boolean;
+    }>(
+      `SELECT r.upstream_version, r.schema_version,
+              (r.document ? 'version') AS has_version, (r.document ? '$schema') AS has_schema
+       FROM web.mcp_server s JOIN web.mcp_server_revision r ON r.id = s.current_revision_id
+       WHERE s.workspace_id IS NULL AND r.source = 'seed'`,
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.upstream_version === null)).toBe(true);
+    expect(rows.every((r) => r.has_version === false)).toBe(true);
+    expect(rows.every((r) => r.schema_version === null)).toBe(true);
+    expect(rows.every((r) => r.has_schema === false)).toBe(true);
   });
 
   it("carries the editorial half: a manual row says what the person has to do", async () => {
@@ -270,6 +312,57 @@ describe("a version is upstream's promise, and only upstream's", () => {
     expect(new Set(rows.map((r) => r.upstream_version))).toEqual(new Set(["4.0.0"]));
     // The pointer followed the edit: what the workspace receives is the newest save.
     expect(await currentRevisionOf(created.serverId)).toBe(edited.revisionId);
+  });
+});
+
+describe("a server with no version carries none — no fabricated number", () => {
+  it("an owner may write down a server whose document names no version, stored as NULL", async () => {
+    const { createPrivateMcpServer } = await catalog();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    const created = await createPrivateMcpServer(
+      owner,
+      { displayName: "Versionless", authMode: "none" },
+      versionlessDocument("com.example/versionless"),
+    );
+    expect(created.refusal, created.refusal?.message).toBeNull();
+    if (created.refusal !== null) {
+      return;
+    }
+    const rows = await db.q<{ upstream_version: string | null; has_version: boolean }>(
+      `SELECT upstream_version, (document ? 'version') AS has_version
+       FROM web.mcp_server_revision WHERE server_id = $1`,
+      [created.serverId],
+    );
+    // Null column, and the document never grew a version key on the way in.
+    expect(rows[0]?.upstream_version).toBeNull();
+    expect(rows[0]?.has_version).toBe(false);
+  });
+
+  it("a REGISTRY revision that names no version is still refused — upstream must carry one", async () => {
+    const serverId = await seedGlobalServer("mcps_reg_noversion", "com.example/reg-noversion");
+    const refused = await addRevision(serverId, {
+      document: versionlessDocument("com.example/reg-noversion"),
+      source: "registry",
+      publish: false,
+    });
+    expect(refused.refusal?.code).toBe("MCP_INVALID");
+    expect(refused.refusal?.message).toContain("version");
+  });
+
+  it("a version-less document that STILL declares an official schema is refused — that schema requires a version", async () => {
+    // The honest shape of a version-less server makes no schema claim. A document that omits the
+    // version but keeps a `$schema` that requires it is self-contradictory, and would be stored and
+    // served verbatim as schema-invalid — so even an owner's own write refuses it.
+    const { createPrivateMcpServer } = await catalog();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    const created = await createPrivateMcpServer(
+      owner,
+      { displayName: "Schema no version", authMode: "none" },
+      versionlessDocument("com.example/schema-no-version", {
+        $schema: "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+      }),
+    );
+    expect(created.refusal?.code).toBe("MCP_INVALID");
   });
 });
 
@@ -564,16 +657,17 @@ describe("precedence guards the accept", () => {
     expect(await currentRevisionOf(serverId)).toBe(upstream.revisionId);
   });
 
-  it("lets any candidate freely supersede a SEED placeholder current — no override, even older", async () => {
+  it("lets any candidate freely supersede a version-less current — no override, even older", async () => {
     const serverId = await seedGlobalServer("mcps_prec_seed", "com.example/prec-seed");
-    // The current is a SEED placeholder — the version the migration stamped, not a decision.
+    // The current is a SEED placeholder — and a seed now carries NO version, which is precisely what
+    // makes it a starting point rather than a decision: there is nothing to move backward from.
     const seeded = await addRevision(serverId, {
-      document: serverDocument("com.example/prec-seed", "1.0.0"),
+      document: versionlessDocument("com.example/prec-seed"),
       source: "seed",
       publish: true,
     });
-    // Upstream's real version is OLDER by semver, yet it still moves the pointer: a seed is a
-    // placeholder to be replaced the moment a real document arrives, never a prior to move back from.
+    // Upstream's real version is OLDER by semver, yet it still moves the pointer: a version-less
+    // current is freely superseded the moment a real document arrives, never a prior to move back from.
     const upstream = await addRevision(serverId, {
       document: serverDocument("com.example/prec-seed", "0.0.1"),
       source: "registry",
@@ -593,6 +687,33 @@ describe("precedence guards the accept", () => {
       [upstream.revisionId],
     );
     expect(audit[0]?.details.overrode).toBeUndefined();
+  });
+
+  it("still protects a version-less current a PERSON authored — provenance outranks a null version", async () => {
+    const serverId = await seedGlobalServer("mcps_prec_staff_nv", "com.example/prec-staff-nv");
+    // A staff correction that names no version is STILL a decision someone made — the null-version
+    // "freely superseded" rule is for placeholders, not for a person's own hand-authored statement.
+    const authored = await addRevision(serverId, {
+      document: versionlessDocument("com.example/prec-staff-nv"),
+      source: "staff",
+      publish: true,
+    });
+    const upstream = await addRevision(serverId, {
+      document: serverDocument("com.example/prec-staff-nv", "2.0.0"),
+      source: "registry",
+      publish: false,
+    });
+    if (authored.refusal !== null || upstream.refusal !== null) {
+      throw new Error("the fixture revisions did not land");
+    }
+    const { acceptMcpRevision } = await catalog();
+    const refused = await acceptMcpRevision(staff, upstream.revisionId);
+    expect(refused.refusal?.code).toBe("MCP_PRECEDENCE_PROTECTED");
+    expect(await currentRevisionOf(serverId)).toBe(authored.revisionId);
+    // A deliberate override still moves it.
+    const overridden = await acceptMcpRevision(staff, upstream.revisionId, { override: true });
+    expect(overridden.refusal).toBeNull();
+    expect(await currentRevisionOf(serverId)).toBe(upstream.revisionId);
   });
 });
 

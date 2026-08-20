@@ -258,7 +258,9 @@ async function editServerIntent(
     notFound();
   }
   const posted = String(formData.get("document") ?? "");
-  const validated = validateServerJson(posted);
+  // Editing a workspace's own server: a document with no version is honest, so the edit accepts it
+  // and stores a null version rather than demanding a fabricated number.
+  const validated = validateServerJson(posted, { requireVersion: false });
   if (!validated.ok) {
     return data(
       { intent: "edit-mcp-server" as const, status: "error" as const, message: validated.message },

@@ -227,6 +227,79 @@ describe("a real document on an older official schema", () => {
   });
 });
 
+/**
+ * A VERSION IS OPTIONAL UNLESS THE CALLER DEMANDS ONE. A document bound for the official registry
+ * must carry a version; one this install authors for its OWN catalog may honestly carry none, and
+ * the gate never fabricates a number to fill the gap.
+ */
+describe("a missing version is refused only when the caller requires one", () => {
+  const versionless = JSON.stringify({
+    name: "io.github.acme/versionless",
+    description: "A server that names no version.",
+    remotes: [{ type: STREAMABLE_HTTP, url: "https://versionless.acme.example/mcp" }],
+  });
+
+  it("refuses a missing version by default — the strict, registry-grade gate", () => {
+    const result = validateServerJson(versionless);
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+    expect(result.ok === false && result.message).toContain("version");
+  });
+
+  it("still refuses a missing version when requireVersion is explicitly on", () => {
+    const result = validateServerJson(versionless, { requireVersion: true });
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+  });
+
+  it("accepts a missing version when the caller relaxes it, and reports version as null", () => {
+    const result = validateServerJson(versionless, { requireVersion: false });
+    expect(result.ok, result.ok === false ? result.message : "").toBe(true);
+    expect(result.ok === true && result.summary.version).toBeNull();
+  });
+
+  it("an explicit `version: null` is malformed, not absent — a present field must be a string", () => {
+    // Absence is an OMITTED key; a present `null` is a non-string value the schema forbids, and
+    // storing it verbatim would serve `"version": null` to schema-aware clients. Refused even relaxed.
+    const explicitNull = JSON.stringify({
+      name: "io.github.acme/nulled",
+      description: "A version field present, but null.",
+      version: null,
+      remotes: [{ type: STREAMABLE_HTTP, url: "https://nulled.acme.example/mcp" }],
+    });
+    const result = validateServerJson(explicitNull, { requireVersion: false });
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+  });
+
+  it("a version that IS present is still checked, relaxed or not — no range, no `latest`", () => {
+    const ranged = JSON.stringify({
+      name: "io.github.acme/ranged",
+      description: "A version that names a set.",
+      version: "^1.2.3",
+      remotes: [{ type: STREAMABLE_HTTP, url: "https://ranged.acme.example/mcp" }],
+    });
+    expect(validateServerJson(ranged, { requireVersion: false }).ok === false).toBe(true);
+    const latest = JSON.stringify({
+      name: "io.github.acme/latest",
+      description: "The moving pointer, not a version.",
+      version: "latest",
+      remotes: [{ type: STREAMABLE_HTTP, url: "https://latest.acme.example/mcp" }],
+    });
+    const result = validateServerJson(latest, { requireVersion: false });
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+  });
+
+  it("the candidate gate carries the same relaxation through to its document", () => {
+    const relaxed = validateCandidateFiles(
+      [{ path: "server.json", bytes: Buffer.from(versionless, "utf8") }],
+      { requireVersion: false },
+    );
+    expect(relaxed.ok).toBe(true);
+    const strict = validateCandidateFiles([
+      { path: "server.json", bytes: Buffer.from(versionless, "utf8") },
+    ]);
+    expect(strict.ok === false && strict.code).toBe("MCP_INVALID");
+  });
+});
+
 describe("the exact-version grammars", () => {
   /**
    * Probe for probe, the SAME table the client's suite drives. A grammar that answered differently

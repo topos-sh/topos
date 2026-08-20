@@ -430,7 +430,7 @@
           "type": "string"
         },
         "version": {
-          "description": "The version the document declares.",
+          "description": "The version the document declares, or EMPTY for a server that names none — an editorial or\nself-maintained one. Never a fabricated stand-in: a receipt renders the empty as no version\nat all (`what_it_is` beside it), rather than printing a bare `v`.",
           "type": "string"
         }
       },

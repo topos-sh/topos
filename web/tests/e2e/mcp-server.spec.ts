@@ -16,12 +16,18 @@ import { gotoSettled } from "./sign-in";
 const CATALOG = { serverId: "e2e_mcps_catalog", bundleId: "e2e_b_catalog", name: "e2e-catalog" };
 const PINNED = { serverId: "e2e_mcps_pinned", bundleId: "e2e_b_pinned", name: "e2e-pinned" };
 const OWN = { serverId: "e2e_mcps_own", bundleId: "e2e_b_own", name: "e2e-own" };
+const UNVERSIONED = {
+  serverId: "e2e_mcps_unversioned",
+  bundleId: "e2e_b_unversioned",
+  name: "e2e-unversioned",
+};
 
-function document(name: string, version: string, url: string): string {
+function document(name: string, version: string | null, url: string): string {
   return JSON.stringify({
     name,
     description: `Everything ${name} knows.`,
-    version,
+    // A version-less server names NO version key — never a fabricated number.
+    ...(version === null ? {} : { version }),
     remotes: [{ type: "streamable-http", url }],
   });
 }
@@ -44,7 +50,7 @@ async function seedRevision(
   serverId: string,
   id: string,
   seq: number,
-  version: string,
+  version: string | null,
   opts: { current?: boolean; status?: "published" | "revoked"; url?: string } = {},
 ): Promise<void> {
   const registryName = (
@@ -98,10 +104,10 @@ test.beforeAll(async () => {
   // counts — so the three fixtures are taken down (connections first: a catalog row a workspace
   // is connected to is deliberately not deletable out from under it) and seeded fresh.
   await adminQuery(`delete from web.bundle where id = any($1::text[])`, [
-    [CATALOG.bundleId, PINNED.bundleId, OWN.bundleId],
+    [CATALOG.bundleId, PINNED.bundleId, OWN.bundleId, UNVERSIONED.bundleId],
   ]);
   await adminQuery(`delete from web.mcp_server where id = any($1::text[])`, [
-    [CATALOG.serverId, PINNED.serverId, OWN.serverId],
+    [CATALOG.serverId, PINNED.serverId, OWN.serverId, UNVERSIONED.serverId],
   ]);
 
   // A catalog server on its current version, with a sign-in a person has to arrange.
@@ -132,6 +138,15 @@ test.beforeAll(async () => {
     url: "https://own.e2e.example/mcp",
   });
   await connect(OWN.bundleId, OWN.name, OWN.serverId);
+
+  // A server that names NO version — the honest shape of a self-maintained one. The page reads it
+  // without inventing a number: "the current version" with no digits, and an "unversioned" label.
+  await seedServer("e2e_mcps_unversioned", "io.github.e2e/unversioned", { authMode: "none" });
+  await seedRevision(UNVERSIONED.serverId, mcpRevisionId("e2e_unver_1"), 1, null, {
+    current: true,
+    url: "https://unversioned.e2e.example/mcp",
+  });
+  await connect(UNVERSIONED.bundleId, UNVERSIONED.name, UNVERSIONED.serverId);
 });
 
 test("says what the server is, what this workspace receives, and which versions exist", async ({
@@ -170,6 +185,20 @@ test("a pin is honored, and a withdrawn pin says so", async ({ page }) => {
   await gotoSettled(page, `/mcp/${PINNED.name}`);
   await expect(page.getByTestId("mcp-connection")).toContainText("Pinned to 1.0.0.");
   await expect(page.getByTestId("mcp-revoked")).toContainText("withdrawn after it was published");
+});
+
+test("a version-less server reads as unversioned, never as a fabricated number", async ({
+  page,
+}) => {
+  await gotoSettled(page, `/mcp/${UNVERSIONED.name}`);
+  // The connection line names the current version without a number, since there is none.
+  await expect(page.getByTestId("mcp-connection")).toContainText("Following the current version.");
+  // The history row wears the honest label rather than a made-up version like 1.0.0 or 0.0.0.
+  const revisions = page.getByTestId("mcp-revisions");
+  await expect(revisions).toContainText("unversioned");
+  await expect(revisions).toContainText("delivered here");
+  await expect(revisions).not.toContainText("1.0.0");
+  await expect(revisions).not.toContainText("0.0.0");
 });
 
 test("an owner's save of their own server is a NEW version, not a rewrite", async ({ page }) => {

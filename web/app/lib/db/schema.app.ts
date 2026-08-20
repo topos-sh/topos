@@ -574,11 +574,15 @@ export const mcpServer = webSchema.table(
  * the decision was made and what it was, and `revoked` is the pull-back of something that was
  * published — pinned connections are flagged in the UI rather than silently moved off it.
  *
- * `upstream_version` is the version string inside the document, and its uniqueness is PARTIAL —
- * `source = 'registry'` only. Upstream promises one document per version and a second one under
- * the same number is upstream contradicting itself, which this refuses; a staff correction or an
- * owner's edit of a private server is a NEW revision of the same version string by design, and
- * would have nothing to gain from a fresh number nobody upstream would recognize.
+ * `upstream_version` is the version string inside the document, and it is NULLABLE — null means
+ * "no known version", the honest state of an editorial or self-maintained server whose document
+ * carries no `version` field (we never fabricate one just to fill the column). Its uniqueness is
+ * PARTIAL — `source = 'registry'` only. Upstream promises one document per version and a second
+ * one under the same number is upstream contradicting itself, which this refuses; a registry
+ * revision therefore always carries a real version, and Postgres treats nulls as distinct anyway,
+ * so a versionless editorial row never trips the index. A staff correction or an owner's edit of a
+ * private server is a NEW revision of the same version string (or of none) by design, and would
+ * have nothing to gain from a fresh number nobody upstream would recognize.
  *
  * `schema_version` is the document's own `$schema`. The vocabulary of the ones this tier
  * understands lives in CODE, not in a CHECK here, and deliberately: supporting a newer schema is
@@ -603,8 +607,9 @@ export const mcpServerRevision = webSchema.table(
     /** Monotonic per server, from 1 — the history's reading order, minted under the row lock. */
     seq: integer("seq").notNull(),
     status: text("status").default("candidate").notNull(),
-    /** The `version` inside the document (never this row's own numbering). */
-    upstreamVersion: text("upstream_version").notNull(),
+    /** The `version` inside the document (never this row's own numbering); NULL when the document
+     *  names none — an editorial or self-maintained server we never stamped a fake version on. */
+    upstreamVersion: text("upstream_version"),
     schemaVersion: text("schema_version"),
     /** The `server.json` verbatim, in the official registry format. */
     document: jsonb("document").notNull(),

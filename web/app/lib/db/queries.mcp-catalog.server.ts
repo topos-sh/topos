@@ -17,7 +17,6 @@ import {
 import { bundleMcp, mcpServer, mcpServerRevision } from "@/lib/db/schema.app";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
 import {
-  isSeedPlaceholder,
   isStaffAuthoredSource,
   isStrictlyNewer,
   type McpPrecedenceFacts,
@@ -89,8 +88,9 @@ export type McpAuthMode = "none" | "oauth" | "manual";
 export interface McpRevisionFacts {
   /** The embedded registry name — the server's identity upstream and here. */
   registryName: string;
-  /** The `version` inside the document. */
-  upstreamVersion: string;
+  /** The `version` inside the document, or NULL when it names none (an editorial/self-maintained
+   *  server we never stamped a fake version on). Registry documents always carry a real one. */
+  upstreamVersion: string | null;
   /** The declared `$schema`, or null when the document declared none. */
   schemaVersion: string | null;
   /** The placed remote's transport, null for a document that offers only packages. */
@@ -111,9 +111,22 @@ export type McpFactsOutcome =
  * placed one (first `streamable-http` wins — the client's own selection order). A document that
  * cannot be shared at all — no credential, no unpinned package, nothing to run — is refused here
  * for exactly the reason it would be refused anywhere else, in the same words.
+ *
+ * `requireVersion` carries the ONE rule that differs by provenance: a REGISTRY document must name a
+ * version (the official registry mandates it, and we ingest what it gives), while an editorial or
+ * self-maintained document may carry none — in which case `upstreamVersion` comes back NULL, and
+ * we never fabricate a number to fill it. A document that DECLARES one of the known official
+ * `$schema`s still needs a version whatever its provenance: every one of those schemas requires the
+ * field, so a document claiming a schema while omitting it is self-contradictory, and we would be
+ * storing (and serving verbatim) something no schema-aware reader would accept. The honest shape of
+ * a version-less server is to make NO schema claim — exactly what a hand-written document does.
  */
-export function mcpRevisionFacts(document: Record<string, unknown>): McpFactsOutcome {
+export function mcpRevisionFacts(
+  document: Record<string, unknown>,
+  options: { requireVersion: boolean },
+): McpFactsOutcome {
   const declared = document.$schema;
+  const declaresKnownSchema = typeof declared === "string";
   if (declared !== undefined && declared !== null) {
     if (typeof declared !== "string" || !KNOWN_MCP_SCHEMA_VERSIONS.includes(declared)) {
       return {
@@ -125,7 +138,9 @@ export function mcpRevisionFacts(document: Record<string, unknown>): McpFactsOut
       };
     }
   }
-  const validated = validateServerJson(new TextEncoder().encode(canonicalServerJson(document)));
+  const validated = validateServerJson(new TextEncoder().encode(canonicalServerJson(document)), {
+    requireVersion: options.requireVersion || declaresKnownSchema,
+  });
   if (!validated.ok) {
     return { refusal: { code: validated.code, message: validated.message } };
   }
@@ -239,7 +254,12 @@ export async function addMcpRevisionInTx(
   if (server === undefined) {
     return { refusal: SERVER_NOT_FOUND };
   }
-  const read = mcpRevisionFacts(write.document);
+  // Only a REGISTRY document is held to carrying a version — upstream mandates one, and a missing
+  // version there is upstream giving us less than it promised. Everything we author ourselves may
+  // honestly have none.
+  const read = mcpRevisionFacts(write.document, {
+    requireVersion: write.source === "registry",
+  });
   if (read.refusal !== null) {
     return { refusal: read.refusal };
   }
@@ -262,14 +282,17 @@ export async function addMcpRevisionInTx(
       return { refusal: chore };
     }
   }
-  if (write.source === "registry") {
+  // A registry document always carries a version (required above), so the one-document-per-version
+  // rule has a real key to compare — the `!== null` both narrows the type and states that fact.
+  const registryVersion = read.facts.upstreamVersion;
+  if (write.source === "registry" && registryVersion !== null) {
     const held = await tx
       .select({ id: mcpServerRevision.id })
       .from(mcpServerRevision)
       .where(
         and(
           eq(mcpServerRevision.serverId, serverId),
-          eq(mcpServerRevision.upstreamVersion, read.facts.upstreamVersion),
+          eq(mcpServerRevision.upstreamVersion, registryVersion),
           eq(mcpServerRevision.source, "registry"),
         ),
       )
@@ -278,7 +301,7 @@ export async function addMcpRevisionInTx(
       return {
         refusal: {
           code: "MCP_VERSION_HELD",
-          message: `version ${read.facts.upstreamVersion} of this server is already recorded from upstream`,
+          message: `version ${registryVersion} of this server is already recorded from upstream`,
         },
       };
     }
@@ -358,7 +381,9 @@ export async function createPrivateMcpServer(
   details: McpServerDetails,
   document: Record<string, unknown>,
 ): Promise<McpServerOutcome> {
-  const read = mcpRevisionFacts(document);
+  // A workspace's OWN server is ours to author — its document may name no version, and we store
+  // that truthfully rather than stamp a placeholder on it.
+  const read = mcpRevisionFacts(document, { requireVersion: false });
   if (read.refusal !== null) {
     return { refusal: read.refusal };
   }
@@ -757,14 +782,16 @@ async function precedenceReadInTx(
  * THE PRECEDENCE GUARD, at accept. This is what makes reading older-schema upstream documents safe:
  * an UPSTREAM candidate never displaces a version a PERSON authored here (a staff correction, an
  * owner's edit) at all — a hand-written row is this catalog's own statement, not a slot for upstream
- * to fill — and never displaces a real non-seed prior it does not better. Either bar is cleared only
- * by a deliberate staff override, which the accept records.
+ * to fill — and never displaces a real prior it does not better. Either bar is cleared only by a
+ * deliberate staff override, which the accept records.
  *
- * A SEED PLACEHOLDER current is neither bar. The migration stamps every curated server with a
- * placeholder version under `source = 'seed'`, so it is a starting point waiting for a real
- * document, not a decision to protect or a version to be judged "behind" — the first real candidate
- * freely supersedes it, with no override. A candidate this install authored is not "an upstream
- * candidate" and is not guarded here; a server with nothing current yet has nothing to protect.
+ * A CURRENT WITH NO COMPARABLE VERSION is neither bar. A seed placeholder — or any editorial row
+ * this catalog holds without a real version — carries a NULL version, which is a starting point
+ * waiting for a real document, not a decision to protect or a number to be judged "behind": the
+ * first real candidate freely supersedes it, with no override and no comparison. (This is the
+ * general rule the old seed special-case falls out of, now that a seed row honestly carries no
+ * version.) A candidate this install authored is not "an upstream candidate" and is not guarded
+ * here; a server with nothing current yet has nothing to protect.
  *
  * Returns the refusal precedence WOULD raise, or null — the caller both enforces it (absent an
  * override) and, when overridden, records which bar was crossed.
@@ -785,10 +812,8 @@ async function acceptPrecedenceRefusal(
   if (current === null) {
     return null;
   }
-  // A seed placeholder is freely superseded — no bar, no override, no semver comparison.
-  if (isSeedPlaceholder(current.source)) {
-    return null;
-  }
+  // A person's own statement is protected whatever its version — provenance, not a number, is the
+  // bar; upstream displaces it only by a deliberate override.
   if (isStaffAuthoredSource(current.source)) {
     return {
       code: "MCP_PRECEDENCE_PROTECTED",
@@ -796,6 +821,13 @@ async function acceptPrecedenceRefusal(
         "this server's current version is one this catalog maintains, not one it took from upstream — replacing it with an upstream document is a deliberate override",
     };
   }
+  // No comparable version to move backward from — a seed placeholder, or any versionless editorial
+  // current — is freely superseded: no bar, no override, no semver comparison.
+  if (current.facts.version === null) {
+    return null;
+  }
+  // Two real versions: an upstream candidate must be strictly newer, or moving the pointer is a
+  // downgrade, which is a deliberate override.
   if (!isStrictlyNewer(candidate.facts, current.facts)) {
     return {
       code: "MCP_PRECEDENCE_NOT_NEWER",
@@ -1062,7 +1094,8 @@ export interface McpCatalogRow {
   url: string | null;
   transport: string | null;
   revisionId: string;
-  upstreamVersion: string;
+  /** The version the current revision offers, or NULL when it names none. */
+  upstreamVersion: string | null;
   /** The catalog name of the ACTIVE bundle this workspace connected it as, or null. One
    *  connection per server per workspace, so this is the answer, not one of several. */
   connectedAs: string | null;
@@ -1078,7 +1111,8 @@ export interface McpCatalogRow {
 export interface McpRevisionRow {
   revisionId: string;
   seq: number;
-  upstreamVersion: string;
+  /** The `version` this revision stored, or NULL when it named none. */
+  upstreamVersion: string | null;
   status: string;
   source: string;
   publishedAt: Date | null;
@@ -1105,7 +1139,8 @@ export interface McpServerFace {
   /** What this workspace's machines receive — null when the server has published nothing. */
   resolved: {
     revisionId: string;
-    upstreamVersion: string;
+    /** The version this workspace's machines receive, or NULL when the revision names none. */
+    upstreamVersion: string | null;
     status: string;
     url: string | null;
     transport: string | null;
@@ -1187,7 +1222,7 @@ export async function mcpServerFace(
         ? null
         : {
             revisionId: row.revision_id as string,
-            upstreamVersion: row.upstream_version as string,
+            upstreamVersion: (row.upstream_version as string | null) ?? null,
             status: row.status as string,
             url: (row.url as string | null) ?? null,
             transport: (row.transport as string | null) ?? null,
@@ -1203,7 +1238,7 @@ export async function mcpServerFace(
     revisions: (history.rows as Record<string, unknown>[]).map((rev) => ({
       revisionId: rev.revision_id as string,
       seq: Number(rev.seq),
-      upstreamVersion: rev.upstream_version as string,
+      upstreamVersion: (rev.upstream_version as string | null) ?? null,
       status: rev.status as string,
       source: rev.source as string,
       publishedAt: rev.published_at === null ? null : new Date(rev.published_at as string),
@@ -1351,7 +1386,8 @@ export async function publishedCatalogVersions(name: string): Promise<McpRegistr
 /** One version of a tracked server, as the sweep compares it against upstream's listing. */
 export interface McpTrackedVersion {
   revisionId: string;
-  upstreamVersion: string;
+  /** The stored `version`, or NULL when this revision named none. */
+  upstreamVersion: string | null;
   source: string;
   status: string;
   /** The MCP protocol revisions a probe captured for this version — the precedence tie-break's
@@ -1371,7 +1407,8 @@ export interface McpTrackedVersion {
  *  server has published nothing yet. */
 export interface McpTrackedCurrent {
   revisionId: string;
-  upstreamVersion: string;
+  /** The version on offer, or NULL when the current revision names none. */
+  upstreamVersion: string | null;
   protocolVersions: unknown;
   source: string;
 }
@@ -1440,7 +1477,7 @@ export async function trackedCatalogServers(): Promise<McpTrackedServer[]> {
     if (raw.revision_id !== null && raw.revision_id !== undefined) {
       entry.held.push({
         revisionId: raw.revision_id as string,
-        upstreamVersion: raw.upstream_version as string,
+        upstreamVersion: (raw.upstream_version as string | null) ?? null,
         source: raw.source as string,
         status: raw.revision_status as string,
         protocolVersions: raw.protocol_versions ?? null,
@@ -1616,7 +1653,7 @@ export async function connectableMcpServers(
     url: (row.url as string | null) ?? null,
     transport: (row.transport as string | null) ?? null,
     revisionId: row.revision_id as string,
-    upstreamVersion: row.upstream_version as string,
+    upstreamVersion: (row.upstream_version as string | null) ?? null,
     connectedAs: (row.connected_as as string | null) ?? null,
     inArchive: row.in_archive === true,
   }));

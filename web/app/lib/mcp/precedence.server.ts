@@ -16,14 +16,18 @@
  * This module is PURE comparison, shared by the two places precedence is decided: the upstream
  * sweep (which files a version it cannot better than ours as informational, never as a downgrade)
  * and the accept door (which refuses to move the pointer onto one that is not strictly newer, or
- * onto anything at all over a version a PERSON authored here, without a deliberate override — a
- * seed PLACEHOLDER is neither, and any candidate freely supersedes it).
+ * onto anything at all over a version a PERSON authored here, without a deliberate override). A
+ * current with NO comparable version — a null `version`, which is what a seed placeholder or any
+ * versionless editorial row now carries — is freely superseded by any candidate; that rule lives
+ * with the callers (which hold the current's provenance too), and here it shows up as a null
+ * `version` this comparison simply cannot order.
  */
 
 /** The facts precedence reads off one revision — nothing about its schema or its prose. */
 export interface McpPrecedenceFacts {
-  /** The `version` string inside the document — the server's own version. */
-  version: string;
+  /** The `version` string inside the document — the server's own version — or NULL when it names
+   *  none. A null cannot be ordered, so `compareServerVersion` answers "cannot say" for it. */
+  version: string | null;
   /**
    * The MCP protocol revisions this endpoint answered a probe with (an array of revision strings),
    * or anything else when none was captured. Read defensively: absent is an ambiguity, not a zero.
@@ -36,27 +40,16 @@ export interface McpPrecedenceFacts {
  * private edit. Upstream never supersedes one of these on its own; that is a deliberate act with a
  * person's name on it, and displacing it takes a deliberate override.
  *
- * A `seed` is deliberately NOT here. The catalog's migration stamps every curated server with a
- * placeholder version under `source = 'seed'` — a starting point, not a decision somebody made — so
- * it is a thing to be replaced the moment a real upstream document arrives, never a statement to
- * protect. `isSeedPlaceholder` names that case for the two callers that must let any candidate pass.
+ * A `seed` is deliberately NOT here. A seeded row is a starting point the catalog stood up before
+ * any real document arrived, not a decision somebody made — and it now carries no version, so a
+ * caller lets any candidate freely supersede it under the general "null version cannot be ordered"
+ * rule rather than by naming the source.
  */
 const STAFF_AUTHORED_SOURCES: ReadonlySet<string> = new Set(["staff", "owner"]);
 
 /** Was this revision written by a PERSON here, rather than pulled from upstream or seeded? */
 export function isStaffAuthoredSource(source: string): boolean {
   return STAFF_AUTHORED_SOURCES.has(source);
-}
-
-/**
- * Is this current a SEED PLACEHOLDER — the version the catalog's migration stamped on a curated
- * server before any real document arrived? Such a current is freely superseded by any candidate: it
- * never requires an override and never causes an upstream version to be judged "behind", because
- * there is no real prior to move backward from. The accept guard and the upstream sweep both read
- * this to let a first real document land.
- */
-export function isSeedPlaceholder(source: string): boolean {
-  return source === "seed";
 }
 
 interface ParsedVersion {
@@ -189,9 +182,14 @@ function comparePrerelease(a: string[] | null, b: string[] | null): number {
 
 /**
  * Order two server versions: -1 / 0 / 1, or NULL when either is not a version this can read. The
- * null is load-bearing — every caller reads it as "cannot say", and cannot-say keeps ours.
+ * null is load-bearing — every caller reads it as "cannot say", and cannot-say keeps ours. A
+ * revision that names NO version (a null) is exactly such a "cannot say": there is nothing to
+ * order, so the answer is null.
  */
-export function compareServerVersion(a: string, b: string): number | null {
+export function compareServerVersion(a: string | null, b: string | null): number | null {
+  if (a === null || b === null) {
+    return null;
+  }
   const parsedA = parseVersion(a);
   const parsedB = parseVersion(b);
   if (parsedA === null || parsedB === null) {

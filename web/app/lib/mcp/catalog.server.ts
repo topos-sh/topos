@@ -64,8 +64,10 @@ export async function serverDocumentOf(
     return null;
   }
   // Re-validated on the way OUT, not just on the way in: the gate's rules can tighten between
-  // a publish and a read, and the lane must never serve a document today's rules would refuse.
-  const validated = validateServerJson(blob.data);
+  // a publish and a read, and the lane must never serve a document today's rules would refuse. A
+  // missing version is NOT such a refusal — the backfill files these as our own (`owner`) rows, and
+  // a self-authored document may honestly carry none.
+  const validated = validateServerJson(blob.data, { requireVersion: false });
   if (!validated.ok) {
     return null;
   }

@@ -218,6 +218,45 @@ test("write down a server the catalog does not carry, preview it, add it", async
   ).toContainText("mcp");
 });
 
+test("a version-less paste previews as unversioned, and never offers an add that cannot land", async ({
+  page,
+}) => {
+  const paste = async (doc: Record<string, unknown>) => {
+    await gotoSettled(page, "/mcp/new");
+    await page.getByText("A server that is not on this list", { exact: true }).click();
+    await page.getByLabel("Where it comes from").selectOption("paste");
+    await page.getByTestId("mcp-paste").fill(JSON.stringify(doc));
+    await page.getByRole("button", { name: "Preview" }).click();
+  };
+  const remotes = [{ type: "streamable-http", url: "https://vl.acme.example/mcp" }];
+
+  // A hand-written server that names no version and makes no schema claim previews honestly —
+  // "unversioned", never a fabricated number — and can be added.
+  await paste({ name: "io.github.acme/vl-open", description: "No version, no schema.", remotes });
+  await expect(page.getByTestId("mcp-preview")).toContainText("unversioned");
+  await expect(page.getByTestId("mcp-refusal")).toHaveCount(0);
+
+  // A document that omits the version but still declares an official schema that REQUIRES one is
+  // self-contradictory — the write would reject it, so the preview refuses up front rather than
+  // offering an add that cannot land.
+  await paste({
+    $schema: "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    name: "io.github.acme/vl-schema",
+    description: "No version, but a schema that needs one.",
+    remotes,
+  });
+  await expect(page.getByTestId("mcp-refusal")).toBeVisible();
+  await expect(page.getByTestId("mcp-preview")).toHaveCount(0);
+
+  // Malformed JSON is a refusal, not a crash: the gate answers before anything parses the bytes.
+  await gotoSettled(page, "/mcp/new");
+  await page.getByText("A server that is not on this list", { exact: true }).click();
+  await page.getByLabel("Where it comes from").selectOption("paste");
+  await page.getByTestId("mcp-paste").fill("{ not json");
+  await page.getByRole("button", { name: "Preview" }).click();
+  await expect(page.getByTestId("mcp-refusal")).toBeVisible();
+});
+
 /**
  * ADDING IS NOT SHARING. The destination field rests on no channel, so an untouched form leaves
  * the server in the workspace and nowhere else — the server's own page says "In no channel." and

@@ -28,8 +28,11 @@ import {
  *
  * The shape rules mirror the official registry schema (2025-12-11): `name` is exactly one slash
  * between a reverse-DNS namespace and a server name (3–200 chars), `description` is 1–100
- * characters, `version` is required and names ONE version (never a range, never `latest`), and a
- * `packages[]` entry carries `registryType` + `identifier` + `transport` with STRUCTURED
+ * characters, and — when present — `version` names ONE version (never a range, never `latest`). A
+ * MISSING version is refused only when the caller asks for it (`requireVersion`): a document bound
+ * for the OFFICIAL registry must carry one, but an editorial or self-maintained server we author
+ * for OUR catalog may omit it, and we never invent one to fill the gap. A `packages[]` entry
+ * carries `registryType` + `identifier` + `transport` with STRUCTURED
  * argument/environment objects. `registryType` is OPEN-WORLD — npm, pypi, oci, nuget, mcpb and
  * whatever the registry adds next are all publishable here; whether a given machine can SET one
  * up is the client's question, answered when it renders, not this gate's. The refusal vectors
@@ -128,7 +131,9 @@ export interface McpPackage {
 export interface McpSummary {
   name: string;
   description: string;
-  version: string;
+  /** The server's own `version`, or NULL when the document names none — never a fabricated stand-in.
+   *  A surface renders the absence honestly (an "unversioned" label), never a made-up number. */
+  version: string | null;
   /**
    * The placed remote's address — NULL when the document offers only packages. A shared bundle
    * is allowed to be a thing every machine installs rather than a thing every machine dials, and
@@ -997,11 +1002,26 @@ function checkRemote(remote: Record<string, unknown>): RemoteCheck {
   return { ok: true, headers };
 }
 
+/** What a caller may relax about a document — nothing yet, save whether a version is mandatory. */
+export interface McpValidateOptions {
+  /**
+   * Refuse a document that names no `version`. TRUE (the default) is the strict, registry-grade
+   * gate every caller gets unless it says otherwise — a fail-closed default, so a forgotten option
+   * is the safe answer. A NON-registry door (a workspace's own server, a staff correction) passes
+   * FALSE: such a document may honestly carry no version, and we never fabricate one to pass here.
+   */
+  requireVersion?: boolean;
+}
+
 /**
  * Validate one server document. `raw` is the bytes as fetched or pasted — the scan reads THEM,
  * not a re-serialization, so nothing a caller strips can hide a credential from it.
  */
-export function validateServerJson(raw: Uint8Array | string): McpValidation {
+export function validateServerJson(
+  raw: Uint8Array | string,
+  options: McpValidateOptions = {},
+): McpValidation {
+  const requireVersion = options.requireVersion ?? true;
   let text: string;
   if (typeof raw === "string") {
     text = raw;
@@ -1081,21 +1101,36 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
   ) {
     return refuse("MCP_INVALID", `description is required, 1–${DESCRIPTION_MAX} characters`);
   }
-  const version = parsed.version;
-  if (
-    typeof version !== "string" ||
-    version.length === 0 ||
-    codePointLength(version) > VERSION_MAX
+  // A version is OPTIONAL unless the caller demands one: a document destined for our own catalog
+  // (a workspace's server, a staff correction) may honestly carry none, and we never fabricate one
+  // to fill the gap. A registry-bound document still must — `requireVersion` says which this is.
+  const rawVersion = parsed.version;
+  let version: string | null = null;
+  if (rawVersion === undefined) {
+    // ABSENT means the KEY IS OMITTED — the honest shape of a version-less server. An explicit
+    // `null` is NOT absence: the field is present with a non-string value, which the registry
+    // schema forbids, so it falls through to the malformed refusal below rather than being read
+    // as "no version" (and stored/served as a literal `"version": null`).
+    if (requireVersion) {
+      return refuse("MCP_INVALID", "version is required");
+    }
+  } else if (
+    typeof rawVersion !== "string" ||
+    rawVersion.length === 0 ||
+    codePointLength(rawVersion) > VERSION_MAX
   ) {
-    return refuse("MCP_INVALID", "version is required");
-  }
-  // ONE version, the server's own: `latest` names whatever is served today and a range names a
-  // set, and neither is a thing a workspace can pin its members to.
-  if (version === RESERVED_VERSION || looksLikeVersionRange(version)) {
+    // A version that is PRESENT must be a real one — an empty string, a null, or any non-string is
+    // malformed whether or not one was required.
+    return refuse("MCP_INVALID", "version, when given, names one version");
+  } else if (rawVersion === RESERVED_VERSION || looksLikeVersionRange(rawVersion)) {
+    // ONE version, the server's own: `latest` names whatever is served today and a range names a
+    // set, and neither is a thing a workspace can pin its members to.
     return refuse(
       "MCP_INVALID",
-      `version names one version — ${version} names whichever one a machine resolves`,
+      `version names one version — ${rawVersion} names whichever one a machine resolves`,
     );
+  } else {
+    version = rawVersion;
   }
 
   const rawPackages = parsed.packages;
@@ -1189,7 +1224,10 @@ export interface McpCandidateFile {
  * answer to — a bundle whose behavior is one JSON document must not smuggle scripts or extra
  * payloads beside it.
  */
-export function validateCandidateFiles(files: McpCandidateFile[]): McpValidation {
+export function validateCandidateFiles(
+  files: McpCandidateFile[],
+  options: McpValidateOptions = {},
+): McpValidation {
   const server = files.find((f) => f.path === "server.json");
   if (server === undefined) {
     return refuse(
@@ -1229,7 +1267,7 @@ export function validateCandidateFiles(files: McpCandidateFile[]): McpValidation
       );
     }
   }
-  return validateServerJson(server.bytes);
+  return validateServerJson(server.bytes, options);
 }
 
 /**

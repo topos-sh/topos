@@ -1389,7 +1389,9 @@ pub struct McpServerSummary {
     pub server: String,
     /// The publisher's one-line summary (the registry caps it at 100 characters).
     pub description: String,
-    /// The version the document declares.
+    /// The version the document declares, or EMPTY for a server that names none — an editorial or
+    /// self-maintained one. Never a fabricated stand-in: a receipt renders the empty as no version
+    /// at all (`what_it_is` beside it), rather than printing a bare `v`.
     pub version: String,
     /// The endpoint an agent will call — always `https`, never a template. EMPTY when the bundle
     /// offers no address at all: a server may be a package every machine runs instead (see

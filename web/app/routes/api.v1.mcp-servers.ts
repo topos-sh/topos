@@ -167,7 +167,12 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
       "that is not a server.json — a server document is a JSON object",
     );
   }
-  const validated = validateServerJson(canonicalServerJson(unwrapped));
+  // A document read from the OFFICIAL registry (a `registry_name` was given) must carry a version —
+  // we ingest what upstream gives, and it mandates one, so a malformed registry response is refused
+  // rather than stored version-less. A document LINK is the author's own, and may honestly omit it.
+  const validated = validateServerJson(canonicalServerJson(unwrapped), {
+    requireVersion: typeof registryName === "string",
+  });
   if (!validated.ok) {
     return deniedCodeEnvelope("mcp", validated.code, validated.message);
   }

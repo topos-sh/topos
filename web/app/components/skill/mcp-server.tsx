@@ -27,7 +27,8 @@ export interface McpServerView {
   currentRevisionId: string | null;
   resolved: {
     revisionId: string;
-    upstreamVersion: string;
+    /** The version delivered here, or NULL when the revision names none (shown as "unversioned"). */
+    upstreamVersion: string | null;
     status: string;
     url: string | null;
     transport: string | null;
@@ -37,7 +38,8 @@ export interface McpServerView {
   revisions: {
     revisionId: string;
     seq: number;
-    upstreamVersion: string;
+    /** The revision's version, or NULL when it named none (shown as "unversioned"). */
+    upstreamVersion: string | null;
     status: string;
     source: string;
     publishedAt: string | null;
@@ -59,6 +61,19 @@ function AuthChip({ auth }: { auth: McpServerView["authMode"] }) {
   ) : (
     <Chip tone="neutral">no sign-in</Chip>
   );
+}
+
+/**
+ * The one line saying which version this workspace receives. A versionless revision is named
+ * honestly — "the current version" / "this version" — never a fabricated number.
+ */
+function followingLine(pinnedRevisionId: string | null, version: string | null): string {
+  if (pinnedRevisionId === null) {
+    return version === null
+      ? "Following the current version."
+      : `Following the current version, ${version}.`;
+  }
+  return version === null ? "Pinned to this version." : `Pinned to ${version}.`;
 }
 
 export function McpServerPanel({ server, isOwner }: { server: McpServerView; isOwner: boolean }) {
@@ -113,9 +128,7 @@ export function McpServerPanel({ server, isOwner }: { server: McpServerView; isO
             ) : (
               <>
                 <p className="text-dim text-sm">
-                  {server.pinnedRevisionId === null
-                    ? `Following the current version, ${server.resolved.upstreamVersion}.`
-                    : `Pinned to ${server.resolved.upstreamVersion}.`}
+                  {followingLine(server.pinnedRevisionId, server.resolved.upstreamVersion)}
                 </p>
                 {server.resolved.status === "revoked" && (
                   <p className="text-amber-800 text-sm" data-testid="mcp-revoked">
@@ -151,7 +164,13 @@ function RevisionList({ server }: { server: McpServerView }) {
               key={revision.revisionId}
               className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5"
             >
-              <span className="font-mono text-[13px] text-ink">{revision.upstreamVersion}</span>
+              {revision.upstreamVersion === null ? (
+                // A versionless revision reads as a LABEL, not a fake number — set apart from a
+                // real, mono-spaced version string so nobody mistakes the word for one.
+                <span className="text-[13px] text-faint italic">unversioned</span>
+              ) : (
+                <span className="font-mono text-[13px] text-ink">{revision.upstreamVersion}</span>
+              )}
               {revision.revisionId === server.resolved?.revisionId && (
                 <Chip tone="accent">delivered here</Chip>
               )}

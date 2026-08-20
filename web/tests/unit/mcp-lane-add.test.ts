@@ -246,6 +246,43 @@ describe("a server the catalog does NOT offer", () => {
   });
 });
 
+describe("a version is demanded of a registry read, but not of an author's own document", () => {
+  /** A document that names NO version — the honest shape of a self-authored server. */
+  function versionless(name: string): Record<string, unknown> {
+    return {
+      name,
+      description: "A server for the suite.",
+      remotes: [{ type: "streamable-http", url: "https://mcp.example.com/mcp" }],
+    };
+  }
+
+  it("a version-less response to a REGISTRY name is refused — upstream must carry a version", async () => {
+    upstream = { text: JSON.stringify(versionless("io.github.acme/reg-noversion")) };
+    const answer = await post("sn_owner", { registry_name: "io.github.acme/reg-noversion" });
+    expect(answer.body.ok).toBe(false);
+    expect(errorCodeOf(answer.body)).toBe("MCP_INVALID");
+    const rows = await db.q<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM web.mcp_server WHERE registry_name = $1`,
+      ["io.github.acme/reg-noversion"],
+    );
+    expect(Number(rows[0]?.n)).toBe(0);
+  });
+
+  it("a version-less DOCUMENT LINK is the author's own server, stored with a null version", async () => {
+    upstream = { text: JSON.stringify(versionless("io.github.acme/link-noversion")) };
+    const answer = await post("sn_owner", { document_url: "https://acme.example/server.json" });
+    expect(answer.body.ok, JSON.stringify(answer.body)).toBe(true);
+    expect(dataOf(answer.body).created).toBe(true);
+    const rows = await db.q<{ upstream_version: string | null }>(
+      `SELECT r.upstream_version
+       FROM web.mcp_server s JOIN web.mcp_server_revision r ON r.id = s.current_revision_id
+       WHERE s.registry_name = $1`,
+      ["io.github.acme/link-noversion"],
+    );
+    expect(rows[0]?.upstream_version).toBeNull();
+  });
+});
+
 describe("the document gate rules, and its words are the ones the machine renders", () => {
   it("a document carrying a credential is refused with the gate's own code", async () => {
     upstream = {

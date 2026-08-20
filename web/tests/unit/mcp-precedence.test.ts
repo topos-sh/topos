@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   compareServerVersion,
-  isSeedPlaceholder,
   isStaffAuthoredSource,
   isStrictlyNewer,
   type McpPrecedenceFacts,
@@ -13,7 +12,7 @@ import {
  * function of two revisions' facts and nothing else, and the `$schema` string is never one of them.
  */
 
-function facts(version: string, protocolVersions: unknown = null): McpPrecedenceFacts {
+function facts(version: string | null, protocolVersions: unknown = null): McpPrecedenceFacts {
   return { version, protocolVersions };
 }
 
@@ -39,6 +38,14 @@ describe("ordering server versions", () => {
   it("says it cannot order a version it does not read, rather than guessing", () => {
     expect(compareServerVersion("nightly", "1.0.0")).toBeNull();
     expect(compareServerVersion("1.0.0", "")).toBeNull();
+  });
+
+  it("cannot order a version that is ABSENT — a null is 'cannot say', never a zero", () => {
+    // A revision that names no version has nothing to compare, so neither side of a null orders —
+    // the accept guard reads this as "freely superseded", never as "1.0.0 beats null".
+    expect(compareServerVersion(null, "1.0.0")).toBeNull();
+    expect(compareServerVersion("1.0.0", null)).toBeNull();
+    expect(compareServerVersion(null, null)).toBeNull();
   });
 
   it("treats a malformed label as ambiguous, never as a clean release", () => {
@@ -89,6 +96,14 @@ describe("strictly newer", () => {
     expect(isStrictlyNewer(facts("rolling"), facts("1.0.0"))).toBe(false);
   });
 
+  it("cannot call a candidate strictly newer than a version-less current — that is the guard's job", () => {
+    // This pure comparison never says "newer" over a null on either side; a version-less CURRENT
+    // being freely superseded is a decision the accept guard makes on the null itself, not here.
+    expect(isStrictlyNewer(facts("2.0.0"), facts(null))).toBe(false);
+    expect(isStrictlyNewer(facts(null), facts("1.0.0"))).toBe(false);
+    expect(isStrictlyNewer(facts(null), facts(null))).toBe(false);
+  });
+
   it("a malformed candidate label never supersedes a real release", () => {
     expect(isStrictlyNewer(facts("2.0.0-"), facts("1.0.0"))).toBe(false);
     expect(isStrictlyNewer(facts("1.0.0-rc."), facts("1.0.0"))).toBe(false);
@@ -100,17 +115,9 @@ describe("which sources a person authored", () => {
     expect(isStaffAuthoredSource("staff")).toBe(true);
     expect(isStaffAuthoredSource("owner")).toBe(true);
     expect(isStaffAuthoredSource("registry")).toBe(false);
-    // A seed is a placeholder the migration stamped, not a decision a person made — so it does not
-    // stand between upstream and the pointer, and any candidate freely supersedes it.
+    // A seed is a starting point the catalog stood up, not a decision a person made — so it is not
+    // provenance-protected. It is instead freely superseded because it carries no version (the
+    // accept guard's general "null version" rule), never by naming the source.
     expect(isStaffAuthoredSource("seed")).toBe(false);
-  });
-});
-
-describe("which current is a seed placeholder", () => {
-  it("only a seed is one — a staff, owner or upstream current is a real prior", () => {
-    expect(isSeedPlaceholder("seed")).toBe(true);
-    expect(isSeedPlaceholder("staff")).toBe(false);
-    expect(isSeedPlaceholder("owner")).toBe(false);
-    expect(isSeedPlaceholder("registry")).toBe(false);
   });
 });

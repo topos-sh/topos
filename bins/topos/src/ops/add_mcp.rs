@@ -481,6 +481,17 @@ fn what_it_is(doc: &ServerDoc) -> String {
     }
 }
 
+/// The ` v<version>` a receipt prints for the server's own version — an empty string for a server
+/// that names none, so the line reads `MCP server <name> — …` rather than a bare `v` in front of
+/// nothing. A fabricated version was never the honest answer; its absence is.
+fn version_note(doc: &ServerDoc) -> String {
+    if doc.version.is_empty() {
+        String::new()
+    } else {
+        format!(" v{}", doc.version)
+    }
+}
+
 /// Fold what landed into the add receipt: the typed `mcp` block, then the prose note — WHAT this
 /// row now points at. Where the entries went is the converge's own answer, and the add's receipt
 /// already carries it per surface; this adds the one thing that answer cannot: which server.
@@ -492,9 +503,9 @@ fn fold_receipt(data: &mut AddData, doc: &ServerDoc, agents: Vec<String>) {
     medit::push_note_line(
         data,
         format!(
-            "MCP server {} v{} — {}{auth}",
+            "MCP server {}{} — {}{auth}",
             doc.name,
-            doc.version,
+            version_note(doc),
             what_it_is(doc)
         ),
     );
@@ -661,6 +672,20 @@ mod tests {
             classify_mcp_source("topos.sh/acme", Some("example.com"), &nothing_exists),
             McpSourceShape::RegistryName
         );
+    }
+
+    /// A server that names no version is rendered without one — the receipt reads its name straight
+    /// into the em-dash, never a bare `v` in front of nothing.
+    #[test]
+    fn a_versionless_server_is_rendered_without_a_version() {
+        let versioned = doc_with(vec![package("npm", "@acme/x", "stdio")]);
+        assert_eq!(version_note(&versioned), " v1.0.0");
+        assert_eq!(summarize(&versioned, Vec::new()).version, "1.0.0");
+
+        let mut versionless = doc_with(vec![package("npm", "@acme/x", "stdio")]);
+        versionless.version = String::new();
+        // The receipt line shows the name straight into the em-dash, never `<name> v — …`.
+        assert_eq!(version_note(&versionless), "");
     }
 
     /// A bare word names neither a server nor a link; so does nothing at all.
