@@ -175,6 +175,9 @@ export interface LockedServer {
   authNote: string | null;
   manuallyCurated: boolean;
   currentRevisionId: string | null;
+  /** Bumped on every row write (`$onUpdate`) — the optimistic-concurrency stamp a staff edit
+   *  carries back so a save built on a stale view (any edit OR a promote since) refuses. */
+  updatedAt: Date;
 }
 
 /**
@@ -193,6 +196,7 @@ export async function lockServerInTx(tx: Tx, serverId: string): Promise<LockedSe
       authNote: mcpServer.authNote,
       manuallyCurated: mcpServer.manuallyCurated,
       currentRevisionId: mcpServer.currentRevisionId,
+      updatedAt: mcpServer.updatedAt,
     })
     .from(mcpServer)
     .where(eq(mcpServer.id, serverId))
@@ -794,6 +798,27 @@ export async function promoteMcpRevision(
           },
         });
       }
+      // ONLY FORWARD. A pending proposal is a revision NEWER than the current; a stale panel (the
+      // pointer advanced since it rendered — another operator promoted a later file version) must
+      // not roll the global offer back onto history and change every unpinned workspace's document.
+      // Re-read the current's seq under this lock and refuse anything not above it.
+      if (found.server.currentRevisionId !== null) {
+        const cur = await tx
+          .select({ seq: mcpServerRevision.seq })
+          .from(mcpServerRevision)
+          .where(eq(mcpServerRevision.id, found.server.currentRevisionId))
+          .limit(1);
+        const currentSeq = cur[0]?.seq;
+        if (currentSeq !== undefined && found.revision.seq <= currentSeq) {
+          return refuse({
+            refusal: {
+              code: "MCP_REVISION_NOT_PROPOSAL",
+              message:
+                "this revision is not newer than the one on offer, so it is no longer a pending proposal",
+            },
+          });
+        }
+      }
       // A catalog row states how a person gets in. Promoting one where nobody established that yet
       // would put the catalog's name behind a fact it does not have.
       if (found.server.authMode === null) {
@@ -805,11 +830,44 @@ export async function promoteMcpRevision(
           },
         });
       }
+      // THE VERIFIED TIER IS THE ROW's (`auth_mode`), never a document's word. A revision delivers
+      // its own tier in `sh.topos/auth`; promoting one whose delivered tier DIFFERS from the
+      // established one would split what surfaces show (the column) from what a machine reads (the
+      // document). Rather than let a document overwrite verified truth, refuse and send staff to
+      // EDIT — which re-authors the document at the verified tier — to reconcile a genuine change.
+      const promotedRows = await tx
+        .select({ document: mcpServerRevision.document })
+        .from(mcpServerRevision)
+        .where(eq(mcpServerRevision.id, revisionId))
+        .limit(1);
+      // The delivered tier must MATCH the verified one exactly — a document that names a DIFFERENT
+      // tier would overwrite verified truth, and one that names NONE (null) would deliver a machine
+      // no tier at all (delivery hands over only the document, and the client reads its `sh.topos/auth`).
+      // Either way, refuse and send staff to EDIT, which re-authors the document at the verified tier.
+      const docTier = deliveredAuthOf(promotedRows[0]?.document);
+      if (docTier !== found.server.authMode) {
+        return refuse({
+          refusal: {
+            code: "MCP_AUTH_TIER_MISMATCH",
+            message:
+              "this version does not deliver the sign-in tier established for this server — edit the server to reconcile it before promoting",
+          },
+        });
+      }
       const promoted = await promoteMcpRevisionInTx(tx, found.server, revisionId, staff.display);
       if (promoted !== null) {
         return refuse({ refusal: promoted });
       }
       await markManuallyCuratedInTx(tx, found.server.id);
+      // A staff promote OFFERS this version, so a row a migration left `delisted` (a former,
+      // never-accepted candidate) is relisted as part of the act — otherwise the catalog would
+      // report it offered while workspace queries still exclude it.
+      if (found.server.status !== "active") {
+        await tx
+          .update(mcpServer)
+          .set({ status: "active" })
+          .where(eq(mcpServer.id, found.server.id));
+      }
       await auditCatalogInTx(tx, staff, "mcp_revision_promoted", revisionId, {
         serverId: found.server.id,
         seq: found.revision.seq,
@@ -857,6 +915,27 @@ export async function dismissMcpRevision(
           },
         });
       }
+      // ONLY A PENDING PROPOSAL. Dismiss marks a revision terminal so it never re-offers or is
+      // pinnable; a stale page could otherwise dismiss a revision that has since been superseded and
+      // is now HISTORY (seq below the current), quietly burying a version that was once on offer.
+      // A pending proposal is newer than the current — re-read the current's seq under this lock.
+      if (found.server.currentRevisionId !== null) {
+        const cur = await tx
+          .select({ seq: mcpServerRevision.seq })
+          .from(mcpServerRevision)
+          .where(eq(mcpServerRevision.id, found.server.currentRevisionId))
+          .limit(1);
+        const currentSeq = cur[0]?.seq;
+        if (currentSeq !== undefined && found.revision.seq <= currentSeq) {
+          return refuse({
+            refusal: {
+              code: "MCP_REVISION_NOT_PROPOSAL",
+              message:
+                "this revision is history, not a pending proposal, so it cannot be dismissed",
+            },
+          });
+        }
+      }
       await tx
         .update(mcpServerRevision)
         .set({ dismissedAt: new Date(), dismissedBy: staff.display })
@@ -867,6 +946,460 @@ export async function dismissMcpRevision(
         ...(reason === null ? {} : { reason }),
       });
       return { refusal: null, revisionId, serverId: found.server.id };
+    },
+  );
+  return landed.refused !== null ? landed.refused : landed.value;
+}
+
+// ── Staff acts on the PUBLIC catalog: list it, add a custom server, edit one ─────────────────
+
+/**
+ * A pending file PROPOSAL on a public server — a non-current, non-dismissed revision newer than
+ * the current, awaiting a staff decision. When a manually-curated server has fallen several file
+ * versions behind, this is the NEWEST such (highest seq): promoting it supersedes the rest.
+ */
+export interface McpPublicProposal {
+  revisionId: string;
+  seq: number;
+  upstreamVersion: string | null;
+  createdAt: Date;
+}
+
+/** One public catalog server as the staff panel lists it: what it offers now, and any pending
+ *  proposal the file has filed against it. */
+export interface McpPublicServerRow {
+  serverId: string;
+  name: string | null;
+  displayName: string;
+  description: string | null;
+  /** The brand-mark key the row flies — carried so an edit preserves it rather than clearing it. */
+  icon: string | null;
+  status: string;
+  authMode: string | null;
+  authNote: string | null;
+  scopeMenu: unknown;
+  /** A staff edit or promote has taken this server in hand, so the file proposes rather than
+   *  advances. */
+  manuallyCurated: boolean;
+  currentRevisionId: string | null;
+  /** The version the current revision offers, or NULL when it names none / there is no current. */
+  currentVersion: string | null;
+  /** The row's `updated_at` in epoch millis — the optimistic-concurrency stamp an edit carries back. */
+  updatedAt: number;
+  /** How many workspaces connect this server. */
+  connections: number;
+  /** The newest pending file proposal, or null when the server is settled. */
+  proposal: McpPublicProposal | null;
+}
+
+/**
+ * THE PUBLIC CATALOG, for the operator: every public server, its current version, and its newest
+ * pending proposal, display-name ordered. A private server is its workspace owner's and never here.
+ * The proposal is derived exactly as a surface derives one — a non-current, non-dismissed revision
+ * whose seq is above the current's — so the panel and the delivery lane agree on what is pending.
+ */
+export async function listPublicMcpServers(): Promise<McpPublicServerRow[]> {
+  const rows = await getDb().execute(sql`
+    SELECT ms.id AS server_id, ms.name, ms.display_name, ms.description, ms.icon, ms.status,
+           ms.auth_mode, ms.auth_note, ms.scope_menu, ms.manually_curated,
+           ms.current_revision_id, ms.updated_at, cur.upstream_version AS current_version,
+           (SELECT count(*) FROM web.bundle_mcp bm WHERE bm.server_id = ms.id) AS connections,
+           prop.id AS proposal_id, prop.seq AS proposal_seq,
+           prop.upstream_version AS proposal_version, prop.created_at AS proposal_created_at
+    FROM web.mcp_server ms
+    LEFT JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
+    LEFT JOIN LATERAL (
+      SELECT r.id, r.seq, r.upstream_version, r.created_at
+      FROM web.mcp_server_revision r
+      WHERE r.server_id = ms.id
+        AND r.dismissed_at IS NULL
+        AND (ms.current_revision_id IS NULL OR r.id <> ms.current_revision_id)
+        AND (cur.seq IS NULL OR r.seq > cur.seq)
+      ORDER BY r.seq DESC
+      LIMIT 1
+    ) prop ON TRUE
+    WHERE ms.workspace_id IS NULL
+    ORDER BY lower(ms.display_name)
+  `);
+  return (rows.rows as Record<string, unknown>[]).map((row) => ({
+    serverId: row.server_id as string,
+    name: (row.name as string | null) ?? null,
+    displayName: row.display_name as string,
+    description: (row.description as string | null) ?? null,
+    icon: (row.icon as string | null) ?? null,
+    status: row.status as string,
+    authMode: (row.auth_mode as string | null) ?? null,
+    authNote: (row.auth_note as string | null) ?? null,
+    scopeMenu: row.scope_menu ?? null,
+    manuallyCurated: row.manually_curated === true,
+    currentRevisionId: (row.current_revision_id as string | null) ?? null,
+    currentVersion: (row.current_version as string | null) ?? null,
+    updatedAt: new Date(row.updated_at as string).getTime(),
+    connections: Number(row.connections ?? 0),
+    proposal:
+      row.proposal_id === null || row.proposal_id === undefined
+        ? null
+        : {
+            revisionId: row.proposal_id as string,
+            seq: Number(row.proposal_seq),
+            upstreamVersion: (row.proposal_version as string | null) ?? null,
+            createdAt: new Date(row.proposal_created_at as string),
+          },
+  }));
+}
+
+/** A public server the catalog OFFERS must state a verified sign-in tier — the one fact a vendor's
+ *  own word never settles. Required at add and edit, exactly as the file sync requires it of every
+ *  entry, so a public row is never on offer while saying nobody checked. */
+const PUBLIC_TIER_REQUIRED: McpGateRefusal = {
+  code: "MCP_AUTH_MODE_REQUIRED",
+  message:
+    "a public server the catalog offers must state a verified sign-in tier before it goes on offer",
+};
+
+/**
+ * The key a DELIVERED document carries so a machine reads the verified sign-in tier — the same
+ * word the file sync injects, and the one `mcp_render` reads. The column is the catalog's own
+ * record of the tier; this is what the client is handed, so a public document staff author must
+ * carry it too, or a machine would see no tier (or a vendor's stale claim) and sign in wrongly.
+ */
+export const DELIVERED_AUTH_KEY = "sh.topos/auth";
+
+/**
+ * THE DELIVERED PUBLIC DOCUMENT — what a public catalog row stores and hands a machine, built from
+ * an authored one exactly as the file sync's `deliveredDocumentOf` builds it from a file entry: the
+ * registry backbone (name, description, remotes/packages, websiteUrl) plus the ONE `_meta` word the
+ * client reads for the tier, and NOTHING ELSE.
+ *
+ * VERSIONLESS, deliberately. A public catalog server carries no version (the no-fake-version rule,
+ * and every file-sourced row is versionless), so the authored `version` — and the `$schema` claim
+ * that would require one — are dropped. This is also what lets a tier be corrected: the tier lives
+ * in the delivered document, and were the document versioned, changing the tier would need a second
+ * document under the same version, which "one document per version" forbids.
+ */
+function deliveredPublicDocument(
+  document: Record<string, unknown>,
+  authMode: McpAuthMode,
+): Record<string, unknown> {
+  const doc: Record<string, unknown> = { name: document.name, description: document.description };
+  if (Array.isArray(document.remotes)) {
+    doc.remotes = document.remotes;
+  }
+  if (Array.isArray(document.packages)) {
+    doc.packages = document.packages;
+  }
+  if (typeof document.websiteUrl === "string" && document.websiteUrl.length > 0) {
+    doc.websiteUrl = document.websiteUrl;
+  }
+  doc._meta = { [DELIVERED_AUTH_KEY]: authMode };
+  return doc;
+}
+
+/** The verified tier a delivered document carries, or null when it names none or an unknown one —
+ *  what `mcp_render` reads, and the value the row's column must agree with. */
+function deliveredAuthOf(document: unknown): McpAuthMode | null {
+  if (typeof document !== "object" || document === null) {
+    return null;
+  }
+  const meta = (document as Record<string, unknown>)._meta;
+  if (typeof meta !== "object" || meta === null) {
+    return null;
+  }
+  const tier = (meta as Record<string, unknown>)[DELIVERED_AUTH_KEY];
+  return tier === "none" || tier === "oauth" || tier === "manual" ? tier : null;
+}
+
+/**
+ * Order-insensitive document content, so two documents that say the same thing compare equal
+ * regardless of key order — a jsonb round-trip reorders keys, so the stored current and a freshly
+ * built one must be compared this way, not by `JSON.stringify` (this mirrors the file sync's dedupe).
+ */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/**
+ * ADD A CUSTOM PUBLIC SERVER — one the file does not carry, written down by staff. It is born
+ * `active`, MANUALLY CURATED (staff authored it, so the file never advances over it — a later file
+ * entry under the same name proposes instead), and its first revision is promoted at once, because
+ * a public row the catalog offers must have something to deliver.
+ *
+ * The document is normalized to the DELIVERED public shape (`deliveredPublicDocument`) — versionless,
+ * with the verified tier folded in so a machine reads what a person established, not a vendor's word;
+ * the column keeps the same tier for the surfaces. The public-name partial unique is the arbiter for
+ * two operators racing the same name — the conflict IS the refusal.
+ */
+export async function createPublicMcpServer(
+  staff: McpCatalogStaff,
+  details: McpServerDetails,
+  document: Record<string, unknown>,
+): Promise<McpServerOutcome> {
+  if (details.authMode === null) {
+    return { refusal: PUBLIC_TIER_REQUIRED };
+  }
+  // A `manual` server needs its one line UP FRONT — refused here, not only at promotion, so a save
+  // never half-writes and learns at the end that it cannot be offered.
+  const noteMissing = authNoteRefusal({
+    authMode: details.authMode,
+    authNote: details.authNote ?? null,
+  });
+  if (noteMissing !== null) {
+    return { refusal: noteMissing };
+  }
+  const stored = deliveredPublicDocument(document, details.authMode);
+  const read = mcpRevisionFacts(stored, { requireVersion: false });
+  if (read.refusal !== null) {
+    return { refusal: read.refusal };
+  }
+  const landed = await inFinalTxOrRefusal<McpServerOutcome, McpServerOutcome>(
+    async (tx, refuse) => {
+      // SERIALIZE THE NAME CLAIM. The partial-unique index arbitrates named rows, but the null-name
+      // shadow-check below is a plain read, so two transactions claiming one embedded name (a create
+      // racing a null-name activation) could both pass it. A transaction advisory lock on the name —
+      // taken by both this door and the edit door — makes them serialize, so the second sees the
+      // first's committed row and refuses.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${read.facts.name}, 0))`);
+      // A self-maintained public row (name IS NULL) already serving this name by the name inside its
+      // document reserves it exactly as a named row does — every name lane reads it by its embedded
+      // name. The public partial-unique index constrains only `name`, so it cannot see a null-name
+      // row; this is the check that keeps the name one server's either way.
+      const shadowed = await tx.execute(sql`
+        SELECT 1
+        FROM web.mcp_server ms
+        JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
+        WHERE ms.workspace_id IS NULL AND ms.name IS NULL
+          AND cur.document->>'name' = ${read.facts.name}
+        LIMIT 1
+      `);
+      if ((shadowed.rows as unknown[]).length > 0) {
+        return refuse({
+          refusal: {
+            code: "MCP_NAME_TAKEN",
+            message: `the catalog already carries a self-maintained ${read.facts.name}`,
+          },
+        });
+      }
+      const serverId = mintMcpServerId();
+      const born = await tx
+        .insert(mcpServer)
+        .values({
+          id: serverId,
+          workspaceId: null,
+          name: read.facts.name,
+          displayName: details.displayName,
+          description: details.description ?? null,
+          websiteUrl: details.websiteUrl ?? null,
+          icon: details.icon ?? null,
+          authMode: details.authMode,
+          authNote: details.authNote ?? null,
+          scopeMenu: details.scopeMenu ?? null,
+          status: "active",
+          manuallyCurated: true,
+        })
+        .onConflictDoNothing()
+        .returning({ id: mcpServer.id });
+      if (born[0] === undefined) {
+        return refuse({
+          refusal: {
+            code: "MCP_NAME_TAKEN",
+            message: `the catalog already carries ${read.facts.name}`,
+          },
+        });
+      }
+      const added = await addMcpRevisionInTx(tx, serverId, { document: stored });
+      if (added.refusal !== null) {
+        return refuse({ refusal: added.refusal });
+      }
+      const server = await lockServerInTx(tx, serverId);
+      if (server === undefined) {
+        return refuse({ refusal: SERVER_NOT_FOUND });
+      }
+      const promoted = await promoteMcpRevisionInTx(tx, server, added.revisionId, staff.display);
+      if (promoted !== null) {
+        return refuse({ refusal: promoted });
+      }
+      await auditCatalogInTx(tx, staff, "mcp_public_server_created", serverId, {
+        name: read.facts.name,
+        displayName: details.displayName,
+      });
+      return { refusal: null, serverId, revisionId: added.revisionId };
+    },
+  );
+  return landed.refused !== null ? landed.refused : landed.value;
+}
+
+/**
+ * EDIT A PUBLIC SERVER — update its editorial columns and, when what a machine RECEIVES changes,
+ * promote a new revision of it; either way MARK IT MANUALLY CURATED so the file proposes future
+ * versions rather than advancing over this hand. A private row, or one that does not exist, answers
+ * "no such server" — staff edit the public catalog only, and the answer to "may I edit this" must
+ * not double as a way to learn a private server exists.
+ *
+ * EDITORIAL-ONLY IS NOT A NEW VERSION. The display name, the scope menu and the manual note are the
+ * ROW's own columns, not part of the delivered document; changing only those must not append a
+ * duplicate revision — which a versioned document could not even do (one document per version), so
+ * editing such a server's metadata would otherwise refuse `MCP_VERSION_HELD` and roll back. So the
+ * delivered document is materialized (the tier folded in), compared by content to the current, and
+ * a new revision is appended only when it actually differs.
+ *
+ * OPTIMISTIC CONCURRENCY. A staff view is a snapshot; a save built on it can overwrite another
+ * operator's work — a promotion that moved the pointer, or even a bare editorial change that moved
+ * no revision. Passing `expectedRowStamp` (the row's `updated_at` in epoch millis, as the edit view
+ * loaded it) makes this refuse when the row has been written since — every edit and every promote
+ * bumps `updated_at`, so it catches a stale save the revision id alone would miss. Omit it
+ * (undefined) to skip the check.
+ */
+export async function editPublicMcpServer(
+  staff: McpCatalogStaff,
+  serverId: string,
+  details: McpServerDetails,
+  document: Record<string, unknown>,
+  expectedRowStamp?: number,
+): Promise<McpServerOutcome> {
+  if (details.authMode === null) {
+    return { refusal: PUBLIC_TIER_REQUIRED };
+  }
+  // UP FRONT, and it matters here more than anywhere: the editorial-only fast path below never
+  // reaches the promotion-time note gate, so clearing a `manual` server's note without touching its
+  // document would otherwise leave it offered with no instructions.
+  const noteMissing = authNoteRefusal({
+    authMode: details.authMode,
+    authNote: details.authNote ?? null,
+  });
+  if (noteMissing !== null) {
+    return { refusal: noteMissing };
+  }
+  const stored = deliveredPublicDocument(document, details.authMode);
+  const landed = await inFinalTxOrRefusal<McpServerOutcome, McpServerOutcome>(
+    async (tx, refuse) => {
+      const server = await lockServerInTx(tx, serverId);
+      if (server === undefined || server.workspaceId !== null) {
+        return refuse({ refusal: SERVER_NOT_FOUND });
+      }
+      // Refuse a save built on a stale view: if the caller named the stamp it loaded and the row has
+      // been written under this lock since (an edit or a promote), this would overwrite that newer
+      // work — the row fields, or the pointer every workspace follows. Reload and edit again.
+      if (expectedRowStamp !== undefined && server.updatedAt.getTime() !== expectedRowStamp) {
+        return refuse({
+          refusal: {
+            code: "MCP_REVISION_STALE",
+            message: "this server changed since you loaded it — reload and edit it again",
+          },
+        });
+      }
+      // The current document, read once — for the identity fence and the unchanged-delivery check.
+      const currentRows =
+        server.currentRevisionId === null
+          ? []
+          : await tx
+              .select({ document: mcpServerRevision.document })
+              .from(mcpServerRevision)
+              .where(eq(mcpServerRevision.id, server.currentRevisionId))
+              .limit(1);
+      const currentDoc = (currentRows[0]?.document as Record<string, unknown> | undefined) ?? null;
+      // FENCE THE IDENTITY of a null-name row. `addMcpRevisionInTx` refuses a document that renames a
+      // NAMED server, but a self-maintained row carries no `name` — its identity is the name inside
+      // its current document, and the partial-unique index cannot see it. So for a null-name row an
+      // edit must neither (a) change an existing embedded name, nor (b) activate one under a name
+      // some OTHER public row already carries — either would make a name-based read a coin flip.
+      // (A named server is fenced by `addMcpRevisionInTx` below.)
+      let nameClaim: string | undefined;
+      if (server.name === null) {
+        const read = mcpRevisionFacts(stored, { requireVersion: false });
+        if (read.refusal !== null) {
+          return refuse({ refusal: read.refusal });
+        }
+        const embeddedName = read.facts.name;
+        const currentName = typeof currentDoc?.name === "string" ? currentDoc.name : null;
+        if (currentName !== null && currentName !== embeddedName) {
+          return refuse({
+            refusal: {
+              code: "MCP_NAME_MISMATCH",
+              message: `this server is ${currentName}; a version of it cannot call itself ${embeddedName}`,
+            },
+          });
+        }
+        // The same advisory lock the create door takes, so a null-name activation and a create
+        // claiming one embedded name serialize instead of both passing a plain read.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${embeddedName}, 0))`);
+        const shadowed = await tx.execute(sql`
+          SELECT 1
+          FROM web.mcp_server ms
+          LEFT JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
+          WHERE ms.workspace_id IS NULL AND ms.id <> ${serverId}
+            AND COALESCE(ms.name, cur.document->>'name') = ${embeddedName}
+          LIMIT 1
+        `);
+        if ((shadowed.rows as unknown[]).length > 0) {
+          return refuse({
+            refusal: {
+              code: "MCP_NAME_TAKEN",
+              message: `the catalog already carries ${embeddedName}`,
+            },
+          });
+        }
+        // CLAIM THE NAME into the column. A staff-curated row is a proper named row: writing the
+        // embedded name in lets the partial-unique index arbitrate it and lets the authoritative
+        // file sync (which searches `mcp_server.name`) FIND this row rather than inserting a second
+        // public server under the same name when a later `catalog.json` release adds it.
+        nameClaim = embeddedName;
+      }
+      await tx
+        .update(mcpServer)
+        .set({
+          ...(nameClaim === undefined ? {} : { name: nameClaim }),
+          displayName: details.displayName,
+          description: details.description ?? null,
+          websiteUrl: details.websiteUrl ?? null,
+          icon: details.icon ?? null,
+          authMode: details.authMode,
+          authNote: details.authNote ?? null,
+          scopeMenu: details.scopeMenu ?? null,
+          manuallyCurated: true,
+          // An edit CURATES the server into the offered catalog — relist a row a migration left
+          // `delisted`, so an edited server is one workspaces can actually connect.
+          status: "active",
+        })
+        .where(eq(mcpServer.id, serverId));
+      // When the delivered document is unchanged, this is a column-only edit: keep the current
+      // revision and change nothing a machine receives. (Compared order-insensitively — the stored
+      // current came back through jsonb.)
+      if (currentDoc !== null && stableStringify(currentDoc) === stableStringify(stored)) {
+        await auditCatalogInTx(tx, staff, "mcp_public_server_edited", serverId, {
+          revisionId: server.currentRevisionId,
+          displayName: details.displayName,
+        });
+        return { refusal: null, serverId, revisionId: server.currentRevisionId as string };
+      }
+      const added = await addMcpRevisionInTx(tx, serverId, { document: stored });
+      if (added.refusal !== null) {
+        return refuse({ refusal: added.refusal });
+      }
+      // Promote against the server as edited — the auth note just written is what the manual-note
+      // gate must see, so re-read it under the lock this transaction already holds.
+      const edited = await lockServerInTx(tx, serverId);
+      if (edited === undefined) {
+        return refuse({ refusal: SERVER_NOT_FOUND });
+      }
+      const promoted = await promoteMcpRevisionInTx(tx, edited, added.revisionId, staff.display);
+      if (promoted !== null) {
+        return refuse({ refusal: promoted });
+      }
+      await auditCatalogInTx(tx, staff, "mcp_public_server_edited", serverId, {
+        revisionId: added.revisionId,
+        displayName: details.displayName,
+      });
+      return { refusal: null, serverId, revisionId: added.revisionId };
     },
   );
   return landed.refused !== null ? landed.refused : landed.value;

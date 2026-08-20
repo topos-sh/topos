@@ -482,7 +482,10 @@ describe("staff promote and dismiss a proposal", () => {
     const { promoteMcpRevision } = await catalog();
     const serverId = await seedPublicServer("mcps_promote", "com.example/promote");
     const first = await addAndPromote(serverId, versionlessDocument("com.example/promote"));
-    const proposal = await addRevision(serverId, serverDocument("com.example/promote", "3.0.0"));
+    const proposal = await addRevision(
+      serverId,
+      serverDocument("com.example/promote", "3.0.0", { _meta: { "sh.topos/auth": "none" } }),
+    );
     expect(proposal.refusal).toBeNull();
     if (proposal.refusal !== null) {
       return;
@@ -531,6 +534,29 @@ describe("staff promote and dismiss a proposal", () => {
     expect(await manuallyCuratedOf(serverId)).toBe(true);
   });
 
+  it("refuses to dismiss a revision that has become history", async () => {
+    const { promoteMcpRevision, dismissMcpRevision } = await catalog();
+    const serverId = await seedPublicServer("mcps_dismiss_hist", "com.example/dismiss-hist");
+    await addAndPromote(serverId, versionlessDocument("com.example/dismiss-hist"));
+    const older = await addRevision(serverId, serverDocument("com.example/dismiss-hist", "2.0.0"));
+    const newer = await addRevision(
+      serverId,
+      serverDocument("com.example/dismiss-hist", "3.0.0", { _meta: { "sh.topos/auth": "none" } }),
+    );
+    if (older.refusal !== null || newer.refusal !== null) {
+      throw new Error("seeding proposals failed");
+    }
+    // Promote the newest; the older proposal is now history, below the current.
+    expect((await promoteMcpRevision({ display: "Staff" }, newer.revisionId)).refusal).toBeNull();
+    const stale = await dismissMcpRevision({ display: "Staff" }, older.revisionId);
+    expect(stale.refusal?.code).toBe("MCP_REVISION_NOT_PROPOSAL");
+    const rows = await db.q<{ dismissed_at: string | null }>(
+      `SELECT dismissed_at FROM web.mcp_server_revision WHERE id = $1`,
+      [older.revisionId],
+    );
+    expect(rows[0]?.dismissed_at).toBeNull();
+  });
+
   it("a private server's revision is not a staff concern — promote answers as not found", async () => {
     const { createPrivateMcpServer, promoteMcpRevision } = await catalog();
     const created = await createPrivateMcpServer(
@@ -573,5 +599,495 @@ describe("the schema a document declares", () => {
     );
     expect(rows[0]?.schema_version).toContain("2025-12-11");
     expect(rows[1]?.schema_version).toBeNull();
+  });
+});
+
+describe("staff manage the public catalog: list, add, edit", () => {
+  it("lists a public server with its current version and its newest pending proposal", async () => {
+    const { listPublicMcpServers } = await catalog();
+    const serverId = await seedPublicServer("mcps_list", "com.example/list");
+    await addAndPromote(serverId, versionlessDocument("com.example/list"));
+    // Two file versions ahead at once: the list surfaces the NEWEST as the one decision to make.
+    await addRevision(serverId, serverDocument("com.example/list", "2.0.0"));
+    const proposal = await addRevision(serverId, serverDocument("com.example/list", "2.1.0"));
+    if (proposal.refusal !== null) {
+      throw new Error(proposal.refusal.message);
+    }
+    const row = (await listPublicMcpServers()).find((s) => s.name === "com.example/list");
+    expect(row).toBeDefined();
+    expect(row?.currentVersion).toBeNull(); // the versionless current names none
+    expect(row?.connections).toBe(0);
+    expect(row?.proposal?.revisionId).toBe(proposal.revisionId);
+    expect(row?.proposal?.upstreamVersion).toBe("2.1.0");
+  });
+
+  it("shows no proposal for a settled server", async () => {
+    const { listPublicMcpServers } = await catalog();
+    const serverId = await seedPublicServer("mcps_settled", "com.example/settled");
+    await addAndPromote(serverId, versionlessDocument("com.example/settled"));
+    const row = (await listPublicMcpServers()).find((s) => s.name === "com.example/settled");
+    expect(row?.proposal).toBeNull();
+  });
+
+  it("add creates a public, manually-curated server and promotes its first revision", async () => {
+    const { createPublicMcpServer } = await catalog();
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Weather", authMode: "none" },
+      versionlessDocument("com.example/weather"),
+    );
+    expect(created.refusal).toBeNull();
+    if (created.refusal !== null) {
+      return;
+    }
+    expect(await currentRevisionOf(created.serverId)).toBe(created.revisionId);
+    expect(await manuallyCuratedOf(created.serverId)).toBe(true);
+    const rows = await db.q<{ workspace_id: string | null; status: string; auth_mode: string }>(
+      `SELECT workspace_id, status, auth_mode FROM web.mcp_server WHERE id = $1`,
+      [created.serverId],
+    );
+    expect(rows[0]?.workspace_id).toBeNull();
+    expect(rows[0]?.status).toBe("active");
+    expect(rows[0]?.auth_mode).toBe("none");
+    // The verified tier is materialized into the DELIVERED document, so a machine reads it (the
+    // client derives auth from this key, not the column).
+    const doc = await db.q<{ document: { _meta?: Record<string, unknown> } }>(
+      `SELECT document FROM web.mcp_server_revision WHERE id = $1`,
+      [created.revisionId],
+    );
+    expect(doc[0]?.document._meta?.["sh.topos/auth"]).toBe("none");
+  });
+
+  it("add refuses a name a self-maintained (name-null) public row already serves", async () => {
+    const { createPublicMcpServer } = await catalog();
+    // A public row addressed by the name inside its document, carrying no `name` of its own.
+    await db.q(
+      `INSERT INTO web.mcp_server (id, workspace_id, name, display_name, auth_mode, status)
+       VALUES ('mcps_selfmaint_x', NULL, NULL, 'Self Maintained', 'none', 'active')`,
+    );
+    await addAndPromote("mcps_selfmaint_x", versionlessDocument("com.example/self-maint-x"));
+    const refused = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Shadow", authMode: "none" },
+      versionlessDocument("com.example/self-maint-x"),
+    );
+    expect(refused.refusal?.code).toBe("MCP_NAME_TAKEN");
+    // Nothing new was created under the name — the self-maintained row is still the only one.
+    const rows = await db.q<{ n: number }>(
+      `SELECT count(*)::int AS n FROM web.mcp_server ms
+       JOIN web.mcp_server_revision cur ON cur.id = ms.current_revision_id
+       WHERE ms.workspace_id IS NULL AND cur.document->>'name' = 'com.example/self-maint-x'`,
+    );
+    expect(Number(rows[0]?.n)).toBe(1);
+  });
+
+  it("stores public documents versionless, even from a versioned input", async () => {
+    const { createPublicMcpServer } = await catalog();
+    // A version passed in is editorial framing; the stored public document drops it (and the schema
+    // claim that would require it), matching the file sync — so a tier can be corrected later.
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Versioned in", authMode: "none" },
+      serverDocument("com.example/versionless-store", "9.9.9", {
+        $schema: "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+      }),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    const rows = await db.q<{ upstream_version: string | null; document: Record<string, unknown> }>(
+      `SELECT upstream_version, document FROM web.mcp_server_revision WHERE id = $1`,
+      [created.revisionId],
+    );
+    expect(rows[0]?.upstream_version).toBeNull();
+    expect(rows[0]?.document).not.toHaveProperty("version");
+    expect(rows[0]?.document).not.toHaveProperty("$schema");
+  });
+
+  it("edit changing only the display name keeps the revision — no duplicate", async () => {
+    const { createPublicMcpServer, editPublicMcpServer } = await catalog();
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Editable meta", authMode: "none" },
+      versionlessDocument("com.example/editorial-only"),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    const edited = await editPublicMcpServer(
+      { display: "Ops" },
+      created.serverId,
+      { displayName: "Renamed", authMode: "none" },
+      versionlessDocument("com.example/editorial-only"),
+    );
+    expect(edited.refusal).toBeNull();
+    // Same revision, no second one appended — the delivered document did not change.
+    expect(edited.refusal === null && edited.revisionId).toBe(created.revisionId);
+    expect(await currentRevisionOf(created.serverId)).toBe(created.revisionId);
+    const rows = await db.q<{ n: number }>(
+      `SELECT count(*)::int AS n FROM web.mcp_server_revision WHERE server_id = $1`,
+      [created.serverId],
+    );
+    expect(Number(rows[0]?.n)).toBe(1);
+    const server = await db.q<{ display_name: string }>(
+      `SELECT display_name FROM web.mcp_server WHERE id = $1`,
+      [created.serverId],
+    );
+    expect(server[0]?.display_name).toBe("Renamed");
+  });
+
+  it("add refuses a public server with no established sign-in tier", async () => {
+    const { createPublicMcpServer } = await catalog();
+    const refused = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "No tier", authMode: null },
+      versionlessDocument("com.example/no-tier"),
+    );
+    expect(refused.refusal?.code).toBe("MCP_AUTH_MODE_REQUIRED");
+  });
+
+  it("add refuses a `manual` server with no line saying what a person must do", async () => {
+    const { createPublicMcpServer } = await catalog();
+    const refused = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Manual", authMode: "manual", authNote: "  " },
+      versionlessDocument("com.example/manual-add"),
+    );
+    expect(refused.refusal?.code).toBe("MCP_AUTH_NOTE_REQUIRED");
+    const rows = await db.q(`SELECT id FROM web.mcp_server WHERE name = 'com.example/manual-add'`);
+    expect(rows).toEqual([]); // the refusal left nothing behind
+  });
+
+  it("add refuses a name the public catalog already carries", async () => {
+    const { createPublicMcpServer } = await catalog();
+    const refused = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Dup", authMode: "none" },
+      versionlessDocument("com.github/mcp"),
+    );
+    expect(refused.refusal?.code).toBe("MCP_NAME_TAKEN");
+  });
+
+  it("edit appends a new current revision and marks the server manually curated", async () => {
+    const { createPublicMcpServer, editPublicMcpServer } = await catalog();
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Editable", authMode: "none" },
+      versionlessDocument("com.example/editable"),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    // The file never touched it, so reset the bit the add set — proving edit is what re-sets it.
+    await db.q(`UPDATE web.mcp_server SET manually_curated = false WHERE id = $1`, [
+      created.serverId,
+    ]);
+    const edited = await editPublicMcpServer(
+      { display: "Ops" },
+      created.serverId,
+      { displayName: "Editable v2", authMode: "oauth" },
+      versionlessDocument("com.example/editable", { description: "Now with oauth." }),
+    );
+    if (edited.refusal !== null) {
+      throw new Error(edited.refusal.message);
+    }
+    expect(await currentRevisionOf(created.serverId)).toBe(edited.revisionId);
+    expect(await manuallyCuratedOf(created.serverId)).toBe(true);
+    const rows = await db.q<{ seq: number }>(
+      `SELECT seq FROM web.mcp_server_revision WHERE server_id = $1 ORDER BY seq`,
+      [created.serverId],
+    );
+    expect(rows.map((r) => Number(r.seq))).toEqual([1, 2]);
+    const server = await db.q<{ display_name: string; auth_mode: string }>(
+      `SELECT display_name, auth_mode FROM web.mcp_server WHERE id = $1`,
+      [created.serverId],
+    );
+    expect(server[0]?.display_name).toBe("Editable v2");
+    expect(server[0]?.auth_mode).toBe("oauth");
+  });
+
+  it("edit refuses a revision that renames the server", async () => {
+    const { createPublicMcpServer, editPublicMcpServer } = await catalog();
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Fixed name", authMode: "none" },
+      versionlessDocument("com.example/fixed-name"),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    const renamed = await editPublicMcpServer(
+      { display: "Ops" },
+      created.serverId,
+      { displayName: "Fixed name", authMode: "none" },
+      versionlessDocument("com.example/other-name"),
+    );
+    expect(renamed.refusal?.code).toBe("MCP_NAME_MISMATCH");
+  });
+
+  it("edit answers `no such server` for a workspace's private one", async () => {
+    const { createPrivateMcpServer, editPublicMcpServer } = await catalog();
+    const mine = await createPrivateMcpServer(
+      asOwner(wsId, "u_owner", "Owner"),
+      { displayName: "Private", authMode: "none" },
+      versionlessDocument("com.example/private-edit"),
+    );
+    if (mine.refusal !== null) {
+      throw new Error(mine.refusal.message);
+    }
+    const denied = await editPublicMcpServer(
+      { display: "Ops" },
+      mine.serverId,
+      { displayName: "Hijack", authMode: "none" },
+      versionlessDocument("com.example/private-edit"),
+    );
+    expect(denied.refusal?.code).toBe("MCP_SERVER_NOT_FOUND");
+  });
+
+  it("edit refuses renaming a self-maintained (name-null) public server", async () => {
+    const { editPublicMcpServer } = await catalog();
+    await db.q(
+      `INSERT INTO web.mcp_server (id, workspace_id, name, display_name, auth_mode, status)
+       VALUES ('mcps_selfmaint_edit', NULL, NULL, 'Self Maint Edit', 'none', 'active')`,
+    );
+    await addAndPromote("mcps_selfmaint_edit", versionlessDocument("com.example/self-maint-edit"));
+    // The identity is the name inside its current document; an edit may not change it, even though
+    // the row carries no `name` for `addMcpRevisionInTx` to check.
+    const renamed = await editPublicMcpServer(
+      { display: "Ops" },
+      "mcps_selfmaint_edit",
+      { displayName: "Renamed", authMode: "none" },
+      versionlessDocument("com.example/self-maint-renamed"),
+    );
+    expect(renamed.refusal?.code).toBe("MCP_NAME_MISMATCH");
+  });
+
+  it("edit refuses activating a name-null row under a name another public row holds", async () => {
+    const { editPublicMcpServer } = await catalog();
+    // A public row with no `name` AND no current revision yet — the edit would give it its identity.
+    await db.q(
+      `INSERT INTO web.mcp_server (id, workspace_id, name, display_name, auth_mode, status)
+       VALUES ('mcps_adopt', NULL, NULL, 'To Adopt', 'none', 'active')`,
+    );
+    // A name the seeded catalog already carries.
+    const taken = await editPublicMcpServer(
+      { display: "Ops" },
+      "mcps_adopt",
+      { displayName: "Adopted", authMode: "none" },
+      versionlessDocument("com.github/mcp"),
+    );
+    expect(taken.refusal?.code).toBe("MCP_NAME_TAKEN");
+    // A free name activates it.
+    const fresh = await editPublicMcpServer(
+      { display: "Ops" },
+      "mcps_adopt",
+      { displayName: "Adopted", authMode: "none" },
+      versionlessDocument("com.example/adopted-fresh"),
+    );
+    expect(fresh.refusal).toBeNull();
+    expect(await currentRevisionOf("mcps_adopt")).not.toBeNull();
+    // The embedded name is CLAIMED into the column, so the file sync (which searches by `name`)
+    // finds this row rather than inserting a duplicate under the same name later.
+    const named = await db.q<{ name: string | null }>(
+      `SELECT name FROM web.mcp_server WHERE id = 'mcps_adopt'`,
+    );
+    expect(named[0]?.name).toBe("com.example/adopted-fresh");
+  });
+
+  it("edit refuses a save built on a stale row stamp, but accepts the real one", async () => {
+    const { createPublicMcpServer, editPublicMcpServer, listPublicMcpServers } = await catalog();
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Stale", authMode: "none" },
+      versionlessDocument("com.example/stale"),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    const stamp = (await listPublicMcpServers()).find((s) => s.serverId === created.serverId)
+      ?.updatedAt as number;
+    // A save built on an OLDER stamp than the row carries — another operator wrote it since.
+    const stale = await editPublicMcpServer(
+      { display: "Ops" },
+      created.serverId,
+      { displayName: "Stale v2", authMode: "none" },
+      versionlessDocument("com.example/stale", { description: "changed" }),
+      stamp - 1000,
+    );
+    expect(stale.refusal?.code).toBe("MCP_REVISION_STALE");
+    // The real stamp succeeds.
+    const fresh = await editPublicMcpServer(
+      { display: "Ops" },
+      created.serverId,
+      { displayName: "Stale v2", authMode: "none" },
+      versionlessDocument("com.example/stale", { description: "changed" }),
+      stamp,
+    );
+    expect(fresh.refusal).toBeNull();
+  });
+
+  it("edit refuses clearing a manual server's note, even on an editorial-only change", async () => {
+    const { createPublicMcpServer, editPublicMcpServer } = await catalog();
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Manual srv", authMode: "manual", authNote: "Mint a token first." },
+      versionlessDocument("com.example/manual-edit"),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    // Same document + tier, but blank the note — the editorial-only fast path must still refuse.
+    const refused = await editPublicMcpServer(
+      { display: "Ops" },
+      created.serverId,
+      { displayName: "Manual srv", authMode: "manual", authNote: "  " },
+      versionlessDocument("com.example/manual-edit"),
+    );
+    expect(refused.refusal?.code).toBe("MCP_AUTH_NOTE_REQUIRED");
+    const rows = await db.q<{ auth_note: string | null }>(
+      `SELECT auth_note FROM web.mcp_server WHERE id = $1`,
+      [created.serverId],
+    );
+    expect(rows[0]?.auth_note).toBe("Mint a token first.");
+  });
+
+  it("edit relists a server a migration left delisted", async () => {
+    const { createPublicMcpServer, editPublicMcpServer } = await catalog();
+    const created = await createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: "Relist by edit", authMode: "none" },
+      versionlessDocument("com.example/relist-edit"),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    await db.q(`UPDATE web.mcp_server SET status = 'delisted' WHERE id = $1`, [created.serverId]);
+    const edited = await editPublicMcpServer(
+      { display: "Ops" },
+      created.serverId,
+      { displayName: "Relisted", authMode: "none" },
+      versionlessDocument("com.example/relist-edit"),
+    );
+    expect(edited.refusal).toBeNull();
+    const rows = await db.q<{ status: string }>(`SELECT status FROM web.mcp_server WHERE id = $1`, [
+      created.serverId,
+    ]);
+    expect(rows[0]?.status).toBe("active");
+  });
+});
+
+describe("staff promotion advances only forward and relists", () => {
+  it("refuses to promote a revision no longer newer than the current", async () => {
+    const { promoteMcpRevision } = await catalog();
+    const serverId = await seedPublicServer("mcps_backward", "com.example/backward");
+    await addAndPromote(serverId, versionlessDocument("com.example/backward"));
+    const older = await addRevision(serverId, serverDocument("com.example/backward", "2.0.0"));
+    const newer = await addRevision(
+      serverId,
+      serverDocument("com.example/backward", "3.0.0", { _meta: { "sh.topos/auth": "none" } }),
+    );
+    if (older.refusal !== null || newer.refusal !== null) {
+      throw new Error("seeding proposals failed");
+    }
+    // Promote the newest; the older one is now history, and promoting it would roll the offer back.
+    expect((await promoteMcpRevision({ display: "Staff" }, newer.revisionId)).refusal).toBeNull();
+    expect(await currentRevisionOf(serverId)).toBe(newer.revisionId);
+    const stale = await promoteMcpRevision({ display: "Staff" }, older.revisionId);
+    expect(stale.refusal?.code).toBe("MCP_REVISION_NOT_PROPOSAL");
+    expect(await currentRevisionOf(serverId)).toBe(newer.revisionId);
+  });
+
+  it("relists a delisted server when its proposal is promoted", async () => {
+    const { promoteMcpRevision } = await catalog();
+    const serverId = await seedPublicServer("mcps_relist", "com.example/relist", {
+      status: "delisted",
+    });
+    await addAndPromote(serverId, versionlessDocument("com.example/relist"));
+    const proposal = await addRevision(
+      serverId,
+      serverDocument("com.example/relist", "2.0.0", { _meta: { "sh.topos/auth": "none" } }),
+    );
+    if (proposal.refusal !== null) {
+      throw new Error(proposal.refusal.message);
+    }
+    expect(
+      (await promoteMcpRevision({ display: "Staff" }, proposal.revisionId)).refusal,
+    ).toBeNull();
+    const rows = await db.q<{ status: string }>(`SELECT status FROM web.mcp_server WHERE id = $1`, [
+      serverId,
+    ]);
+    expect(rows[0]?.status).toBe("active");
+  });
+
+  async function seedTierProposal(name: string, proposalId: string, tier: string): Promise<string> {
+    const created = await (await catalog()).createPublicMcpServer(
+      { display: "Ops" },
+      { displayName: name, authMode: "oauth" },
+      versionlessDocument(name),
+    );
+    if (created.refusal !== null) {
+      throw new Error(created.refusal.message);
+    }
+    await db.q(
+      `INSERT INTO web.mcp_server_revision (id, server_id, seq, document, transport, url)
+       VALUES ($1, $2, 2, $3::jsonb, 'streamable-http', 'https://mcp.example.com/mcp')`,
+      [
+        proposalId,
+        created.serverId,
+        JSON.stringify({
+          name,
+          description: "A server for the suite.",
+          remotes: [{ type: "streamable-http", url: "https://mcp.example.com/mcp" }],
+          _meta: { "sh.topos/auth": tier },
+        }),
+      ],
+    );
+    return created.serverId;
+  }
+
+  it("refuses a proposal whose delivered tier differs from the verified one", async () => {
+    // The column is verified truth (oauth); a proposal delivering a different tier must not
+    // overwrite it — staff reconcile a genuine change through an edit, not a blind promote.
+    const proposalId = `mcpr_${"c".repeat(32)}`;
+    const serverId = await seedTierProposal("com.example/tier-mismatch", proposalId, "none");
+    const res = await (await catalog()).promoteMcpRevision({ display: "Staff" }, proposalId);
+    expect(res.refusal?.code).toBe("MCP_AUTH_TIER_MISMATCH");
+    const rows = await db.q<{ auth_mode: string; current_revision_id: string }>(
+      `SELECT auth_mode, current_revision_id FROM web.mcp_server WHERE id = $1`,
+      [serverId],
+    );
+    // Column and pointer both untouched — verified truth held.
+    expect(rows[0]?.auth_mode).toBe("oauth");
+    expect(rows[0]?.current_revision_id).not.toBe(proposalId);
+  });
+
+  it("promotes a proposal whose delivered tier matches the verified one", async () => {
+    const proposalId = `mcpr_${"d".repeat(32)}`;
+    const serverId = await seedTierProposal("com.example/tier-match", proposalId, "oauth");
+    expect(
+      (await (await catalog()).promoteMcpRevision({ display: "Staff" }, proposalId)).refusal,
+    ).toBeNull();
+    const rows = await db.q<{ auth_mode: string; current_revision_id: string }>(
+      `SELECT auth_mode, current_revision_id FROM web.mcp_server WHERE id = $1`,
+      [serverId],
+    );
+    expect(rows[0]?.current_revision_id).toBe(proposalId);
+    expect(rows[0]?.auth_mode).toBe("oauth");
+  });
+
+  it("refuses a proposal whose document delivers NO tier at all", async () => {
+    const { promoteMcpRevision } = await catalog();
+    const serverId = await seedPublicServer("mcps_notier", "com.example/no-tier-prop");
+    await addAndPromote(serverId, versionlessDocument("com.example/no-tier-prop"));
+    // The document carries no `sh.topos/auth`, so a machine would read no tier — refuse.
+    const proposal = await addRevision(
+      serverId,
+      serverDocument("com.example/no-tier-prop", "2.0.0"),
+    );
+    if (proposal.refusal !== null) {
+      throw new Error(proposal.refusal.message);
+    }
+    const res = await promoteMcpRevision({ display: "Staff" }, proposal.revisionId);
+    expect(res.refusal?.code).toBe("MCP_AUTH_TIER_MISMATCH");
   });
 });
