@@ -34,16 +34,19 @@ CREATE UNIQUE INDEX "mcp_server_private_name" ON "web"."mcp_server" USING btree 
 -- as a non-current proposal. A self-hosted install has no panel, so it never sets this.
 ALTER TABLE "web"."mcp_server" ADD COLUMN "manually_curated" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 
--- BACKFILL curation from the old provenance BEFORE dropping `source`: a public server whose CURRENT
--- revision was not the seed's own row (a staff member accepted an upstream candidate, or wrote a
--- correction) is a decision the file must not silently undo. Marking it curated makes the boot sync
--- treat future file versions as proposals rather than promoting one over the staff choice. The seed
--- rows carry `source = 'seed'`, so an untouched public server stays uncurated and tracks the file.
+-- BACKFILL curation from the old provenance BEFORE dropping `source` and the decision stamps: a
+-- public server a staff member ever TOUCHED is a decision the file must not silently undo. Marking
+-- it curated makes the boot sync treat future file versions as proposals rather than promoting one
+-- over the staff choice. "Touched" is any revision that is not the seed's own row (an accepted
+-- upstream candidate, a correction), OR any revision a staff member decided against (`decided_at`)
+-- or pulled back (`revoked_at`) — even when the current fell back to the seed afterward. A server
+-- with only its untouched seed revision stays uncurated and tracks the file.
 UPDATE "web"."mcp_server" ms SET "manually_curated" = true
 WHERE ms."workspace_id" IS NULL
   AND EXISTS (
     SELECT 1 FROM "web"."mcp_server_revision" r
-    WHERE r."id" = ms."current_revision_id" AND r."source" <> 'seed'
+    WHERE r."server_id" = ms."id"
+      AND (r."source" <> 'seed' OR r."decided_at" IS NOT NULL OR r."revoked_at" IS NOT NULL)
   );--> statement-breakpoint
 
 -- ── mcp_server_revision ─────────────────────────────────────────────────────────────────────
@@ -75,11 +78,16 @@ ALTER TABLE "web"."mcp_server_revision" DROP COLUMN "revoked_at";--> statement-b
 
 -- The new index covers ANY non-null version, where the old one covered only source='registry'. So a
 -- server that legitimately carried two revisions of one version (a staff/owner edit that kept the
--- number) would break the index build. Null the version on all but the newest such revision FIRST —
--- a versionless revision is exempt from the index, and the honest state of a document whose version
--- another revision now owns. This never touches a server with one revision per version.
+-- number) would break the index build. Make all but the newest such revision truly VERSIONLESS
+-- FIRST — the honest state of a document whose version another revision now owns, and exempt from
+-- the index. Both sides are rewritten together so the extracted columns never disagree with the
+-- stored document: the version and its `$schema` (that schema requires a version) come off the
+-- document, and `schema_version` is nulled with `upstream_version`. This never touches a server
+-- with one revision per version.
 UPDATE "web"."mcp_server_revision" r
-SET "upstream_version" = NULL
+SET "upstream_version" = NULL,
+    "schema_version" = NULL,
+    "document" = r."document" - 'version' - '$schema'
 WHERE r."upstream_version" IS NOT NULL
   AND EXISTS (
     SELECT 1 FROM "web"."mcp_server_revision" r2

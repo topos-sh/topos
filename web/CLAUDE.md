@@ -119,14 +119,27 @@ caller.
   fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index.
 - **The MCP lane — a CATALOG, not bytes:** a `kind: 'mcp'` bundle holds no files. It NAMES a
   server (`web.bundle_mcp`, one connection per server per workspace, unique-enforced), the server
-  holds its version history (`web.mcp_server` + `mcp_server_revision`, append-only, a `current`
-  pointer moved in the same fenced transaction as the revision that earns it), and delivery
-  resolves the document from there — a pin exactly, revoked or not, else the server's current.
-  Global rows (`workspace_id IS NULL`) are the install's curated catalog; a workspace's own rows
-  are private and exported nowhere. `auth_mode` is VERIFIED truth (`null` = nobody established
-  it, never rendered as `none`; a `manual` row publishes only with the one line saying what a
-  person must do first). The whole data layer is `app/lib/db/queries.mcp-catalog.server.ts`;
-  `KNOWN_MCP_SCHEMA_VERSIONS` there is the fail-closed `$schema` vocabulary.
+  holds its version history (`web.mcp_server` + `mcp_server_revision`, append-only), and delivery
+  resolves the document from there — a pin to a promoted revision, else the server's `current`.
+  Maturity is the POINTER, not a column: `current_revision_id` names the one people receive, every
+  other revision is a proposal or history (told apart by `seq` against the current), and
+  `dismissed_at` is the one terminal state staff can put a proposal in. ONE storage model for
+  every server, told apart by `workspace_id`: public rows (`NULL`) are the GENERIC catalog, a
+  workspace's own rows are private and exported nowhere. `auth_mode` is VERIFIED truth (`null` =
+  nobody established it, never rendered as `none`; a `manual` row is promoted only with the one
+  line saying what a person must do first). The whole data layer is
+  `app/lib/db/queries.mcp-catalog.server.ts`, where `KNOWN_MCP_SCHEMA_VERSIONS` is the fail-closed
+  `$schema` vocabulary and `promoteMcpRevisionInTx` is the ONE function every pointer move goes
+  through (an owner's save, the file sync, a staff promote) — the seam a later gateway-compat gate
+  sits behind.
+  **The generic catalog is FILE-SOURCED** (`app/lib/mcp/catalog.json`, a top-level array of
+  registry-format `server.json` objects; editorial rides `_meta["sh.topos/catalog"]`). A boot
+  sync (`app/lib/db/mcp-catalog-sync.server.ts`, run before the first request) reconciles the file
+  into public rows: it upserts by `name`, computes each delivered document, dedupes by content, and
+  — while a server is untouched by staff (`manually_curated = false`) — advances its `current` to
+  each new file version; once staff edit or promote it, a file version lands as a non-current
+  PROPOSAL instead. It never deletes, never clobbers a live `current`, and never re-proposes a
+  document staff dismissed; a settled catalog no-ops.
   **The document gate** (`app/lib/mcp/validate.server.ts`) still decides what may enter the
   catalog at every door: SOMETHING TO RUN (a remote `streamable-http` endpoint over https, or
   `packages[]`, or both; neither refuses), every package PINNED to one immutable thing (exact
@@ -153,11 +166,11 @@ caller.
   every channel INCLUDING the default is an ordinary named option. That is the FORM's ruling and
   scoped to it. When a channel IS chosen the page discloses what happened to the REACH: a curated
   channel withholds a member's placement, and the server's face says so.
-  **Two read lanes, one serializer** (`app/lib/mcp/registry-api.server.ts`, the official read-API
+  **One read lane, its serializer** (`app/lib/mcp/registry-api.server.ts`, the official read-API
   shape; curation rides `_meta["sh.topos/catalog"]` and never the official registry's namespace):
   `…/registry/v0.1/servers[/{name}/versions[/{version}]]` serves what THIS WORKSPACE runs,
-  member-gated by cookie OR bearer, uniform-404 otherwise; `/mcp-catalog/v0.1/servers…` is the
-  public feed of the install's GLOBAL PUBLISHED rows, off unless `TOPOS_MCP_CATALOG_FEED=on`.
+  member-gated by cookie OR bearer, uniform-404 otherwise. There is NO public catalog feed — the
+  generic catalog is the committed file, and the boot sync is what makes it authoritative.
   A boot backfill (`app/lib/db/mcp-backfill.server.ts`) connects every MCP bundle written before
   the catalog existed — the name lives in the vault's bytes, so it runs where bytes are readable,
   before the first request; what it cannot read is NAMED in the log, never skipped silently.

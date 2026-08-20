@@ -399,6 +399,25 @@ describe("the connection", () => {
     expect(face?.resolved?.revisionId).toBe(pinned);
     expect(face?.resolved?.state).toBe("history");
   });
+
+  it("refuses a pin to a proposal nobody promoted — a pin never bypasses curation", async () => {
+    const { connectMcpServer } = await catalog();
+    const member = asMember(wsId, "u_mem", "member", "Member");
+    const serverId = await seedPublicServer("mcps_pinprop", "com.example/pinprop");
+    await addAndPromote(serverId, versionlessDocument("com.example/pinprop"));
+    // A non-current proposal (appended, never promoted) — no promotion stamp.
+    const proposal = await addRevision(serverId, serverDocument("com.example/pinprop", "9.9.9"));
+    if (proposal.refusal !== null) {
+      throw new Error(proposal.refusal.message);
+    }
+    const refused = await connectMcpServer(member, {
+      serverId,
+      displayName: "pinprop",
+      to: null,
+      pinnedRevisionId: proposal.revisionId,
+    });
+    expect(refused.refusal?.code).toBe("MCP_REVISION_NOT_FOUND");
+  });
 });
 
 describe("the server face reads the pointer, not a status column", () => {

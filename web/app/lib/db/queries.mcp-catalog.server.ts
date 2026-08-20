@@ -1,4 +1,4 @@
-import { and, eq, isNull, or, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor, SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
@@ -557,9 +557,10 @@ export async function connectMcpServer(
       }
       const pinnedRevisionId = request.pinnedRevisionId ?? null;
       if (pinnedRevisionId !== null) {
-        // A pin names a revision OF THIS SERVER that a staff member has not dismissed. It need not
-        // be the current one — a pin is the deliberate choice to follow one revision and keep
-        // following it.
+        // A pin names a revision OF THIS SERVER that HAS BEEN ON OFFER — it carries the promotion
+        // stamp (the current, or one that was current before) and is not dismissed. It need not be
+        // the current one, but it may never be a file proposal nobody promoted: pinning to one
+        // would deliver a document the catalog never put on offer, bypassing curation.
         const pinned = await tx
           .select({ id: mcpServerRevision.id })
           .from(mcpServerRevision)
@@ -567,6 +568,7 @@ export async function connectMcpServer(
             and(
               eq(mcpServerRevision.id, pinnedRevisionId),
               eq(mcpServerRevision.serverId, server.id),
+              isNotNull(mcpServerRevision.publishedAt),
               isNull(mcpServerRevision.dismissedAt),
             ),
           )
