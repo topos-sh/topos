@@ -1444,3 +1444,60 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
         "{receipt}"
     );
 }
+
+/// **The whole flip, end to end.** A workspace that reaches a server on the agent's behalf delivers
+/// a document saying so; the sweep carries the session that delivery ran under into the demand, and
+/// the entry lands dialed with THIS machine's credential for that workspace. The document is
+/// recorded exactly as it arrived — the credential is never in it, and never comes down the wire.
+#[test]
+fn a_delivered_gateway_server_is_placed_with_this_machines_own_session_credential() {
+    let rig = Rig::new("gateway-sweep");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let s = served(&gateway_server_json("https://gw.example/sn_1/srv_linear"));
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.warnings);
+
+    // The record holds the delivered bytes and nothing else: no credential arrived with them.
+    let record = server_record(&rig.fs, &rig.layout(), "s_linear").expect("the record");
+    let stored = serde_json::to_string(&record.document).unwrap();
+    assert!(
+        !stored.contains("cred-1") && stored.contains("sh.topos/gateway"),
+        "{stored}"
+    );
+
+    // Both hermetic configs dial the workspace's address, signed with this machine's own session.
+    for path in [
+        rig.home.0.join(".cursor/mcp.json"),
+        rig.home.0.join(".openclaw/openclaw.json"),
+    ] {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        assert!(
+            text.contains("https://gw.example/sn_1/srv_linear"),
+            "{path:?}: {text}"
+        );
+        assert!(text.contains("Bearer cred-1"), "{path:?}: {text}");
+        assert!(
+            !text.contains("\"auth\""),
+            "the document's own word was `oauth`, and OpenClaw spells that key — an entry the \
+             workspace already signs has no sign-in left to start: {path:?}: {text}"
+        );
+    }
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "linear")
+        .unwrap();
+    assert!(
+        row.harnesses.iter().all(|h| h.state.wrote()),
+        "a fresh placement everywhere the row reaches: {row:?}"
+    );
+}

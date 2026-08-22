@@ -185,6 +185,18 @@ pub(super) fn server_json(url: &str) -> String {
     )
 }
 
+/// The document a WORKSPACE delivers for a server it reaches on the agent's behalf: the address is
+/// the workspace's own, and the `_meta` key says so — which is what makes the entry carry this
+/// machine's session credential for that workspace. The publisher's auth word stands beside it
+/// deliberately: a gateway entry is ready whatever the upstream server's own sign-in tier is.
+pub(super) fn gateway_server_json(url: &str) -> String {
+    format!(
+        "{{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\
+         \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\"}}],\
+         \"_meta\":{{\"sh.topos/auth\":\"oauth\",\"sh.topos/gateway\":true}}}}"
+    )
+}
+
 /// A document this build cannot place: the header is marked secret, so the placement parse fails
 /// the whole demand closed rather than write a header whose value nothing vouched for. The ONE
 /// unplaceable shape the fixtures use, because there is now ONE refusal code for all of them.
@@ -681,6 +693,23 @@ pub(super) fn demand(
         version_id: "v1".to_owned(),
         server_json: server.as_bytes().to_vec(),
         reach: None,
+        gateway: None,
+    }
+}
+
+/// The same demand as a WORKSPACE DELIVERY carries it: the session credential the delivery ran
+/// under travels beside the document, which is what lets a document saying "the workspace reaches
+/// this server" be rendered with this machine's own credential for it.
+pub(super) fn delivered_demand(
+    bundle_id: &str,
+    name: &str,
+    ws: &str,
+    server: &str,
+    credential: &str,
+) -> DemandedBundle {
+    DemandedBundle {
+        gateway: Some(crate::mcp_render::GatewayBearer::new(credential.to_owned())),
+        ..demand(bundle_id, name, Some(ws), server)
     }
 }
 
