@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": []
   },
-  "include": ["core/**/*.ts", "service/**/*.ts", "tests/**/*.ts"]
+  "include": ["core/**/*.ts", "service/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
 }

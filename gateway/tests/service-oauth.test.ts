@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { GatewayContext, GatewayStore } from "../core/ports";
-import { EnvelopeCrypto } from "../service/crypto";
+import { EnvelopeCrypto, FileMasterKey } from "../service/crypto";
 import { createGuardedFetch } from "../service/guarded-fetch";
 import { beginAuthorize, type OauthStore } from "../service/oauth";
 import { createPublicHandler } from "../service/server";
@@ -154,7 +154,7 @@ function fixtureStore(urlByServerId: Map<string, string>): GatewayStore & OauthS
 beforeAll(async () => {
   db = await createServiceDb();
   pool = new pg.Pool({ connectionString: db.gatewayUrl, max: 5 });
-  realStore = new PgStore(pool, new EnvelopeCrypto(randomBytes(32)), CONFIG.toposPublicUrl, quiet);
+  realStore = new PgStore(pool, new EnvelopeCrypto(new FileMasterKey(randomBytes(32))), CONFIG.toposPublicUrl, quiet);
   await seedIdentity(db, "ws1", "u1");
   base = await startFixture();
 }, 120_000);

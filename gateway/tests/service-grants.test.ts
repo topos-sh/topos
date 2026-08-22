@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { EnvelopeCrypto } from "../service/crypto";
+import { EnvelopeCrypto, FileMasterKey } from "../service/crypto";
 import { PgStore } from "../service/store";
 import {
   createServiceDb,
@@ -29,7 +29,7 @@ beforeAll(async () => {
   gatewayPool = new pg.Pool({ connectionString: db.gatewayUrl, max: 2 });
   const store = new PgStore(
     gatewayPool,
-    new EnvelopeCrypto(randomBytes(32)),
+    new EnvelopeCrypto(new FileMasterKey(randomBytes(32))),
     "https://team.example.com",
     () => {},
   );

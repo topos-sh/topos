@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { EnvelopeCrypto } from "../service/crypto";
+import { EnvelopeCrypto, FileMasterKey } from "../service/crypto";
 import { createInternalHandler } from "../service/internal";
 import { PgStore } from "../service/store";
 import {
@@ -42,7 +42,7 @@ function lane(
 beforeAll(async () => {
   db = await createServiceDb();
   pool = new pg.Pool({ connectionString: db.gatewayUrl, max: 5 });
-  store = new PgStore(pool, new EnvelopeCrypto(randomBytes(32)), CONFIG.toposPublicUrl, () => {});
+  store = new PgStore(pool, new EnvelopeCrypto(new FileMasterKey(randomBytes(32))), CONFIG.toposPublicUrl, () => {});
   await seedIdentity(db, "ws1", "u1");
   const deps = {
     store,

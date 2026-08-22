@@ -411,7 +411,11 @@ export class PgStore implements GatewayStore {
     }
   }
 
-  /** True when a row was deleted (the secret cascades with it). */
+  /**
+   * True when a row was deleted (the secret cascades with it). Revocation is unaffected by the
+   * data-key cache: `credentialFor` finds no row and answers null before any key is consulted, so
+   * a cached workspace key cannot keep a revoked credential alive for a moment.
+   */
   async deleteCredential(credentialId: string): Promise<boolean> {
     const result = await this.pool.query("DELETE FROM gateway.credential WHERE id = $1", [
       credentialId,
