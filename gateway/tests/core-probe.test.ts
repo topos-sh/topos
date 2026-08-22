@@ -258,7 +258,7 @@ describe("what a probe leaves behind", () => {
     // The verdict is shared knowledge about the server — the next real call is faster for it.
     expect(memory.verdict(SERVER_ID)?.version).toBe("2025-06-18");
     // The conversation is the probe's own, and it is gone.
-    expect(memory.upstream(PROBE_SESSION, SERVER_ID)).toBeNull();
+    expect(memory.upstream(PROBE_SESSION, SERVER_ID, t.ctx.env.now())).toBeNull();
   });
 
   it("does not leave a 2024-11-05 SSE pump running", async () => {
@@ -270,6 +270,6 @@ describe("what a probe leaves behind", () => {
     expect(
       (await probeServerTools(t.ctx, { workspaceId: WS, serverId: SERVER_ID, userId: USER })).kind,
     ).toBe("recorded");
-    expect(memory.upstream(PROBE_SESSION, SERVER_ID)).toBeNull();
+    expect(memory.upstream(PROBE_SESSION, SERVER_ID, t.ctx.env.now())).toBeNull();
   });
 });

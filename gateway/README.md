@@ -42,6 +42,33 @@ call. Revocation is a row change, effective next call.
   one. Gate: with no `GATEWAY_INTERNAL_TOKEN` the whole lane answers 404; a wrong bearer answers
   401; only the token's sha256 survives boot and the compare is constant-time.
 
+## What a long-lived process holds
+
+`core/state.ts` is module memory: minted client sessions, open 2024-11-05 channels, cached era
+verdicts, and one upstream conversation per `(topos session, server)` — the last of which can own a
+live socket. Everything in it is reconstructible, so three rules bound residency and nothing more
+is needed:
+
+- **An idle TTL of 8 hours** on client sessions and upstream conversations. Every access restamps
+  its entry AND the conversation it speaks for, and an insert sweeps what has aged out — the
+  discipline `service/crypto.ts` already runs for unwrapped data keys. It spans a working day of
+  intermittent use, so an idle agent is not disrupted; a sleeping laptop or a partitioned machine
+  is reclaimed by the next morning, and the cost of being wrong is one re-initialize, the recovery
+  the MCP lifecycle already defines. **`core/` owns no clock and no timer**: the millisecond
+  arrives from the injected `ctx.env.now()` at each call, and expiry is observed on the next
+  insert, never on a tick.
+- **A cap of 10,000 client sessions**, the backstop for a burst that never idles.
+- **Reference counting before teardown.** Several clients legitimately share one upstream
+  conversation — two legacy sessions from the same machine, a 2024-11-05 channel, a modern listen
+  stream — so an eviction, a sweep, a `DELETE`, or a closed 2024-11-05 stream releases the
+  conversation (aborting its pump) only when NOTHING still names it. Deliberate invalidation is the
+  exception and is never counted: a changed credential, a dead upstream session, or a wrong cached
+  era makes the conversation unusable for every client that shares it.
+
+Concurrency here is bounded by FILE DESCRIPTORS, not memory: a streaming session costs a client
+socket plus an upstream socket, so the deployment raises `nofile` (see `docker-compose.yml`) long
+before `mem_limit` is the constraint.
+
 ## The tool probe
 
 A tool policy is a checklist over what a server offers, so the list has to exist before anyone can
@@ -146,6 +173,7 @@ credential is valid, online, and logged" — which is the point, and is not the 
 | `GATEWAY_GCP_ACCESS_TOKEN` | `gcp-kms`: a ready-made token for a hand smoke test. REFUSED in production — nothing renews it |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | `aws-kms`: the credentials, the first two required |
 | `GATEWAY_ALLOW_PRIVATE_UPSTREAMS` | `1` lets upstreams resolve to private ranges (self-host) |
+| `GATEWAY_USAGE_RETENTION_DAYS` | days of `gateway.usage_event` to keep. `0` — the default, and what unset means — keeps every row FOREVER, so a permanent audit trail is the deployment that does nothing. Any other number arms an hourly sweep that deletes past that age in bounded batches; 90 is the value to reach for first |
 
 ## Moving the master key to a KMS
 

@@ -18,7 +18,7 @@ import { runMigrations } from "./migrate";
 import type { OauthConfig } from "./oauth";
 import { createPublicHandler, type EngineHandler } from "./server";
 import { PgStore } from "./store";
-import { BufferedUsageSink } from "./usage";
+import { BufferedUsageSink, UsageRetention } from "./usage";
 
 /**
  * The container entry point. Boot order mirrors the plane's: logs armed → env parsed → the master
@@ -61,6 +61,10 @@ const storedWraps = await pool.query<{ workspace_id: string; wrapped_key: Buffer
 await assertStoredWrapsOpen(storedWraps.rows, masterKey, log);
 
 const usage = new BufferedUsageSink(pool, log);
+// Retention beside the flush, on its own interval — off unless GATEWAY_USAGE_RETENTION_DAYS says
+// otherwise, so a deployment keeps every usage row until its operator asks for a window.
+const retention = new UsageRetention(pool, log, env.GATEWAY_USAGE_RETENTION_DAYS);
+retention.start();
 const guardedFetch = createGuardedFetch(
   { allowPrivate: env.GATEWAY_ALLOW_PRIVATE_UPSTREAMS === "1" },
   log,
@@ -116,6 +120,7 @@ async function shutdown(signal: string): Promise<void> {
   log("info", "shutting down", { signal });
   await publicServer.stop(true);
   await internalServer.stop(true);
+  retention.close();
   await usage.close();
   await pool.end();
   process.exit(0);

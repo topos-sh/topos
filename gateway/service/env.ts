@@ -58,6 +58,21 @@ const gatewaySchema = z.object({
   AWS_SESSION_TOKEN: z.string().min(1).optional(),
   /** "1" lets upstream addresses resolve to private ranges (self-host with internal servers). */
   GATEWAY_ALLOW_PRIVATE_UPSTREAMS: z.enum(["0", "1"]).default("0"),
+  /**
+   * How many days of `gateway.usage_event` rows to keep — one row per proxied call, and without a
+   * window that table only grows.
+   *
+   * `0`, WHICH IS ALSO WHAT UNSET MEANS, KEEPS EVERY ROW FOREVER. That is the default on purpose:
+   * a self-hoster who wants a permanent audit trail of every call their agents made has one, and
+   * upgrading a running deployment never silently deletes history nobody asked it to delete.
+   *
+   * Set a number and a sweep beside the usage flush deletes rows past that age in bounded batches.
+   * 90 is the value to reach for first: a quarter outlives the longest range the usage page
+   * offers and any billing or incident question that would be asked of a per-call row, and it is
+   * short enough that the table stays proportional to the traffic of a season rather than of a
+   * deployment's whole life.
+   */
+  GATEWAY_USAGE_RETENTION_DAYS: z.coerce.number().int().min(0).default(0),
   APP_ENV: z.enum(["production", "development", "test"]).default("development"),
 });
 
