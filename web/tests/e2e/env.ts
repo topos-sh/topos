@@ -87,4 +87,4 @@ export function appEnv(): Record<string, string> {
  * app/lib/api/compat.server.ts (not imported: specs must not load server modules); when the
  * floor moves, lane calls refuse with the 426 that names the new floor, and this is the line.
  */
-export const CLI_USER_AGENT = "topos/0.1.42";
+export const CLI_USER_AGENT = "topos/0.1.43";

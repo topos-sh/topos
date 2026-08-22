@@ -198,7 +198,15 @@ function isoSeconds(date: Date): string {
  * and a connection is the one thing that decides which list a row lands in, so the `via`
  * attribution, the ordering and the snapshot are shared rather than asked for twice.
  */
-export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
+export async function deliveryFor(
+  actor: FeedActor,
+  /**
+   * Whether the CALLING machine's renderer can attach its credential to a gateway address
+   * (`clientPlacesGatewayEntries`). Defaults to false: a caller that cannot say — a page's own
+   * feed read, a test — is never handed an address that needs a credential it may not attach.
+   */
+  placesGatewayEntries = false,
+): Promise<DeliveryBody> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
@@ -273,9 +281,13 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
         ...(r.picked === true ? { picked: true as const } : {}),
       });
       // THE GATEWAY FLIP, resolved once per delivery rather than per row: where a gateway is
-      // deployed AND the caller is a session (a page's own feed read has no machine to address),
-      // every connected server with an address is handed the gateway's instead of its own.
-      const gatewayBase = actor.sessionId === undefined ? null : gatewayPublicBase();
+      // deployed AND the caller is a session (a page's own feed read has no machine to address)
+      // AND that machine's renderer can attach its credential to a gateway address, every
+      // connected server with an address is handed the gateway's instead of its own. A machine
+      // too old to attach one keeps the document's own address — turning the gateway on never
+      // breaks a fleet mid-update.
+      const gatewayBase =
+        actor.sessionId === undefined || !placesGatewayEntries ? null : gatewayPublicBase();
       const skills: DeliverySkill[] = [];
       const mcpServers: DeliveryMcpServer[] = [];
       for (const r of rows.rows as Record<string, unknown>[]) {

@@ -108,6 +108,28 @@ export function decideClientFloor(
   return { refused, clientVersion };
 }
 
+/**
+ * The first release whose renderer understands a gateway-addressed document — it attaches this
+ * machine's own session credential to that address. An OLDER client places the same address with
+ * NO credential, so its agents would dial the gateway unauthenticated and get nothing.
+ *
+ * That is why delivery asks this question rather than the floor doing it: turning the gateway on
+ * for a deployment must not lock out, or silently break, machines that have not updated yet. They
+ * keep receiving the document's OWN address and keep signing in per machine — the behaviour they
+ * already had — and the flip reaches them when they update.
+ */
+export const GATEWAY_MIN_CLI_VERSION = "0.1.43";
+
+/**
+ * Whether THIS caller's renderer can be handed a gateway address. Unidentified clients (no
+ * readable product token) answer NO: an address that needs a credential the client may not attach
+ * is not something to hand out on a guess.
+ */
+export function clientPlacesGatewayEntries(request: Request): boolean {
+  const version = parseClientVersion(request.headers.get("user-agent"));
+  return version !== null && !below(version, GATEWAY_MIN_CLI_VERSION);
+}
+
 /** The 426 to answer a below-floor client, or null to pass. */
 export function clientFloor(request: Request): Response | null {
   const { refused, clientVersion } = decideClientFloor(

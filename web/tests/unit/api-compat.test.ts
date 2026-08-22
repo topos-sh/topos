@@ -195,3 +195,27 @@ describe("laneGate — the lane's front door", () => {
     expect((belted.laneGate(lane("topos/0.1.1")) as Response).status).toBe(429);
   });
 });
+
+describe("which machines may be handed a gateway address", () => {
+  const lane = (userAgent: string | null) =>
+    new Request(
+      "http://x/api/v1/workspaces/w/delivery",
+      userAgent === null ? {} : { headers: { "user-agent": userAgent } },
+    );
+
+  it("says yes from the release whose renderer attaches the credential, and no below it", () => {
+    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.43"))).toBe(true);
+    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.44"))).toBe(true);
+    expect(compat.clientPlacesGatewayEntries(lane("topos/0.2.0"))).toBe(true);
+    // The releases that predate the renderer flip: they would place the address with no
+    // credential, so delivery keeps handing them the server's own.
+    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.42"))).toBe(false);
+    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.15"))).toBe(false);
+  });
+
+  it("says no to anything it cannot read as a topos", () => {
+    expect(compat.clientPlacesGatewayEntries(lane("curl/8.7.1"))).toBe(false);
+    expect(compat.clientPlacesGatewayEntries(lane(null))).toBe(false);
+    expect(compat.clientPlacesGatewayEntries(lane("topos/not.a.version"))).toBe(false);
+  });
+});
