@@ -15,3 +15,4 @@ Cargo.lock.bak
 .env
 .env.*
 !.env.example
+gateway/node_modules/
