@@ -5,6 +5,7 @@ import {
   KEY_BYTES,
   loadMasterKey,
   type MasterKeyBackend,
+  workspaceKeyAad,
 } from "./crypto";
 import { awsRegionFromKeyArn, type GatewayEnv } from "./env";
 import {
@@ -14,7 +15,7 @@ import {
   staticToken,
   type AccessTokenSource,
 } from "./gcp-auth";
-import { KmsMasterKey } from "./kms";
+import { KmsMasterKey, RetryableKmsError } from "./kms";
 import { AwsKms } from "./kms-aws";
 import { GcpKms } from "./kms-gcp";
 import type { Logger } from "./log";
@@ -93,6 +94,10 @@ export function createMasterKeyBackend(
 /** Never a workspace's AAD: a probe wrap must not be mistakable for a row's. */
 const PROBE_AAD = "topos:gateway:master-key-probe";
 
+/** How many stored wraps the boot check opens. A wrong key fails every row, so a handful settles
+ *  it; checking the whole table would be one KMS round trip per workspace on every restart. */
+const STORED_WRAP_SAMPLE = 5;
+
 /**
  * Prove the configured backend can wrap AND unwrap before the process serves anything. For a file
  * key that is nearly free; for a KMS it is the round trip that turns "the operator typed a key
@@ -126,26 +131,54 @@ export async function proveMasterKeyBackend(
  */
 export async function assertStoredWrapsOpen(
   rows: readonly { workspace_id: string; wrapped_key: Buffer }[],
-  crypto: { canOpenWorkspaceKey(workspaceId: string, wrapped: Buffer): Promise<boolean> },
+  backend: MasterKeyBackend,
   log: Logger,
 ): Promise<void> {
   if (rows.length === 0) {
     log("info", "no stored workspace keys to verify");
     return;
   }
-  const unreadable: string[] = [];
-  for (const row of rows) {
-    if (!(await crypto.canOpenWorkspaceKey(row.workspace_id, row.wrapped_key))) {
-      unreadable.push(row.workspace_id);
+  // A SAMPLE, not the whole table. The question is "is this the key that wrapped what is stored",
+  // and a wrong key fails EVERY row — so a handful answers it. Checking all of them would make
+  // boot O(workspaces) sequential KMS round trips on every restart, and would turn one deliberately
+  // unreadable row (the re-wrap leaves those as evidence) into a deployment that cannot start.
+  const sample = rows.slice(0, STORED_WRAP_SAMPLE);
+  let refused = 0;
+  for (const row of sample) {
+    try {
+      // Straight to the backend, NOT through the cache: this needs an answer, not a usable key,
+      // and routing it through EnvelopeCrypto would leave every sampled workspace's plaintext data
+      // key resident in memory from boot — widening exactly the in-process exposure a key service
+      // cannot cover.
+      await backend.unwrapDataKey(row.wrapped_key, workspaceKeyAad(row.workspace_id));
+    } catch (error) {
+      if (error instanceof RetryableKmsError) {
+        // "I could not ASK" is not "the key is wrong". A KMS blip must not produce a refusal whose
+        // remedy text tells the operator to run a migration.
+        log("warn", "could not verify a stored workspace key (the key service did not answer)", {
+          error: (error as Error).name,
+        });
+        return;
+      }
+      refused += 1;
     }
   }
-  if (unreadable.length > 0) {
+  if (refused === sample.length) {
     throw new Error(
-      `refusing to serve: ${unreadable.length} of ${rows.length} stored workspace keys cannot be ` +
-        "opened by the configured key backend. This deployment would authenticate and then fail " +
-        "every credential. Run the re-wrap (bun scripts/rewrap-workspace-keys.ts --from <backend>) " +
-        "or point GATEWAY_KMS_KEY back at the key that wrapped them.",
+      `refusing to serve: none of the ${sample.length} stored workspace keys sampled can be opened ` +
+        "by the configured key backend, so this deployment would authenticate and then fail every " +
+        "credential. Run the re-wrap (bun scripts/rewrap-workspace-keys.ts --from <backend>) or " +
+        "point the key configuration back at the key that wrapped them.",
     );
   }
-  log("info", "stored workspace keys verified", { count: rows.length });
+  if (refused > 0) {
+    // A minority that will not open is a real problem for those workspaces and not a reason to
+    // refuse everyone else — the re-wrap deliberately leaves such rows intact as evidence.
+    log("warn", "some stored workspace keys cannot be opened by the configured backend", {
+      refused,
+      sampled: sample.length,
+    });
+    return;
+  }
+  log("info", "stored workspace keys verified", { sampled: sample.length, stored: rows.length });
 }

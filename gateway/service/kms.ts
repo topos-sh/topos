@@ -61,6 +61,14 @@ export function assertAad(aad: string): string {
 /** Bounded, jittered retry for the transport-level failures a key service is allowed to have. */
 export class RetryableKmsError extends Error {}
 
+/**
+ * Every call to a key service is bounded. Without this a socket that never settles hangs the boot
+ * proof with no listener bound and no error line, hangs any proxied call that needs an unwrap, and
+ * — worst — parks an open transaction and a row lock through the whole re-wrap. A hang is treated
+ * as RETRYABLE: "no answer yet" is the one failure that genuinely might succeed on a second ask.
+ */
+export const KMS_CALL_TIMEOUT_MS = 10_000;
+
 export const KMS_ATTEMPTS = 3;
 
 export async function withKmsRetry<T>(

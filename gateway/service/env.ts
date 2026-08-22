@@ -106,6 +106,17 @@ const AWS_KEY_ARN = /^arn:aws:kms:([a-z0-9-]+):\d{12}:key\/[A-Za-z0-9-]+$/;
  * request instead of at deploy. Both are refusals, here, with the variable named.
  */
 function assertKeyBackendConfigured(env: GatewayEnv): void {
+  // AWS is implemented but has never been exercised against a real endpoint, and its request
+  // signing is hand-written rather than a vendor SDK. That is acceptable for a self-hoster who
+  // chooses it deliberately; it is not something to run unproven where other people's credentials
+  // are at stake. A production deployment that wants AWS must first verify it and lift this.
+  if (env.APP_ENV === "production" && env.GATEWAY_KEY_BACKEND === "aws-kms") {
+    throw new Error(
+      "refusing to start: GATEWAY_KEY_BACKEND=aws-kms is not verified against a real AWS endpoint " +
+        "and is refused in production. Use gcp-kms, or verify the AWS path and lift this guard.",
+    );
+  }
+
   const missing = (variable: string): never => {
     throw new Error(
       `refusing to start: GATEWAY_KEY_BACKEND=${env.GATEWAY_KEY_BACKEND} requires ${variable}`,

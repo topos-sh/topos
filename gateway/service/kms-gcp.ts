@@ -5,6 +5,7 @@ import {
   RetryableKmsError,
   withKmsRetry,
   type KmsProvider,
+  KMS_CALL_TIMEOUT_MS,
 } from "./kms";
 
 /**
@@ -186,6 +187,7 @@ export class GcpKms implements KmsProvider {
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
+        signal: AbortSignal.timeout(KMS_CALL_TIMEOUT_MS),
         method: "POST",
         headers: {
           authorization: `Bearer ${token}`,

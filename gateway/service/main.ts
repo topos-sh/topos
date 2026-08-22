@@ -58,7 +58,7 @@ const store = new PgStore(pool, crypto, env.TOPOS_PUBLIC_URL, log);
 const storedWraps = await pool.query<{ workspace_id: string; wrapped_key: Buffer }>(
   "SELECT workspace_id, wrapped_key FROM gateway.workspace_key",
 );
-await assertStoredWrapsOpen(storedWraps.rows, crypto, log);
+await assertStoredWrapsOpen(storedWraps.rows, masterKey, log);
 
 const usage = new BufferedUsageSink(pool, log);
 const guardedFetch = createGuardedFetch(
