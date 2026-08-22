@@ -5,6 +5,7 @@ import {
   RetryableKmsError,
   withKmsRetry,
   type KmsProvider,
+  KMS_CALL_TIMEOUT_MS,
 } from "./kms";
 
 /**
@@ -260,6 +261,7 @@ export class AwsKms implements KmsProvider {
     let response: Response;
     try {
       response = await this.fetchImpl(`https://${host}/`, {
+        signal: AbortSignal.timeout(KMS_CALL_TIMEOUT_MS),
         method: "POST",
         headers: signed.headers,
         body,

@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { EnvelopeCrypto, FileMasterKey, workspaceKeyAad } from "../service/crypto";
+import type { MasterKeyBackend } from "../service/crypto";
 import { awsRegionFromKeyArn, parseGatewayEnv } from "../service/env";
 import { metadataTokens, parseServiceAccountKey, serviceAccountTokens } from "../service/gcp-auth";
-import { KmsMasterKey } from "../service/kms";
+import { KmsMasterKey, RetryableKmsError } from "../service/kms";
 import { AwsKms, deriveSigningKey, signKmsRequest } from "../service/kms-aws";
 import { crc32c, GcpKms } from "../service/kms-gcp";
 import {
@@ -613,35 +614,87 @@ describe("the boot proof", () => {
 });
 
 describe("the boot check against what is already stored", () => {
+  // A backend that opens exactly the wraps it is told to, and fails the rest the way a real one
+  // does — a definite refusal, not a transport error.
+  const backendThatOpens = (openable: (ws: string) => boolean): MasterKeyBackend => ({
+    describe: "fake",
+    formatVersion: 0x01,
+    wrapDataKey: async (key: Buffer) => key,
+    unwrapDataKey: async (envelope: Buffer, aad: string) => {
+      if (!openable(aad)) {
+        throw new Error("refused");
+      }
+      return envelope;
+    },
+  });
+
   it("passes trivially when nothing is stored yet", async () => {
     const seen: string[] = [];
-    await assertStoredWrapsOpen([], { canOpenWorkspaceKey: async () => true }, (_l, m) => {
+    await assertStoredWrapsOpen([], backendThatOpens(() => true), (_l, m) => {
       seen.push(m);
     });
     expect(seen).toContain("no stored workspace keys to verify");
   });
 
-  it("refuses to serve when a stored wrap cannot be opened by the configured backend", async () => {
-    // The half-finished migration: the key works (the boot proof passed) but it is not the key
-    // that wrapped these rows, so every credential would fail at an agent's first tool call.
+  it("refuses to serve when NONE of the sampled wraps open — the wrong-key deployment", async () => {
     const rows = [
-      { workspace_id: "ws_ok", wrapped_key: Buffer.from([1]) },
-      { workspace_id: "ws_stale", wrapped_key: Buffer.from([2]) },
+      { workspace_id: "ws_a", wrapped_key: Buffer.from([1]) },
+      { workspace_id: "ws_b", wrapped_key: Buffer.from([2]) },
     ];
     await expect(
-      assertStoredWrapsOpen(
-        rows,
-        { canOpenWorkspaceKey: async (ws) => ws === "ws_ok" },
-        () => {},
-      ),
-    ).rejects.toThrow(/1 of 2 stored workspace keys cannot be opened/);
+      assertStoredWrapsOpen(rows, backendThatOpens(() => false), () => {}),
+    ).rejects.toThrow(/none of the 2 stored workspace keys sampled can be opened/);
   });
 
-  it("passes when every stored wrap opens", async () => {
+  it("warns rather than refuses when only SOME will not open", async () => {
+    // The re-wrap deliberately leaves a row it could not convert, as evidence. That must not stop
+    // every other workspace from being served.
+    const rows = [
+      { workspace_id: "ws_ok", wrapped_key: Buffer.from([1]) },
+      { workspace_id: "ws_evidence", wrapped_key: Buffer.from([2]) },
+    ];
+    const warned: string[] = [];
+    await assertStoredWrapsOpen(
+      rows,
+      backendThatOpens((aad) => aad.endsWith("ws_ok")),
+      (level, m) => {
+        if (level === "warn") warned.push(m);
+      },
+    );
+    expect(warned.join()).toMatch(/some stored workspace keys cannot be opened/);
+  });
+
+  it("does not refuse when the key service could not be ASKED", async () => {
+    // A KMS blip must never produce a refusal telling the operator to run a migration.
     const rows = [{ workspace_id: "ws_a", wrapped_key: Buffer.from([1]) }];
-    await expect(
-      assertStoredWrapsOpen(rows, { canOpenWorkspaceKey: async () => true }, () => {}),
-    ).resolves.toBeUndefined();
+    const backend: MasterKeyBackend = {
+      describe: "fake",
+      formatVersion: 0x02,
+      wrapDataKey: async (k: Buffer) => k,
+      unwrapDataKey: async () => {
+        throw new RetryableKmsError("Cloud KMS is unavailable (503)");
+      },
+    };
+    await expect(assertStoredWrapsOpen(rows, backend, () => {})).resolves.toBeUndefined();
+  });
+
+  it("samples rather than opening every row — boot stays O(1) in workspaces", async () => {
+    const rows = Array.from({ length: 400 }, (_, i) => ({
+      workspace_id: `ws_${i}`,
+      wrapped_key: Buffer.from([1]),
+    }));
+    let calls = 0;
+    const backend: MasterKeyBackend = {
+      describe: "fake",
+      formatVersion: 0x02,
+      wrapDataKey: async (k: Buffer) => k,
+      unwrapDataKey: async (e: Buffer) => {
+        calls += 1;
+        return e;
+      },
+    };
+    await assertStoredWrapsOpen(rows, backend, () => {});
+    expect(calls).toBeLessThanOrEqual(5);
   });
 });
 
@@ -656,5 +709,37 @@ describe("the AWS key ARN's partition", () => {
 
   it("accepts a commercial ARN and names its region", () => {
     expect(awsRegionFromKeyArn("arn:aws:kms:us-west-2:123456789012:key/abc-def")).toBe("us-west-2");
+  });
+});
+
+describe("the guards the security review asked for", () => {
+  it("refuses aws-kms in production — hand-rolled signing, never verified against AWS", () => {
+    expect(() =>
+      parseGatewayEnv({
+        DATABASE_URL: "postgres://x",
+        GATEWAY_PUBLIC_URL: "https://gw.example.com",
+        TOPOS_PUBLIC_URL: "https://topos.example.com",
+        APP_ENV: "production",
+        GATEWAY_KEY_BACKEND: "aws-kms",
+        GATEWAY_KMS_KEY: "arn:aws:kms:us-west-2:123456789012:key/abc-def",
+        AWS_ACCESS_KEY_ID: "AKIA",
+        AWS_SECRET_ACCESS_KEY: "secret",
+      }),
+    ).toThrow(/aws-kms is not verified against a real AWS endpoint/);
+  });
+
+  it("still allows aws-kms outside production, where an operator chose it deliberately", () => {
+    expect(() =>
+      parseGatewayEnv({
+        DATABASE_URL: "postgres://x",
+        GATEWAY_PUBLIC_URL: "https://gw.example.com",
+        TOPOS_PUBLIC_URL: "https://topos.example.com",
+        APP_ENV: "development",
+        GATEWAY_KEY_BACKEND: "aws-kms",
+        GATEWAY_KMS_KEY: "arn:aws:kms:us-west-2:123456789012:key/abc-def",
+        AWS_ACCESS_KEY_ID: "AKIA",
+        AWS_SECRET_ACCESS_KEY: "secret",
+      }),
+    ).not.toThrow();
   });
 });

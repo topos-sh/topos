@@ -219,22 +219,6 @@ export class EnvelopeCrypto {
     this.dataKeys.clear();
   }
 
-  /**
-   * Can this backend actually open a wrap already sitting in the database? The boot proof answers
-   * "the configured key works", which is NOT the same question: a deployment switched to a KMS
-   * without running the re-wrap — or pointed at a different, perfectly valid key — passes that
-   * proof and then fails on every stored credential. This is what makes such a deployment refuse
-   * to serve instead of serving brokenly. Warms the cache for the workspaces it checks.
-   */
-  async canOpenWorkspaceKey(workspaceId: string, wrapped: Buffer): Promise<boolean> {
-    try {
-      await this.unwrapWorkspaceKey(workspaceId, wrapped);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   private async unwrapWorkspaceKey(workspaceId: string, wrapped: Buffer): Promise<CryptoKey> {
     const cacheKey = `${workspaceId}:${sha256Hex(wrapped)}`;
     const standing = this.dataKeys.get(cacheKey);
@@ -258,6 +242,14 @@ export class EnvelopeCrypto {
     })();
     // A failed unwrap must never be remembered — the next call has to ask the backend again.
     key.catch(() => this.dataKeys.delete(cacheKey));
+    // Sweep what has already expired. The TTL is checked on ACCESS, so without this an entry that
+    // is never asked for again sits in the map holding a live key long past its window — residency
+    // outliving usefulness, which is the opposite of what the TTL is for.
+    for (const [k, v] of this.dataKeys) {
+      if (this.now() >= v.expiresAt) {
+        this.dataKeys.delete(k);
+      }
+    }
     this.dataKeys.set(cacheKey, { key, expiresAt: this.now() + DATA_KEY_TTL_MS });
     while (this.dataKeys.size > DATA_KEY_CACHE_MAX) {
       const oldest = this.dataKeys.keys().next();

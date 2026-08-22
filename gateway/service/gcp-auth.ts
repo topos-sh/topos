@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createSign } from "node:crypto";
+import { KMS_CALL_TIMEOUT_MS } from "./kms";
 
 /**
  * Google access tokens for the KMS calls — the two credential paths a container actually has, and
@@ -90,7 +91,7 @@ async function postJson(
   init: RequestInit,
   where: string,
 ): Promise<unknown> {
-  const response = await fetchImpl(url, init);
+  const response = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(KMS_CALL_TIMEOUT_MS) });
   const text = await response.text();
   if (!response.ok) {
     // The body of a token failure carries `error`/`error_description`, never a credential — but
