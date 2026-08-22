@@ -97,13 +97,12 @@ describe("as topos_web", () => {
 });
 
 describe("as topos_gateway", () => {
-  it("reads the web tables the store needs", async () => {
+  it("reads exactly the eight web tables the store needs", async () => {
     for (const table of [
       "cli_session",
       "bundle_mcp",
       "mcp_server",
       "mcp_server_revision",
-      "seat",
       "workspace",
       "bundle",
       "mcp_tool_policy",
@@ -111,6 +110,13 @@ describe("as topos_gateway", () => {
     ]) {
       await gatewayPool.query(`SELECT 1 FROM web.${table} LIMIT 1`);
     }
+  });
+
+  it("is DENIED the identity store and everything else in web", async () => {
+    // The enumerated grant (web migration 0028) is what keeps the most-exposed role out of the
+    // Better Auth account tokens, and out of tables it has no business reading.
+    expect(await deniedFor(gatewayPool, "SELECT 1 FROM web.account LIMIT 1")).toBe(true);
+    expect(await deniedFor(gatewayPool, "SELECT 1 FROM web.seat LIMIT 1")).toBe(true);
   });
 
   it("cannot write the web schema", async () => {
