@@ -110,9 +110,17 @@ export class PgStore implements GatewayStore {
       user_id: string;
       display_name: string;
     }>(
-      `SELECT id, workspace_id, user_id, display_name
-         FROM web.cli_session
-        WHERE credential_sha256 = decode($1, 'hex') AND status = 'active'`,
+      // Status active AND within the workspace's session_max_age_ms — the SAME expiry the web
+      // lane applies (sessionUnexpiredSql). Expiry never deletes the row, so a lookup that checked
+      // only status would let an expired or stolen bearer call tools forever after the web lane
+      // stopped honoring it. Null max-age = no expiry, exactly as the web spells it.
+      `SELECT cs.id, cs.workspace_id, cs.user_id, cs.display_name
+         FROM web.cli_session cs
+         JOIN web.workspace w ON w.id = cs.workspace_id
+        WHERE cs.credential_sha256 = decode($1, 'hex')
+          AND cs.status = 'active'
+          AND (w.session_max_age_ms IS NULL
+               OR cs.created_at > now() - make_interval(secs => w.session_max_age_ms / 1000.0))`,
       [hex],
     );
     const row = result.rows[0];

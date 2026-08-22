@@ -108,7 +108,19 @@ export type McpRefusalCode =
   | "MCP_INSECURE_URL"
   | "MCP_URL_TEMPLATE"
   | "MCP_SECRET_REFUSED"
+  | "MCP_RESERVED_META"
   | "MCP_PACKAGE_UNPINNED";
+
+/**
+ * `_meta` keys under `sh.topos/` are the SYSTEM's to write, not a publisher's to claim. Only
+ * `sh.topos/auth` is a word the author may state; the rest are delivery-control keys the trusted
+ * web side injects at serve time — most sharply `sh.topos/gateway`, which a machine reads as
+ * "attach this workspace's session credential to this URL". An authored document that carried it
+ * with an arbitrary URL would turn every member's machine into a credential courier, so any
+ * reserved key is refused at the door, and delivery strips them again as belt-and-suspenders.
+ */
+const RESERVED_META_PREFIX = "sh.topos/";
+const AUTHOR_META_KEY = "sh.topos/auth";
 
 /** A header that survived the gate: a literal name and a literal value, nothing to fill in. */
 export interface McpHeader {
@@ -1191,7 +1203,15 @@ export function validateServerJson(
   // a spelling from a newer publisher, a typo, a `true` — reads as no declaration at all rather
   // than as one of them.
   const meta = isRecord(parsed._meta) ? parsed._meta : {};
-  const declared = meta["sh.topos/auth"];
+  for (const key of Object.keys(meta)) {
+    if (key.startsWith(RESERVED_META_PREFIX) && key !== AUTHOR_META_KEY) {
+      return refuse(
+        "MCP_RESERVED_META",
+        `_meta["${key}"] is reserved for the system and cannot be set on a document`,
+      );
+    }
+  }
+  const declared = meta[AUTHOR_META_KEY];
   const authHint =
     declared === "oauth" || declared === "none" || declared === "manual" ? declared : null;
 

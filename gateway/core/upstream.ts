@@ -214,13 +214,29 @@ async function parseJsonBody(resp: Response, wantId: string | number): Promise<J
   return asJsonRpcMessage(parsed);
 }
 
+/** How long the unary handshake-sized SSE read waits for its response id before giving up. A
+ *  server that opens the stream but never emits the answer (keep-alives, unrelated events) would
+ *  otherwise hold the read forever; the deadline is polled off the injected clock, so the core
+ *  schedules no timer of its own. Passthrough streaming (a client's own tools/call answer) does
+ *  NOT come through here — those are piped and bounded by the client connection. */
+const SSE_HANDSHAKE_DEADLINE_MS = 60_000;
+
 /** Extract the response with `id` out of an SSE body (handshake-sized reads only), then cancel. */
-export async function responseFromSse(body: ReadableStream<Uint8Array>, id: string | number): Promise<JsonRpcMessage | null> {
+export async function responseFromSse(
+  body: ReadableStream<Uint8Array>,
+  id: string | number,
+  now: () => number,
+): Promise<JsonRpcMessage | null> {
   const parser = new SseParser();
   const decoder = new TextDecoder();
   const reader = body.getReader();
+  const deadline = now() + SSE_HANDSHAKE_DEADLINE_MS;
   try {
     for (;;) {
+      if (now() >= deadline) {
+        reader.cancel().catch(() => {});
+        return null;
+      }
       const { done, value } = await reader.read();
       if (done) return null;
       for (const ev of parser.push(decoder.decode(value, { stream: true }))) {
@@ -263,7 +279,7 @@ async function probeModern(call: UpstreamCall): Promise<UpstreamVerdict | null> 
   if (resp.ok && (isJsonResponse(resp) || isSseResponse(resp))) {
     const msg = isSseResponse(resp)
       ? resp.body
-        ? await responseFromSse(resp.body, id)
+        ? await responseFromSse(resp.body, id, call.ctx.env.now)
         : null
       : await parseJsonBody(resp, id);
     if (msg && isResponse(msg) && "result" in msg) {
@@ -345,7 +361,7 @@ async function legacyInitialize(
   }
   const reply = isSseResponse(resp)
     ? resp.body
-      ? await responseFromSse(resp.body, id)
+      ? await responseFromSse(resp.body, id, call.ctx.env.now)
       : null
     : await parseJsonBody(resp, id);
   if (!reply || !isResponse(reply) || !("result" in reply)) return null;
@@ -490,6 +506,7 @@ async function request2024(call: UpstreamCall, handle: Sse2024Handle, msg: JsonR
  */
 export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentity): Promise<UpstreamReady | null> {
   const { session, server } = call;
+  const credentialId = call.auth.credential?.id ?? null;
   let verdict = memory.verdict(server.serverId);
   if (verdict && verdict.url !== server.url) {
     // The resolved revision moved the endpoint — everything cached about the old one is stale.
@@ -498,7 +515,14 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
     verdict = null;
   }
   const existing = memory.upstream(session.sessionId, server.serverId);
-  if (verdict && existing && existing.version === verdict.version) return { verdict, us: existing };
+  // Reuse the conversation only if the SAME credential still backs it. A disconnect+reconnect
+  // under a different upstream account changes the credential id; reusing the old upstream
+  // Mcp-Session-Id would leave it bound to the prior principal.
+  if (existing && existing.credentialId !== credentialId) {
+    memory.dropUpstream(session.sessionId, server.serverId);
+  } else if (verdict && existing && existing.version === verdict.version) {
+    return { verdict, us: existing };
+  }
 
   if (!verdict) {
     verdict = await probeModern(call);
@@ -534,7 +558,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
           supportedVersions: null,
         };
         memory.setVerdict(server.serverId, verdict);
-        const us: UpstreamSession = { version: "2024-11-05", mcpSessionId: null, initialized: true, sse2024: pumped };
+        const us: UpstreamSession = { version: "2024-11-05", mcpSessionId: null, initialized: true, sse2024: pumped, credentialId };
         memory.setUpstream(session.sessionId, server.serverId, us);
         return { verdict, us };
       }
@@ -544,6 +568,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
         mcpSessionId: init.mcpSessionId,
         initialized: true,
         sse2024: null,
+        credentialId,
       };
       memory.setUpstream(session.sessionId, server.serverId, us);
       await sendInitialized(call, us);
@@ -554,7 +579,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
 
   // Verdict known; establish this pair's conversation.
   if (verdict.version === MODERN) {
-    const us: UpstreamSession = { version: MODERN, mcpSessionId: null, initialized: true, sse2024: null };
+    const us: UpstreamSession = { version: MODERN, mcpSessionId: null, initialized: true, sse2024: null, credentialId };
     memory.setUpstream(session.sessionId, server.serverId, us);
     return { verdict, us };
   }
@@ -577,7 +602,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
       return null;
     }
     void post2024(call, handle, { jsonrpc: "2.0", method: "notifications/initialized" });
-    const us: UpstreamSession = { version: "2024-11-05", mcpSessionId: null, initialized: true, sse2024: handle };
+    const us: UpstreamSession = { version: "2024-11-05", mcpSessionId: null, initialized: true, sse2024: handle, credentialId };
     memory.setUpstream(session.sessionId, server.serverId, us);
     return { verdict, us };
   }
@@ -587,7 +612,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
     memory.dropVerdict(server.serverId);
     return null;
   }
-  const us: UpstreamSession = { version: init.verdict.version, mcpSessionId: init.mcpSessionId, initialized: true, sse2024: null };
+  const us: UpstreamSession = { version: init.verdict.version, mcpSessionId: init.mcpSessionId, initialized: true, sse2024: null, credentialId };
   memory.setVerdict(server.serverId, init.verdict);
   memory.setUpstream(session.sessionId, server.serverId, us);
   await sendInitialized(call, us);
