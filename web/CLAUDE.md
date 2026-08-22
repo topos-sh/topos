@@ -22,11 +22,17 @@ caller.
   gateway service, MCP sign-ins live there (never here): `app/lib/gateway/client.server.ts` is its
   one transport — `gatewayFetch` + a route allowlist, the custody transport's twin, same shared
   bearer, same boundary-gate treatment — with three typed wrappers in `credentials.server.ts`
-  (begin an authorize walk · store a pasted secret · revoke). This tier reads the gateway's
+  (begin an authorize walk · store a pasted secret · revoke) and one in `tools.server.ts` (ask the
+  server for its tool list again; the gateway probes it automatically the moment a sign-in lands,
+  so this is for a list that has since changed). This tier reads the gateway's
   non-secret rows through a second read-only mirror (`app/lib/db/schema.gateway.ts`: credential
   METADATA, observed tools, usage events — the ciphertext table has no grant and no mirror), and
   owns the tool policy itself (`web.mcp_tool_policy` + `mcp_tool_selection`, hanging off the
-  connection). Three env vars, all optional and none defaulted: `GATEWAY_INTERNAL_URL` +
+  connection). ONE policy state is refused rather than written: `selected` with nothing selected
+  means every tool off, which is switching a server off and never what an empty checklist meant —
+  so the checklist renders STARTING FULL (narrowing is unchecking; a standing selection is
+  preserved) and the write answers `empty_selection`. Three env vars, all optional and none
+  defaulted: `GATEWAY_INTERNAL_URL` +
   `GATEWAY_INTERNAL_TOKEN` (paired — half a lane refuses at parse time) arm the lane and the
   server-page sections; `GATEWAY_PUBLIC_URL` arms the DELIVERY FLIP
   (`app/lib/gateway/delivery.server.ts`), where an addressable server's delivered document gets ONE

@@ -147,18 +147,53 @@ function SignInSection({ view }: { view: McpGatewayView }) {
 }
 
 /**
+ * WHICH TOOLS A FRESHLY RENDERED CHECKLIST STARTS CHECKED.
+ *
+ * THE CHECKLIST STARTS FULL. Narrowing is switching tools OFF, never hunting for what to switch on:
+ * a workspace that has never narrowed this server sees every tool checked, so the radio and the
+ * checklist agree before anything is touched, and the act of narrowing is unchecking.
+ *
+ * A workspace with a STANDING SELECTION sees that selection instead — its answer is never
+ * overwritten by opening the page. A `selected` policy carrying no observed tool is the state this
+ * rule exists to heal: it has nothing to preserve, so it starts full like any other, and the way
+ * out of it is one click on All tools or one Save.
+ */
+export function startingToolChecks(tools: readonly McpGatewayToolRow[]): ReadonlySet<string> {
+  const standing = tools.filter((tool) => tool.selected);
+  return new Set((standing.length > 0 ? standing : tools).map((tool) => tool.name));
+}
+
+/**
  * TOOLS. The radio is the whole policy: every tool, or only the checked ones. The second line says
  * outright what happens to a tool the server adds later, because that is the question a reader has
- * the moment they narrow anything.
+ * the moment they narrow anything. Saving an empty checklist under `selected` is refused
+ * server-side, with the sentence that says what it would have done.
  */
 function ToolsSection({ view }: { view: McpGatewayView }) {
-  const busy = useSubmittingIntent() === "gateway-tools";
-  const refusal = useArmRefusal("gateway-tools");
+  const flying = useSubmittingIntent();
+  const busy = flying === "gateway-tools";
+  const refreshing = flying === "gateway-tools-refresh";
+  // Both hooks run every render (a `??` would short-circuit the second one out of the call order).
+  const saveRefusal = useArmRefusal("gateway-tools");
+  const refreshRefusal = useArmRefusal("gateway-tools-refresh");
+  const refusal = saveRefusal ?? refreshRefusal;
+  const startsChecked = startingToolChecks(view.tools);
   return (
     <section aria-labelledby="mcp-tools-heading" className="space-y-3">
-      <SectionHeading>
-        <span id="mcp-tools-heading">Tools</span>
-      </SectionHeading>
+      <div className="flex items-center justify-between gap-3">
+        <SectionHeading>
+          <span id="mcp-tools-heading">Tools</span>
+        </SectionHeading>
+        {/* Its own form, outside the policy form — a form cannot nest inside another. */}
+        <Form method="post">
+          <input type="hidden" name="intent" value="gateway-tools-refresh" />
+          <BusyFields busy={refreshing}>
+            <button type="submit" className={buttonClasses("quiet")}>
+              Refresh tools
+            </button>
+          </BusyFields>
+        </Form>
+      </div>
       <Card className="px-4 py-3">
         <Form method="post" className="space-y-3">
           <input type="hidden" name="intent" value="gateway-tools" />
@@ -193,7 +228,8 @@ function ToolsSection({ view }: { view: McpGatewayView }) {
             </fieldset>
             {view.tools.length === 0 ? (
               <p className="text-faint text-sm" data-testid="mcp-tools-empty">
-                No tools observed yet. The list fills in after the first call through the gateway.
+                No tools observed yet. The list fills in when a sign-in is connected, or when you
+                refresh it.
               </p>
             ) : (
               <ul className="space-y-2" data-testid="mcp-tools-list">
@@ -203,7 +239,7 @@ function ToolsSection({ view }: { view: McpGatewayView }) {
                       type="checkbox"
                       name="tool"
                       value={tool.name}
-                      defaultChecked={tool.selected}
+                      defaultChecked={startsChecked.has(tool.name)}
                       id={`mcp-tool-${tool.name}`}
                       className="mt-1"
                     />

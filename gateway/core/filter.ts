@@ -12,6 +12,21 @@ export function isToolAllowed(policy: ToolPolicy, name: string): boolean {
   return policy.mode === "all" || policy.selected.has(name);
 }
 
+/** The named tool entries of a tools/list result. Non-array or nameless entries fail closed out. */
+export function toolEntries(result: Record<string, unknown>): Record<string, unknown>[] {
+  const raw = Array.isArray(result["tools"]) ? (result["tools"] as unknown[]) : [];
+  return raw.filter((t): t is Record<string, unknown> => typeof t === "object" && t !== null && typeof (t as Record<string, unknown>)["name"] === "string");
+}
+
+/** What gets written down about those entries — the name and the sentence, nothing else. ONE
+ *  reader, so the live path and the connect-time probe can never observe different things. */
+export function observedToolsOf(tools: readonly Record<string, unknown>[]): ObservedTool[] {
+  return tools.map((t) => ({
+    name: t["name"] as string,
+    ...(typeof t["description"] === "string" ? { description: t["description"] as string } : {}),
+  }));
+}
+
 /**
  * Filter one tools/list result page in place-shape (a rebuilt object, source untouched) and
  * record what the upstream actually advertised. Non-array `tools` fails closed to an empty list.
@@ -23,13 +38,8 @@ export async function filterToolsListResult(
   policy: ToolPolicy,
   result: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const raw = Array.isArray(result["tools"]) ? (result["tools"] as unknown[]) : [];
-  const tools = raw.filter((t): t is Record<string, unknown> => typeof t === "object" && t !== null && typeof (t as Record<string, unknown>)["name"] === "string");
-
-  const observed: ObservedTool[] = tools.map((t) => ({
-    name: t["name"] as string,
-    ...(typeof t["description"] === "string" ? { description: t["description"] as string } : {}),
-  }));
+  const tools = toolEntries(result);
+  const observed: ObservedTool[] = observedToolsOf(tools);
   try {
     // Fire-and-forget semantics: an observation write must never fail the live call.
     await ctx.store.recordObservedTools(workspaceId, serverId, observed);

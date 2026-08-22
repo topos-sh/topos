@@ -23,6 +23,9 @@ export const ALLOWED_ROUTES = [
   "POST /internal/v1/credentials/manual",
   // Revoke: the row goes, and the next call through the gateway has no credential to attach.
   "DELETE /internal/v1/credentials/{credentialId}",
+  // Ask the server for its tool list again. The gateway holds the sign-in, so it is the only tier
+  // that can ask; what comes back is rows in its own schema, which this tier then reads.
+  "POST /internal/v1/tools/refresh",
 ] as const;
 
 const allowed = new Set<string>(ALLOWED_ROUTES);

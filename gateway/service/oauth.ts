@@ -360,7 +360,16 @@ export async function beginAuthorize(
 }
 
 export type CallbackOutcome =
-  | { ok: true; returnTo: string }
+  | {
+      ok: true;
+      returnTo: string;
+      /**
+       * The connection a credential just landed on, or null when the walk ended without one. The
+       * caller uses it to probe the server's tools before the person is sent back to the page that
+       * renders them; this module does no probing of its own — its business is the ceremony.
+       */
+      stored: { workspaceId: string; serverId: string; userId: string | null } | null;
+    }
   | { ok: false; status: 400 };
 
 /**
@@ -389,7 +398,7 @@ export async function completeCallback(
   const code = params.get("code");
   if (code === null || code === "" || params.get("error") !== null) {
     // The AS refused (or answered without a code). The ceremony is over; the page tells the truth.
-    return { ok: true, returnTo: flow.returnTo };
+    return { ok: true, returnTo: flow.returnTo, stored: null };
   }
   const body = new URLSearchParams({
     grant_type: "authorization_code",
@@ -421,7 +430,7 @@ export async function completeCallback(
     (typeof tokenType === "string" && tokenType.toLowerCase() !== "bearer")
   ) {
     deps.log("warn", "token exchange failed", { serverId: flow.serverId });
-    return { ok: true, returnTo: flow.returnTo };
+    return { ok: true, returnTo: flow.returnTo, stored: null };
   }
   const payload: CredentialPayload = {
     secret: accessToken,
@@ -439,5 +448,9 @@ export async function completeCallback(
     payload,
     createdByDisplay: flow.userId ?? "workspace",
   });
-  return { ok: true, returnTo: flow.returnTo };
+  return {
+    ok: true,
+    returnTo: flow.returnTo,
+    stored: { workspaceId: flow.workspaceId, serverId: flow.serverId, userId: flow.userId },
+  };
 }
