@@ -1,0 +1,15 @@
+-- Retention needs an index on age alone.
+--
+-- `usage_event_workspace_created_idx` serves the usage page, which always asks about ONE workspace
+-- ("this workspace's calls, newest first"). The retention sweep asks the opposite question — every
+-- workspace's rows older than a date — and a leading `workspace_id` cannot answer it without
+-- reading the whole table each pass. This index makes both halves of the sweep an index scan: the
+-- batch that picks the oldest rows past the window, and the `min(created_at)` the summary line
+-- reports as the oldest row still kept.
+--
+-- Built in the migrator's transaction (not CONCURRENTLY, which cannot run in one), so it takes a
+-- SHARE lock for the length of the build. That blocks INSERTs into `usage_event` — usage rows are
+-- buffered and flushed off the request path, so a flush waits rather than a proxied call. On a
+-- table small enough to have accumulated without retention this is seconds; the alternative is a
+-- retention sweep that sequentially scans forever.
+CREATE INDEX usage_event_created_idx ON gateway.usage_event (created_at);

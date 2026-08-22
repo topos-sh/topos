@@ -351,7 +351,7 @@ async function handleLegacyInitialize(rc: RequestCtx, msg: JsonRpcRequest): Prom
     clientInfo: identity.clientInfo,
     initialized: false,
   };
-  memory.putClientSession(session);
+  memory.putClientSession(session, rc.ctx.env.now());
   record(rc, "ok", msg.method);
   return jsonResponse(
     rpcResult(msg.id, {
@@ -603,7 +603,7 @@ async function handlePost(rc: RequestCtx): Promise<Response> {
   }
 
   if (sseToken !== null) {
-    const channel = memory.legacyChannels.get(sseToken);
+    const channel = memory.legacyChannel(sseToken, rc.ctx.env.now());
     if (!channel || channel.toposSessionId !== rc.session.sessionId || channel.serverId !== rc.server.serverId || channel.writer.closed) {
       record(rc, "ok", "POST");
       return jsonResponse(rpcError(null, ERR_INVALID_REQUEST, "The stream this request addresses is not open."), 404);
@@ -639,7 +639,7 @@ async function handlePost(rc: RequestCtx): Promise<Response> {
 
   const sessionHeader = rc.greq.request.headers.get("mcp-session-id");
   if (sessionHeader !== null) {
-    const cs = memory.clientSessions.get(sessionHeader);
+    const cs = memory.clientSession(sessionHeader, rc.ctx.env.now());
     if (!cs || cs.toposSessionId !== rc.session.sessionId || cs.serverId !== rc.server.serverId) {
       // Dead or foreign session: 404 tells a legacy client to re-initialize.
       record(rc, "ok", "method" in msg ? msg.method : "response");
@@ -657,10 +657,10 @@ async function handlePost(rc: RequestCtx): Promise<Response> {
 
 async function handleBatch(rc: RequestCtx, entries: unknown[]): Promise<Response> {
   const sessionHeader = rc.greq.request.headers.get("mcp-session-id");
-  const cs = sessionHeader !== null ? memory.clientSessions.get(sessionHeader) : undefined;
+  const cs = sessionHeader !== null ? memory.clientSession(sessionHeader, rc.ctx.env.now()) : null;
   if (!cs || cs.toposSessionId !== rc.session.sessionId || cs.serverId !== rc.server.serverId) {
     record(rc, "ok", "POST");
-    return jsonResponse(rpcError(null, ERR_INVALID_REQUEST, "A batch request needs an initialized session."), cs === undefined && sessionHeader !== null ? 404 : 400);
+    return jsonResponse(rpcError(null, ERR_INVALID_REQUEST, "A batch request needs an initialized session."), cs === null && sessionHeader !== null ? 404 : 400);
   }
   if (!BEHAVIOR[cs.clientVersion].batching || entries.length === 0) {
     record(rc, "ok", "POST");
@@ -706,7 +706,7 @@ async function handleBatch(rc: RequestCtx, entries: unknown[]): Promise<Response
 async function handleGet(rc: RequestCtx): Promise<Response> {
   const sessionHeader = rc.greq.request.headers.get("mcp-session-id");
   if (sessionHeader !== null) {
-    const cs = memory.clientSessions.get(sessionHeader);
+    const cs = memory.clientSession(sessionHeader, rc.ctx.env.now());
     if (!cs || cs.toposSessionId !== rc.session.sessionId || cs.serverId !== rc.server.serverId) {
       record(rc, "ok", "GET");
       return jsonResponse(rpcError(null, ERR_INVALID_REQUEST, "The session this request names is not open."), 404);
@@ -733,17 +733,20 @@ async function handleDelete(rc: RequestCtx): Promise<Response> {
     record(rc, "ok", "DELETE");
     return new Response(null, { status: 405 });
   }
-  const cs = memory.clientSessions.get(sessionHeader);
+  const cs = memory.clientSession(sessionHeader, rc.ctx.env.now());
   if (!cs || cs.toposSessionId !== rc.session.sessionId || cs.serverId !== rc.server.serverId) {
     record(rc, "ok", "DELETE");
     return jsonResponse(rpcError(null, ERR_INVALID_REQUEST, "The session this request names is not open."), 404);
   }
-  memory.clientSessions.delete(cs.mcpSessionId);
-  // Tear down the upstream conversation too, best-effort (needs the credential to speak).
-  const cred = await rc.ctx.store.credentialFor(rc.session.workspaceId, rc.server.serverId, rc.session.userId);
-  rc.call.auth.credential = cred;
-  rc.call.auth.secret = cred?.secret ?? null;
-  await deleteUpstreamSession(rc.call);
+  // Tear the upstream conversation down too, best-effort (it needs the credential to speak) — but
+  // only once this was the LAST client session or channel using it. Another session of the same
+  // machine, or an open 2024-11-05 channel, is still mid-conversation on that pair.
+  if (memory.dropClientSession(cs.mcpSessionId)) {
+    const cred = await rc.ctx.store.credentialFor(rc.session.workspaceId, rc.server.serverId, rc.session.userId);
+    rc.call.auth.credential = cred;
+    rc.call.auth.secret = cred?.secret ?? null;
+    await deleteUpstreamSession(rc.call);
+  }
   record(rc, "ok", "DELETE");
   return new Response(null, { status: 200 });
 }

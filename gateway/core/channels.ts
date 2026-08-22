@@ -83,7 +83,7 @@ export async function attachUpstreamNotifications(
   identity: ClientIdentity,
   emit: (msg: JsonRpcMessage) => void,
 ): Promise<() => void> {
-  const us = memory.upstream(call.session.sessionId, call.server.serverId);
+  const us = memory.upstream(call.session.sessionId, call.server.serverId, call.ctx.env.now());
   if (!us) return () => {};
   const bridge = channelBridge(call, clientVersion, us.version, identity);
 
@@ -194,7 +194,7 @@ export async function serveClientGetStream(call: UpstreamCall, clientVersion: Re
  * honored subset itself (the tool surface) and translates from the legacy notification channel.
  */
 export async function serveModernListen(call: UpstreamCall, msg: { id: JsonRpcId; params?: Record<string, unknown> }, identity: ClientIdentity): Promise<Response | null> {
-  const us = memory.upstream(call.session.sessionId, call.server.serverId);
+  const us = memory.upstream(call.session.sessionId, call.server.serverId, call.ctx.env.now());
   if (!us) return null;
 
   if (us.version === "2026-07-28") {
@@ -258,12 +258,10 @@ export async function serveModernListen(call: UpstreamCall, msg: { id: JsonRpcId
 /** The 2024-11-05 client transport: the GET stream with its `endpoint` event, module-tracked. */
 export function serve2024ClientStream(requestUrl: string, toposSessionId: string, serverId: string, mintToken: () => string): Response {
   const token = mintToken();
-  const { stream, writer } = sseSource(() => {
-    const ch = memory.legacyChannels.get(token);
-    ch?.detachUpstream?.();
-    memory.legacyChannels.delete(token);
-  });
-  memory.legacyChannels.set(token, {
+  // Closing the stream is this client's whole teardown vocabulary — the 2024-11-05 transport has
+  // no DELETE — so the drop is what releases the upstream when nothing else still speaks for it.
+  const { stream, writer } = sseSource(() => memory.dropLegacyChannel(token));
+  memory.putLegacyChannel({
     token,
     toposSessionId,
     serverId,

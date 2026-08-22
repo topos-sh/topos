@@ -514,7 +514,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
     memory.dropUpstream(session.sessionId, server.serverId);
     verdict = null;
   }
-  const existing = memory.upstream(session.sessionId, server.serverId);
+  const existing = memory.upstream(session.sessionId, server.serverId, call.ctx.env.now());
   // Reuse the conversation only if the SAME credential still backs it. A disconnect+reconnect
   // under a different upstream account changes the credential id; reusing the old upstream
   // Mcp-Session-Id would leave it bound to the prior principal.
@@ -559,7 +559,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
         };
         memory.setVerdict(server.serverId, verdict);
         const us: UpstreamSession = { version: "2024-11-05", mcpSessionId: null, initialized: true, sse2024: pumped, credentialId };
-        memory.setUpstream(session.sessionId, server.serverId, us);
+        memory.setUpstream(session.sessionId, server.serverId, us, call.ctx.env.now());
         return { verdict, us };
       }
       memory.setVerdict(server.serverId, init.verdict);
@@ -570,7 +570,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
         sse2024: null,
         credentialId,
       };
-      memory.setUpstream(session.sessionId, server.serverId, us);
+      memory.setUpstream(session.sessionId, server.serverId, us, call.ctx.env.now());
       await sendInitialized(call, us);
       return { verdict: init.verdict, us };
     }
@@ -580,7 +580,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
   // Verdict known; establish this pair's conversation.
   if (verdict.version === MODERN) {
     const us: UpstreamSession = { version: MODERN, mcpSessionId: null, initialized: true, sse2024: null, credentialId };
-    memory.setUpstream(session.sessionId, server.serverId, us);
+    memory.setUpstream(session.sessionId, server.serverId, us, call.ctx.env.now());
     return { verdict, us };
   }
   if (verdict.version === "2024-11-05") {
@@ -603,7 +603,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
     }
     void post2024(call, handle, { jsonrpc: "2.0", method: "notifications/initialized" });
     const us: UpstreamSession = { version: "2024-11-05", mcpSessionId: null, initialized: true, sse2024: handle, credentialId };
-    memory.setUpstream(session.sessionId, server.serverId, us);
+    memory.setUpstream(session.sessionId, server.serverId, us, call.ctx.env.now());
     return { verdict, us };
   }
   const init = await legacyInitialize(call, identity, verdict.version);
@@ -614,7 +614,7 @@ export async function ensureUpstream(call: UpstreamCall, identity: ClientIdentit
   }
   const us: UpstreamSession = { version: init.verdict.version, mcpSessionId: init.mcpSessionId, initialized: true, sse2024: null, credentialId };
   memory.setVerdict(server.serverId, init.verdict);
-  memory.setUpstream(session.sessionId, server.serverId, us);
+  memory.setUpstream(session.sessionId, server.serverId, us, call.ctx.env.now());
   await sendInitialized(call, us);
   return { verdict: init.verdict, us };
 }
@@ -651,7 +651,7 @@ export async function sendUpstreamRequest(call: UpstreamCall, msg: JsonRpcReques
     : null;
   try {
     for (let attempt = 0; ; attempt++) {
-      const sessionAtSend = memory.upstream(call.session.sessionId, call.server.serverId);
+      const sessionAtSend = memory.upstream(call.session.sessionId, call.server.serverId, call.ctx.env.now());
       let resp: Response;
       try {
         resp = await authedFetch(call, call.server.url, {
@@ -728,7 +728,7 @@ export async function sendUpstreamOneWay(call: UpstreamCall, msg: JsonRpcNotific
 
 /** Open the legacy upstream's unsolicited-notification GET stream (may 405 — caller handles). */
 export async function openUpstreamGetStream(call: UpstreamCall, lastEventId: string | null): Promise<Response | null> {
-  const us = memory.upstream(call.session.sessionId, call.server.serverId);
+  const us = memory.upstream(call.session.sessionId, call.server.serverId, call.ctx.env.now());
   if (!us) return null;
   const headers: Record<string, string> = { accept: "text/event-stream" };
   if (BEHAVIOR[us.version].versionHeader) headers["mcp-protocol-version"] = us.version;
@@ -743,7 +743,7 @@ export async function openUpstreamGetStream(call: UpstreamCall, lastEventId: str
 
 /** DELETE the upstream session on client teardown; 405 is a legal answer and ignored. */
 export async function deleteUpstreamSession(call: UpstreamCall): Promise<void> {
-  const us = memory.upstream(call.session.sessionId, call.server.serverId);
+  const us = memory.upstream(call.session.sessionId, call.server.serverId, call.ctx.env.now());
   if (!us) return;
   memory.dropUpstream(call.session.sessionId, call.server.serverId);
   if (!us.mcpSessionId) return;

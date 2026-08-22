@@ -173,6 +173,17 @@ services:
     image: ghcr.io/topos-sh/topos-gateway:${TOPOS_VERSION:-v0.1.43}
     restart: unless-stopped
     mem_limit: 1g
+    # WHAT THIS BOUNDS IS CONCURRENT MCP STREAMS, NOT MEMORY (mem_limit above is the memory
+    # ceiling). Every streaming session costs at least two descriptors — the agent's socket in and
+    # the upstream server's socket out — so the usual 1024 stops this service at roughly 400-500
+    # concurrent streams while it is still nowhere near its memory limit, and the failure looks
+    # like refused connections rather than anything a log would call an error. Descriptors are a
+    # few kilobytes of kernel bookkeeping each, so a generous ceiling costs nothing until the
+    # streams that need it actually exist.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       db:
         condition: service_healthy
@@ -209,6 +220,12 @@ services:
       # this service into a probe of the network it runs in. Set to 1 only if the servers your team
       # connects are genuinely internal.
       GATEWAY_ALLOW_PRIVATE_UPSTREAMS: ${TOPOS_GATEWAY_ALLOW_PRIVATE_UPSTREAMS:-0}
+      # How many days of per-call usage rows to keep. 0 — the default — keeps them all, forever:
+      # the usage table is the record of what your agents did, and nothing here deletes it unless
+      # you say so. Set 90 (or any number of days) and an hourly sweep removes rows past that age
+      # in small batches, which is what keeps the table proportional to a season's traffic rather
+      # than to how long this deployment has been up.
+      GATEWAY_USAGE_RETENTION_DAYS: ${TOPOS_GATEWAY_USAGE_RETENTION_DAYS:-0}
     volumes:
       # THE MASTER KEY, and nothing else. It wraps every workspace's data key, which encrypts every
       # stored upstream sign-in — so this volume is custody, not cache: BACK IT UP WITH THE DATABASE.
