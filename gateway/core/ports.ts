@@ -136,3 +136,11 @@ export interface GatewayRequest {
   request: Request;
   bearer: string | null;
 }
+
+/**
+ * HOST CONTRACT for `request`: it may arrive with its body unread, and the engine may answer
+ * without reading it (every pre-auth refusal does). The engine cancels the body on those paths
+ * rather than leaving a stream dangling — some hosts route a request across an internal hop that
+ * objects to an unread stream once a response is sent. A host that buffers the body before
+ * calling is equally fine; neither side needs to know which the other did.
+ */
