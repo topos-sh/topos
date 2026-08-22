@@ -3218,3 +3218,223 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         );
     }
 }
+
+// =================================================================================================
+// A server the WORKSPACE reaches on the agent's behalf.
+// =================================================================================================
+
+/// **The delivered credential lands in the entry, and only there.** A document that says the
+/// workspace reaches the server is placed with this machine's own session credential for that
+/// workspace as its `Authorization` header — byte-identical to what the pure driver renders for
+/// that entry, with no sign-in hint of any kind, because there is nothing left to sign into. The
+/// rendering is a function of the document and the credential, so a second converge finds every
+/// surface `current` and writes nothing.
+#[test]
+fn a_delivered_gateway_document_places_the_workspace_credential_in_every_dialect() {
+    let home = Scratch::new("gateway-place");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let d = delivered_demand(
+        "s_linear",
+        "linear",
+        "eng",
+        &gateway_server_json("https://gw.example/sn_1/srv_1"),
+        "sc-secret",
+    );
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(warning_lines(&out).is_empty(), "{:?}", out.warnings);
+    assert!(standing_lines(&out).is_empty(), "{:?}", out.advisories);
+
+    // The entry a driver would render for this document: the workspace's address, dialed with the
+    // machine's own credential, and NO auth hint — `oauth` was the upstream server's word, and the
+    // workspace is what answers it now.
+    let entry = McpEntry {
+        key: "topos-eng-linear".into(),
+        target: mcp::McpTarget::Remote {
+            url: "https://gw.example/sn_1/srv_1".into(),
+            headers: vec![("Authorization".into(), "Bearer sc-secret".into())],
+        },
+        auth: AuthHint::None,
+    };
+    for (suffix, dialect) in [
+        (".cursor/mcp.json", McpDialect::CursorJson),
+        (".opencode/opencode.json", McpDialect::OpencodeJson),
+        (".openclaw/openclaw.json", McpDialect::OpenclawJson),
+    ] {
+        let got = std::fs::read(home.0.join(suffix)).unwrap_or_else(|e| panic!("{suffix}: {e}"));
+        let expect = match mcp::apply(
+            dialect,
+            None,
+            std::slice::from_ref(&entry),
+            &BTreeMap::new(),
+        )
+        .plan
+        {
+            mcp::EditPlan::Write(bytes) => bytes,
+            other => panic!("{dialect:?}: {other:?}"),
+        };
+        assert_eq!(got, expect, "{suffix} differs from the driver's rendering");
+        assert!(
+            String::from_utf8_lossy(&got).contains("Bearer sc-secret"),
+            "{suffix} carries the header the workspace reads"
+        );
+    }
+    // …and the dialects that spell an address their own way carry it too.
+    let codex = std::fs::read_to_string(home.0.join(".codex/config.toml")).unwrap();
+    assert!(
+        codex.contains(r#"http_headers = { Authorization = "Bearer sc-secret" }"#),
+        "{codex}"
+    );
+
+    // Idempotent: the same document and the same session render the same bytes, so nothing is
+    // rewritten and every fingerprint still matches the file.
+    let out2 = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    for h in synthetic() {
+        assert_eq!(
+            state_of(&out2, "s_linear", h.slug).state,
+            TargetOutcome::Current,
+            "{}",
+            h.slug
+        );
+    }
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
+    for (k, _b, e) in custody.iter() {
+        let slug = k.split('/').next().unwrap();
+        let h = synthetic().into_iter().find(|h| h.slug == slug).unwrap();
+        let dialect = h.mcp().unwrap().user.unwrap().dialect;
+        let observed = mcp::observe(dialect, std::fs::read(&e.file).ok().as_deref());
+        assert_eq!(
+            observed.entries.get("topos-eng-linear"),
+            Some(&e.fingerprint),
+            "{k}: the fingerprint is taken over the rendering, credential included"
+        );
+    }
+}
+
+/// **A folder on this machine can spell the claim; it can never earn the credential.** A local row
+/// carries no workspace and no session, so the same document is REFUSED — nothing is placed, no
+/// config file is touched, and the reason is one plain sentence. The refusal is structural: a
+/// demand that names no workspace is not rendered with a credential even when one is handed to it,
+/// which is what stops a document naming an address of its own choosing from harvesting it.
+#[test]
+fn a_gateway_document_from_a_local_folder_is_refused_and_places_nothing() {
+    let home = Scratch::new("gateway-local");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let document = gateway_server_json("https://gw.example/sn_1/srv_1");
+    // A local row as the sweep builds one: no workspace slug, no session behind it.
+    let local = demand("local:linear", "linear", None, &document);
+    // …and the same row with a credential smuggled in beside it: still no workspace, still refused.
+    let mut smuggled = demand("local:beta", "beta", None, &document);
+    smuggled.gateway = Some(crate::mcp_render::GatewayBearer::new(
+        "sc-secret".to_owned(),
+    ));
+
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![local, smuggled]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    for bundle in ["local:linear", "local:beta"] {
+        let st = state_of(&out, bundle, "cursor");
+        assert_eq!(st.state, TargetOutcome::Withheld, "{bundle}: {st:?}");
+        assert_eq!(
+            st.note.as_deref(),
+            Some("reached through a workspace this machine holds no session for"),
+            "{bundle}"
+        );
+    }
+    assert_eq!(
+        standing_lines(&out),
+        [
+            "MCP_NO_SESSION linear: not placed: this server is reached through the workspace that \
+             shares it, and nothing here holds a session for that workspace.",
+            "MCP_NO_SESSION beta: not placed: this server is reached through the workspace that \
+             shares it, and nothing here holds a session for that workspace.",
+        ],
+        "one line per bundle, each naming the bundle it is about"
+    );
+    assert!(warning_lines(&out).is_empty(), "{:?}", warning_lines(&out));
+    assert_eq!(
+        out.unplaced_bundles,
+        vec!["local:linear".to_owned(), "local:beta".to_owned()],
+        "nothing of either is installed anywhere, so the summary says so"
+    );
+    for suffix in [
+        ".cursor/mcp.json",
+        ".codex/config.toml",
+        ".opencode/opencode.json",
+        ".openclaw/openclaw.json",
+        ".hermes/config.yaml",
+    ] {
+        assert!(
+            !home.0.join(suffix).exists(),
+            "{suffix} was written for a document nothing vouched for"
+        );
+    }
+}
+
+/// The bridge carries it too. An agent that dials no address reaches the workspace's own through
+/// `mcp-remote`, and the credential takes the same environment hop every bridged header value takes
+/// — the argument carries no space, so nothing mangles it on the way to the program.
+#[test]
+fn a_bridged_agent_reaches_the_workspace_address_with_the_credential_in_its_environment() {
+    static BRIDGED: &[KnownHarness] = &[registry::home_rooted_mcp_row_with_caps(
+        "cursor",
+        "Cursor",
+        ".cursor/mcp.json",
+        McpDialect::CursorJson,
+        None,
+        "restart cursor",
+        false, // dials nothing itself
+        true,  // …but runs programs
+        topos_harness::mcp::descriptor::EnvRef::DollarBrace,
+    )];
+    let table: Vec<&'static KnownHarness> = BRIDGED.iter().collect();
+    let slugs: BTreeSet<String> = table.iter().map(|h| h.slug.to_owned()).collect();
+
+    let home = Scratch::new("gateway-bridge");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let document = gateway_server_json("https://gw.example/sn_1/srv_1");
+    let demands = vec![
+        delivered_demand("s_linear", "linear", "eng", &document, "sc-secret")
+            .planned(&io, &table, &slugs),
+    ];
+    let out = mcp_engine::converge(&io, &demands, &table, &slugs, &no_hold(), true);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    let written = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).expect("cursor");
+    assert!(
+        written.contains("\"https://gw.example/sn_1/srv_1\""),
+        "{written}"
+    );
+    assert!(
+        written.contains("\"Authorization:${TOPOS_HEADER_AUTHORIZATION}\""),
+        "the header argument carries no space: {written}"
+    );
+    assert!(
+        written.contains("\"TOPOS_HEADER_AUTHORIZATION\": \"Bearer sc-secret\""),
+        "…and the credential travels in the environment: {written}"
+    );
+}

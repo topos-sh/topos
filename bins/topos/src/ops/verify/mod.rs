@@ -10,8 +10,12 @@
 //! is touched. `current` keeps meaning "you have the followed version" and cannot be confused with
 //! "it answered"; a verification is about this moment and this machine, and a moment is not a state.
 //!
-//! **No credential is ever supplied.** topos holds none, and this verb does not ask the harness for
-//! the one it holds. A server that refuses without a sign-in is therefore the EXPECTED answer for
+//! **No sign-in of anybody's is ever supplied.** This verb never asks a harness for the credential
+//! it holds, and topos holds none of its own — with ONE exception, which is not a sign-in at all:
+//! where a workspace reaches the server on the agent's behalf, the address is the workspace's own
+//! and it is dialed with this machine's session credential for that workspace, exactly as the
+//! placed entry dials it. Verifying it any other way would verify an address no agent uses. A
+//! server that refuses without a sign-in is therefore still the EXPECTED answer for
 //! every OAuth-gated server, and it is reported as HEALTHY. WHO can complete that sign-in is a
 //! second question the refusal itself cannot answer, so the sign-in walk ([`discovery`]) reads the
 //! server's own discovery documents for it: a server that registers clients on demand keeps the
@@ -71,7 +75,9 @@ pub(crate) fn verify(
     if let Some(bytes) = local_row_server(ctx, name, scope)? {
         let doc = mcp_render::parse_server_json(&bytes)
             .map_err(|e| ClientError::Corrupt(format!("{name}: {e}")))?;
-        return Ok(data_for(name, &check(&doc)?));
+        // A folder's own file, verified with no session behind it — nothing delivered it, so
+        // nothing vouches for an address it might ask to be signed for.
+        return Ok(data_for(name, &check(&doc, None)?));
     }
     let (layout, sid, lock) = super::resolve_skill_in_scope(ctx, name, None, scope)?;
     let sctx = super::pull::ctx_with_layout(ctx, &layout);
@@ -96,7 +102,30 @@ pub(crate) fn verify(
     let bytes = recorded.document;
     let doc = mcp_render::parse_server_json(&bytes)
         .map_err(|e| ClientError::Corrupt(format!("{}: {e}", lock.name)))?;
-    Ok(data_for(&lock.name, &check(&doc)?))
+    let gateway = delivering_session(ctx, sid.as_str());
+    Ok(data_for(&lock.name, &check(&doc, gateway.as_ref())?))
+}
+
+/// **The session that delivered this bundle**, when this machine still holds one: the workspace is
+/// the one whose last delivery carried the bundle (the offline cache is that record), and the
+/// credential is that workspace's own session. `None` when either half is missing — a workspace
+/// logged out of, a cache never written — and a document that needs one then earns the refusal
+/// rather than a bare dial.
+///
+/// It is read here rather than passed in because `verify` resolves a NAME, not a session: which
+/// workspace a bundle came from is a fact about the machine's own records.
+fn delivering_session(ctx: &Ctx<'_>, skill_id: &str) -> Option<crate::mcp_render::GatewayBearer> {
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).ok()?;
+    let workspace_id = cache
+        .workspaces
+        .iter()
+        .find(|(_, ws)| ws.delivered.contains_key(skill_id))
+        .map(|(id, _)| id.clone())?;
+    let sessions = crate::sessions::read_sessions(ctx.fs, &ctx.layout).ok()?;
+    let session = sessions.live().find(|s| s.workspace_id == workspace_id)?;
+    Some(crate::mcp_render::GatewayBearer::new(
+        session.credential.clone(),
+    ))
 }
 
 /// A LOCAL row's document: the `server.json` at the root of the folder a `kind = "mcp"` row in
@@ -177,10 +206,19 @@ struct Checked {
 /// exactly the question a verification asks — so a bundle offering an address is verified at its
 /// address, and a package bundle is verified by running the package.
 ///
+/// `gateway` is the session credential the delivering workspace's own address is reached with, for
+/// the one document shape that names one ([`mcp_render::select`]); it is what makes the thing
+/// verified the thing delivered. A document that names one where nothing here holds a session for
+/// that workspace is a REFUSAL, not a verdict — dialing it bare would only prove that an address
+/// refuses an unsigned caller.
+///
 /// # Errors
 /// A capability gap: this build or this machine cannot set the server up at all, so there is
 /// nothing to verify and no verdict to give.
-fn check(doc: &mcp_render::ServerDoc) -> Result<Checked, ClientError> {
+fn check(
+    doc: &mcp_render::ServerDoc,
+    gateway: Option<&mcp_render::GatewayBearer>,
+) -> Result<Checked, ClientError> {
     let caps = HarnessCaps {
         remote: true,
         stdio: true,
@@ -192,7 +230,7 @@ fn check(doc: &mcp_render::ServerDoc) -> Result<Checked, ClientError> {
     };
     // No bridge: with `remote` true the address is dialed directly, so the bridge arm — which
     // exists for agents that cannot dial one — is never the shape under test.
-    match mcp_render::select(doc, caps, None, &PathRuntimes, machine) {
+    match mcp_render::select(doc, caps, None, &PathRuntimes, machine, gateway) {
         Ok(McpTarget::Remote { url, headers }) => {
             let verdict = remote::probe(&remote::agent(), &url, &headers);
             Ok(Checked {

@@ -25,15 +25,36 @@
 //! happens to have installed would make the same bundle a different server per machine, quietly.
 //! The placement is re-decided on every sweep, so installing the runtime is all it takes.
 //!
-//! ## What never travels
+//! ## What never travels IN THE DOCUMENT
 //!
-//! No credential, ever. A package's environment slot that carries a literal, non-secret value
-//! renders that value; a slot the document leaves EMPTY travels as a NAME
-//! ([`EnvValue::Inherited`]) and is spelled by the config dialect — a reference inside the value
-//! for most harnesses ([`EnvRef`]), a list of inherited variables for the one that names them
-//! structurally — so the name travels in the bundle and each machine's own environment fills it
-//! in. A value the document leaves for a person to fill in (a template) is not something topos can
-//! supply, and the placement says so.
+//! No credential is ever carried BY a shared bundle. A package's environment slot that carries a
+//! literal, non-secret value renders that value; a slot the document leaves EMPTY travels as a
+//! NAME ([`EnvValue::Inherited`]) and is spelled by the config dialect — a reference inside the
+//! value for most harnesses ([`EnvRef`]), a list of inherited variables for the one that names
+//! them structurally — so the name travels in the bundle and each machine's own environment fills
+//! it in. A value the document leaves for a person to fill in (a template) is not something topos
+//! can supply, and the placement says so. A header the document itself declares is re-checked
+//! here and must be a plain literal: a secret / templated / value-less one fails the whole demand
+//! closed ([`parse_server_json`]).
+//!
+//! ## The one credential this machine attaches ITSELF
+//!
+//! A workspace can share a server it reaches on the agent's behalf: the delivered document then
+//! says so (`_meta["sh.topos/gateway"]`) and its address is the workspace's own. Such an entry
+//! carries an `Authorization: Bearer` header holding **this machine's standing session credential
+//! for the workspace that delivered it** — read from this machine's own session store
+//! ([`crate::sessions`]) and attached HERE, after the document was parsed. The server never sends
+//! it, and it never appears in a bundle's bytes.
+//!
+//! Two consequences, both deliberate:
+//!
+//! - the header is part of the rendered entry, so it lands in the agent's config file (and in the
+//!   fingerprint taken over that rendering) exactly like every other rendered byte — the file the
+//!   agent already keeps its own sign-in state in, whose permissions are that agent's to set;
+//! - the attach happens ONLY for a document a workspace delivered, and only with that session's
+//!   own credential ([`select`]). A folder on this machine can spell the same `_meta` key; it is
+//!   handed nothing, and nothing is placed for it ([`Gap::NoSession`]) — a document must never
+//!   be able to name an address of its choosing and be given the machine's credential for it.
 
 use std::path::{Path, PathBuf};
 
@@ -66,7 +87,47 @@ pub(crate) struct ServerDoc {
     /// Every package the document declares, in its own order.
     pub packages: Vec<PackageRef>,
     pub auth: AuthHint,
+    /// **The workspace reaches this server on the agent's behalf** — the delivered document says
+    /// its address is the workspace's own (`_meta["sh.topos/gateway"] == true`), so the entry is
+    /// dialed with this machine's session credential for that workspace rather than with a
+    /// sign-in each machine completes for itself.
+    ///
+    /// It is a CLAIM the document makes, not a permission: what turns it into an attached header
+    /// is the demand's own provenance, which only [`select`] can be told about (see the module
+    /// doc). `false` for every document that does not state it, whatever else it states.
+    pub gateway: bool,
 }
+
+/// **This machine's standing session credential for one workspace**, as an entry's `Authorization`
+/// header — the ONE secret a rendering carries, and never one the document supplied.
+///
+/// A type of its own for two reasons: it makes the plumbing say what it is at every hop, and its
+/// `Debug` redacts, so no future `{:?}` over a demand or a plan can print it (the same discipline
+/// [`crate::sessions::Session`] keeps over the credential it holds).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct GatewayBearer(String);
+
+impl GatewayBearer {
+    /// Wrap the session credential a delivery ran under.
+    pub(crate) fn new(credential: String) -> Self {
+        Self(credential)
+    }
+
+    /// The header value an entry carries.
+    fn header_value(&self) -> String {
+        format!("Bearer {}", self.0)
+    }
+}
+
+impl std::fmt::Debug for GatewayBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GatewayBearer(<redacted>)")
+    }
+}
+
+/// The header a gateway entry is dialed with. Its name is fixed: the workspace that delivers the
+/// document is the one that reads it.
+const AUTHORIZATION: &str = "Authorization";
 
 /// The address half of a document.
 #[derive(Debug, Clone)]
@@ -179,6 +240,18 @@ impl ServerDoc {
             .first()
             .map(|p| format!("{}:{}", p.registry, p.identifier))
     }
+
+    /// **The auth word the ENTRY carries**, which is the publisher's own — except where the
+    /// workspace reaches the server for the agent: that entry is dialed with the credential
+    /// [`select`] attaches, so there is nothing for a harness to sign into and no hint to give.
+    /// Both halves read the same `gateway` argument [`select`] does, so an entry can never be
+    /// written with a header and a sign-in hint at once.
+    pub(crate) fn entry_auth(&self, gateway: Option<&GatewayBearer>) -> AuthHint {
+        if self.gateway && gateway.is_some() {
+            return AuthHint::None;
+        }
+        self.auth
+    }
 }
 
 // =================================================================================================
@@ -206,8 +279,8 @@ pub(crate) fn parse_server_json(bytes: &[u8]) -> Result<ServerDoc, String> {
             "its server.json offers neither an address to dial nor a package to run".to_owned(),
         );
     }
-    let auth = match root
-        .get("_meta")
+    let meta = root.get("_meta");
+    let auth = match meta
         .and_then(|m| m.get("sh.topos/auth"))
         .and_then(Value::as_str)
     {
@@ -216,6 +289,12 @@ pub(crate) fn parse_server_json(bytes: &[u8]) -> Result<ServerDoc, String> {
         Some("manual") => AuthHint::Manual,
         _ => AuthHint::Unknown,
     };
+    // The gateway claim is the literal `true` and nothing else — a string, a number, or any other
+    // shape says nothing, and a claim nobody spelled is not one to honour.
+    let gateway = meta
+        .and_then(|m| m.get("sh.topos/gateway"))
+        .and_then(Value::as_bool)
+        == Some(true);
     let text = |key: &str| {
         root.get(key)
             .and_then(Value::as_str)
@@ -231,6 +310,7 @@ pub(crate) fn parse_server_json(bytes: &[u8]) -> Result<ServerDoc, String> {
         remote,
         packages,
         auth,
+        gateway,
     })
 }
 
@@ -535,6 +615,11 @@ pub(crate) enum Gap {
     Unfillable { name: String },
     /// The agent cannot take the shape this document offers at all.
     Unsupported { program: bool },
+    /// The document says the workspace reaches this server for the agent, and this machine holds
+    /// no session for a workspace that shares it — so there is no credential to dial the address
+    /// with, and an address dialed without one is an entry that could only fail. A `server.json`
+    /// in a folder on this machine can spell the claim; it can never earn the credential.
+    NoSession,
 }
 
 impl Gap {
@@ -546,6 +631,7 @@ impl Gap {
             | Self::Unsupported { .. } => "MCP_KIND_UNSUPPORTED",
             Self::MissingRuntime { .. } => "MCP_RUNTIME_MISSING",
             Self::Unfillable { .. } => "MCP_VALUE_UNFILLABLE",
+            Self::NoSession => "MCP_NO_SESSION",
         }
     }
 
@@ -576,6 +662,9 @@ impl Gap {
                 "not placed in {harness}: this server is an address, and this version of topos \
                  cannot set that up in {harness}."
             ),
+            Self::NoSession => "not placed: this server is reached through the workspace that \
+                                shares it, and nothing here holds a session for that workspace."
+                .to_owned(),
         }
     }
 
@@ -603,6 +692,9 @@ impl Gap {
             Self::Unsupported { program: false } => {
                 format!("this version of topos cannot set up an address in {harness}")
             }
+            Self::NoSession => {
+                "reached through a workspace this machine holds no session for".to_owned()
+            }
         }
     }
 
@@ -620,6 +712,9 @@ impl Gap {
             Self::Unsupported { .. } => {
                 "this bundle offers nothing this machine can run or dial".to_owned()
             }
+            Self::NoSession => {
+                "it is reached through a workspace this machine holds no session for".to_owned()
+            }
         };
         format!("this version of topos cannot set this server up on this machine ({cause})")
     }
@@ -634,6 +729,14 @@ const UVX: &str = "uvx";
 /// **The one selection** — see the module doc for the order, which this function is the whole
 /// implementation of.
 ///
+/// `gateway` is **this machine's own session credential for the workspace that delivered this
+/// document**, and the caller passes it ONLY when both halves hold: the demand came from a
+/// workspace, and the credential is that workspace's session ([`crate::mcp_engine`] is where the
+/// two are joined). It is consulted only where the document itself claims the workspace reaches
+/// the server ([`ServerDoc::gateway`]) — a document that claims nothing is rendered exactly as
+/// before, credential or no credential — and a document that claims it without one is refused
+/// ([`Gap::NoSession`]) rather than dialed bare.
+///
 /// # Errors
 /// One [`Gap`] naming, in plain words, why this agent gets nothing for this bundle.
 pub(crate) fn select(
@@ -642,9 +745,14 @@ pub(crate) fn select(
     bridge: Option<&McpBridge>,
     runtimes: &dyn RuntimeProbe,
     machine: Machine,
+    gateway: Option<&GatewayBearer>,
 ) -> Result<McpTarget, Gap> {
     // 1. The address, where the agent dials one itself.
     if let Some(remote) = &doc.remote {
+        // The header this machine attaches itself, for a document that says the workspace reaches
+        // the server. Resolved ONCE, before the two address arms, so the address a bridge carries
+        // and the address a harness dials are the same address dialed the same way.
+        let remote = authorized(doc, remote, gateway)?;
         if caps.remote {
             return Ok(McpTarget::Remote {
                 url: remote.url.clone(),
@@ -655,7 +763,7 @@ pub(crate) fn select(
         if caps.stdio
             && let Some(bridge) = bridge
         {
-            return bridged(remote, bridge, caps.env_ref, runtimes, machine);
+            return bridged(&remote, bridge, caps.env_ref, runtimes, machine);
         }
     }
     // 3. The first package this build can set up — npm, then pypi.
@@ -673,6 +781,42 @@ pub(crate) fn select(
     Err(Gap::Unsupported {
         program: doc.remote.is_none(),
     })
+}
+
+/// **The address as it is actually dialed** — the document's own, unless the document says the
+/// workspace reaches the server, in which case the entry carries this machine's session credential
+/// for that workspace as its `Authorization` header.
+///
+/// The document's own headers are kept beside it, minus any `Authorization` of its own: an entry
+/// may only carry one, and the one this machine attached is the one the workspace reads. (The
+/// parse already refused a secret / templated / value-less header, so anything dropped here was a
+/// plain literal the workspace's own header supersedes.)
+///
+/// # Errors
+/// [`Gap::NoSession`] when the document makes the claim and no credential answers it — the address
+/// is never dialed bare on the strength of the document's word alone.
+fn authorized<'a>(
+    doc: &'a ServerDoc,
+    remote: &'a RemoteEndpoint,
+    gateway: Option<&GatewayBearer>,
+) -> Result<std::borrow::Cow<'a, RemoteEndpoint>, Gap> {
+    if !doc.gateway {
+        return Ok(std::borrow::Cow::Borrowed(remote));
+    }
+    let Some(bearer) = gateway else {
+        return Err(Gap::NoSession);
+    };
+    let mut headers: Vec<(String, String)> = remote
+        .headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case(AUTHORIZATION))
+        .cloned()
+        .collect();
+    headers.push((AUTHORIZATION.to_owned(), bearer.header_value()));
+    Ok(std::borrow::Cow::Owned(RemoteEndpoint {
+        url: remote.url.clone(),
+        headers,
+    }))
 }
 
 /// Why THIS package could not be set up, in the order a person would ask it: a registry with no
@@ -698,6 +842,10 @@ fn unrenderable(package: &PackageRef) -> Gap {
 /// environment, which mcp-remote expands itself. So the bridge's env spelling is always `${VAR}`,
 /// whatever the harness's own reference syntax is: the program reading it is mcp-remote, not the
 /// harness.
+///
+/// That is also how the workspace's own `Authorization` header reaches a bridged agent: it is one
+/// more pair by the time this runs ([`authorized`]), and `Bearer <credential>` is exactly the kind
+/// of value — one with a space in it — the environment hop exists for.
 fn bridged(
     remote: &RemoteEndpoint,
     bridge: &McpBridge,
@@ -714,9 +862,10 @@ fn bridged(
         let var = header_var(name, &env);
         args.push("--header".to_owned());
         args.push(format!("{name}:${{{var}}}"));
-        // Every slot the bridge carries is a LITERAL header value the gate approved. Nothing here
-        // is inherited from the machine — the `${VAR}` in the argument above is mcp-remote's own
-        // expansion of the slot beside it, not a reference the harness resolves.
+        // Every slot the bridge carries is a LITERAL header value — one the gate approved in the
+        // document, or the workspace credential this machine attached itself. Nothing here is
+        // inherited from the machine's environment: the `${VAR}` in the argument above is
+        // mcp-remote's own expansion of the slot beside it, not a reference the harness resolves.
         env.push((var, EnvValue::Literal(value.clone())));
     }
     let (command, args) = windows_wrap(NPX, &args, machine.windows, machine.wsl_dest);
@@ -973,6 +1122,7 @@ mod tests {
             Some(&BRIDGE),
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect("placed");
         assert!(matches!(target, McpTarget::Remote { .. }));
@@ -985,6 +1135,7 @@ mod tests {
             Some(&BRIDGE),
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect("placed");
         let (command, args, env) = local(&target);
@@ -1000,6 +1151,7 @@ mod tests {
             Some(&BRIDGE),
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect("placed");
         let (command, args, _) = local(&target);
@@ -1013,7 +1165,8 @@ mod tests {
                 caps(true, false),
                 Some(&BRIDGE),
                 &EVERYTHING,
-                Machine::default()
+                Machine::default(),
+                None
             ),
             Err(Gap::Unsupported { program: true })
         );
@@ -1024,7 +1177,8 @@ mod tests {
                 caps(false, false),
                 Some(&BRIDGE),
                 &EVERYTHING,
-                Machine::default()
+                Machine::default(),
+                None
             ),
             Err(Gap::Unsupported { program: false })
         );
@@ -1035,7 +1189,8 @@ mod tests {
                 caps(false, true),
                 None,
                 &EVERYTHING,
-                Machine::default()
+                Machine::default(),
+                None
             ),
             Err(Gap::Unsupported { program: false })
         );
@@ -1064,6 +1219,7 @@ mod tests {
             None,
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect("placed");
         let (command, args, env) = local(&target);
@@ -1092,6 +1248,7 @@ mod tests {
                 None,
                 &EVERYTHING,
                 Machine::default(),
+                None,
             )
             .expect("placed"),
         );
@@ -1125,6 +1282,7 @@ mod tests {
             Some(&BRIDGE),
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect_err("nothing this build can set up");
         assert_eq!(
@@ -1153,7 +1311,8 @@ mod tests {
                 caps(false, true),
                 None,
                 &EVERYTHING,
-                Machine::default()
+                Machine::default(),
+                None
             ),
             Err(Gap::PackageTransport {
                 transport: "sse".to_owned()
@@ -1177,6 +1336,7 @@ mod tests {
                 None,
                 &EVERYTHING,
                 Machine::default(),
+                None,
             )
             .expect("placed"),
         );
@@ -1199,7 +1359,8 @@ mod tests {
                 caps(false, true),
                 None,
                 &EVERYTHING,
-                Machine::default()
+                Machine::default(),
+                None
             ),
             Err(Gap::UnsupportedPackage {
                 registry: "nuget".to_owned()
@@ -1223,6 +1384,7 @@ mod tests {
                 None,
                 &EVERYTHING,
                 Machine::default(),
+                None,
             )
             .expect("placed");
             local(&target).2
@@ -1260,6 +1422,7 @@ mod tests {
             Some(&BRIDGE),
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect("placed");
         let (command, args, env) = local(&target);
@@ -1301,6 +1464,7 @@ mod tests {
             Some(&BRIDGE),
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect("placed");
         let (_, args, env) = local(&target);
@@ -1333,6 +1497,7 @@ mod tests {
                     Some(&BRIDGE),
                     &EVERYTHING,
                     Machine::default(),
+                    None,
                 )
                 .expect("placed"),
             )
@@ -1384,13 +1549,28 @@ mod tests {
         let packaged = doc(NPM_ONLY);
         // Nothing on this PATH: withheld for a Windows destination…
         assert_eq!(
-            select(&packaged, caps(false, true), None, &NOTHING, on_windows),
+            select(
+                &packaged,
+                caps(false, true),
+                None,
+                &NOTHING,
+                on_windows,
+                None
+            ),
             Err(Gap::MissingRuntime { tool: NODE })
         );
         // …and placed for the WSL one, unwrapped, because the answer would be about the wrong
         // machine either way.
         let (command, args, _) = local(
-            &select(&packaged, caps(false, true), None, &NOTHING, inside_wsl).expect("placed"),
+            &select(
+                &packaged,
+                caps(false, true),
+                None,
+                &NOTHING,
+                inside_wsl,
+                None,
+            )
+            .expect("placed"),
         );
         assert_eq!(
             (command.as_str(), args[1].as_str()),
@@ -1403,7 +1583,8 @@ mod tests {
                 caps(false, true),
                 Some(&BRIDGE),
                 &NOTHING,
-                on_windows
+                on_windows,
+                None
             ),
             Err(Gap::MissingRuntime { tool: NODE })
         );
@@ -1413,12 +1594,23 @@ mod tests {
                 caps(false, true),
                 Some(&BRIDGE),
                 &NOTHING,
-                inside_wsl
+                inside_wsl,
+                None
             )
             .is_ok()
         );
         // A runtime that IS here is still placed for both — the skip changes nothing else.
-        assert!(select(&packaged, caps(false, true), None, &EVERYTHING, on_windows).is_ok());
+        assert!(
+            select(
+                &packaged,
+                caps(false, true),
+                None,
+                &EVERYTHING,
+                on_windows,
+                None
+            )
+            .is_ok()
+        );
     }
 
     /// **A file on `PATH` that nobody can execute is not a runtime.** On POSIX the bit is the
@@ -1473,6 +1665,7 @@ mod tests {
             None,
             &NOTHING,
             Machine::default(),
+            None,
         )
         .expect_err("no node");
         assert_eq!(gap, Gap::MissingRuntime { tool: NODE });
@@ -1487,7 +1680,8 @@ mod tests {
                 caps(false, true),
                 Some(&BRIDGE),
                 &NOTHING,
-                Machine::default()
+                Machine::default(),
+                None
             ),
             Err(Gap::MissingRuntime { tool: NODE })
         );
@@ -1498,7 +1692,14 @@ mod tests {
                               "version": "3.0.1", "transport": {"type": "stdio"}}]}"#,
         );
         assert_eq!(
-            select(&pypi, caps(false, true), None, &NOTHING, Machine::default()),
+            select(
+                &pypi,
+                caps(false, true),
+                None,
+                &NOTHING,
+                Machine::default(),
+                None
+            ),
             Err(Gap::MissingRuntime { tool: UVX })
         );
 
@@ -1515,6 +1716,7 @@ mod tests {
             None,
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect_err("no oci arm");
         assert_eq!(
@@ -1535,6 +1737,7 @@ mod tests {
             None,
             &EVERYTHING,
             Machine::default(),
+            None,
         )
         .expect_err("templated");
         assert_eq!(
@@ -1549,7 +1752,8 @@ mod tests {
                 caps(true, false),
                 None,
                 &EVERYTHING,
-                Machine::default()
+                Machine::default(),
+                None
             )
             .expect_err("no stdio")
             .message("lm-studio"),
@@ -1563,8 +1767,15 @@ mod tests {
     fn a_windows_machine_wraps_the_runner_unless_the_config_lives_in_wsl() {
         let packaged = doc(NPM_ONLY);
         let render = |machine| {
-            let target =
-                select(&packaged, caps(false, true), None, &EVERYTHING, machine).expect("placed");
+            let target = select(
+                &packaged,
+                caps(false, true),
+                None,
+                &EVERYTHING,
+                machine,
+                None,
+            )
+            .expect("placed");
             let (command, args, _) = local(&target);
             (command, args)
         };
@@ -1691,5 +1902,213 @@ mod tests {
             let e = parse_server_json(bad.as_bytes()).expect_err(bad);
             assert!(e.contains(says), "{bad}: {e}");
         }
+    }
+
+    /// The document a workspace delivers for a server it reaches itself: an address, and the ONE
+    /// `_meta` key that says so. The literal `true` is the whole claim — anything else is a key
+    /// nobody spelled.
+    const GATEWAY: &str = r#"{
+      "name": "io.github.acme/server", "description": "d", "version": "1.0.0",
+      "remotes": [{"type": "streamable-http", "url": "https://gw.example/sn_1/srv_1",
+                   "headers": [{"name": "X-Team", "value": "eng"}]}],
+      "_meta": {"sh.topos/auth": "oauth", "sh.topos/gateway": true}
+    }"#;
+
+    fn bearer() -> GatewayBearer {
+        GatewayBearer::new("sc-secret".to_owned())
+    }
+
+    fn remote_of(target: &McpTarget) -> (String, Vec<(String, String)>) {
+        match target {
+            McpTarget::Remote { url, headers } => (url.clone(), headers.clone()),
+            McpTarget::Local { .. } => panic!("expected an address, got a program"),
+        }
+    }
+
+    /// **The one credential this machine attaches itself.** A document that says the workspace
+    /// reaches the server renders with this machine's own session credential for that workspace —
+    /// beside the document's own headers, never instead of the document being read — and the entry
+    /// is ready by construction: there is nothing left for a harness to sign into.
+    #[test]
+    fn a_gateway_document_is_dialed_with_this_machines_own_session_credential() {
+        let gateway = doc(GATEWAY);
+        assert!(gateway.gateway, "the claim survives the parse");
+        assert_eq!(
+            gateway.auth,
+            AuthHint::Oauth,
+            "so does the publisher's word"
+        );
+
+        let target = select(
+            &gateway,
+            caps(true, true),
+            Some(&BRIDGE),
+            &EVERYTHING,
+            Machine::default(),
+            Some(&bearer()),
+        )
+        .expect("placed");
+        let (url, headers) = remote_of(&target);
+        assert_eq!(url, "https://gw.example/sn_1/srv_1");
+        assert_eq!(
+            headers,
+            [
+                ("X-Team".to_owned(), "eng".to_owned()),
+                ("Authorization".to_owned(), "Bearer sc-secret".to_owned()),
+            ],
+            "the document's own headers stand, and the workspace's rides beside them"
+        );
+        assert_eq!(
+            gateway.entry_auth(Some(&bearer())),
+            AuthHint::None,
+            "an entry dialed with a credential has no sign-in left to hint at"
+        );
+
+        // The SAME bytes without the claim: the credential is not attached to a document that did
+        // not ask for it, and the publisher's word is the entry's own.
+        let plain = doc(&GATEWAY.replace("\"sh.topos/gateway\": true", "\"sh.topos/gateway\": 1"));
+        assert!(!plain.gateway, "only the literal true is the claim");
+        let (_, headers) = remote_of(
+            &select(
+                &plain,
+                caps(true, true),
+                Some(&BRIDGE),
+                &EVERYTHING,
+                Machine::default(),
+                Some(&bearer()),
+            )
+            .expect("placed"),
+        );
+        assert_eq!(headers, [("X-Team".to_owned(), "eng".to_owned())]);
+        assert_eq!(plain.entry_auth(Some(&bearer())), AuthHint::Oauth);
+    }
+
+    /// **A document may name the header, and never own it.** An `Authorization` the document
+    /// declares is dropped where the workspace's own is attached: one header, and the one that
+    /// travels is the one this machine put there.
+    #[test]
+    fn a_documents_own_authorization_header_never_survives_beside_the_attached_one() {
+        let claiming = doc(&GATEWAY.replace(
+            r#"{"name": "X-Team", "value": "eng"}"#,
+            r#"{"name": "authorization", "value": "Bearer theirs"}"#,
+        ));
+        let (_, headers) = remote_of(
+            &select(
+                &claiming,
+                caps(true, true),
+                None,
+                &EVERYTHING,
+                Machine::default(),
+                Some(&bearer()),
+            )
+            .expect("placed"),
+        );
+        assert_eq!(
+            headers,
+            [("Authorization".to_owned(), "Bearer sc-secret".to_owned())]
+        );
+    }
+
+    /// **The claim is not a permission.** A `server.json` in a folder on this machine can spell the
+    /// same key; nothing delivered it, so no credential answers, and the address is REFUSED rather
+    /// than dialed bare — which is what stops a document naming an address of its own choosing from
+    /// harvesting the machine's credential.
+    #[test]
+    fn a_gateway_document_with_no_session_behind_it_is_refused_rather_than_dialed_bare() {
+        let gateway = doc(GATEWAY);
+        for caps in [caps(true, true), caps(false, true), caps(false, false)] {
+            assert_eq!(
+                select(
+                    &gateway,
+                    caps,
+                    Some(&BRIDGE),
+                    &EVERYTHING,
+                    Machine::default(),
+                    None
+                ),
+                Err(Gap::NoSession),
+                "no shape of agent gets this address without a session behind it"
+            );
+        }
+        // A package beside the claim is not a way around it either: the document asked to be
+        // reached through the workspace, and this build does not quietly run something else.
+        let with_package = doc(&GATEWAY.replace(
+            r#""_meta""#,
+            r#""packages": [{"registryType": "npm", "identifier": "@acme/server",
+                             "version": "2.1.0", "transport": {"type": "stdio"}}], "_meta""#,
+        ));
+        assert_eq!(
+            select(
+                &with_package,
+                caps(false, true),
+                None,
+                &EVERYTHING,
+                Machine::default(),
+                None
+            ),
+            Err(Gap::NoSession)
+        );
+
+        assert_eq!(Gap::NoSession.code(), "MCP_NO_SESSION");
+        assert_eq!(
+            Gap::NoSession.message("cursor"),
+            "not placed: this server is reached through the workspace that shares it, and nothing \
+             here holds a session for that workspace."
+        );
+        assert_eq!(
+            Gap::NoSession.note("cursor"),
+            "reached through a workspace this machine holds no session for"
+        );
+        assert_eq!(
+            Gap::NoSession.refusal(),
+            "this version of topos cannot set this server up on this machine (it is reached \
+             through a workspace this machine holds no session for)"
+        );
+    }
+
+    /// An agent that dials nothing still reaches the workspace's address — through the bridge, with
+    /// the credential taking the same environment hop every header value takes there (the value has
+    /// a space in it, which is the whole reason that hop exists).
+    #[test]
+    fn a_bridged_agent_carries_the_workspace_credential_through_the_environment() {
+        let target = select(
+            &doc(GATEWAY),
+            caps(false, true),
+            Some(&BRIDGE),
+            &EVERYTHING,
+            Machine::default(),
+            Some(&bearer()),
+        )
+        .expect("placed");
+        let (command, args, env) = local(&target);
+        assert_eq!(command, NPX);
+        assert_eq!(
+            args,
+            [
+                "-y",
+                "mcp-remote@0.1.38",
+                "https://gw.example/sn_1/srv_1",
+                "--header",
+                "X-Team:${TOPOS_HEADER_X_TEAM}",
+                "--header",
+                "Authorization:${TOPOS_HEADER_AUTHORIZATION}",
+            ]
+        );
+        assert_eq!(
+            env,
+            [
+                ("TOPOS_HEADER_X_TEAM".to_owned(), "eng".to_owned()),
+                (
+                    "TOPOS_HEADER_AUTHORIZATION".to_owned(),
+                    "Bearer sc-secret".to_owned()
+                ),
+            ]
+        );
+    }
+
+    /// The credential prints as nothing, wherever a `{:?}` reaches one.
+    #[test]
+    fn the_attached_credential_is_redacted_in_debug() {
+        assert_eq!(format!("{:?}", bearer()), "GatewayBearer(<redacted>)");
     }
 }

@@ -543,6 +543,7 @@ mod tests {
             remote: None,
             packages,
             auth: topos_harness::mcp::AuthHint::Unknown,
+            gateway: false,
         }
     }
 

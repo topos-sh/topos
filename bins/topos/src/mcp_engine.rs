@@ -42,6 +42,13 @@
 //! The engine is OFFLINE by construction: demands carry the stored `server.json` bytes, so a dead
 //! network still heals config files from the store + the custody records.
 //!
+//! ONE demand field is not a document fact: the SESSION a workspace delivery ran under
+//! ([`DemandedBundle::gateway`]). A workspace can share a server it reaches on the agent's behalf,
+//! and the entry for one is dialed with this machine's own credential for that workspace — so the
+//! credential is carried beside the bytes, never inside them, and it is honoured only where the
+//! demand's own provenance vouches for the document's claim ([`McpDemand::gateway_bearer`]). A
+//! local folder row carries none and can earn none.
+//!
 //! Wire states (an OPEN vocabulary, kept small): `placed` (THIS run wrote the entry — a first
 //! placement, an update to it, or the repair of one that was gone) · `current` (found already in
 //! order; nothing written) · `drifted` (hand-edited since topos wrote it — untouched) ·
@@ -99,6 +106,17 @@ pub(crate) struct DemandedBundle {
     /// stands there. `None` = every MCP-capable harness. It is a PLANNER INPUT and nothing else:
     /// the plan turns it into targets, and no downstream step re-derives reach.
     pub reach: Option<Vec<String>>,
+    /// **The session this delivery ran under**, for the one document shape that needs one: a
+    /// workspace that reaches the server on the agent's behalf delivers a document saying so, and
+    /// the entry is then dialed with this machine's own credential for THAT workspace
+    /// ([`crate::mcp_render::select`]).
+    ///
+    /// `None` for every demand that did not come from a live workspace delivery — a local folder
+    /// row above all. The pairing is what makes the claim safe: the credential a demand carries is
+    /// the one its own session minted, so a document can never name an address of its choosing and
+    /// be handed the credential for a workspace it does not belong to. See
+    /// [`McpDemand::gateway_bearer`], the one place the two halves are joined.
+    pub gateway: Option<crate::mcp_render::GatewayBearer>,
 }
 
 impl DemandedBundle {
@@ -125,6 +143,7 @@ impl DemandedBundle {
             workspace_slug: self.workspace_slug,
             version_id: self.version_id,
             server_json: self.server_json,
+            gateway: self.gateway,
             plan,
         }
     }
@@ -145,9 +164,27 @@ pub(crate) struct McpDemand {
     pub version_id: String,
     /// See [`DemandedBundle::server_json`].
     pub server_json: Vec<u8>,
+    /// See [`DemandedBundle::gateway`]. Read only through [`Self::gateway_bearer`].
+    pub gateway: Option<crate::mcp_render::GatewayBearer>,
     /// The ENTRIES half of this bundle's placement plan at this scope: one target per config file
     /// its entries belong in, plus the surfaces the plan withheld with their reasons.
     pub plan: PlacementPlan,
+}
+
+impl McpDemand {
+    /// **The credential this demand may be rendered with — and the ONE place the two halves of
+    /// that question are asked together.** A gateway claim is honoured only for a demand that came
+    /// from a workspace (it carries that workspace's slug) AND carries the credential its own
+    /// session minted; anything else answers `None`, and a document making the claim is refused
+    /// rather than dialed bare ([`crate::mcp_render::Gap::NoSession`]).
+    ///
+    /// The workspace half is what a LOCAL FOLDER row can never satisfy: its demand carries no
+    /// slug, so a `server.json` in a folder cannot spell the claim into a credential — which is
+    /// the whole point, since the address in that file would be the folder's own choosing.
+    fn gateway_bearer(&self) -> Option<&crate::mcp_render::GatewayBearer> {
+        self.workspace_slug.as_ref()?;
+        self.gateway.as_ref()
+    }
 }
 
 /// The scope's I/O: the fs seam, the scope store (where the custody document and every bundle's own
@@ -510,12 +547,14 @@ pub(crate) fn converge(
                 continue;
             }
             let Some(caps) = caps else { continue };
+            let gateway = demands[*i].gateway_bearer();
             let target = match crate::mcp_render::select(
                 doc,
                 caps,
                 topos_harness::registry::mcp_bridge(),
                 io.runtimes,
                 machine,
+                gateway,
             ) {
                 Ok(target) => target,
                 Err(gap) => {
@@ -539,7 +578,10 @@ pub(crate) fn converge(
             desired.push(McpEntry {
                 key,
                 target,
-                auth: doc.auth,
+                // The publisher's word, EXCEPT where the workspace reaches the server itself: that
+                // entry is dialed with the credential the target already carries, so there is no
+                // sign-in for a harness to start and no hint to give it.
+                auth: doc.entry_auth(gateway),
             });
         }
         // THE COLLISION PRE-FLIGHT — asked before the drivers, because the drivers can only see

@@ -2597,6 +2597,10 @@ fn local_mcp_demand(
                     version_id: String::new(),
                     server_json: bytes,
                     reach: narrowing.filter,
+                    // No workspace delivered this folder, so no session vouches for what its
+                    // `server.json` says: a document here that asks to be dialed with one is
+                    // refused, never handed a credential to an address of its own choosing.
+                    gateway: None,
                 },
             );
         }
@@ -3682,6 +3686,13 @@ fn sync_workspace_server(
                     version_id: recorded.revision_id,
                     server_json: recorded.document,
                     reach: st.reach.clone(),
+                    // The session THIS delivery ran under — the credential an entry carries where
+                    // the workspace reaches the server for the agent. It travels with the demand
+                    // rather than being looked up later, so the credential and the document it
+                    // authorizes can only ever come from the same workspace.
+                    gateway: Some(crate::mcp_render::GatewayBearer::new(
+                        run.session.credential.clone(),
+                    )),
                 },
             );
         }
