@@ -87,6 +87,18 @@ export function addressBlocked(addr: string): boolean {
     const lo = Number.parseInt(hexed[2], 16);
     return ipv4Blocked(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
   }
+  // IPv4-COMPATIBLE (deprecated `::a.b.c.d`, which the URL parser re-serializes to `::hi:lo`):
+  // classify by the embedded v4 too, so `::127.0.0.1` / `::7f00:1` is caught, not read as public.
+  const compatDotted = lower.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
+  if (compatDotted?.[1] !== undefined) {
+    return ipv4Blocked(compatDotted[1]);
+  }
+  const compatHex = lower.match(/^::([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (compatHex?.[1] !== undefined && compatHex[2] !== undefined) {
+    const hi = Number.parseInt(compatHex[1], 16);
+    const lo = Number.parseInt(compatHex[2], 16);
+    return ipv4Blocked(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  }
   if (lower === "::" || lower === "::1") {
     return true;
   }
