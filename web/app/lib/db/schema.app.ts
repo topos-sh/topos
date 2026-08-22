@@ -725,6 +725,69 @@ export const bundleMcp = webSchema.table(
   ],
 );
 
+/**
+ * WHICH OF A SERVER'S TOOLS THIS WORKSPACE'S AGENTS MAY USE — one row per connection, and the
+ * connection is what it hangs off (the composite FK below names `bundle_mcp`'s unique
+ * workspace/server pair, so disconnecting a server takes its policy with it).
+ *
+ * NO ROW IS `all`. A workspace that never opened the panel gets every tool the server offers,
+ * which is what a connection already promised; the row exists only once somebody narrowed it.
+ * `selected` reads the companion table below: a tool is enabled iff it has a row there, so a
+ * tool the server adds later starts OUT — the safe direction, and the one the panel's copy
+ * states outright.
+ *
+ * The gateway READS this per call (it holds SELECT on the two tables); nothing here is a
+ * client-side hint. Policy is decided in one place and enforced where the call is made.
+ */
+export const mcpToolPolicy = webSchema.table(
+  "mcp_tool_policy",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    serverId: text("server_id").notNull(),
+    mode: text("mode").default("all").notNull(),
+    /** Who last set it — display comes from the audit row; this is the id, as everywhere. */
+    updatedBy: text("updated_by").references(() => user.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.serverId] }),
+    foreignKey({
+      name: "mcp_tool_policy_connection_fk",
+      columns: [table.workspaceId, table.serverId],
+      foreignColumns: [bundleMcp.workspaceId, bundleMcp.serverId],
+    }).onDelete("cascade"),
+    check("mcp_tool_policy_mode_check", sql`${table.mode} in ('all', 'selected')`),
+  ],
+);
+
+/**
+ * ONE ENABLED TOOL under `selected` mode. A row IS the enablement; there is no disabled row and
+ * no third state. Rows may name a tool the server no longer offers (a checked tool that
+ * disappeared) — harmless, and keeping them means a tool that comes back keeps the answer the
+ * workspace already gave. The cascade is to the POLICY row, so switching a connection back to
+ * `all` is free to leave the selection standing, and deleting the policy clears it.
+ */
+export const mcpToolSelection = webSchema.table(
+  "mcp_tool_selection",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.serverId, table.toolName] }),
+    foreignKey({
+      name: "mcp_tool_selection_policy_fk",
+      columns: [table.workspaceId, table.serverId],
+      foreignColumns: [mcpToolPolicy.workspaceId, mcpToolPolicy.serverId],
+    }).onDelete("cascade"),
+  ],
+);
+
 // ── Channels — named, curated BUNDLE SETS (nothing else; never access control) ──────────────
 
 /**

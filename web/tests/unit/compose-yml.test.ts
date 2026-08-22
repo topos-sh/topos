@@ -36,17 +36,21 @@ describe("the self-host compose file", () => {
     expect(await res.text()).toBe(onDisk);
   });
 
-  it("pins both application images to one release and builds neither", async () => {
+  it("pins every application image to one release and builds none", async () => {
     const served = await (await composeLoader()).text();
 
-    // Both images, both pinned through the SAME variable — one TOPOS_VERSION moves the pair, and
+    // Every image, all pinned through the SAME variable — one TOPOS_VERSION moves the set, and
     // they are only ever tested together.
     const pins = [
       ...served.matchAll(/image:\s*ghcr\.io\/topos-sh\/(\S+):\$\{TOPOS_VERSION:-([^}]+)\}/g),
     ];
-    expect(pins.map(([, image]) => image).sort()).toEqual(["topos-plane", "topos-web"]);
+    expect(pins.map(([, image]) => image).sort()).toEqual([
+      "topos-gateway",
+      "topos-plane",
+      "topos-web",
+    ]);
 
-    // ONE version across both, and a release tag rather than a floating one: `latest` is a choice
+    // ONE version across the set, and a release tag rather than a floating one: `latest` is a choice
     // a self-hoster makes, never the default a fresh install lands on.
     const versions = pins.map(([, , version]) => version);
     expect(new Set(versions).size).toBe(1);

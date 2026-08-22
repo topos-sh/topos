@@ -19,6 +19,16 @@ export function wsPathServer(workspaceName: string, sub?: string): string {
 }
 
 /**
+ * The ABSOLUTE form of [`wsPathServer`] — for a link that has to survive leaving this app and
+ * coming back. The gateway's authorize walk is the case: the browser goes to an upstream's consent
+ * screen and the gateway needs somewhere to send it afterwards, which a relative path cannot say.
+ * Same origin resolution as every other outward-facing address here.
+ */
+export function wsUrlServer(request: Request, workspaceName: string, sub?: string): string {
+  return `${publicOrigin(request)}${wsPathServer(workspaceName, sub)}`;
+}
+
+/**
  * The full shareable workspace address — what sharing/joining speak and the CLI logs into verbatim.
  * Single tenancy → the BARE ORIGIN (the install IS the one workspace); multi → `<origin>/<name>`.
  * The origin resolution matches `publicOrigin` exactly, so the address matches the printed setup line

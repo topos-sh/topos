@@ -18,6 +18,36 @@ const serverSchema = z.object({
    * vault answers 404 on the whole lane when its side is unset.
    */
   PLANE_INTERNAL_TOKEN: z.string().min(1),
+  /**
+   * THE GATEWAY, over the internal network — the service that holds MCP sign-ins and proxies every
+   * agent call. OPTIONAL, and its absence is a whole deployment shape rather than a fault: an
+   * install with no gateway renders no Sign-in/Tools/Usage sections and delivers MCP documents in
+   * the direct shape, exactly as before. Empty spells unset, how compose and every deploy panel
+   * spell it.
+   */
+  GATEWAY_INTERNAL_URL: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.url().optional(),
+  ),
+  /**
+   * The shared bearer for the gateway's internal lane — the plane token's twin. This app is the
+   * only holder; the gateway answers 404 on the whole lane while its own side is unset. Set with
+   * GATEWAY_INTERNAL_URL or not at all: half a lane is refused at parse time below.
+   */
+  GATEWAY_INTERNAL_TOKEN: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().min(1).optional(),
+  ),
+  /**
+   * The gateway's own PUBLIC base — the origin an agent's MCP client dials. Set, delivery hands
+   * every gateway-capable server a single remote under this base instead of the upstream address;
+   * unset, delivery is unchanged. It is deliberately independent of the internal lane: a deployment
+   * turns the flip on for its machines by setting this, and rolls it back by clearing it.
+   */
+  GATEWAY_PUBLIC_URL: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.url().optional(),
+  ),
   /** Path the /install route serves; defaults to the repo's own installer. */
   INSTALL_SH_PATH: z.string().default("../scripts/install.sh"),
   /**
@@ -175,12 +205,30 @@ function assertNoShippedDefaults(env: ServerEnv): void {
   }
 }
 
+/**
+ * The gateway's internal lane is a PAIR. Half of it is never a working deployment — a URL with no
+ * token would send unauthenticated requests at a service that answers 404 to them, and a token with
+ * no URL is a secret sitting in the environment doing nothing. Both, or neither: an install that
+ * runs no gateway sets neither and every gateway surface simply is not there.
+ */
+function assertGatewayLanePaired(env: ServerEnv): void {
+  const url = env.GATEWAY_INTERNAL_URL !== undefined;
+  const token = env.GATEWAY_INTERNAL_TOKEN !== undefined;
+  if (url !== token) {
+    throw new Error(
+      "refusing to start: GATEWAY_INTERNAL_URL and GATEWAY_INTERNAL_TOKEN are set together or not at all. " +
+        `Currently ${url ? "the URL is set without the token" : "the token is set without the URL"}.`,
+    );
+  }
+}
+
 let cached: ServerEnv | undefined;
 
 export function serverEnv(): ServerEnv {
   if (cached === undefined) {
     const parsed = serverSchema.parse(process.env);
     assertNoShippedDefaults(parsed);
+    assertGatewayLanePaired(parsed);
     cached = parsed;
   }
   return cached;

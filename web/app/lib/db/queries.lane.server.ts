@@ -32,6 +32,7 @@ import {
 } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
 import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody";
+import { gatewayDeliveryDocument, gatewayPublicBase } from "@/lib/gateway/delivery.server";
 
 /**
  * The SESSION lane's data access — the row-op half of `/api/v1`, served entirely by this
@@ -97,7 +98,12 @@ export interface DeliveryMcpServer {
   display_name?: string;
   /** The revision this connection resolves to — a pin, else the server's `current`. */
   revision_id: string;
-  /** The `server.json` verbatim, in the official registry format. */
+  /**
+   * The `server.json`, in the official registry format — the resolved revision's document verbatim,
+   * EXCEPT where a gateway is deployed: an addressable server is then handed one remote at this
+   * deployment's gateway, marked in `_meta` (app/lib/gateway/delivery.server.ts). Package-only
+   * documents and every gateway-less deployment carry the stored bytes unchanged.
+   */
   document: Record<string, unknown>;
   /** This connection follows ONE revision rather than the server's `current`. OMITTED when it
    *  does not — the wire spells absence by absence, never by `false`. */
@@ -199,7 +205,7 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
                (extract(epoch from cp.moved_at) * 1000)::bigint AS updated_at,
                vd.bundle_digest AS current_digest,
                -- The catalog half: the revision this connection resolves to, and its document.
-               r.id AS revision_id, r.document AS document,
+               r.id AS revision_id, r.document AS document, bm.server_id AS server_id,
                (bm.pinned_revision_id IS NOT NULL) AS pinned,
                (extract(epoch from r.published_at) * 1000)::bigint AS revision_at,
                COALESCE((
@@ -262,6 +268,10 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
         ...(r.assigned_by === null ? {} : { assigned_by: r.assigned_by as string }),
         ...(r.picked === true ? { picked: true as const } : {}),
       });
+      // THE GATEWAY FLIP, resolved once per delivery rather than per row: where a gateway is
+      // deployed AND the caller is a session (a page's own feed read has no machine to address),
+      // every connected server with an address is handed the gateway's instead of its own.
+      const gatewayBase = actor.sessionId === undefined ? null : gatewayPublicBase();
       const skills: DeliverySkill[] = [];
       const mcpServers: DeliveryMcpServer[] = [];
       for (const r of rows.rows as Record<string, unknown>[]) {
@@ -272,10 +282,19 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
           ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
         };
         if (r.revision_id !== null) {
+          const document = r.document as Record<string, unknown>;
           mcpServers.push({
             ...common,
             revision_id: r.revision_id as string,
-            document: r.document as Record<string, unknown>,
+            document:
+              gatewayBase === null
+                ? document
+                : gatewayDeliveryDocument(document, {
+                    base: gatewayBase,
+                    // Non-null by construction: gatewayBase is null unless the actor is a session.
+                    sessionId: actor.sessionId as string,
+                    serverId: r.server_id as string,
+                  }),
             ...(r.pinned === true ? { pinned: true as const } : {}),
             updated_at: Number(r.revision_at),
             via: via(r),
@@ -555,6 +574,12 @@ export async function laneChannels(actor: FeedActor): Promise<LaneChannel[]> {
 export interface FeedActor {
   readonly userId: string;
   readonly workspaceId: string;
+  /**
+   * The CALLING session, where one made the call. Present on the lane's SessionActor and absent on
+   * a page's MemberActor — the delivery rewrite needs it (a gateway address names the session that
+   * will dial it), and every other feed read ignores it.
+   */
+  readonly sessionId?: string;
 }
 
 // ── Protection setters ───────────────────────────────────────────────────────────────────────

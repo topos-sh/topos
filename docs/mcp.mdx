@@ -34,7 +34,9 @@ constraints decide what may be written down at all:
   bytes, and "the same bytes everywhere" is the promise that breaks.
 - **Secretless.** The document carries no credential and no slot for one *in what travels*. Where a
   server needs a sign-in, that sign-in is your agent's own OAuth dance on your own machine — Topos
-  never sees it, never stores it, and never moves it between machines. A package may *name* the
+  never sees it, never stores it, and never moves it between machines. (A deployment running the
+  gateway holds that sign-in instead, connected once for the whole workspace — see *Signing in
+  through the gateway*.) A package may *name* the
   environment variable it wants (`GITHUB_TOKEN`, and `isSecret` on it is fine): the machine that
   runs the server fills that in. What refuses is such a slot arriving with the value already in it.
 
@@ -221,7 +223,7 @@ different bytes on different machines is the thing sharing is supposed to preven
 
 Sixteen agents have an MCP config surface. Topos writes into the ones it detects on the machine
 (and into a config file that already exists, so removals still reach it), and says nothing about
-how you sign in — that stays the agent's own business:
+how you sign in — without a gateway, that stays the agent's own business:
 
 | Agent | Picking up the change | Signing in |
 |---|---|---|
@@ -258,6 +260,34 @@ up later changes nothing until the line does. The same two flags on `topos remov
 file at a time: that entry leaves, the row survives with the rest, and subtracting the last file
 removes the row. A file outside the known set refuses, because its format has to be known to edit
 it.
+
+## Signing in through the gateway
+
+Some deployments run a **gateway**: one service, on its own address, standing in front of every MCP
+server the workspace connects. Where one is running, an agent no longer dials the server — it dials
+the gateway, and the gateway attaches the sign-in on the far side. The catalog is unchanged; what
+changes is where the sign-in lives.
+
+- **Sign in once, on the web.** A member connects their account on the server's page, and every
+  agent they run in that workspace can use the server — including on a machine they log in from
+  next month. An owner can connect a workspace account instead, which answers for everyone who has
+  not connected their own.
+- **Say which tools agents may use.** The same page lists every tool the server has offered. Leave
+  it at all of them, or check the ones your agents may call; a tool the server adds later starts
+  unchecked.
+- **See every call**: person, machine, tool, outcome, when. Arguments and results are never
+  recorded.
+- **Revoking is a row change.** Disconnect a sign-in and the agents using it lose access on their
+  next call.
+
+What a machine receives changes in one visible way: the delivered document points at the gateway
+rather than the server's own address, and carries `"sh.topos/gateway": true` in its `_meta`. Seeing
+that key, `topos` attaches the machine's own Topos credential to the entry — the server never sends
+a secret to a machine — and skips the sign-in hints, because the sign-in has already happened. A
+package bundle is untouched: a program the agent runs here has no address to redirect.
+
+An install with no gateway keeps everything above exactly as described — the entry names the
+server's own address, and signing in stays the agent's own business.
 
 ## Checking that a server actually works
 

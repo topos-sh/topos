@@ -53,13 +53,14 @@ with is simply `https://topos.example.com`.
 
 ## What runs
 
-Three services, **one published port**:
+Four services, **two published ports**:
 
 | Service | What it is | Published port |
 |---|---|---|
-| **web** | The whole product app — the only thing that needs to be reachable | `3000` |
+| **web** | The whole product app — the surface people reach | `3000` |
+| **gateway** | The MCP proxy agents dial — it holds the workspace's tool sign-ins and attaches them per call | `8788` |
 | **plane** | Byte custody for skill versions. One caller — the app, over an internal bearer-gated lane | none, deliberately |
-| **db** | PostgreSQL 18, digest-pinned. Two roles, two schemas — one per application, boundary enforced by grants | none |
+| **db** | PostgreSQL 18, digest-pinned. Three roles, three schemas — one per application, boundary enforced by grants | none |
 
 <Warning>
   **`plane` must never be externally reachable.** It publishes no port by design. Do not add
@@ -68,15 +69,16 @@ Three services, **one published port**:
 
 ### The images
 
-Both application images are published to GHCR, multi-arch (`linux/amd64` and `linux/arm64`), built
+The application images are published to GHCR, multi-arch (`linux/amd64` and `linux/arm64`), built
 by the public repository's release workflow:
 
 | Image | What it is |
 |---|---|
 | `ghcr.io/topos-sh/topos-web` | The product app — the surface you reach |
+| `ghcr.io/topos-sh/topos-gateway` | The MCP proxy — the address agents' tool calls dial |
 | `ghcr.io/topos-sh/topos-plane` | Byte custody, internal-only |
 
-The checkout pins both to the release it was cut for rather than tracking `latest`, and
+The checkout pins all of them to the release it was cut for rather than tracking `latest`, and
 `TOPOS_VERSION` in your `.env` overrides that without moving the tree. Pinning is deliberate: your
 server and your team's CLIs speak one wire, so a server that jumped forward on its own would break
 machines you cannot see. Upgrading is a decision you make — see [Upgrades](#upgrades).
@@ -99,7 +101,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ## A real deployment
 
 <Steps>
-  <Step title="Set the five values that must change">
+  <Step title="Set the values that must change">
     Fill them into the file you already copied — `cp .env.example .env`, beside
     `docker-compose.yml`. Every line below is in there, commented, with its current value:
 
@@ -107,15 +109,20 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
     # The public origin, behind your reverse proxy. Required.
     TOPOS_PUBLIC_URL=https://topos.example.com
 
+    # The gateway's own public origin — the address agents' MCP tool calls dial. Leave it
+    # unset and shared MCP servers are delivered direct, without the gateway.
+    TOPOS_GATEWAY_PUBLIC_URL=https://topos-gateway.example.com
+
     # The app's session-signing secret — at least 32 characters.
     TOPOS_WEB_AUTH_SECRET=<paste output of: openssl rand -hex 32>
 
     # The app-to-plane internal bearer. Both services read it; they must match.
     TOPOS_INTERNAL_TOKEN=<paste output of: openssl rand -hex 32>
 
-    # The two database roles' passwords.
+    # The three database roles' passwords.
     TOPOS_PLANE_DB_PASSWORD=<paste output of: openssl rand -hex 16>
     TOPOS_WEB_DB_PASSWORD=<paste output of: openssl rand -hex 16>
+    TOPOS_GATEWAY_DB_PASSWORD=<paste output of: openssl rand -hex 16>
 
     # Optional: the first workspace's slug. Default: team
     TOPOS_WORKSPACE_NAME=acme
@@ -131,15 +138,19 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
     docker compose up -d
     ```
 
-    Both images are pulled, the database provisions its roles and grants on first boot of a fresh
+    The images are pulled, the database provisions its roles and grants on first boot of a fresh
     volume, and each application migrates its own schema at startup, before serving anything.
   </Step>
   <Step title="Terminate TLS at your proxy">
-    Forward to `http://web:3000`. Caddy, for example:
+    Forward the app origin to `http://web:3000` and the gateway origin to `http://gateway:8788`.
+    Caddy, for example:
 
     ```text title="Caddyfile"
     topos.example.com {
         reverse_proxy web:3000
+    }
+    topos-gateway.example.com {
+        reverse_proxy gateway:8788
     }
     ```
 
@@ -283,12 +294,13 @@ declare nothing and simply pass, until the next actual break.
 
 ## Backups
 
-All durable state lives in **two volumes** — and the order you snapshot them in matters:
+All durable state lives in **three volumes** — and the order you snapshot them in matters:
 
 | Volume | Holds |
 |---|---|
+| `gateway-key` (`/run/topos`) | The gateway's master key. Tiny, and custody-critical: the tool sign-ins in the database decrypt only with it — lose it and every connected sign-in must be redone |
 | `plane-data` (`/data`) | The bytes: per-workspace git object stores and large objects |
-| `pg-data` (`/var/lib/postgresql`) | Both schemas: identity, membership, catalog, channels, proposals, audit — plus the version index and `current` pointers |
+| `pg-data` (`/var/lib/postgresql`) | The schemas: identity, membership, catalog, channels, proposals, audit, encrypted tool sign-ins — plus the version index and `current` pointers |
 
 <Warning>
   **Snapshot the bytes first, then the database.** A pointer in the database may name a byte

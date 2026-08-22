@@ -11,6 +11,7 @@ import {
 import { VersionFiles } from "@/components/browse/version-files";
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime } from "@/components/format";
+import { McpGatewayPanel } from "@/components/skill/mcp-gateway";
 import { McpServerPanel, type McpServerView } from "@/components/skill/mcp-server";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillInviteAffordance } from "@/components/skill/skill-invite";
@@ -28,6 +29,7 @@ import {
 import { getAuth } from "@/lib/auth/server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import {
+  baseForKind,
   baseOf,
   bundleNameOf,
   bundleNoun,
@@ -39,18 +41,22 @@ import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { channelsCarrying } from "@/lib/db/queries.channels.server";
 import { assignBundle, assignedToEveryone, unassign } from "@/lib/db/queries.feed.server";
+import { mcpCredentialIdFor, setMcpToolPolicy } from "@/lib/db/queries.gateway.server";
 import { editPrivateMcpServer, mcpServerFace } from "@/lib/db/queries.mcp-catalog.server";
 import { createInvitations, foldInviteEmail } from "@/lib/db/queries.roster.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { type AppliedOnSession, yourSessionsApplying } from "@/lib/db/queries.sessions.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
+import { gatewayLane } from "@/lib/gateway/client.server";
+import { beginAuthorize, deleteCredential } from "@/lib/gateway/credentials.server";
+import { mcpGatewayView } from "@/lib/gateway/panel.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
 import { scheduleRevisionProbe } from "@/lib/mcp/probe.server";
 import { validateServerJson } from "@/lib/mcp/validate.server";
 import { useWsPath } from "@/lib/ws-path";
-import { agentDocUrl, inviteUrl, wsPathServer } from "@/lib/ws-url.server";
+import { agentDocUrl, inviteUrl, wsPathServer, wsUrlServer } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { skill?: string; server?: string } }) {
   return [{ title: `${params.server ?? params.skill ?? "skill"} · Topos` }];
@@ -109,6 +115,18 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     isServer ? mcpServerFace(memberActor, row.skillId) : Promise.resolve(null),
   ]);
 
+  // THE GATEWAY'S HALF of a connected server's page — the sign-in, the tool policy and the call
+  // ledger. `null` on a deployment that runs no gateway (and on every skill), and the page renders
+  // nothing rather than a panel promising a capability this install does not have.
+  const gateway =
+    server === null
+      ? null
+      : await mcpGatewayView(memberActor, {
+          serverId: server.serverId,
+          displayName: server.displayName,
+          authMode: server.authMode,
+        });
+
   return {
     face: "page" as const,
     wsName: workspace.name,
@@ -122,6 +140,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     versionFiles,
     /** The server view, for a bundle whose document lives in the catalog. */
     server: server === null ? null : serverViewOf(server),
+    /** The gateway sections, or null where this deployment runs no gateway. */
+    gateway,
     channels,
     yourSessions,
     everyoneAssigned,
@@ -197,7 +217,135 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "edit-mcp-server") {
     return editServerIntent(request, workspace.id, actor, bundleNameOf(params), formData);
   }
+  if (
+    intent === "gateway-connect" ||
+    intent === "gateway-disconnect" ||
+    intent === "gateway-tools"
+  ) {
+    return gatewayIntent(request, workspace, actor, bundleNameOf(params), intent, formData);
+  }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
+}
+
+/** The reply every gateway arm answers with when it did not land — one honest sentence, scoped to
+ *  the arm, rendered by the panel's own alert. A landed arm redirects or falls through to `ok`. */
+type GatewayIntent = "gateway-connect" | "gateway-disconnect" | "gateway-tools";
+interface GatewayActionData {
+  intent: GatewayIntent;
+  status: "ok" | "error";
+  message?: string;
+}
+
+function gatewayRefusal(intent: GatewayIntent, message: string, status = 400) {
+  return data<GatewayActionData>({ intent, status: "error", message }, { status });
+}
+
+/**
+ * THE GATEWAY ARMS — connect a sign-in, disconnect one, set the tool policy.
+ *
+ * Member scope is the floor (the face's own guard ran above); the WORKSPACE-scoped sign-in
+ * re-guards for an owner INSIDE the arm, the same way the assignment arms do, so its refusal is
+ * the uniform 404 rather than a message telling a member what they are not. A deployment with no
+ * gateway has no such surface at all: the arm answers the house 404, not an error, because from
+ * the outside these paths simply do not exist there.
+ *
+ * The connect walk LEAVES this app: the gateway does discovery and hands back the upstream's own
+ * authorize URL, and this tier's whole part is sending the browser there with somewhere to come
+ * back to. A `manual` server has no walk to send anyone on, so it lands on its own Connect page,
+ * where the secret is typed once and goes straight over the internal lane.
+ */
+async function gatewayIntent(
+  request: Request,
+  workspace: ScopedWorkspace,
+  actor: MemberActor,
+  bundleName: string,
+  intent: GatewayIntent,
+  formData: FormData,
+) {
+  if (gatewayLane() === null) {
+    notFound();
+  }
+  const row = await skillIndexRow(actor, bundleName);
+  if (row === undefined) {
+    notFound();
+  }
+  const server = await mcpServerFace(actor, row.skillId);
+  if (server === null) {
+    notFound();
+  }
+  if (intent === "gateway-tools") {
+    const mode = formData.get("mode") === "selected" ? "selected" : "all";
+    // The checklist IS the answer: what the form posted replaces the selection wholesale.
+    const tools = formData.getAll("tool").map((value) => String(value));
+    const outcome = await setMcpToolPolicy(actor, server.serverId, { mode, tools });
+    return outcome === "saved"
+      ? data<GatewayActionData>({ intent, status: "ok" })
+      : gatewayRefusal(intent, "This workspace is no longer connected to that server.");
+  }
+
+  const scope = formData.get("scope") === "workspace" ? "workspace" : "mine";
+  if (scope === "workspace") {
+    await requireWorkspaceOwner(request, workspace.id);
+  }
+  if (intent === "gateway-disconnect") {
+    const credentialId = await mcpCredentialIdFor(actor, server.serverId, scope);
+    if (credentialId === null) {
+      return gatewayRefusal(intent, "That sign-in is already disconnected.");
+    }
+    const removed = await deleteCredential(credentialId);
+    await recordAdminEvent(actor, {
+      kind: "mcp_signin_disconnected",
+      subject: server.serverId,
+      detail: scope,
+      outcome: removed.kind === "deleted" ? "ok" : "error",
+    });
+    return removed.kind === "deleted"
+      ? data<GatewayActionData>({ intent, status: "ok" })
+      : gatewayRefusal(intent, "That didn't go through. Try again.", 500);
+  }
+
+  // CONNECT. A server that asks for nothing has nothing to connect; a `manual` one is a page.
+  if (server.authMode === "none") {
+    notFound();
+  }
+  const base = baseForKind(row.kind);
+  if (server.authMode === "manual") {
+    throw redirect(
+      `${wsPathServer(workspace.name, bundlePath(base, bundleName, "/connect"))}?scope=${scope}`,
+    );
+  }
+  const outcome = await beginAuthorize({
+    workspaceId: workspace.id,
+    serverId: server.serverId,
+    userId: scope === "workspace" ? null : actor.userId,
+    returnTo: wsUrlServer(request, workspace.name, bundlePath(base, bundleName)),
+  });
+  if (outcome.kind === "authorize") {
+    await recordAdminEvent(actor, {
+      kind: "mcp_signin_started",
+      subject: server.serverId,
+      detail: scope,
+      outcome: "ok",
+    });
+    throw redirect(outcome.authorizeUrl);
+  }
+  await recordAdminEvent(actor, {
+    kind: "mcp_signin_started",
+    subject: server.serverId,
+    detail: outcome.kind === "refused" ? outcome.code : "fault",
+    outcome: outcome.kind === "refused" ? "denied" : "error",
+  });
+  if (outcome.kind === "refused") {
+    return gatewayRefusal(
+      intent,
+      outcome.code === "MANUAL_ONLY"
+        ? "This server does not offer a sign-in an agent can complete on its own."
+        : outcome.code === "NO_AUTH_NEEDED"
+          ? "This server asks for no sign-in."
+          : "This server's sign-in could not be read.",
+    );
+  }
+  return gatewayRefusal(intent, "That didn't go through. Try again.", 500);
 }
 
 /**
@@ -386,6 +534,7 @@ function SkillCurrentContent({
   yourSessions,
   everyoneAssigned,
   server,
+  gateway,
   mailArmed,
   isOwner,
 }: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
@@ -421,6 +570,7 @@ function SkillCurrentContent({
           </p>
         </Card>
       )}
+      {gateway !== null && <McpGatewayPanel view={gateway} />}
       <DeliverySection
         skillId={skillId}
         noun={noun}
