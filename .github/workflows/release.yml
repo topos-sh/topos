@@ -69,20 +69,21 @@ jobs:
               ;;
           esac
 
-          # The pin is the compose default: `${TOPOS_VERSION:-vX.Y.Z}`. BOTH application services must
-          # carry it, so count the matches rather than just deduplicating them — a service whose tag
-          # got hardcoded would otherwise leave one correct pin behind and pass. `|| true` keeps a
-          # zero-match grep from killing the script under `set -e` before it can say why.
+          # The pin is the compose default: `${TOPOS_VERSION:-vX.Y.Z}`. ALL THREE application
+          # services must carry it, so count the matches rather than just deduplicating them — a
+          # service whose tag got hardcoded would otherwise leave the correct pins behind and pass.
+          # `|| true` keeps a zero-match grep from killing the script under `set -e` before it can
+          # say why.
           pins="$(grep -oE '\$\{TOPOS_VERSION:-[^}]+\}' docker-compose.yml | sed 's/.*:-//;s/}//' || true)"
           count="$(printf '%s' "$pins" | grep -c . || true)"
           distinct="$(printf '%s\n' "$pins" | sort -u | tr '\n' ' ' | sed 's/ *$//')"
-          if [ "$count" -ne 2 ] || [ "$distinct" != "$tag" ]; then
-            echo "::error file=docker-compose.yml::expected BOTH services pinned to ${tag} through \${TOPOS_VERSION:-…}; found ${count} such pin(s): ${distinct:-none}."
-            echo "::error::Set plane and web to \${TOPOS_VERSION:-${tag}} and re-tag (see RELEASING.md)."
+          if [ "$count" -ne 3 ] || [ "$distinct" != "$tag" ]; then
+            echo "::error file=docker-compose.yml::expected all three services pinned to ${tag} through \${TOPOS_VERSION:-…}; found ${count} such pin(s): ${distinct:-none}."
+            echo "::error::Set plane, web and gateway to \${TOPOS_VERSION:-${tag}} and re-tag (see RELEASING.md)."
             exit 1
           fi
 
-          echo "crate ${crate} and both compose pins (${distinct}) match ${tag}."
+          echo "crate ${crate} and all three compose pins (${distinct}) match ${tag}."
 
   build-cli:
     name: cli (${{ matrix.target }})
@@ -141,10 +142,11 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  # Per-arch builds of BOTH self-host images on NATIVE runners (no QEMU), pushed by digest; the
-  # merge job below assembles one multi-arch manifest list per image. The two images are the whole
-  # deployment: the web app is the surface a self-hoster reaches, the plane is the byte custody
-  # behind it — publishing only one of them still leaves `docker compose up` compiling from source.
+  # Per-arch builds of ALL self-host images on NATIVE runners (no QEMU), pushed by digest; the
+  # merge job below assembles one multi-arch manifest list per image. The three images are the
+  # whole deployment: the web app is the surface a self-hoster reaches, the plane is the byte
+  # custody behind it, the gateway is the tool proxy agents dial — publishing only some of them
+  # still leaves `docker compose up` compiling from source.
   image:
     name: image (${{ matrix.image.name }}, ${{ matrix.platform.id }})
     needs: [gate, pins]
@@ -160,6 +162,8 @@ jobs:
             dockerfile: Dockerfile
           - name: topos-web
             dockerfile: web/Dockerfile
+          - name: topos-gateway
+            dockerfile: gateway/Dockerfile
         platform:
           - id: linux/amd64
             runner: ubuntu-24.04
@@ -230,7 +234,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [topos-plane, topos-web]
+        image: [topos-plane, topos-web, topos-gateway]
     env:
       IMAGE: ghcr.io/topos-sh/${{ matrix.image }}
     steps:
@@ -420,6 +424,7 @@ jobs:
         run: |
           plane_ref="$(head -n 1 dist/topos-plane-image-digest.txt)"
           web_ref="$(head -n 1 dist/topos-web-image-digest.txt)"
+          gateway_ref="$(head -n 1 dist/topos-gateway-image-digest.txt)"
           {
             cat <<'EOF'
           ## Assets
@@ -440,15 +445,17 @@ jobs:
           | `SHA256SUMS` | checksums over every asset |
           | `topos-web-image-digest.txt` | the immutable multi-arch digest of the web-app image |
           | `topos-plane-image-digest.txt` | the immutable multi-arch digest of the plane image |
+          | `topos-gateway-image-digest.txt` | the immutable multi-arch digest of the gateway image |
           | `topos-web-image.spdx.json` | SBOM of the web-app image |
           | `topos-plane-image.spdx.json` | SBOM of the plane image |
+          | `topos-gateway-image.spdx.json` | SBOM of the gateway image |
           | `topos-source.spdx.json` | SBOM of the source tree (the `--locked` Cargo.lock is the dependency set of every binary) |
 
           ## Self-host
 
-          Clone this tag and start it — the compose file, the database's provisioning script and both
-          image pins are cut together, so the checkout is one self-consistent deployment. Nothing is
-          compiled on the box: both images are pulled, pinned to this release.
+          Clone this tag and start it — the compose file, the database's provisioning script and
+          every image pin are cut together, so the checkout is one self-consistent deployment.
+          Nothing is compiled on the box: the images are pulled, pinned to this release.
 
           ```
           EOF

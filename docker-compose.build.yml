@@ -1,4 +1,4 @@
-# Build BOTH application images from this checkout instead of pulling the released ones — for
+# Build ALL THREE application images from this checkout instead of pulling the released ones — for
 # contributors, for a patched tree, and for the compose smoke test that proves the real deploy
 # artifacts still build and boot.
 #
@@ -13,15 +13,20 @@
 # pulling. That is the intent while you work on a branch; run `docker compose pull` to get back to the
 # released bytes.
 #
-# Both builds take the REPO ROOT as their context — the web image reads files that live outside `web/`
+# Every build takes the REPO ROOT as its context — the web image reads files that live outside `web/`
 # (the vault OpenAPI contract, the installer, the built-in skill), so a `web/`-scoped context cannot
-# build it.
+# build it, and the other two follow the same convention so all three Dockerfiles read alike.
 
 services:
   plane:
     build:
       context: .
       dockerfile: Dockerfile
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
 
   web:
     build:
