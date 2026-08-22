@@ -301,3 +301,50 @@ jobs:
       # globalSetup, and the served app's readiness probe is a database-backed /healthz.
       - name: e2e
         run: node tests/e2e/db-setup.mjs && bunx playwright test
+
+  # The MCP gateway: the static gate (tsc over the engine, the container host and the suites) and
+  # the suites themselves. Its DB tests provision a scratch database per run on the service
+  # Postgres, create both application roles and apply the PRODUCTION grant design, then run the
+  # WEB drizzle lineage beside the gateway's own — because what they prove is a CROSS-SCHEMA
+  # boundary, and half a database could not show it. That is why this job installs web's
+  # dependencies too: the rig drives the real `web/scripts/migrate.mjs` under plain node.
+  gateway:
+    name: gateway (check + tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # A superuser on the maintenance database: the rig creates (and drops) its own scratch
+      # database and both login roles from here. Without it the DB suites FAIL — they never skip.
+      TEST_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.3.10
+      - name: install (web — the scratch-database rig runs its migration lineage)
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: install (gateway)
+        working-directory: gateway
+        run: bun install --frozen-lockfile
+      - name: check (tsc)
+        working-directory: gateway
+        run: bun run check
+      # `bun run test` is vitest, deliberately — `bun test` is bun's own runner, which this repo
+      # keeps out of every TypeScript package for the same reason the web app does.
+      - name: tests
+        working-directory: gateway
+        run: bun run test

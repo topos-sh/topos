@@ -1,13 +1,15 @@
-# Self-host Topos: the web app (the ONE public surface), the stateless plane behind it, and a pinned
-# Postgres, on one internal network. Clone a release, paste two secrets, start it.
+# Self-host Topos: the web app (the surface people use), the MCP gateway (the surface their AGENTS
+# dial), the stateless plane behind both, and a pinned Postgres, on one internal network. Clone a
+# release, paste two secrets, start it.
 #
 #   git clone --depth 1 --branch <release-tag> https://github.com/topos-sh/topos
 #   cd topos
 #   cp .env.example .env      # paste two `openssl rand -hex 32` outputs into the two blank lines
-#   docker compose up -d      # the app on http://localhost:3000; the plane + Postgres beside it,
-#                             # reachable only on the compose network (no published ports)
+#   docker compose up -d      # the app on http://localhost:3000 and the gateway on :8788; the plane
+#                             # + Postgres beside them, reachable only on the compose network (no
+#                             # published ports)
 #
-# The tag is the unit of a deployment: this file, the database's provisioning script, and the two image
+# The tag is the unit of a deployment: this file, the database's provisioning script, and the three image
 # pins are cut together, so a checkout is one self-consistent release and `git status` is your diff
 # against it. Latest tag: https://github.com/topos-sh/topos/releases/latest
 #
@@ -22,6 +24,11 @@
 # Same file: uncomment and fill TOPOS_PUBLIC_URL (the public https origin your reverse proxy terminates
 # on — the app cannot infer it, see the web service below), TOPOS_WORKSPACE_NAME, and the five SMTP vars
 # if more than one person will use this install (mail is how an invited teammate proves their address).
+# Set TOPOS_GATEWAY_PUBLIC_URL as well if agents are to reach MCP servers through the gateway: it is the
+# gateway's OWN public origin (a second hostname, or the same one on port 8788), and setting it is what
+# turns the gateway on for the machines in your team — the web app hands out gateway addresses only once
+# it knows one. Leave it unset and the whole stack still runs; MCP servers are simply delivered in the
+# direct shape, each machine signing in for itself, exactly as before.
 #
 # ── upgrading ──────────────────────────────────────────────────────────────────────────────────────────
 #
@@ -29,14 +36,14 @@
 #   docker compose pull && docker compose up -d
 #
 # Deliberately explicit: the server and the `topos` CLIs your team runs speak one wire, so an unattended
-# jump to a newer server is a way to break machines you cannot see. The checkout pins BOTH images to the
-# release it belongs to (the TOPOS_VERSION defaults below); setting TOPOS_VERSION in `.env` overrides
+# jump to a newer server is a way to break machines you cannot see. The checkout pins ALL THREE images to
+# the release it belongs to (the TOPOS_VERSION defaults below); setting TOPOS_VERSION in `.env` overrides
 # them without moving the tree, and a `:latest` tag is published if you would rather track it and take
 # the upgrade discipline on yourself. Release notes: https://github.com/topos-sh/topos/releases
 #
 # ── prebuilt images, not a build ───────────────────────────────────────────────────────────────────────
-# Both application images are PULLED from GHCR — no Rust toolchain, no Node, nothing compiled on the box.
-# They are multi-arch (linux/amd64 + linux/arm64), built by the release workflow of the public
+# All three application images are PULLED from GHCR — no Rust toolchain, no Node, nothing compiled on the
+# box. They are multi-arch (linux/amd64 + linux/arm64), built by the release workflow of the public
 # repository, provenance-attested and SBOM'd (`gh attestation verify`).
 #
 # To BUILD from source instead (contributing, or a patched tree), add the override beside this file:
@@ -45,7 +52,7 @@
 #
 # ── TWO files, if you skip the clone ───────────────────────────────────────────────────────────────────
 # This file mounts `./scripts/compose-init-db.sh` into the database's first-boot hook — the script that
-# creates the two application roles and their schemas. It is a SEPARATE file on purpose (it is also the
+# creates the three application roles and their schemas. It is a SEPARATE file on purpose (it is also the
 # recipe for a managed/external Postgres, below), and both are served beside each other, so a deployment
 # that would rather not clone fetches the two:
 #
@@ -61,23 +68,28 @@
 # recipe, so a fetched deployment wants TOPOS_VERSION pinned in its `.env` to stay reproducible — which
 # is the whole reason the clone is the recommended shape.
 #
-# The TOPOLOGY: the WEB APP is the only thing the world reaches. It fronts `/api`, serves the resource
-# addresses + the constant protocol card, and drives the plane over an internal session lane. The PLANE
-# has NO published port — it answers on the compose-internal network only, at `http://plane:8787`.
-# Postgres is a SEPARATE service (never baked into an app image); each application migrates its own
-# schema AT BOOT, before it serves — the plane its `plane` schema, the web app its `web` schema.
+# The TOPOLOGY: TWO things the world reaches, for two kinds of caller. The WEB APP (3000) is where people
+# and their CLIs go: it fronts `/api`, serves the resource addresses + the constant protocol card, and
+# drives the plane over an internal session lane. The GATEWAY (8788) is where the AGENTS' MCP clients go,
+# and only that — one public listener carrying proxied MCP traffic and the OAuth callback. Everything
+# else is internal: the PLANE has no published port (`http://plane:8787`), and the gateway's SECOND
+# listener — the lane the web app asks it to store and revoke sign-ins over — is a separate socket that
+# is likewise never published (`http://gateway:8789`), so no public request can reach it whatever the
+# routing says. Postgres is a SEPARATE service (never baked into an app image); each application migrates
+# its own schema AT BOOT, before it serves — the plane its `plane` schema, the web app its `web` schema,
+# the gateway its `gateway` schema.
 #
 # ── bring your own Postgres ────────────────────────────────────────────────────────────────────────────
-# To use a managed/external database instead of the bundled `db`: create the two roles + the `plane`
-# schema + the search_paths it expects (scripts/compose-init-db.sh is the exact recipe; run it once
-# against your server), then set the plane's DATABASE_URL (as topos_plane) and the web's DATABASE_URL (as
-# topos_web) to point there and start with `--no-deps` so the bundled `db` stays down. A networked
-# Postgres should append `?sslmode=require`.
+# To use a managed/external database instead of the bundled `db`: create the three roles + the `plane` and
+# `gateway` schemas + the search_paths and grants they expect (scripts/compose-init-db.sh is the exact
+# recipe; run it once against your server), then set each service's DATABASE_URL (as topos_plane,
+# topos_web, topos_gateway respectively) to point there and start with `--no-deps` so the bundled `db`
+# stays down. A networked Postgres should append `?sslmode=require`.
 
 # The project name, pinned rather than derived from whatever the directory happens to be called. It is
-# what prefixes the two volumes (`topos_pg-data`, `topos_plane-data`), so the backup and restore commands
-# in the docs name real volumes no matter what the checkout directory is called. `docker compose -p <other>`
-# still overrides it.
+# what prefixes the three volumes (`topos_pg-data`, `topos_plane-data`, `topos_gateway-key`), so the
+# backup and restore commands in the docs name real volumes no matter what the checkout directory is
+# called. `docker compose -p <other>` still overrides it.
 name: topos
 
 services:
@@ -93,10 +105,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-topos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-topos}
       POSTGRES_DB: ${POSTGRES_DB:-topos}
-      # Read by the init script (below) to create the two app roles. The superuser above owns nothing the
-      # app uses — the plane connects as topos_plane, the web app as topos_web.
+      # Read by the init script (below) to create the three app roles. The superuser above owns nothing
+      # any application uses — the plane connects as topos_plane, the web app as topos_web, the gateway
+      # as topos_gateway.
       TOPOS_PLANE_DB_PASSWORD: ${TOPOS_PLANE_DB_PASSWORD:-plane}
       TOPOS_WEB_DB_PASSWORD: ${TOPOS_WEB_DB_PASSWORD:-web}
+      TOPOS_GATEWAY_DB_PASSWORD: ${TOPOS_GATEWAY_DB_PASSWORD:-gateway}
     volumes:
       # The metadata database — back this up with `pg_dump` or a volume snapshot (see the README).
       # Mount at the image's PARENT data path, not `/var/lib/postgresql/data`: at v18 the official postgres
@@ -105,12 +119,12 @@ services:
       # refuse to start. Upgrading an EXISTING pre-18 `pg-data` volume is a `pg_dump`/restore into this new
       # layout (see the README's backups section) — an in-place tag bump against the old mount will not start.
       - pg-data:/var/lib/postgresql
-      # First-boot ONLY (initdb runs it once, on a fresh volume, before accepting TCP): create the two
-      # roles + both schemas + the search_paths + the cross-lane grants BEFORE either application
+      # First-boot ONLY (initdb runs it once, on a fresh volume, before accepting TCP): create the three
+      # roles + all three schemas + the search_paths + the cross-lane grants BEFORE any application
       # boots. Each app then runs its own migration lineage as its own role.
       - ./scripts/compose-init-db.sh:/docker-entrypoint-initdb.d/10-topos-init.sh:ro
     healthcheck:
-      # Accepting connections is NOT enough to be healthy: the two application roles must exist.
+      # Accepting connections is NOT enough to be healthy: the application roles must exist.
       # initdb runs the provisioning script ONCE, on a fresh volume — so if that script never
       # arrived or never ran (a clone always carries it; a fetch is a second file, and `curl`
       # cannot carry its execute bit), postgres still comes up perfectly serviceable with only the
@@ -153,9 +167,59 @@ services:
       # README's backup order).
       - plane-data:/data
 
+  gateway:
+    # The same release as the other two — one TOPOS_VERSION moves all three, and they are only ever
+    # tested together.
+    image: ghcr.io/topos-sh/topos-gateway:${TOPOS_VERSION:-v0.1.42}
+    restart: unless-stopped
+    mem_limit: 1g
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # ONLY the public MCP listener. The gateway's second listener — the web app's lane, on 8789 —
+      # is deliberately absent from this list and stays reachable at http://gateway:8789 on the
+      # compose network alone. They are separate sockets in the process, so publishing one cannot
+      # expose the other.
+      - "8788:8788"
+    environment:
+      # Connects as topos_gateway (owns schema `gateway`: credential custody, observed tools, usage;
+      # reads the `web` tables a call resolves against, read-only and grant-enforced). Migrates its
+      # own schema at container start, before it serves.
+      DATABASE_URL: postgres://topos_gateway:${TOPOS_GATEWAY_DB_PASSWORD:-gateway}@db:5432/${POSTGRES_DB:-topos}
+      # The web app's lane into this service, with the shared bearer — the SAME TOPOS_INTERNAL_TOKEN
+      # the plane and the web app read. One value, three consumers: there is one internal network
+      # here and one secret that gates it. Unset, the whole lane answers 404 and no sign-in can be
+      # stored. REQUIRED, with no default, exactly as the plane's is.
+      GATEWAY_INTERNAL_TOKEN: "${TOPOS_INTERNAL_TOKEN:?generate one with: openssl rand -hex 32 — set it in .env (cp .env.example .env)}"
+      # The gateway's OWN externally reachable origin — what an agent's MCP client dials, and the
+      # base of the OAuth redirect URI (`{here}/oauth/callback`) that upstream services register and
+      # redirect back to. The localhost default is a laptop default: it makes a bare `up` work, and
+      # it is wrong for anything else, because an upstream authorization server will send a person's
+      # browser to whatever this says. Set TOPOS_GATEWAY_PUBLIC_URL for a real deployment — ONE
+      # variable feeds both this service and the web app's delivery flip below, so the address agents
+      # are handed and the address sign-ins come back to are the same string by construction.
+      GATEWAY_PUBLIC_URL: ${TOPOS_GATEWAY_PUBLIC_URL:-http://localhost:8788}
+      # The web app's origin: where a finished sign-in returns the person to, and the fence those
+      # return addresses are checked against. Defaulted the way BETTER_AUTH_URL is, for the same
+      # reason — this service, unlike the web app, cannot fall back to a request's own origin.
+      TOPOS_PUBLIC_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
+      # Upstream MCP servers on your own network. Off by default: the gateway refuses to dial
+      # loopback, private and link-local addresses, which is what stops a pasted URL from turning
+      # this service into a probe of the network it runs in. Set to 1 only if the servers your team
+      # connects are genuinely internal.
+      GATEWAY_ALLOW_PRIVATE_UPSTREAMS: ${TOPOS_GATEWAY_ALLOW_PRIVATE_UPSTREAMS:-0}
+    volumes:
+      # THE MASTER KEY, and nothing else. It wraps every workspace's data key, which encrypts every
+      # stored upstream sign-in — so this volume is custody, not cache: BACK IT UP WITH THE DATABASE.
+      # The image mints a 32-byte key here on first boot if the file is absent and never touches an
+      # existing one. Restore the database without it and the credential rows are unreadable
+      # ciphertext — nothing is lost but the sign-ins, which have to be made again.
+      - gateway-key:/run/topos
+
   web:
-    # The same release as the plane — one TOPOS_VERSION moves both, and they are only ever tested
-    # together.
+    # The same release as the plane and the gateway — one TOPOS_VERSION moves all three, and they are
+    # only ever tested together.
     image: ghcr.io/topos-sh/topos-web:${TOPOS_VERSION:-v0.1.42}
     restart: unless-stopped
     mem_limit: 1g
@@ -163,6 +227,8 @@ services:
       db:
         condition: service_healthy
       plane:
+        condition: service_started
+      gateway:
         condition: service_started
     ports:
       - "3000:3000"
@@ -174,6 +240,17 @@ services:
       # (the same TOPOS_INTERNAL_TOKEN the plane above reads; one value, two consumers).
       PLANE_INTERNAL_URL: http://plane:8787
       PLANE_INTERNAL_TOKEN: "${TOPOS_INTERNAL_TOKEN:?generate one with: openssl rand -hex 32 — set it in .env (cp .env.example .env)}"
+      # The gateway's lane — its SECOND listener, on the compose network only, with the same shared
+      # bearer. This is how the app asks the gateway to begin a sign-in, store a pasted secret, or
+      # revoke one; the secrets themselves live over there and never come back.
+      GATEWAY_INTERNAL_URL: http://gateway:8789
+      GATEWAY_INTERNAL_TOKEN: "${TOPOS_INTERNAL_TOKEN:?generate one with: openssl rand -hex 32 — set it in .env (cp .env.example .env)}"
+      # THE FLIP, and the only thing that arms it: the gateway's public origin, passed through from
+      # the same variable the gateway itself reads. SET, the app hands every machine one gateway
+      # address per connected MCP server, and the workspace signs in once for all of them. Unset —
+      # passed through EMPTY, which is how this app spells "no gateway" — MCP servers are delivered
+      # in the direct shape and each machine signs in for itself. Rolling back is clearing it.
+      GATEWAY_PUBLIC_URL: ${TOPOS_GATEWAY_PUBLIC_URL:-}
       # The app's externally reachable origin — the ONE public base every client-visible URL rides:
       # the resource addresses, the protocol card's `api_base_url` (this origin + `/api`), and the
       # sign-in/verification pages. Behind a TLS-terminating proxy this MUST be set to the public
@@ -212,3 +289,6 @@ services:
 volumes:
   pg-data:
   plane-data:
+  # The gateway's master key (see the gateway service above) — small, and as load-bearing as the
+  # database it decrypts alongside.
+  gateway-key:

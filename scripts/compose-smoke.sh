@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Compose smoke test: the web app is the ONE public surface, the vault is internal-only, and a
-# FRESH VOLUME boots the whole first-run story. A green run proves the images build, the real
-# initdb provisions both roles/schemas/grants, both boot-time migration lineages run (each app's
-# lineage at its own boot, before it serves), the vault publishes
-# NO host port, the constant protocol card answers on any path, the boot ceremony prints the
+# Compose smoke test: the web app is the public surface people use, the gateway is the public
+# surface their agents dial, the vault is internal-only, and a FRESH VOLUME boots the whole
+# first-run story. A green run proves the images build, the real initdb provisions all three
+# roles/schemas/grants, every boot-time migration lineage runs (each app's lineage at its own
+# boot, before it serves), the vault publishes NO host port and the gateway publishes only its
+# public one, the constant protocol card answers on any path, the boot ceremony prints the
 # setup line, and the CLAIM CEREMONY seats a first owner whose signed-in dashboard reads
 # custody state across the schema boundary — the cross-lane SELECT grant, proven on the real
 # deploy artifact, not a test copy.
@@ -72,6 +73,43 @@ if printf '%s' "$ports_json" | grep -q 'HostPort'; then
   exit 1
 fi
 echo "PASS: the vault exposes no host port (internal-only)."
+
+# ── the gateway publishes its PUBLIC listener and only that ──────────────────────────────────────────
+# The gateway is the one service with two sockets: 8788 is what agents dial, 8789 is the app's lane
+# into it. They are separate listeners precisely so the lane cannot be reached by anything off the
+# compose network — and that guarantee is only as good as this port map.
+echo "== asserting the gateway publishes the public listener and not the lane =="
+gateway_cid="$(compose ps -q gateway)"
+[ -n "$gateway_cid" ] || { echo "FAIL: no gateway container found"; exit 1; }
+gw_ports="$(docker inspect "$gateway_cid" --format '{{json .NetworkSettings.Ports}}')"
+echo "gateway port map: $gw_ports"
+if printf '%s' "$gw_ports" | grep -q '8789'; then
+  echo "FAIL: the gateway publishes its INTERNAL lane — 8789 must never leave the compose network"
+  exit 1
+fi
+printf '%s' "$gw_ports" | grep -q '"8788/tcp"' || {
+  echo "FAIL: the gateway does not publish its public MCP listener on 8788"
+  exit 1
+}
+echo "PASS: the gateway publishes 8788 alone."
+
+# ── the gateway is up (it migrated its own schema first) ─────────────────────────────────────────────
+# The gateway runs its plain-SQL lineage at boot under an advisory lock and mints its master key on
+# the volume before that — so a 200 here proves the third role, the third schema, the key file and
+# both listeners all landed.
+echo "== waiting for the gateway's /healthz =="
+gw_health=""
+for _ in $(seq 1 60); do
+  gw_health="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8788/healthz || true)"
+  [ "$gw_health" = "200" ] && break
+  sleep 1
+done
+if [ "$gw_health" != "200" ]; then
+  echo "FAIL: the gateway's /healthz never returned 200 (last: '$gw_health')"
+  compose logs --no-color gateway | tail -40
+  exit 1
+fi
+echo "PASS: the gateway is up (schema migrated, master key minted, both listeners bound)."
 
 # ── the app is up (own-database liveness) ────────────────────────────────────────────────────────────
 echo "== waiting for the web app's /healthz (own-database liveness) =="
