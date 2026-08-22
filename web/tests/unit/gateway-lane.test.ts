@@ -37,12 +37,13 @@ beforeEach(() => {
 });
 
 describe("the route allowlist", () => {
-  it("carries exactly the three internal routes this tier may call", async () => {
+  it("carries exactly the four internal routes this tier may call", async () => {
     const { ALLOWED_ROUTES } = await client();
     expect([...ALLOWED_ROUTES]).toEqual([
       "POST /internal/v1/authorize/begin",
       "POST /internal/v1/credentials/manual",
       "DELETE /internal/v1/credentials/{credentialId}",
+      "POST /internal/v1/tools/refresh",
     ]);
   });
 

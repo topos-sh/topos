@@ -1,7 +1,9 @@
 import { z } from "zod";
+import type { GatewayStore } from "../core/ports";
 import { digestsEqual, sha256Hex } from "./crypto";
 import type { Logger } from "./log";
 import { beginAuthorize, type OauthConfig, type OauthStore } from "./oauth";
+import { probeToolsForServer } from "./tool-probe";
 
 /**
  * The web→gateway internal lane — the plane lane's twin. Served on its OWN listener (never the
@@ -9,8 +11,13 @@ import { beginAuthorize, type OauthConfig, type OauthStore } from "./oauth";
  * whole lane answers a uniform 404 (invisible); wrong or missing bearer ⇒ an honest 401. Only
  * the token's sha256 survives boot, and the compare is constant-time over digests.
  *
- * Three routes, exactly: authorize/begin, credentials/manual (the ONE route a secret rides —
- * never logged), DELETE credentials/{id}. Everything else on the lane is the uniform 404.
+ * Four routes, exactly: authorize/begin, credentials/manual (the ONE route a secret rides —
+ * never logged), DELETE credentials/{id}, tools/refresh. Everything else on the lane is the
+ * uniform 404.
+ *
+ * A stored secret is followed by a TOOL PROBE (tool-probe.ts): the tool list is what a policy is
+ * written against, so it must exist the moment a sign-in does. The probe is bounded and its outcome
+ * never changes this route's answer — the credential landed either way.
  */
 
 const SMALL_BODY_LIMIT = 64 * 1024;
@@ -48,6 +55,12 @@ const manualSchema = z.object({
   createdByDisplay: z.string().min(1),
 });
 
+const refreshSchema = z.object({
+  workspaceId: z.string().min(1),
+  serverId: z.string().min(1),
+  userId: z.string().min(1).nullable(),
+});
+
 async function parseBody<T>(request: Request, schema: z.ZodType<T>): Promise<T | null> {
   try {
     const text = await request.text();
@@ -60,8 +73,11 @@ async function parseBody<T>(request: Request, schema: z.ZodType<T>): Promise<T |
   }
 }
 
-/** The lane's store surface — OauthStore plus the one delete the lane serves. */
-export interface LaneStore extends OauthStore {
+/**
+ * The lane's store surface — OauthStore plus the one delete the lane serves, over the engine's own
+ * GatewayStore, which the probe speaks through. One object satisfies all three (PgStore does).
+ */
+export interface LaneStore extends OauthStore, GatewayStore {
   deleteCredential(credentialId: string): Promise<boolean>;
 }
 
@@ -149,7 +165,41 @@ export function createInternalHandler(deps: InternalLaneDeps): (request: Request
       deps.log("info", "manual credential stored", {
         route: "POST /internal/v1/credentials/manual",
       });
+      // The list this secret unlocks, read now rather than at some agent's first call. Bounded and
+      // non-fatal: whatever it answers, the credential above is stored.
+      await probeToolsForServer(deps, {
+        workspaceId: body.workspaceId,
+        serverId: body.serverId,
+        userId: body.userId,
+      });
       return Response.json({ credentialId });
+    }
+
+    if (
+      request.method === "POST" &&
+      segments.length === 4 &&
+      segments[0] === "internal" &&
+      segments[1] === "v1" &&
+      segments[2] === "tools" &&
+      segments[3] === "refresh"
+    ) {
+      // ASK AGAIN. A server's tools change over time, and the list a policy is written against is
+      // only ever as fresh as the last time somebody looked. The outcome is the answer — the caller
+      // renders it — and an unconnected server is the same uniform 404 every other route gives.
+      const body = await parseBody(request, refreshSchema);
+      if (body === null) {
+        return Response.json({ code: "BAD_REQUEST" }, { status: 400 });
+      }
+      const outcome = await probeToolsForServer(deps, body);
+      if (outcome.kind === "not_connected") {
+        return notFound();
+      }
+      deps.log("info", "tools refreshed", { route: "POST /internal/v1/tools/refresh" });
+      return Response.json(
+        outcome.kind === "recorded"
+          ? { outcome: outcome.kind, tools: outcome.tools }
+          : { outcome: outcome.kind },
+      );
     }
 
     if (

@@ -37,10 +37,23 @@ call. Revocation is a row change, effective next call.
   method → the engine), `/oauth/callback`, `/healthz`. Everything else is a uniform 404.
 - **Internal** (`GATEWAY_INTERNAL_BIND`, default `127.0.0.1:8789`): the web app's lane —
   `POST /internal/v1/authorize/begin`, `POST /internal/v1/credentials/manual`,
-  `DELETE /internal/v1/credentials/{id}`. A SEPARATE socket, so the lane is unreachable from
-  the public bind by construction; compose publishes only the public one. Gate: with no
-  `GATEWAY_INTERNAL_TOKEN` the whole lane answers 404; a wrong bearer answers 401; only the
-  token's sha256 survives boot and the compare is constant-time.
+  `DELETE /internal/v1/credentials/{id}`, `POST /internal/v1/tools/refresh`. A SEPARATE socket, so
+  the lane is unreachable from the public bind by construction; compose publishes only the public
+  one. Gate: with no `GATEWAY_INTERNAL_TOKEN` the whole lane answers 404; a wrong bearer answers
+  401; only the token's sha256 survives boot and the compare is constant-time.
+
+## The tool probe
+
+A tool policy is a checklist over what a server offers, so the list has to exist before anyone can
+narrow it. `core/probe.ts` walks `tools/list` (following cursors, recorded whole or not at all)
+through the SAME client the live path uses — era detection, credential attach, refresh-once retry,
+guarded fetch — and writes the UNFILTERED result to `gateway.observed_tool`. It runs right after a
+credential is stored, on both paths (`credentials/manual` and the OAuth callback), and again
+whenever the web calls `tools/refresh`. `service/tool-probe.ts` bounds it (8s: an abort signal on
+every fetch plus a race, because a 2024-11-05 request waits on its SSE pump rather than a socket)
+and hands it a usage sink that DROPS — a probe is the product's bookkeeping, not an agent's call, so
+it leaves no usage row and invents no session. A probe that fails leaves the list untouched and
+never fails the connect.
 
 ## Custody
 

@@ -91,6 +91,37 @@ function startFixture(): Promise<string> {
             registration_endpoint: `${base}/plainas/register`,
             code_challenge_methods_supported: ["plain"],
           });
+        // The MCP endpoint itself — reached by the tool probe the callback runs once a credential
+        // has landed. Bearer-gated, so the probe proves it attached the token it just stored.
+        case "/mcp": {
+          if (request.method !== "POST") {
+            return json(405, { error: "method_not_allowed" });
+          }
+          if (request.headers.authorization !== "Bearer at-live") {
+            return json(401, { error: "unauthorized" });
+          }
+          const rpc = JSON.parse(body) as Record<string, unknown>;
+          if (rpc.method === "initialize") {
+            return json(200, {
+              jsonrpc: "2.0",
+              id: rpc.id,
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "oauth-fixture" },
+              },
+            });
+          }
+          if (rpc.method === "tools/list") {
+            return json(200, {
+              jsonrpc: "2.0",
+              id: rpc.id,
+              result: { tools: [{ name: "list_issues" }, { name: "create_issue" }] },
+            });
+          }
+          response.writeHead(202);
+          return response.end();
+        }
         case "/as/register": {
           const parsed = JSON.parse(body) as Record<string, unknown>;
           registrations.push(parsed);
@@ -237,6 +268,14 @@ describe("the authorize walk + callback ceremony", () => {
 
     // The token request carried PKCE + the RFC 8707 resource.
     expect(tokenRequests.at(-1)?.resource).toBe(`${base}/mcp`);
+
+    // AND the server's tools were read down before the person was sent back, with the token that
+    // had just been stored — so the Tools panel has a checklist the moment the page renders.
+    const observed = await db.q<{ name: string }>(
+      "SELECT name FROM gateway.observed_tool WHERE server_id = $1 ORDER BY name",
+      [seeded.serverId],
+    );
+    expect(observed.map((row) => row.name)).toEqual(["create_issue", "list_issues"]);
 
     // The credential landed, personal, decryptable, refresh material intact.
     const credential = await realStore.credentialFor("ws1", seeded.serverId, "u1");

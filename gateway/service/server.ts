@@ -1,12 +1,18 @@
 import type { GatewayContext, GatewayRequest } from "../core/ports";
 import type { Logger } from "./log";
 import { completeCallback, type OauthConfig, type OauthStore } from "./oauth";
+import { probeToolsForServer } from "./tool-probe";
 
 /**
  * The PUBLIC listener's routes: `/{sessionId}/{serverId}` (every method — the engine answers),
  * `/oauth/callback`, `/healthz`. Anything else is the uniform 404 — no path echo, no existence
  * signal. The internal lane is NOT here: it lives on its own listener (internal.ts), so no
  * public request can reach it whatever this router does.
+ *
+ * A callback that STORED a credential probes that server's tools before redirecting, the internal
+ * lane's manual route's twin: the person is on their way to the page whose Tools section the list
+ * fills, so the list should be there when they arrive. Bounded and non-fatal — a probe that fails
+ * costs the redirect nothing.
  */
 
 export type EngineHandler = (ctx: GatewayContext, req: GatewayRequest) => Promise<Response>;
@@ -56,6 +62,12 @@ export function createPublicHandler(deps: PublicDeps): (request: Request) => Pro
       });
       if (!outcome.ok) {
         return new Response("This sign-in link is no longer valid.", { status: 400 });
+      }
+      if (outcome.stored !== null) {
+        await probeToolsForServer(
+          { store: deps.context.store, guardedFetch: deps.guardedFetch, log: deps.log },
+          outcome.stored,
+        );
       }
       return new Response(null, { status: 302, headers: { location: outcome.returnTo } });
     }

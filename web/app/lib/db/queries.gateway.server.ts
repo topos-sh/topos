@@ -175,7 +175,7 @@ export async function mcpToolsView(actor: MemberActor, serverId: string): Promis
   };
 }
 
-export type ToolPolicyOutcome = "saved" | "not_connected";
+export type ToolPolicyOutcome = "saved" | "not_connected" | "empty_selection";
 
 /**
  * SET THE POLICY — member-writable, and one transaction: the policy row is upserted, the selection
@@ -186,6 +186,11 @@ export type ToolPolicyOutcome = "saved" | "not_connected";
  * complete state rather than two half-applied edits. A server this workspace is not connected to
  * has no policy to set — the composite FK refuses it, and that refusal is typed back rather than
  * thrown.
+ *
+ * ONE STATE IS REFUSED: `selected` with nothing selected. It is spellable, and it means every tool
+ * on the server is off — which is a thing a person may well want, but never a thing they meant by
+ * saving an empty checklist. It reads as "narrow this" and lands as "switch this server off", so
+ * the write refuses and the caller says why. Turning a whole server off is disconnecting it.
  */
 export async function setMcpToolPolicy(
   actor: MemberActor,
@@ -193,6 +198,9 @@ export async function setMcpToolPolicy(
   next: { mode: "all" | "selected"; tools: readonly string[] },
 ): Promise<ToolPolicyOutcome> {
   const wanted = [...new Set(next.tools)].sort();
+  if (next.mode === "selected" && wanted.length === 0) {
+    return "empty_selection";
+  }
   return await getDb().transaction(async (tx) => {
     const connected = await tx.execute(sql`
       SELECT 1 FROM web.bundle_mcp

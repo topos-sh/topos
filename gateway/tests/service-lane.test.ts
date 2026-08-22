@@ -23,6 +23,50 @@ let store: PgStore;
 let armed: (request: Request) => Promise<Response>;
 let unarmed: (request: Request) => Promise<Response>;
 
+/**
+ * The lane's outbound fetch, stubbed. Two reasons it must be: the credential routes now PROBE the
+ * server they just got a sign-in for, and a unit suite that dialled the real internet would be
+ * testing the internet. Each case installs the upstream it wants to meet.
+ */
+let upstream: (request: Request) => Promise<Response> = async () =>
+  new Response("no upstream installed", { status: 599 });
+const stubFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+  upstream(new Request(input, init))) as typeof fetch;
+
+/** A 2025-06-18 server that answers `initialize` and hands back exactly these tools. */
+function serverOffering(...tools: string[]): (request: Request) => Promise<Response> {
+  return async (request) => {
+    const body = (await request.json()) as Record<string, unknown>;
+    if (body["method"] === "initialize") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body["id"],
+        result: {
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "lane-fake" },
+        },
+      });
+    }
+    if (body["method"] === "tools/list") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body["id"],
+        result: { tools: tools.map((name) => ({ name, description: `What ${name} does.` })) },
+      });
+    }
+    return new Response(null, { status: 202 });
+  };
+}
+
+async function observedNames(serverId: string): Promise<string[]> {
+  const rows = await db.q<{ name: string }>(
+    "SELECT name FROM gateway.observed_tool WHERE server_id = $1 ORDER BY name",
+    [serverId],
+  );
+  return rows.map((row) => row.name);
+}
+
 function lane(
   method: string,
   path: string,
@@ -47,7 +91,7 @@ beforeAll(async () => {
   const deps = {
     store,
     config: CONFIG,
-    guardedFetch: fetch,
+    guardedFetch: stubFetch,
     log: () => {},
   };
   armed = createInternalHandler({ ...deps, internalToken: TOKEN });
@@ -141,6 +185,132 @@ describe("credentials/manual", () => {
     );
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ code: "BAD_REQUEST" });
+  });
+});
+
+describe("the tool probe a stored sign-in triggers", () => {
+  it("reads the server's tools down the moment a secret is stored", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "probed", { authMode: "manual" });
+    upstream = serverOffering("search", "create_issue");
+
+    const response = await armed(
+      lane("POST", "/internal/v1/credentials/manual", {
+        body: {
+          workspaceId: "ws1",
+          serverId: seeded.serverId,
+          userId: "u1",
+          secret: "sk-probed",
+          createdByDisplay: "Person One",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    // The whole point: the checklist has something to check BEFORE any agent has called.
+    expect(await observedNames(seeded.serverId)).toEqual(["create_issue", "search"]);
+    // And the probe is not a call — nothing in the ledger says a person's machine did this.
+    const usage = await db.q<{ n: string }>(
+      "SELECT count(*) AS n FROM gateway.usage_event WHERE server_id = $1",
+      [seeded.serverId],
+    );
+    expect(usage[0]?.n).toBe("0");
+  });
+
+  it("stores the credential even when the server cannot be reached", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "offline", { authMode: "manual" });
+    upstream = async () => new Response("down", { status: 503 });
+
+    const response = await armed(
+      lane("POST", "/internal/v1/credentials/manual", {
+        body: {
+          workspaceId: "ws1",
+          serverId: seeded.serverId,
+          userId: "u1",
+          secret: "sk-offline",
+          createdByDisplay: "Person One",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect((await response.json()) as { credentialId: string }).toMatchObject({
+      credentialId: expect.stringMatching(/^cred_[0-9a-f]{32}$/),
+    });
+    expect(await store.credentialFor("ws1", seeded.serverId, "u1")).not.toBeNull();
+    expect(await observedNames(seeded.serverId)).toEqual([]);
+  });
+});
+
+describe("tools/refresh", () => {
+  it("asks the server again and answers how many it now offers", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "refresh", { authMode: "none" });
+    upstream = serverOffering("alpha", "beta", "gamma");
+
+    const response = await armed(
+      lane("POST", "/internal/v1/tools/refresh", {
+        body: { workspaceId: "ws1", serverId: seeded.serverId, userId: "u1" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: "recorded", tools: 3 });
+    expect(await observedNames(seeded.serverId)).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("says a server needing a sign-in nobody connected cannot be read", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "unsigned", { authMode: "oauth" });
+    upstream = serverOffering("never-reached");
+
+    const response = await armed(
+      lane("POST", "/internal/v1/tools/refresh", {
+        body: { workspaceId: "ws1", serverId: seeded.serverId, userId: "u1" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: "no_credential" });
+  });
+
+  it("says so when the server does not answer, and leaves the standing list alone", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "silent", { authMode: "none" });
+    upstream = serverOffering("kept");
+    await armed(
+      lane("POST", "/internal/v1/tools/refresh", {
+        body: { workspaceId: "ws1", serverId: seeded.serverId, userId: null },
+      }),
+    );
+    upstream = async () => new Response("nope", { status: 500 });
+
+    const response = await armed(
+      lane("POST", "/internal/v1/tools/refresh", {
+        body: { workspaceId: "ws1", serverId: seeded.serverId, userId: null },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: "unreachable" });
+    expect(await observedNames(seeded.serverId)).toEqual(["kept"]);
+  });
+
+  it("is the uniform 404 for a server this workspace is not connected to", async () => {
+    const response = await armed(
+      lane("POST", "/internal/v1/tools/refresh", {
+        body: { workspaceId: "ws1", serverId: "msrv_ghost", userId: null },
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "NOT_FOUND" });
+  });
+
+  it("refuses a malformed body typed, and is invisible on an unarmed lane", async () => {
+    const bad = await armed(lane("POST", "/internal/v1/tools/refresh", { body: { serverId: 1 } }));
+    expect(bad.status).toBe(400);
+    const off = await unarmed(
+      lane("POST", "/internal/v1/tools/refresh", {
+        body: { workspaceId: "ws1", serverId: "msrv_x", userId: null },
+      }),
+    );
+    expect(off.status).toBe(404);
   });
 });
 

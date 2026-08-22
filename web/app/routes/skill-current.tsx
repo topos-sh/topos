@@ -50,6 +50,7 @@ import { resolveSkillName } from "@/lib/db/resolve.server";
 import { gatewayLane } from "@/lib/gateway/client.server";
 import { beginAuthorize, deleteCredential } from "@/lib/gateway/credentials.server";
 import { mcpGatewayView } from "@/lib/gateway/panel.server";
+import { refreshObservedTools } from "@/lib/gateway/tools.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
 import { canonicalServerJson } from "@/lib/mcp/fetch.server";
@@ -220,7 +221,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (
     intent === "gateway-connect" ||
     intent === "gateway-disconnect" ||
-    intent === "gateway-tools"
+    intent === "gateway-tools" ||
+    intent === "gateway-tools-refresh"
   ) {
     return gatewayIntent(request, workspace, actor, bundleNameOf(params), intent, formData);
   }
@@ -229,7 +231,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
 
 /** The reply every gateway arm answers with when it did not land — one honest sentence, scoped to
  *  the arm, rendered by the panel's own alert. A landed arm redirects or falls through to `ok`. */
-type GatewayIntent = "gateway-connect" | "gateway-disconnect" | "gateway-tools";
+type GatewayIntent =
+  | "gateway-connect"
+  | "gateway-disconnect"
+  | "gateway-tools"
+  | "gateway-tools-refresh";
 interface GatewayActionData {
   intent: GatewayIntent;
   status: "ok" | "error";
@@ -241,7 +247,8 @@ function gatewayRefusal(intent: GatewayIntent, message: string, status = 400) {
 }
 
 /**
- * THE GATEWAY ARMS — connect a sign-in, disconnect one, set the tool policy.
+ * THE GATEWAY ARMS — connect a sign-in, disconnect one, set the tool policy, ask for the tool list
+ * again.
  *
  * Member scope is the floor (the face's own guard ran above); the WORKSPACE-scoped sign-in
  * re-guards for an owner INSIDE the arm, the same way the assignment arms do, so its refusal is
@@ -278,9 +285,39 @@ async function gatewayIntent(
     // The checklist IS the answer: what the form posted replaces the selection wholesale.
     const tools = formData.getAll("tool").map((value) => String(value));
     const outcome = await setMcpToolPolicy(actor, server.serverId, { mode, tools });
-    return outcome === "saved"
-      ? data<GatewayActionData>({ intent, status: "ok" })
-      : gatewayRefusal(intent, "This workspace is no longer connected to that server.");
+    if (outcome === "saved") {
+      return data<GatewayActionData>({ intent, status: "ok" });
+    }
+    // Narrowing to nothing is not narrowing — it is switching the server off, and nobody means
+    // that by saving an empty checklist. The refusal names both ways out.
+    return gatewayRefusal(
+      intent,
+      outcome === "empty_selection"
+        ? "Selected tools with nothing checked would disable every tool on this server. Choose All tools, or check at least one."
+        : "This workspace is no longer connected to that server.",
+    );
+  }
+
+  if (intent === "gateway-tools-refresh") {
+    // A server's tools change over time. The gateway holds the sign-in, so asking again is its
+    // call to make; this tier asks it to, then re-reads the rows it wrote.
+    const outcome = await refreshObservedTools({
+      workspaceId: workspace.id,
+      serverId: server.serverId,
+      userId: actor.userId,
+    });
+    if (outcome.kind === "refreshed") {
+      return data<GatewayActionData>({ intent, status: "ok" });
+    }
+    return gatewayRefusal(
+      intent,
+      outcome.kind === "no_credential"
+        ? "Connect a sign-in first — this server won't list its tools without one."
+        : outcome.kind === "unreachable"
+          ? "This server didn't answer. The tool list is unchanged."
+          : "That didn't go through. Try again.",
+      outcome.kind === "fault" ? 500 : 400,
+    );
   }
 
   const scope = formData.get("scope") === "workspace" ? "workspace" : "mine";

@@ -190,9 +190,11 @@ describe("the tool policy", () => {
   });
 
   it("refuses a server this workspace is not connected to, typed rather than thrown", async () => {
+    // `selected` with a real checklist — an EMPTY one is refused ahead of the connection check,
+    // and that refusal has its own suite (gateway-tool-selection.test.ts).
     const outcome = await (await dal()).setMcpToolPolicy(member(), "mcps_nobody", {
       mode: "selected",
-      tools: [],
+      tools: ["search"],
     });
     expect(outcome).toBe("not_connected");
   });
