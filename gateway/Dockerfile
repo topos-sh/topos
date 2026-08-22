@@ -44,6 +44,9 @@ RUN bun install --frozen-lockfile --production
 COPY gateway/core ./core
 COPY gateway/service ./service
 COPY gateway/migrations ./migrations
+# The one-off master-key re-wrap, run against a stopped deployment's database:
+#   docker compose run --rm gateway bun scripts/rewrap-workspace-keys.ts --from file --dry-run
+COPY gateway/scripts ./scripts
 
 # Both listeners bind all interfaces INSIDE the container (the checkout defaults are loopback, for
 # a laptop); which of them the world can reach is the compose file's ruling, not this one.

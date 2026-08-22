@@ -1,13 +1,19 @@
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { handleGatewayRequest } from "../core/engine";
 import type { GatewayContext } from "../core/ports";
-import { EnvelopeCrypto, loadMasterKey } from "./crypto";
+import { EnvelopeCrypto } from "./crypto";
 import { gatewayEnv, parseBind } from "./env";
 import { createGuardedFetch } from "./guarded-fetch";
 import { createInternalHandler } from "./internal";
 import { stderrLogger } from "./log";
+import {
+  assertStoredWrapsOpen,
+  createMasterKeyBackend,
+  proveMasterKeyBackend,
+} from "./master-key";
 import { runMigrations } from "./migrate";
 import type { OauthConfig } from "./oauth";
 import { createPublicHandler, type EngineHandler } from "./server";
@@ -15,18 +21,30 @@ import { PgStore } from "./store";
 import { BufferedUsageSink } from "./usage";
 
 /**
- * The container entry point. Boot order mirrors the plane's: logs armed → env parsed → master
- * key read once → migrations under the advisory lock → adapters wired → BOTH listeners bound
- * (public MCP + the never-published internal lane) → signal-driven shutdown that drains the
- * usage buffer before the pool closes.
+ * The container entry point. Boot order mirrors the plane's: logs armed → env parsed → the master
+ * key backend built and PROVEN by a wrap/unwrap round trip → migrations under the advisory lock →
+ * adapters wired → BOTH listeners bound (public MCP + the never-published internal lane) →
+ * signal-driven shutdown that drains the usage buffer before the pool closes.
  */
 
 const log = stderrLogger();
 const env = gatewayEnv();
 
-const masterKey = loadMasterKey(env.GATEWAY_MASTER_KEY_FILE, (message, fields) =>
-  log("warn", message, fields),
-);
+// Before the database, before the listeners: a deployment that cannot open its own credentials
+// must fail in the deploy, not on some agent's first tool call.
+const masterKey = createMasterKeyBackend(env, log);
+if (
+  env.GATEWAY_KEY_BACKEND !== "file" &&
+  env.GATEWAY_MASTER_KEY_FILE !== undefined &&
+  existsSync(env.GATEWAY_MASTER_KEY_FILE)
+) {
+  // A real key file still on disk under a KMS backend is the middle of a migration — or its
+  // forgotten leftover. Either way the host is still holding a master key that opens nothing.
+  log("warn", "a master key file is still present but this key backend does not use it", {
+    backend: env.GATEWAY_KEY_BACKEND,
+  });
+}
+await proveMasterKeyBackend(masterKey, log);
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
 await runMigrations(env.DATABASE_URL, migrationsDir, log);
@@ -34,6 +52,14 @@ await runMigrations(env.DATABASE_URL, migrationsDir, log);
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL, max: 10 });
 const crypto = new EnvelopeCrypto(masterKey);
 const store = new PgStore(pool, crypto, env.TOPOS_PUBLIC_URL, log);
+// The key works (proved above) — but is it the key that wrapped what is already stored? A
+// deployment moved to a KMS without its re-wrap, or pointed at a different valid key, would
+// otherwise bind and then fail every credential. Nothing stored yet passes trivially.
+const storedWraps = await pool.query<{ workspace_id: string; wrapped_key: Buffer }>(
+  "SELECT workspace_id, wrapped_key FROM gateway.workspace_key",
+);
+await assertStoredWrapsOpen(storedWraps.rows, crypto, log);
+
 const usage = new BufferedUsageSink(pool, log);
 const guardedFetch = createGuardedFetch(
   { allowPrivate: env.GATEWAY_ALLOW_PRIVATE_UPSTREAMS === "1" },
