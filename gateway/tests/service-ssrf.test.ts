@@ -42,6 +42,8 @@ describe("address classification", () => {
       "::",
       "::ffff:127.0.0.1", // v4-mapped loopback
       "::ffff:10.0.0.1",
+      "::7f00:1", // v4-COMPATIBLE loopback (how the parser serializes ::127.0.0.1)
+      "::a00:1", // v4-compatible 10.0.0.1
       "fe80::1",
       "fd00::1",
       "fc00::abcd",
