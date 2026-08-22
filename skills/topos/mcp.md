@@ -3,8 +3,10 @@
 An MCP server is tools, not instructions — and it is not files at all. It is a CATALOG ENTRY the
 workspace connects to (or a server the workspace wrote down itself), delivered as the `server.json`
 document inline. The document names an ADDRESS every machine dials, a PACKAGE every machine runs
-(npm or PyPI, at one pinned version), or both; it never carries a credential, and the sign-in stays
-the agent's own.
+(npm or PyPI, at one pinned version), or both. The DOCUMENT never carries a credential. Where the
+workspace deploys a gateway, a shared server's address IS the gateway and the sign-in lives with
+the workspace (someone connects it once, on the web); the entry then dials with this machine's own
+session credential, attached locally. Everywhere else the sign-in stays the agent's own.
 
 ```
 topos add weather                              # one the workspace already shares — no flag
@@ -50,7 +52,8 @@ When a server misbehaves, run `topos verify <name>`: topos dials the address (or
 and asks the server for its tools, live, storing nothing. RELAY the one line it prints — it is the
 whole answer, and its exit code repeats it: `responding (N tools)` = 0 ·
 `sign-in required - healthy; your agent app completes sign-in on first use` = 3 (the RIGHT answer for
-an OAuth server — topos holds no credential) ·
+an OAuth server dialed directly — this machine holds no credential for it; a gateway-shared server
+answering this means nobody has connected a sign-in on the web yet) ·
 `sign-in required - this server accepts only pre-registered clients or tokens; an agent cannot complete sign-in by itself`
 = 3 as well (also healthy, and NOT something to retry: tell the human they need a personal token or
 an OAuth app registered with the vendor first, once per person or per organization) ·
@@ -64,9 +67,12 @@ exact version), `MCP_NO_STREAMABLE_REMOTE` (neither a usable remote nor a packag
 `MCP_INSECURE_URL`, `MCP_URL_TEMPLATE` (a `{placeholder}` endpoint), `MCP_SECRET_REFUSED` (a
 credential in ANY form — `isSecret`, a value-less header, per-installation variables, or a literal
 that merely looks like a token), `MCP_INVALID`, `MCP_NAME_TAKEN`. Never work around one by editing
-the document to hide the shape — a shared bundle carries no credential, and the sign-in belongs to
-the agent on the machine. A document THIS machine cannot place says `MCP_UNPLACEABLE` on the
-receipt and leaves that bundle's standing entries exactly where they are.
+the document to hide the shape — a shared document carries no credential: the sign-in lives with
+the workspace (through its gateway) or with the agent on the machine, never in the bundle. A
+document THIS machine cannot place says `MCP_UNPLACEABLE` on the receipt and leaves that bundle's
+standing entries exactly where they are. `MCP_NO_SESSION` is a standing advisory, not a failure:
+the server is reached through the workspace that shares it, and nothing here holds a session for
+that workspace — `topos login` is the fix.
 
 RELAY the receipt's per-agent lines to the human, because the last step is theirs: Claude Code
 loads next session (`/reload-plugins` reloads live, sign in with `/mcp`) · Codex needs a restart

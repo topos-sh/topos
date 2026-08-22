@@ -32,10 +32,14 @@
  *     random SECRETS/ids (randomness is this tier's; hashing stays in Postgres/better-auth) —
  *     plus the specifier (never randomBytes) in the public-digest module above.
  *     No process.getBuiltinModule escape hatch anywhere.
- *  3. Transport containment: PLANE_INTERNAL_URL only in app/env.server.ts +
- *     app/lib/plane/client.server.ts; `fetch(` inside app/lib/plane/ only in client.server.ts;
- *     the `/internal/v1` custody-lane spelling and `vaultFetch(` calls confined to
- *     app/lib/plane/ — every vault byte goes through the one allowlisted transport.
+ *  3. Transport containment, once per internal lane. VAULT: PLANE_INTERNAL_URL only in
+ *     app/env.server.ts + app/lib/plane/client.server.ts; `fetch(` inside app/lib/plane/ only in
+ *     client.server.ts; `vaultFetch(` calls confined to app/lib/plane/. GATEWAY, the same
+ *     treatment: GATEWAY_INTERNAL_URL/GATEWAY_INTERNAL_TOKEN only in app/env.server.ts +
+ *     app/lib/gateway/client.server.ts; `fetch(` inside app/lib/gateway/ only in client.server.ts;
+ *     `gatewayFetch(` calls confined to app/lib/gateway/. The `/internal/v1` spelling belongs to
+ *     those two directories and nowhere else — every internal-lane request goes through one of the
+ *     two allowlisted transports.
  *  4. The dead acting-identity header may not be spelled: `x-topos-acting-email` is GONE (the
  *     vault is identity-free; authorization happens in this tier's guards + rows).
  *  5. Every server-tier module under app/lib that imports app/env.server or the raw pg/drizzle
@@ -232,6 +236,13 @@ const PLANE_URL_ALLOWED = new Set([
 ]);
 const CLIENT_SERVER = join("app", "lib", "plane", "client.server.ts");
 const PLANE_DIR = join("app", "lib", "plane") + sep;
+/** The gateway lane's twin containment: its own dir, its own one transport module. */
+const GATEWAY_URL_ALLOWED = new Set([
+  join("app", "env.server.ts"),
+  join("app", "lib", "gateway", "client.server.ts"),
+]);
+const GATEWAY_CLIENT_SERVER = join("app", "lib", "gateway", "client.server.ts");
+const GATEWAY_DIR = join("app", "lib", "gateway") + sep;
 for (const { rel, text } of files) {
   if (text.includes("PLANE_INTERNAL_URL") && !PLANE_URL_ALLOWED.has(rel)) {
     fail(rel, "PLANE_INTERNAL_URL outside app/env.server.ts + app/lib/plane/client.server.ts");
@@ -239,11 +250,26 @@ for (const { rel, text } of files) {
   if (rel.startsWith(PLANE_DIR) && rel !== CLIENT_SERVER && /\bfetch\s*\(/.test(text)) {
     fail(rel, "fetch( inside app/lib/plane/ outside client.server.ts");
   }
-  if (!rel.startsWith(PLANE_DIR) && text.includes("/internal/v1")) {
-    fail(rel, "the /internal/v1 custody lane spelled outside app/lib/plane/");
+  if (
+    (text.includes("GATEWAY_INTERNAL_URL") || text.includes("GATEWAY_INTERNAL_TOKEN")) &&
+    !GATEWAY_URL_ALLOWED.has(rel)
+  ) {
+    fail(
+      rel,
+      "a GATEWAY_INTERNAL_* value outside app/env.server.ts + app/lib/gateway/client.server.ts",
+    );
+  }
+  if (rel.startsWith(GATEWAY_DIR) && rel !== GATEWAY_CLIENT_SERVER && /\bfetch\s*\(/.test(text)) {
+    fail(rel, "fetch( inside app/lib/gateway/ outside client.server.ts");
+  }
+  if (!rel.startsWith(PLANE_DIR) && !rel.startsWith(GATEWAY_DIR) && text.includes("/internal/v1")) {
+    fail(rel, "the /internal/v1 lane spelled outside app/lib/plane/ + app/lib/gateway/");
   }
   if (!rel.startsWith(PLANE_DIR) && /\bvaultFetch\s*\(/.test(text)) {
     fail(rel, "vaultFetch( called outside app/lib/plane/ — go through the typed wrappers");
+  }
+  if (!rel.startsWith(GATEWAY_DIR) && /\bgatewayFetch\s*\(/.test(text)) {
+    fail(rel, "gatewayFetch( called outside app/lib/gateway/ — go through the typed wrappers");
   }
 }
 
@@ -262,6 +288,7 @@ const SERVER_SUFFIX_EXEMPT = new Set([
   join("app", "lib", "db", "schema.app.ts"),
   join("app", "lib", "db", "schema.auth.ts"),
   join("app", "lib", "db", "schema.custody.ts"),
+  join("app", "lib", "db", "schema.gateway.ts"),
   // The named auth entry (imported only by server modules; also allowlisted in rule 7 below).
   join("app", "lib", "auth", "server.ts"),
 ]);

@@ -18,6 +18,21 @@ caller.
   wears the 429. Only the byte/pointer ops of a publish-family verb leave this tier: through the
   ONE custody transport (`app/lib/plane/client.server.ts` — `vaultFetch` + a route allowlist) to
   the vault's `/internal/v1` lane, authenticated by the shared internal bearer alone.
+- **The MCP gateway is the SECOND internal lane, and it is OPTIONAL.** Where a deployment runs the
+  gateway service, MCP sign-ins live there (never here): `app/lib/gateway/client.server.ts` is its
+  one transport — `gatewayFetch` + a route allowlist, the custody transport's twin, same shared
+  bearer, same boundary-gate treatment — with three typed wrappers in `credentials.server.ts`
+  (begin an authorize walk · store a pasted secret · revoke). This tier reads the gateway's
+  non-secret rows through a second read-only mirror (`app/lib/db/schema.gateway.ts`: credential
+  METADATA, observed tools, usage events — the ciphertext table has no grant and no mirror), and
+  owns the tool policy itself (`web.mcp_tool_policy` + `mcp_tool_selection`, hanging off the
+  connection). Three env vars, all optional and none defaulted: `GATEWAY_INTERNAL_URL` +
+  `GATEWAY_INTERNAL_TOKEN` (paired — half a lane refuses at parse time) arm the lane and the
+  server-page sections; `GATEWAY_PUBLIC_URL` arms the DELIVERY FLIP
+  (`app/lib/gateway/delivery.server.ts`), where an addressable server's delivered document gets ONE
+  remote at the gateway plus `_meta["sh.topos/gateway"]`. Unset, every one of those surfaces is
+  simply absent and delivery carries the stored document — the whole rollback is clearing a
+  variable.
 - **One identity.** A person is a `user.id` (Better Auth); email is a mutable login attribute —
   NOTHING authorizes by email equality (`check:email` enforces it). Human display is one rule
   written twice in lockstep: `app/lib/person-display.ts` (TS) +
@@ -183,7 +198,9 @@ caller.
 - **Signed-in:** dashboard (skills and MCP servers as separate sections) · bundle browser +
   lifecycle ceremonies (a skill's tabs: Current · Proposals · History · owner Settings; a server's
   face carries the server, what this workspace receives, and its revisions instead, and mounts
-  Settings alone beside it; `skills/import` add-from-GitHub + the Upstream panel) · the rendered
+  Settings alone beside it — plus, where a gateway is deployed, the three gateway sections
+  (Sign-in · Tools · Usage) and the manual tier's own `mcp/:server/connect` page;
+  `skills/import` add-from-GitHub + the Upstream panel) · the rendered
   review UI (diff, approve/reject, comments, revert) · `/profile` (Mine grouped by provenance +
   Library) · `/visibility` · channel pages (tabs: Skills/curation · Members · History ·
   Settings) · roster · workspace Settings (General policy knobs · whole-catalog export ·
@@ -210,8 +227,9 @@ Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth) · self
 every DB/vault read per-request fresh.
 
 Gates (`bun run check`, all in CI): `check:tokens` (DESIGN.md ↔ `app.css`), `check:boundary` (no
-crypto outside the named carve-out; vault URL/`fetch(`/`/internal/v1` confined to the one
-transport; `.server` discipline; route-guard allowlist; DAL confinement; zero client env),
+crypto outside the named carve-out; each internal lane's URL/token/`fetch(`/`gatewayFetch(` or
+`vaultFetch(` confined to its one transport, and `/internal/v1` to those two directories;
+`.server` discipline; route-guard allowlist; DAL confinement; zero client env),
 `check:email`, `check:contract` (OpenAPI-generated `schema.d.ts`), `check:docs`,
 `check:mcp-patterns` (the credential shapes ↔ the generated module), `check:bundle`
 (post-build client-bundle byte-scan). Repo-level `scripts/check-db-grants.sh` proves the

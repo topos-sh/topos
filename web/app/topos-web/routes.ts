@@ -250,6 +250,17 @@ function bundleMounts(
   );
 }
 
+/**
+ * The MCP kind's own connect page, built from the same record every other MCP path is built from —
+ * so it moves with the base and the param name rather than hard-coding `mcp/:server`. An empty list
+ * if the kind is ever removed, which is the only way this can be half-present.
+ */
+function mcpConnectMount(file: (p: string) => string): RouteConfigEntry[] {
+  return BUNDLE_KINDS.filter((kind) => kind.kind === "mcp").map((kind) =>
+    route(`${kind.base}/:${kind.paramName}/connect`, file("mcp-connect.tsx")),
+  );
+}
+
 /** The member-only pages, mounted origin-rooted (single) or under `/:ws` (multi). */
 function memberWorkspaceChildren(
   tenancy: "single" | "multi",
@@ -287,6 +298,11 @@ function memberWorkspaceChildren(
     // each, kind-fenced, so a server's tabs stay inside the MCP section instead of walking the
     // reader back into Skills. Member-only.
     ...bundleMounts(BUNDLE_SUBPAGES, file, (sub) => sub),
+    // The manual sign-in page, mounted for the MCP kind ALONE — deliberately not a BUNDLE_SUBPAGE:
+    // a skill has no sign-in to connect, and a page that exists for one kind is one route, not a
+    // per-kind mount with the other half fenced off. `oauth` servers never reach it (their connect
+    // leaves for the upstream); the module answers the house 404 for everything but a manual one.
+    ...mcpConnectMount(file),
   ];
   return tenancy === "multi" ? prefix(":ws", children) : children;
 }

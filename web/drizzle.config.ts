@@ -4,9 +4,10 @@ import { defineConfig } from "drizzle-kit";
 // db-connected commands, so the config must stay valid without env set.
 //
 // Only the web tier's OWN tables are diffed: schema.auth.ts (Better Auth) + schema.app.ts (the
-// policy audit trail + proposal comments). The plane mirror (schema.plane.ts) is DELIBERATELY
-// excluded — those rows are the vault's, read-only, migrated by the vault's own SQL; the web
-// tier never generates DDL against them.
+// policy audit trail + proposal comments). The two read-only mirrors — schema.custody.ts (the
+// vault's `plane`) and schema.gateway.ts (the gateway's `gateway`) — are DELIBERATELY excluded:
+// those rows belong to the other services, are migrated by their own lineages, and this tier
+// never generates DDL against them.
 export default defineConfig({
   schema: ["./app/lib/db/schema.auth.ts", "./app/lib/db/schema.app.ts"],
   out: "./drizzle",
