@@ -28,6 +28,21 @@ export interface FetchPolicy {
 
 const MAX_REDIRECTS = 5;
 
+// Headers safe to carry to a DIFFERENT origin on a redirect: content negotiation and the MCP
+// protocol framing, none of which is a credential. Everything else — `Authorization`, any
+// document-declared secret header, cookies — is dropped, so no secret follows a cross-origin
+// bounce regardless of the name it rode under.
+const CROSS_ORIGIN_SAFE_HEADERS = new Set([
+  "accept",
+  "accept-encoding",
+  "content-type",
+  "content-length",
+  "user-agent",
+  "mcp-protocol-version",
+  "mcp-method",
+  "mcp-name",
+]);
+
 function ipv4Blocked(addr: string): boolean {
   const parts = addr.split(".").map(Number);
   const [a, b] = parts;
@@ -172,10 +187,18 @@ export function createGuardedFetch(
       } else if (hadBody) {
         throw new Error("upstream redirected a request whose body cannot be replayed");
       }
-      // Credentials never travel across origins on a redirect.
+      // Credentials never travel across origins on a redirect. The caller attaches the upstream
+      // secret under `Authorization` OR a document-declared custom header (e.g. `X-API-Key`), and
+      // this wrapper cannot know which — so cross-origin we KEEP only a safelist of non-credential
+      // headers and drop the rest. Anything carrying a secret is dropped by construction.
       if (next.origin !== url.origin) {
-        headers = new Headers(headers);
-        headers.delete("authorization");
+        const kept = new Headers();
+        headers.forEach((value, name) => {
+          if (CROSS_ORIGIN_SAFE_HEADERS.has(name.toLowerCase())) {
+            kept.set(name, value);
+          }
+        });
+        headers = kept;
       }
       log("info", "following upstream redirect", { status: response.status, hop: hop + 1 });
       url = next;

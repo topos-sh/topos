@@ -99,12 +99,9 @@ export async function createServiceDb(): Promise<ServiceDb> {
     await admin.query(
       `ALTER ROLE topos_gateway IN DATABASE ${name} SET search_path = gateway, web`,
     );
-    // The gateway reads the web tables it needs; the mirror of the plane→web default-privilege
-    // pattern, so FUTURE web migrations arrive readable without manual re-grants.
-    await admin.query("GRANT USAGE ON SCHEMA web TO topos_gateway");
-    await admin.query(
-      "ALTER DEFAULT PRIVILEGES FOR ROLE topos_web IN SCHEMA web GRANT SELECT ON TABLES TO topos_gateway",
-    );
+    // No blanket web grant here — the web lineage's 0028 grants topos_gateway exactly the tables
+    // it reads (topos_gateway exists by now, so its guard fires), which is what production does.
+    // Granting all of web here would let this rig read the identity store and drift from prod.
   });
 
   const webUrl = urlForRole(ADMIN_URL, "topos_web", "web", name);

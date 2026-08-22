@@ -143,11 +143,17 @@ probe_real() {
   expect_denied topos_web web "CREATE TABLE gateway.intruder (id text)" \
     "web CREATE IN gateway refused"
 
-  # The gateway reads exactly what a proxied call resolves against, and nothing of custody.
-  for table in cli_session seat workspace bundle bundle_mcp mcp_server mcp_server_revision \
+  # The gateway reads exactly the eight tables a proxied call resolves against — no more.
+  for table in cli_session workspace bundle bundle_mcp mcp_server mcp_server_revision \
     mcp_tool_policy mcp_tool_selection; do
     expect_ok topos_gateway gateway "SELECT count(*) FROM web.$table" "gateway reads web.$table"
   done
+  # And NOT the identity store, nor custody: the blanket grant that would have swept these in is
+  # exactly what migration 0028 replaced with an enumerated list.
+  expect_denied topos_gateway gateway "SELECT count(*) FROM web.account" \
+    "gateway SELECT of web.account (identity tokens) refused"
+  expect_denied topos_gateway gateway "SELECT count(*) FROM web.seat" \
+    "gateway SELECT of web.seat refused"
   expect_denied topos_gateway gateway "SELECT count(*) FROM plane.version" \
     "gateway SELECT of plane.version refused"
 

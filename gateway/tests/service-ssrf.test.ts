@@ -141,6 +141,33 @@ describe("redirect handling (stubbed transport — public IP literals resolve no
     ]);
   });
 
+  it("drops a document-declared secret header across origins, keeps content headers", async () => {
+    const seen: Array<{ host: string; apiKey: string | null; accept: string | null }> = [];
+    const stub = (async (input: RequestInfo | URL) => {
+      const request = input as Request;
+      const url = new URL(request.url);
+      seen.push({
+        host: url.hostname,
+        apiKey: request.headers.get("x-api-key"),
+        accept: request.headers.get("accept"),
+      });
+      if (url.hostname === "8.8.8.8") {
+        return new Response(null, { status: 302, headers: { location: "https://9.9.9.9/c" } });
+      }
+      return new Response("done");
+    }) as typeof fetch;
+    const guarded = createGuardedFetch({ allowPrivate: false }, quiet, stub);
+    // A manual-tier credential rides a document-named header, NOT Authorization — the leak the
+    // reviews caught. It must not survive a cross-origin bounce; a content header must.
+    await guarded("https://8.8.8.8/a", {
+      headers: { "x-api-key": "sk-workspace-secret", accept: "application/json" },
+    });
+    expect(seen).toEqual([
+      { host: "8.8.8.8", apiKey: "sk-workspace-secret", accept: "application/json" },
+      { host: "9.9.9.9", apiKey: null, accept: "application/json" },
+    ]);
+  });
+
   it("refuses to replay a body a 307 would resend", async () => {
     const stub = (async () =>
       new Response(null, {

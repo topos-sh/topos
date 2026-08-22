@@ -205,7 +205,7 @@ async function finishReply(
     return { kind: "message", message: upstreamFailureError(msg.id, "upstream_error"), status: 502 };
   }
   if (reply.kind === "sse" && opts.unary) {
-    const extracted = await responseFromSse(reply.body, msg.id);
+    const extracted = await responseFromSse(reply.body, msg.id, rc.ctx.env.now);
     if (!extracted) {
       record(rc, "upstream_error", msg.method, opts.toolName);
       return { kind: "message", message: upstreamFailureError(msg.id, "upstream_error"), status: 502 };
@@ -351,7 +351,7 @@ async function handleLegacyInitialize(rc: RequestCtx, msg: JsonRpcRequest): Prom
     clientInfo: identity.clientInfo,
     initialized: false,
   };
-  memory.clientSessions.set(session.mcpSessionId, session);
+  memory.putClientSession(session);
   record(rc, "ok", msg.method);
   return jsonResponse(
     rpcResult(msg.id, {
@@ -754,22 +754,30 @@ export async function handleGatewayRequest(ctx: GatewayContext, greq: GatewayReq
   const started = ctx.env.now();
   const { request } = greq;
 
+  // A refusal that answers WITHOUT reading the request body wedges some hosts (a Durable Object
+  // stub hop refuses to read a request stream once its response is sent); draining first makes
+  // the early returns portable, and is a no-op where the body was already consumed or absent.
+  const refuse = (response: Response): Response => {
+    request.body?.cancel().catch(() => {});
+    return response;
+  };
+
   // Origin validation (MUST, all revisions): gateway callers are headless agents; a request
   // carrying any browser Origin is a DNS-rebinding shape and is refused outright.
   if (request.headers.get("origin") !== null) {
     ctx.env.log("warn", "request with Origin header refused", { serverId: greq.serverId });
-    return jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 403);
+    return refuse(jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 403));
   }
 
   // Pre-auth failures have no workspace to attribute a usage row to: logged, never recorded.
   if (greq.bearer === null || greq.bearer === "") {
     ctx.env.log("warn", "request without bearer refused", { serverId: greq.serverId });
-    return jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 401);
+    return refuse(jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 401));
   }
   const session = await ctx.store.sessionByTokenSha256(await sha256Hex(greq.bearer));
   if (session === null) {
     ctx.env.log("warn", "unknown bearer refused", { serverId: greq.serverId });
-    return jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 401);
+    return refuse(jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 401));
   }
 
   const rc: RequestCtx = {

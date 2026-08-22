@@ -24,6 +24,38 @@ import { DELIVERED_AUTH_KEY } from "@/lib/db/queries.mcp-catalog.server";
 /** The `_meta` key a renderer reads to know an entry is proxied. */
 export const GATEWAY_META_KEY = "sh.topos/gateway";
 
+/** The one `sh.topos/*` key a document AUTHOR may state; every other is delivery-control. */
+const AUTHOR_META_KEY = "sh.topos/auth";
+
+/**
+ * Strip every reserved `sh.topos/*` control key except the author's `sh.topos/auth` from a
+ * document's `_meta`. The document gate already refuses these at entry, but delivery is the last
+ * chokepoint EVERY delivered document passes — including rows written before the gate learned to
+ * refuse them, or by any future path — so a stored `sh.topos/gateway` can never reach a machine
+ * and be read as "attach this workspace's credential to this URL". The trusted rewrite below adds
+ * its own flag AFTER this runs, on documents this has already cleaned.
+ */
+export function sanitizeReservedMeta(document: Record<string, unknown>): Record<string, unknown> {
+  const meta = document._meta;
+  if (typeof meta !== "object" || meta === null) {
+    return document;
+  }
+  const source = meta as Record<string, unknown>;
+  const offending = Object.keys(source).filter(
+    (key) => key.startsWith("sh.topos/") && key !== AUTHOR_META_KEY,
+  );
+  if (offending.length === 0) {
+    return document;
+  }
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith("sh.topos/") || key === AUTHOR_META_KEY) {
+      cleaned[key] = value;
+    }
+  }
+  return { ...document, _meta: cleaned };
+}
+
 /** The one transport a gateway remote speaks. */
 const STREAMABLE_HTTP = "streamable-http";
 

@@ -54,6 +54,23 @@ describe("sessionByTokenSha256", () => {
     expect(await store.sessionByTokenSha256(bearerSha256Hex("no-such-bearer"))).toBeNull();
     expect(await store.sessionByTokenSha256("not-hex")).toBeNull();
   });
+
+  it("ignores an active session past the workspace's session_max_age_ms", async () => {
+    // A workspace that expires sessions after an hour, and a still-'active' row created two hours
+    // ago: the web lane already rejects it, and the gateway must too — expiry never deletes the
+    // row, so a status-only check would let a stale bearer call tools forever.
+    await seedIdentity(db, "wsexp", "u1");
+    await db.q("UPDATE web.workspace SET session_max_age_ms = 3600000 WHERE id = 'wsexp'");
+    await seedSession(db, "sn_stale", "wsexp", "u1", "bearer-stale");
+    await db.q(
+      "UPDATE web.cli_session SET created_at = now() - interval '2 hours' WHERE id = 'sn_stale'",
+    );
+    expect(await store.sessionByTokenSha256(bearerSha256Hex("bearer-stale"))).toBeNull();
+
+    // A fresh session in the same workspace still resolves.
+    await seedSession(db, "sn_fresh", "wsexp", "u1", "bearer-fresh");
+    expect(await store.sessionByTokenSha256(bearerSha256Hex("bearer-fresh"))).not.toBeNull();
+  });
 });
 
 describe("connectedServer", () => {

@@ -32,7 +32,11 @@ import {
 } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
 import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody";
-import { gatewayDeliveryDocument, gatewayPublicBase } from "@/lib/gateway/delivery.server";
+import {
+  gatewayDeliveryDocument,
+  gatewayPublicBase,
+  sanitizeReservedMeta,
+} from "@/lib/gateway/delivery.server";
 
 /**
  * The SESSION lane's data access — the row-op half of `/api/v1`, served entirely by this
@@ -282,7 +286,11 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
           ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
         };
         if (r.revision_id !== null) {
-          const document = r.document as Record<string, unknown>;
+          // Sanitize FIRST — a stored document may carry a reserved `sh.topos/*` control key (an
+          // older row, or a path that predates the gate); the trusted rewrite adds its own flag
+          // only after. So a machine never receives a gateway flag the delivery side did not put
+          // there, gateway deployed or not.
+          const document = sanitizeReservedMeta(r.document as Record<string, unknown>);
           mcpServers.push({
             ...common,
             revision_id: r.revision_id as string,

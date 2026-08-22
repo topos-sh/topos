@@ -79,17 +79,13 @@ GRANT USAGE ON SCHEMA plane TO topos_web;
 ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane
   GRANT SELECT ON TABLES TO topos_web;
 
--- The gateway resolves every proxied call against web rows it may only READ (the session, the
--- seat, the workspace, the connected server and its revisions, the tool policy). Same
--- default-privileges shape as the app's custody read, so future web migrations arrive granted.
--- The explicit ALL TABLES grant is for a RE-RUN against a database whose web lineage already
--- ran (an existing self-host adding the gateway): default privileges only reach tables created
--- after they were set, and on a fresh volume — where initdb runs before any migration — it is a
--- no-op.
-GRANT USAGE ON SCHEMA web TO topos_gateway;
-ALTER DEFAULT PRIVILEGES FOR ROLE topos_web IN SCHEMA web
-  GRANT SELECT ON TABLES TO topos_gateway;
-GRANT SELECT ON ALL TABLES IN SCHEMA web TO topos_gateway;
+-- The gateway resolves every proxied call against a FIXED set of web rows it may only READ. Those
+-- grants are NOT made here: a blanket "SELECT on all of web" (or the ALTER DEFAULT PRIVILEGES that
+-- would cover a fresh volume) would also hand the most-exposed component the identity store — the
+-- Better Auth account tokens, session tokens, and emails. Instead the web lineage migration
+-- 0028_gateway_web_reads grants exactly the eight tables the gateway reads, guarded on this role
+-- existing, once the tables are real and topos_web owns them. Creating the role here is enough; the
+-- next web boot-migration makes the precise grants (and re-affirms them idempotently).
 
 -- The app renders sign-in state, the tools checklist and the usage page straight out of the
 -- gateway's schema — so it needs to REACH the schema. WHICH TABLES it may read is decided in
