@@ -101,7 +101,7 @@ afterAll(async () => {
 
 describe("delivery under a deployed gateway", () => {
   it("points an addressable server at the gateway, naming the calling session", async () => {
-    const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, "cs_laptop"));
+    const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, "cs_laptop"), true);
     const served = body.mcp_servers.find((row) => row.skill_id === "b_remote");
     expect(served?.document.remotes).toEqual([
       { type: "streamable-http", url: `${BASE}/cs_laptop/mcps_remote` },
@@ -115,7 +115,7 @@ describe("delivery under a deployed gateway", () => {
   });
 
   it("gives a second machine its own address", async () => {
-    const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, "cs_desktop"));
+    const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, "cs_desktop"), true);
     const served = body.mcp_servers.find((row) => row.skill_id === "b_remote");
     expect((served?.document.remotes as { url: string }[])[0]?.url).toBe(
       `${BASE}/cs_desktop/mcps_remote`,
@@ -123,7 +123,7 @@ describe("delivery under a deployed gateway", () => {
   });
 
   it("hands a package-only server over exactly as stored", async () => {
-    const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, "cs_laptop"));
+    const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, "cs_laptop"), true);
     const served = body.mcp_servers.find((row) => row.skill_id === "b_pkg");
     expect(served?.document).toEqual({
       name: "com.example/packaged",
@@ -135,6 +135,18 @@ describe("delivery under a deployed gateway", () => {
 
   it("rewrites nothing for a read with no machine behind it", async () => {
     const body = await (await lane()).deliveryFor(asMember(ws, MEMBER));
+    const served = body.mcp_servers.find((row) => row.skill_id === "b_remote");
+    expect(served?.document.remotes).toEqual([
+      { type: "streamable-http", url: "https://upstream.example.com/mcp" },
+    ]);
+    expect((served?.document._meta as Record<string, unknown>)["sh.topos/gateway"]).toBeUndefined();
+  });
+
+  it("rewrites nothing for a machine whose renderer cannot attach the credential", async () => {
+    // The whole point of the guard: a deployment may turn the gateway on while machines are still
+    // on an older release. Those keep the server's OWN address — which still works for them —
+    // instead of a gateway address they would dial with no credential at all.
+    const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, "cs_laptop"), false);
     const served = body.mcp_servers.find((row) => row.skill_id === "b_remote");
     expect(served?.document.remotes).toEqual([
       { type: "streamable-http", url: "https://upstream.example.com/mcp" },
