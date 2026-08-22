@@ -4,20 +4,26 @@ import { randomBytes, timingSafeEqual as nodeTimingSafeEqual, createHash } from 
 /**
  * Envelope crypto for credential custody — AES-256-GCM throughout, via WebCrypto.
  *
- * Two layers: a per-workspace DATA KEY encrypts credential payloads; the MASTER KEY (increment 1
- * backend: a 32-byte file at GATEWAY_MASTER_KEY_FILE) wraps each data key. Every ciphertext's AAD
- * binds it to its row identity — a credential's to (credential id, workspace id), a wrapped key's
- * to its workspace id — so copying bytes between rows yields nothing but a decrypt failure.
+ * Two layers: a per-workspace DATA KEY encrypts credential payloads; a MASTER KEY BACKEND wraps
+ * each data key. Every ciphertext's AAD binds it to its row identity — a credential's to
+ * (credential id, workspace id), a wrapped key's to its workspace id — so copying bytes between
+ * rows yields nothing but a decrypt failure.
  *
- * The envelope byte layout is versioned for a later KMS backend:
- *   [0] format version (0x01) · [1..13] 96-bit IV · [13..] GCM ciphertext+tag.
+ * The leading byte of every envelope says which kind of key opens it:
+ *   0x01 — AES-256-GCM under a key THIS PROCESS HOLDS: [0] 0x01 · [1..13] 96-bit IV · [13..]
+ *          ciphertext+tag. Every credential ciphertext is this, always (the data key is local by
+ *          construction); a data key wrapped by `FileMasterKey` is this too.
+ *   0x02 — a data key wrapped by an EXTERNAL KMS (`service/kms.ts` owns that layout).
+ * A backend unwraps its own version and refuses the other by name, so a row's bytes — not the
+ * deployment's configuration — decide which key must open it.
  *
  * Nothing here logs, and nothing here holds plaintext longer than its caller does.
  */
 
-const FORMAT_VERSION = 0x01;
+/** AES-256-GCM under a key this process holds. Its meaning is frozen: rows in the field carry it. */
+export const LOCAL_FORMAT_VERSION = 0x01;
 const IV_BYTES = 12;
-const KEY_BYTES = 32;
+export const KEY_BYTES = 32;
 
 /** The decrypted payload one credential row protects. */
 export interface CredentialPayload {
@@ -77,11 +83,11 @@ async function seal(key: CryptoKey, plaintext: Buffer, aad: string): Promise<Buf
     key,
     new Uint8Array(plaintext),
   );
-  return Buffer.concat([Buffer.from([FORMAT_VERSION]), iv, Buffer.from(sealed)]);
+  return Buffer.concat([Buffer.from([LOCAL_FORMAT_VERSION]), iv, Buffer.from(sealed)]);
 }
 
 async function open(key: CryptoKey, envelope: Buffer, aad: string): Promise<Buffer> {
-  if (envelope.length < 1 + IV_BYTES || envelope[0] !== FORMAT_VERSION) {
+  if (envelope.length < 1 + IV_BYTES || envelope[0] !== LOCAL_FORMAT_VERSION) {
     throw new Error("unrecognized envelope format");
   }
   const iv = envelope.subarray(1, 1 + IV_BYTES);
@@ -99,28 +105,168 @@ function credentialAad(credentialId: string, workspaceId: string): string {
   return `topos:gateway:credential:${credentialId}:${workspaceId}`;
 }
 
-function workspaceKeyAad(workspaceId: string): string {
+/** The wrap's AAD. Exported because the re-wrap routine seals under the SAME binding. */
+export function workspaceKeyAad(workspaceId: string): string {
   return `topos:gateway:workspace-key:${workspaceId}`;
 }
 
-export class EnvelopeCrypto {
-  private masterKey: Promise<CryptoKey>;
+/**
+ * Where the master key lives. `wrapDataKey`/`unwrapDataKey` are the WHOLE contract: a backend may
+ * hold the key in this process (`FileMasterKey`) or never see it at all (`KmsMasterKey`, whose
+ * wrap and unwrap are RPCs), and nothing above this interface can tell which.
+ *
+ * `aad` binds a wrap to its row and MUST reach the underlying primitive as authenticated data —
+ * dropping it would let a wrapped key be moved between workspaces, which is the property the two
+ * layers exist for. Every backend stamps `formatVersion` as the envelope's first byte and refuses
+ * any other version by name; that refusal is what keeps a deployment from silently reading rows
+ * its configured key cannot actually open.
+ */
+export interface MasterKeyBackend {
+  /** The envelope version this backend produces AND the only one it will open. */
+  readonly formatVersion: number;
+  /** Log-safe identity for boot and the re-wrap ledger — never key material. */
+  readonly describe: string;
+  wrapDataKey(plaintextKey: Buffer, aad: string): Promise<Buffer>;
+  unwrapDataKey(envelope: Buffer, aad: string): Promise<Buffer>;
+}
+
+const VERSION_BLAME = new Map<number, string>([
+  [LOCAL_FORMAT_VERSION, "the file key backend"],
+  [0x02, "a KMS key backend"],
+]);
+
+/**
+ * Fail closed on a wrapped key this backend did not write. The version byte is the row's own
+ * statement of what wrote it, so the refusal names both sides: an operator who moved a deployment
+ * to a KMS without running the re-wrap gets told exactly that, not a decrypt failure.
+ */
+export function assertWrapVersion(envelope: Buffer, expected: number, backend: string): void {
+  const found = envelope[0];
+  if (found === expected) {
+    return;
+  }
+  const wrote =
+    found === undefined
+      ? "an empty value"
+      : (VERSION_BLAME.get(found) ?? `an unrecognized backend (0x${found.toString(16).padStart(2, "0")})`);
+  throw new Error(
+    `wrapped workspace key was written by ${wrote}; this gateway runs the ${backend} backend ` +
+      `(envelope format 0x${expected.toString(16).padStart(2, "0")})`,
+  );
+}
+
+/**
+ * The master key as 32 bytes in this process's memory — today's deployment, unchanged. The wrap
+ * is local AES-256-GCM, so a data key wrapped here is a plain 0x01 envelope and every wrapped key
+ * already in the field keeps opening.
+ */
+export class FileMasterKey implements MasterKeyBackend {
+  readonly formatVersion = LOCAL_FORMAT_VERSION;
+  readonly describe = "file";
+  private key: Promise<CryptoKey>;
 
   constructor(masterKeyBytes: Buffer) {
-    this.masterKey = importAesKey(masterKeyBytes);
+    this.key = importAesKey(masterKeyBytes);
   }
+
+  async wrapDataKey(plaintextKey: Buffer, aad: string): Promise<Buffer> {
+    return seal(await this.key, plaintextKey, aad);
+  }
+
+  async unwrapDataKey(envelope: Buffer, aad: string): Promise<Buffer> {
+    assertWrapVersion(envelope, this.formatVersion, this.describe);
+    return open(await this.key, envelope, aad);
+  }
+}
+
+/**
+ * How long an unwrapped data key stays usable in memory. Fifteen minutes is the trade: an unwrap
+ * is a network round trip under a KMS backend and EVERY proxied tool call needs one, so caching is
+ * what keeps the gateway's latency the upstream's rather than the key service's — while a window
+ * this short still bounds how long a workspace keeps working after its KMS key is disabled or its
+ * IAM binding is pulled. Nothing here is a substitute for revocation: revoking a CREDENTIAL is a
+ * row delete, which the store sees before any key is consulted.
+ */
+const DATA_KEY_TTL_MS = 15 * 60 * 1000;
+/** A ceiling on resident data keys — the busiest workspaces stay, the rest re-unwrap on demand. */
+const DATA_KEY_CACHE_MAX = 256;
+
+export class EnvelopeCrypto {
+  /**
+   * Unwrapped data keys, keyed by workspace AND by the wrapped bytes they came from. The digest in
+   * the key is what makes a re-wrapped row (a migration to another backend) impossible to serve
+   * from a stale entry: different bytes, different cache key, a real unwrap through whichever
+   * backend this process is configured with.
+   *
+   * The value is the in-flight PROMISE, so a burst of concurrent calls for one workspace makes one
+   * unwrap, not one per call. The CryptoKey it resolves to is non-extractable — the raw key bytes
+   * are dropped as soon as WebCrypto has imported them, and nothing can read them back out.
+   */
+  private dataKeys = new Map<string, { key: Promise<CryptoKey>; expiresAt: number }>();
+
+  constructor(
+    private masterKey: MasterKeyBackend,
+    private now: () => number = Date.now,
+  ) {}
 
   /** Mint a fresh workspace data key; returns it wrapped for storage. */
   async mintWrappedWorkspaceKey(workspaceId: string): Promise<Buffer> {
-    return seal(await this.masterKey, randomBytes(KEY_BYTES), workspaceKeyAad(workspaceId));
+    return this.masterKey.wrapDataKey(randomBytes(KEY_BYTES), workspaceKeyAad(workspaceId));
+  }
+
+  /** Drop every cached data key — the next call unwraps again. */
+  clearDataKeyCache(): void {
+    this.dataKeys.clear();
+  }
+
+  /**
+   * Can this backend actually open a wrap already sitting in the database? The boot proof answers
+   * "the configured key works", which is NOT the same question: a deployment switched to a KMS
+   * without running the re-wrap — or pointed at a different, perfectly valid key — passes that
+   * proof and then fails on every stored credential. This is what makes such a deployment refuse
+   * to serve instead of serving brokenly. Warms the cache for the workspaces it checks.
+   */
+  async canOpenWorkspaceKey(workspaceId: string, wrapped: Buffer): Promise<boolean> {
+    try {
+      await this.unwrapWorkspaceKey(workspaceId, wrapped);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async unwrapWorkspaceKey(workspaceId: string, wrapped: Buffer): Promise<CryptoKey> {
-    const raw = await open(await this.masterKey, wrapped, workspaceKeyAad(workspaceId));
-    if (raw.length !== KEY_BYTES) {
-      throw new Error("unwrapped workspace key has the wrong size");
+    const cacheKey = `${workspaceId}:${sha256Hex(wrapped)}`;
+    const standing = this.dataKeys.get(cacheKey);
+    if (standing !== undefined) {
+      if (this.now() < standing.expiresAt) {
+        // Re-insert to move this entry to the end: Map iterates in insertion order, so the
+        // eviction below drops the least recently USED rather than the oldest. The expiry is
+        // carried over unchanged — the TTL is absolute, so traffic cannot hold a key forever.
+        this.dataKeys.delete(cacheKey);
+        this.dataKeys.set(cacheKey, standing);
+        return standing.key;
+      }
+      this.dataKeys.delete(cacheKey);
     }
-    return importAesKey(raw);
+    const key = (async (): Promise<CryptoKey> => {
+      const raw = await this.masterKey.unwrapDataKey(wrapped, workspaceKeyAad(workspaceId));
+      if (raw.length !== KEY_BYTES) {
+        throw new Error("unwrapped workspace key has the wrong size");
+      }
+      return importAesKey(raw);
+    })();
+    // A failed unwrap must never be remembered — the next call has to ask the backend again.
+    key.catch(() => this.dataKeys.delete(cacheKey));
+    this.dataKeys.set(cacheKey, { key, expiresAt: this.now() + DATA_KEY_TTL_MS });
+    while (this.dataKeys.size > DATA_KEY_CACHE_MAX) {
+      const oldest = this.dataKeys.keys().next();
+      if (oldest.done === true) {
+        break;
+      }
+      this.dataKeys.delete(oldest.value);
+    }
+    return key;
   }
 
   async encryptCredential(

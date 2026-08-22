@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { EnvelopeCrypto } from "../service/crypto";
+import { EnvelopeCrypto, FileMasterKey } from "../service/crypto";
 import { PgStore, secretHeaderFromDocument } from "../service/store";
 import { BufferedUsageSink } from "../service/usage";
 import {
@@ -23,7 +23,7 @@ let store: PgStore;
 beforeAll(async () => {
   db = await createServiceDb();
   pool = new pg.Pool({ connectionString: db.gatewayUrl, max: 5 });
-  store = new PgStore(pool, new EnvelopeCrypto(randomBytes(32)), TOPOS_PUBLIC_URL, () => {});
+  store = new PgStore(pool, new EnvelopeCrypto(new FileMasterKey(randomBytes(32))), TOPOS_PUBLIC_URL, () => {});
   await seedIdentity(db, "ws1", "u1");
   await seedIdentity(db, "ws1", "u2");
 }, 120_000);
@@ -235,6 +235,23 @@ describe("credential custody", () => {
     expect(await store.credentialFor("ws1", seeded.serverId, "u1")).toBeNull();
   });
 
+  it("revocation lands immediately even with the workspace's data key already cached", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "revcache");
+    const id = await store.storeCredential({
+      workspaceId: "ws1",
+      serverId: seeded.serverId,
+      userId: "u1",
+      authKind: "manual",
+      payload: { secret: "live" },
+      createdByDisplay: "u1",
+    });
+    // This read warms the data-key cache for ws1 — the row is then deleted out from under it.
+    expect((await store.credentialFor("ws1", seeded.serverId, "u1"))?.secret).toBe("live");
+    expect(await store.deleteCredential(id)).toBe(true);
+    // No key was consulted: the row is simply gone, which is what makes revocation a row change.
+    expect(await store.credentialFor("ws1", seeded.serverId, "u1")).toBeNull();
+  });
+
   it("saveRotatedCredential re-encrypts and stamps last_refreshed_at", async () => {
     const seeded = await seedConnectedServer(db, "ws1", "rot");
     const id = await store.storeCredential({
@@ -361,7 +378,7 @@ describe("recordObservedTools", () => {
     // by dropping to a poisoned pool) must resolve, not reject.
     const closed = new pg.Pool({ connectionString: db.gatewayUrl, max: 1 });
     await closed.end();
-    const poisoned = new PgStore(closed, new EnvelopeCrypto(randomBytes(32)), TOPOS_PUBLIC_URL, () => {});
+    const poisoned = new PgStore(closed, new EnvelopeCrypto(new FileMasterKey(randomBytes(32))), TOPOS_PUBLIC_URL, () => {});
     await expect(
       poisoned.recordObservedTools("ws1", "msrv_x", [{ name: "t" }]),
     ).resolves.toBeUndefined();
