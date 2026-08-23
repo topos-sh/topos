@@ -2265,6 +2265,12 @@ fn plan_from_standing(
         {
             return Ok(Some(plan));
         }
+        // And a record whose ROW IS GONE — a landed publish's stale claim before the sweep
+        // retires it, a hand-removed line — claims nothing: it falls through to ordinary
+        // resolution rather than refusing over a row the named file does not hold.
+        if !scope_holds_row(ctx, global, standing.and_then(|r| r.origin.as_ref())) {
+            return Ok(None);
+        }
         return Err(ClientError::AlreadyAdded {
             name: name.to_owned(),
             scope: if global {
@@ -2359,6 +2365,53 @@ fn set_delivered_standing(
 /// one per origin. Both halves matter — a record nothing can spell cannot appear on a runnable
 /// line, and several records of ONE source (a forge import lands one per destination) are one
 /// thing the name means, not an ambiguity between identical spellings.
+/// Whether the INVOKED scope's manifest actually holds a row claiming `origin` — the file check
+/// behind every "already added (<file>)" sentence. Best-effort: an unreadable file claims
+/// nothing (the add's own write path owns that refusal).
+fn scope_holds_row(ctx: &Ctx<'_>, global: bool, origin: Option<&RecordOrigin>) -> bool {
+    let Some(origin) = origin else {
+        // An unspellable record cannot be checked against any row — the standing answer keeps
+        // its old meaning for it (added, with no `source:` line).
+        return true;
+    };
+    let plan = if global {
+        crate::manifest::scopes::person_plan(ctx.fs, &ctx.layout).ok()
+    } else {
+        ctx.roots.as_ref().and_then(|r| {
+            crate::manifest::scopes::nearest_project_plan(ctx.fs, r.cwd.as_deref()?, Some(&r.home))
+                .ok()
+                .flatten()
+                .map(|(_, p)| p)
+        })
+    };
+    let Some(plan) = plan else {
+        return true;
+    };
+    plan.things
+        .iter()
+        .chain(plan.sets.iter())
+        .chain(plan.offs.iter())
+        .any(|row| match origin {
+            RecordOrigin::Reference(reference) => row.reference == *reference,
+            RecordOrigin::Folder(dir) => match &row.shape {
+                crate::manifest::keys::KeyShape::LocalPath { raw } => {
+                    // The row spells the portable `~/` form where it can; the record's folder
+                    // is absolute — expand before comparing, or every home-relative row would
+                    // read as claimless.
+                    let raw_path = match (
+                        raw.strip_prefix("~/"),
+                        ctx.roots.as_ref().map(|r| r.home.as_path()),
+                    ) {
+                        (Some(rest), Some(home)) => home.join(rest),
+                        _ => std::path::PathBuf::from(raw),
+                    };
+                    raw_path == *dir
+                }
+                _ => false,
+            },
+        })
+}
+
 fn spellable(records: &[StandingRecord]) -> Vec<&StandingRecord> {
     let mut out: Vec<&StandingRecord> = Vec::new();
     for record in records.iter().filter(|r| r.origin.is_some()) {

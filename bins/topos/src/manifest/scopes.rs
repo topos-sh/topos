@@ -133,6 +133,8 @@ pub(crate) struct ScopePlan {
     pub sets: Vec<PlanRow>,
     /// The project's `workspace = ` line (`None` in the machine plan).
     pub workspace: Option<(String, String)>,
+    /// The explicit scheme that line spelled, when one did (self-hosted `http://`).
+    pub workspace_scheme: Option<&'static str>,
 }
 
 impl ScopePlan {
@@ -141,6 +143,7 @@ impl ScopePlan {
         let mut plan = ScopePlan {
             file,
             workspace: doc.workspace.clone(),
+            workspace_scheme: doc.workspace_scheme,
             ..ScopePlan::default()
         };
         for row in &doc.rows {

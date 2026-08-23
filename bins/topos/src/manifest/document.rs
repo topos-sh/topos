@@ -189,6 +189,9 @@ pub(crate) struct ManifestDoc {
     /// The `workspace = "<host>/<ws>"` line, split — `None` in the machine file, and in a
     /// project file holding only repo/path rows.
     pub workspace: Option<(String, String)>,
+    /// The explicit scheme the `workspace = ` line spelled (`http://` on a self-hosted
+    /// deployment); `None` = default https. Only the machine-token dial reads it.
+    pub workspace_scheme: Option<&'static str>,
     /// One line per unknown top-level section skipped — surfaced, never fatal.
     pub warnings: Vec<String>,
 }
@@ -597,12 +600,31 @@ fn off_in_table(reference: &str) -> ManifestError {
 
 /// Parse a `workspace = "<host>/<workspace>"` line's value.
 pub(crate) fn parse_workspace_line(s: &str) -> Result<(String, String), ManifestError> {
-    match classify_key(s) {
+    // An explicit scheme is a SELF-HOST fact (`http://127.0.0.1:3100/acme`): the address half
+    // stays the canonical `<host>/<workspace>` everywhere, and the scheme rides separately
+    // (see [`workspace_line_scheme`]) into the one place that dials — the machine-token path.
+    let bare = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    match classify_key(bare) {
         Ok(KeyShape::Feed { host, workspace }) => Ok((host, workspace)),
         _ => Err(plain(format!(
             "`workspace = \"{s}\"` is not a workspace address — the line is \
              `workspace = \"<host>/<workspace>\"` (e.g. `topos.sh/acme`)",
         ))),
+    }
+}
+
+/// The explicit scheme a workspace spelling carries, when one does (`http://…` on a self-hosted
+/// deployment); `None` = the default (`https`).
+pub(crate) fn workspace_line_scheme(s: &str) -> Option<&'static str> {
+    if s.starts_with("http://") {
+        Some("http://")
+    } else if s.starts_with("https://") {
+        Some("https://")
+    } else {
+        None
     }
 }
 
@@ -742,6 +764,7 @@ pub(crate) fn parse_document(
             ));
         }
         out.workspace = Some(parse_workspace_line(s)?);
+        out.workspace_scheme = workspace_line_scheme(s);
     }
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -1817,6 +1840,27 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
                 ..EntryFields::default()
             })
         );
+    }
+
+    #[test]
+    fn a_workspace_line_with_an_explicit_scheme_parses_and_remembers_it() {
+        let doc = parse_manifest(
+            "workspace = \"http://127.0.0.1:3100/acme\"\n[skills]\nx = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap();
+        assert_eq!(
+            doc.workspace,
+            Some(("127.0.0.1:3100".to_owned(), "acme".to_owned()))
+        );
+        assert_eq!(doc.workspace_scheme, Some("http://"));
+        // The default spelling carries none.
+        let doc = parse_manifest(
+            "workspace = \"topos.sh/acme\"\n[skills]\nx = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap();
+        assert_eq!(doc.workspace_scheme, None);
     }
 
     #[test]

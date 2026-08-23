@@ -1374,8 +1374,17 @@ pub(crate) fn manifest_update(
             .iter()
             .any(|s| s.status != SESSION_ENDED && s.host == t_host && s.workspace_name == t_ws)
     {
+        // The dial's scheme: an explicit spelling wins — TOPOS_WORKSPACE first (the invocation's
+        // own word), else the project line's — and https is the default. A self-hosted http
+        // deployment is a spelling, never a fallback the client invents.
+        let scheme = std::env::var("TOPOS_WORKSPACE")
+            .ok()
+            .as_deref()
+            .and_then(crate::manifest::document::workspace_line_scheme)
+            .or_else(|| project.as_ref().and_then(|(_, p)| p.workspace_scheme))
+            .unwrap_or("https://");
         all_sessions.sessions.push(Session {
-            base_url: format!("https://{t_host}"),
+            base_url: format!("{scheme}{t_host}"),
             workspace_id: t_ws.clone(),
             workspace_name: t_ws,
             host: t_host,

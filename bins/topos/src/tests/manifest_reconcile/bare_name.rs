@@ -859,13 +859,13 @@ fn a_locally_adopted_record_answers_with_the_folder_its_bytes_live_in() {
         },
     )
     .unwrap_err();
-    // The `source:` line is the folder, in the spelling that stays portable.
+    // A record with NO ROW claims nothing (the review's stale-claim rule): the answer is the
+    // discovery's own honest one about the tracked folder — never "already added (<file>)"
+    // over a file that holds no such line.
     assert_eq!(
         err.to_string(),
-        format!(
-            "alpha is already added machine-wide (~/.topos/topos.toml)\nsource: ~/{}",
-            folder.strip_prefix(&rig.home.0).unwrap().display()
-        )
+        "a skill named 'alpha' is already tracked — edit it in place (`topos diff alpha`), or \
+         adopt a different directory by path (`topos add ./<dir>`)"
     );
 
     // A SECOND record of the same name in the same store: no single answer, so the chooser — one
@@ -1107,4 +1107,96 @@ fn a_read_catalog_clears_the_cache_row_it_no_longer_carries() {
         ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
         other => panic!("a local copy adopts in place: {other:?}"),
     }
+}
+
+#[test]
+fn a_stale_claim_after_a_publish_never_refuses_over_a_row_the_file_lacks() {
+    // The quickstart flow: adopt a folder by path row, publish it (the governance transfer
+    // rewrites the row away), and — BEFORE the sweep retires the stale record — run a bare
+    // `add <name>`. The standing record's row is gone, so it claims nothing: the add resolves
+    // ordinarily instead of refusing over a machine-wide row that does not exist.
+    let rig = Rig::new("bare-postpub");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let folder = untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\ndeploy = \"{}\"\n",
+        folder.display()
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    // The publish's transfer leaves the file feed-only (the governed row is the feed's own
+    // delivery); the record still stands — the stale-claim window.
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    let out = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "deploy",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    );
+    match out {
+        Err(e) => assert_ne!(
+            e.code(),
+            "ALREADY_TRACKED",
+            "a rowless record must not refuse as already-added: {e}"
+        ),
+        Ok(_) => {}
+    }
+}
+
+#[test]
+fn the_mixed_ambiguity_lists_every_candidate_as_a_runnable_line() {
+    // A workspace catalog match beside an on-disk folder: the chooser must PRINT both — a
+    // "pick one:" with nothing under it asks a person to choose between unseen lines.
+    let rig = Rig::new("bare-mixed-amb");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
+    untracked_skill(&rig.home.0, "deploy", b"# a stray\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    let err = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "deploy",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    )
+    .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("pick one:"), "{text}");
+    assert!(
+        text.contains(&format!("{HOST}/{WS_NAME}/deploy")),
+        "the workspace candidate prints: {text}"
+    );
+    assert!(
+        text.contains("skills/deploy"),
+        "the folder candidate prints: {text}"
+    );
 }
