@@ -529,7 +529,9 @@ impl SessionInstall {
                     // No forge lane is wired in these composed fixtures (`git` is `None` above),
                     // so the cadence never comes into play; the hand-run posture is the honest one.
                     forge: ops::ForgeCadence::Now,
-                    lock: ops::LockMode::Install,
+                    // The fixture's `update` IS the typed verb — follow rows re-resolve and the
+                    // project lock rewrites, exactly as `topos update` runs it.
+                    lock: ops::LockMode::Update,
                 },
             )
             // The lines a sweep emits, merged exactly as the `--json` envelope merges them:

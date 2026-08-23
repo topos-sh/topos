@@ -80,12 +80,14 @@ fn a_copy_edited_between_the_scan_and_the_delete_is_snapshotted_before_it_goes()
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let placed = install_feed_deploy(&rig, &plane, &dir);
     let before = store_versions(&rig.layout(), "s_deploy");
 
     // The recipe stops asking for it — the next sweep retires the placement.
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     // The racer edits the (clean) copy between the sweep's scan and its delete.
     let racing = placed.clone();
     // The seam: the retiring loop probes `exists(dir)` immediately before it acts on the dir —
@@ -120,11 +122,13 @@ fn a_copy_edited_in_the_instant_before_the_park_is_snapshotted_too() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let placed = install_feed_deploy(&rig, &plane, &dir);
     let before = store_versions(&rig.layout(), "s_deploy");
 
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let racing = placed.clone();
     let fs = crate::fs_seam::HookFs::before_first_move_of(&placed, move || {
         std::fs::write(racing.join("SKILL.md"), b"# raced at the park\n").unwrap();
@@ -168,7 +172,9 @@ fn a_copy_edited_in_the_instant_before_the_swap_is_snapshotted_too() {
         .with_version("s_deploy", &v2);
     plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let placed = install_feed_deploy(&rig, &plane, &dir);
     let before = store_versions(&rig.layout(), "s_deploy");
 
@@ -221,8 +227,8 @@ fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
         vec![channel("backend", &[("s_deploy", "deploy")])],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"github.com/o/r/deploy\" = \"*\"\n\"{HOST}/{WS_NAME}/channels/backend\" = \
-         \"*\"\n"
+        "[skills]\ndeploy = \"github:o/r\"\n\n[channels]\n\"{HOST}/{WS_NAME}/backend\" = \
+         \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -257,9 +263,9 @@ fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
     ));
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
-    assert!(!text.contains("github.com/o/r/deploy"), "{text}");
+    assert!(!text.contains("github:o/r"), "{text}");
     assert!(
-        text.contains("channels/backend"),
+        text.contains(&format!("\"{HOST}/{WS_NAME}/backend\"")),
         "the set line stands: {text}"
     );
 }
@@ -282,8 +288,8 @@ fn a_bare_name_two_sets_carry_is_refused_not_split_at_random() {
         ],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
-         \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/backend\" = \"latest\"\n\
+         \"{HOST}/{WS_NAME}/platform\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let err = ops::remove_global(
@@ -330,7 +336,8 @@ fn a_bare_name_two_sets_carry_is_refused_not_split_at_random() {
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(
-        text.contains("channels/backend") && text.contains("channels/platform"),
+        text.contains(&format!("\"{HOST}/{WS_NAME}/backend\""))
+            && text.contains(&format!("\"{HOST}/{WS_NAME}/platform\"")),
         "{text}"
     );
 }
@@ -360,8 +367,8 @@ fn a_via_reference_splits_exactly_the_line_it_names() {
         ],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
-         \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/backend\" = \"latest\"\n\
+         \"{HOST}/{WS_NAME}/platform\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let via = format!("{HOST}/{WS_NAME}/channels/backend");
@@ -387,7 +394,10 @@ fn a_via_reference_splits_exactly_the_line_it_names() {
     // Nothing was written by the describe.
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
-    assert!(text.contains("channels/backend"), "{text}");
+    assert!(
+        text.contains(&format!("\"{HOST}/{WS_NAME}/backend\"")),
+        "{text}"
+    );
 
     let out = ops::remove_global(
         &ctx,
@@ -458,8 +468,8 @@ fn a_via_that_names_no_line_or_no_member_refuses_typed() {
         ],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
-         \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/backend\" = \"latest\"\n\
+         \"{HOST}/{WS_NAME}/platform\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let backend = format!("{HOST}/{WS_NAME}/channels/backend");
@@ -500,7 +510,8 @@ fn a_via_that_names_no_line_or_no_member_refuses_typed() {
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(
-        text.contains("channels/backend") && text.contains("channels/platform"),
+        text.contains(&format!("\"{HOST}/{WS_NAME}/backend\""))
+            && text.contains(&format!("\"{HOST}/{WS_NAME}/platform\"")),
         "{text}"
     );
 }
@@ -522,10 +533,10 @@ fn a_bare_name_the_feed_and_a_repo_set_both_deliver_is_refused() {
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     // The repo import is a real tracked member of the home store (the set's expansion reads it).
-    gate_add(&ctx, &plane, &dir, &git, "o/r");
+    gate_add(&ctx, &plane, &dir, &git, "o/r/deploy");
     // Both lines stand: the workspace feed AND the repo set.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"github.com/o/r\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\ndeploy = \"github:o/r\"\n"
     ));
 
     let err = ops::remove_global(
@@ -573,14 +584,14 @@ fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
         vec![channel("backend", &[("s_a", "alpha"), ("s_b", "beta")])],
     );
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
-    let line = format!("\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n");
-    rig.write_global(&format!("[bundles]\n{line}"));
+    let line = format!("\"{HOST}/{WS_NAME}/backend\" = \"latest\"\n");
+    rig.write_global(&format!("[channels]\n{line}"));
 
     // The racer: an outside editor writes beta's own row AFTER the arms were resolved and before
     // they are re-proven (topos's own writers serialize on the file's lock; a person's editor does
     // not).
     let racing = manifest.clone();
-    let raced = format!("[bundles]\n{line}\"{HOST}/{WS_NAME}/beta\" = \"*\"\n");
+    let raced = format!("[channels]\n{line}\n[skills]\n\"{HOST}/{WS_NAME}/beta\" = \"latest\"\n");
     let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 2, move || {
         std::fs::write(&racing, &raced).unwrap();
     });
@@ -601,7 +612,10 @@ fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
 
     // NOTHING was written: the racer's row stands, the set line stands, no split landed.
     let text = std::fs::read_to_string(&manifest).unwrap();
-    assert!(text.contains("channels/backend"), "{text}");
+    assert!(
+        text.contains(&format!("\"{HOST}/{WS_NAME}/backend\"")),
+        "{text}"
+    );
     assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
     assert!(
         !text.contains(&format!("{HOST}/{WS_NAME}/alpha")),
@@ -623,7 +637,10 @@ fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
         ops::RemoveOutcome::Applied(_)
     ));
     let text = std::fs::read_to_string(&manifest).unwrap();
-    assert!(!text.contains("channels/backend"), "the line split: {text}");
+    assert!(
+        !text.contains(&format!("\"{HOST}/{WS_NAME}/backend\"")),
+        "the line split: {text}"
+    );
     assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
 }
 
@@ -654,7 +671,7 @@ fn the_reproof_and_the_editor_read_one_document() {
     );
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/backend\" = \"latest\"\n"
     ));
 
     // The tripwire sits on the read that would OPEN that window — the fourth. It never fires.
@@ -685,7 +702,10 @@ fn the_reproof_and_the_editor_read_one_document() {
 
     // And the split it proved is the split it wrote.
     let text = std::fs::read_to_string(&manifest).unwrap();
-    assert!(!text.contains("channels/backend"), "the line split: {text}");
+    assert!(
+        !text.contains(&format!("\"{HOST}/{WS_NAME}/backend\"")),
+        "the line split: {text}"
+    );
     assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
 }
 
@@ -714,8 +734,8 @@ fn an_edit_landing_at_the_write_rename_boundary_is_refused_by_the_compare_and_sw
         vec![channel("backend", &[("s_a", "alpha"), ("s_b", "beta")])],
     );
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
-    let line = format!("\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n");
-    rig.write_global(&format!("[bundles]\n{line}"));
+    let line = format!("\"{HOST}/{WS_NAME}/backend\" = \"latest\"\n");
+    rig.write_global(&format!("[channels]\n{line}"));
 
     // Read 1 = the plan/arms, read 2 = the apply's one document (reproof + editor), read 3 = the
     // write's pre-rename compare. The racer fires immediately before read 3.
@@ -723,7 +743,7 @@ fn an_edit_landing_at_the_write_rename_boundary_is_refused_by_the_compare_and_sw
     let staged_when_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let staged_flag = std::sync::Arc::clone(&staged_when_fired);
     let racing = manifest.clone();
-    let raced = format!("[bundles]\n{line}\"{HOST}/{WS_NAME}/beta\" = \"*\"\n");
+    let raced = format!("[channels]\n{line}\n[skills]\n\"{HOST}/{WS_NAME}/beta\" = \"latest\"\n");
     let tmp_probe = tmp.clone();
     let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 3, move || {
         staged_flag.store(tmp_probe.exists(), Ordering::Relaxed);
@@ -752,7 +772,10 @@ fn an_edit_landing_at_the_write_rename_boundary_is_refused_by_the_compare_and_sw
     // NOTHING was overwritten: the outside writer's document stands byte-for-byte, and the
     // staged temp was discarded.
     let text = std::fs::read_to_string(&manifest).unwrap();
-    assert!(text.contains("channels/backend"), "{text}");
+    assert!(
+        text.contains(&format!("\"{HOST}/{WS_NAME}/backend\"")),
+        "{text}"
+    );
     assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
     assert!(!tmp.exists(), "the staged document was discarded");
 
@@ -790,7 +813,7 @@ fn a_manifest_birth_racing_an_outside_writer_refuses_manifest_exists() {
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     assert!(!manifest.exists(), "the race needs a birth, not an edit");
     let tmp = crate::atomic::temp_path(&manifest);
-    let outside = "# an outside editor's file\n[bundles]\n\"./mine\" = \"*\"\n";
+    let outside = "# an outside editor's file\n[skills]\nmine = \"./mine\"\n";
     let racing = manifest.clone();
     let fs = crate::fs_seam::HookFs::before_first_move_of(&tmp, move || {
         std::fs::write(&racing, outside).unwrap();
@@ -832,8 +855,8 @@ fn the_visited_store_index_unions_under_its_own_lock() {
     // simply does not contain the first writer's checkout, and that checkout's holdings drop out
     // of every later applied report.
     let rig = Rig::new("visited-lock");
-    let a = project("visited-lock-a", "[bundles]\n");
-    let b = project("visited-lock-b", "[bundles]\n");
+    let a = project("visited-lock-a", "[skills]\n");
+    let b = project("visited-lock-b", "[skills]\n");
     crate::sidecar::ensure_project_store(&rig.fs, &a.0).unwrap();
     crate::sidecar::ensure_project_store(&rig.fs, &b.0).unwrap();
 
@@ -988,7 +1011,7 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
     // committed it as a symlink out of the tree. A lexical `starts_with` still says "inside" —
     // only the containment proof catches it, and it must catch it on REUSED paths too.
     let rig = Rig::new("prior-escape");
-    let proj = project("prior-escape-proj", "[bundles]\n");
+    let proj = project("prior-escape-proj", "[skills]\n");
     let outside = Scratch::new("prior-escape-outside");
     std::fs::create_dir_all(outside.0.join("skills/deploy")).unwrap();
     std::os::unix::fs::symlink(&outside.0, proj.0.join(".claude")).unwrap();
@@ -1057,7 +1080,7 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
         "o-r-aaaaaaaaaaaa1",
         &[("skills/deploy/SKILL.md", b"# deploy v1\n")],
     ));
-    gate_add(&ctx, &plane, &dir, &git, "o/r");
+    gate_add(&ctx, &plane, &dir, &git, "o/r/deploy");
     let placed = rig.home.0.join(".claude/skills/deploy");
     assert!(placed.join("SKILL.md").exists());
     let imports = crate::ops::forge_imports(&ctx);
@@ -1272,58 +1295,5 @@ fn a_selector_imports_harness_choice_rides_the_row_into_the_next_update() {
     assert!(
         !rig.home.0.join(".claude/skills/deploy").exists(),
         "and nothing was re-imported into the default agent dir"
-    );
-}
-
-#[test]
-fn a_pinned_whole_repo_row_keeps_its_pin_and_says_the_selection_did_not_fit() {
-    // The one shape that cannot carry both: a whole-repo row takes `dest` and nothing else, so a
-    // PINNED repo-root import has no legal spelling for the `-a` choice. The pin wins — it decides
-    // which bytes, the selection only decides where they sit — and the receipt says so, rather than
-    // writing a row the file would refuse or dropping the pin in silence.
-    let rig = Rig::new("pin-vs-harness");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    // A repo whose SKILL.md is at the ROOT — its row key is the repo itself.
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[("SKILL.md", b"# whole repo\n")],
-    ));
-    let data = match ops::add_forge_selected(
-        &ctx,
-        &connect(&plane, &dir),
-        &git,
-        "o/r#aaaaaaaaaaaa1",
-        &[],
-        &["codestudio".to_owned()],
-        &[],
-        true,
-        true,
-    )
-    .unwrap()
-    {
-        ops::AddManyOutcome::Applied(mut items) => items.remove(0),
-        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
-    };
-    let note = data.note.unwrap_or_default();
-    assert!(note.contains("not recorded"), "{note}");
-    let text =
-        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
-    let doc = crate::manifest::document::parse_manifest(
-        &text,
-        crate::manifest::document::ManifestScope::Global,
-    )
-    .unwrap_or_else(|e| panic!("{e}: {text}"));
-    let row = doc
-        .rows
-        .iter()
-        .find(|r| r.reference == "github.com/o/r")
-        .unwrap_or_else(|| panic!("the repo row: {text}"));
-    assert_eq!(
-        row.value,
-        crate::manifest::document::EntryValue::Pin("aaaaaaaaaaaa1".into()),
-        "the pin is kept whole: {text}"
     );
 }

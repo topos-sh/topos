@@ -9,14 +9,19 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
 
 - **Manifests, two UNBLENDED scopes.** PERSON = the machine's own `~/.topos/topos.toml`, the WHOLE
   machine-wide recipe: no file (or no row) means nothing is demanded machine-wide. `topos login`
-  writes the workspace's FEED row (`"<host>/<ws>" = "*"` — assignments minus declines, computed
-  server-side and served whole) on this machine's FIRST connection to it and never again, so a row
-  someone deleted stays deleted. PROJECT = the NEAREST `topos.toml` covering the cwd,
-  taken whole (walk up only to find it; no ancestor merging, no cross-scope shadowing). A
-  manifest's `[bundles]` keys ARE references, classified by shape: local paths ·
-  `github.com/<owner>/<repo>[/<skill>]` · `<host>/<ws>` (the feed) · `<host>/<ws>/<bundle>` ·
-  `<host>/<ws>/channels/<name>`; values are `"*"`, a 64-hex version, a 7–40-hex commit pin,
-  `"off"` (global-file-only), or an inline table. `topos fmt` writes the normal form.
+  writes the workspace's FEED row (`[workspaces] "<host>/<ws>" = "latest"` — assignments minus
+  declines, computed server-side and served whole) on this machine's FIRST connection to it and
+  never again, so a row someone deleted stays deleted. PROJECT = the NEAREST `topos.toml` covering
+  the cwd, taken whole (walk up only to find it; no ancestor merging, no cross-scope shadowing),
+  beside its committed generated `topos.lock`. The v2 grammar (`manifest/document`): `schema = 1`,
+  a project's one `workspace = "<host>/<ws>"` line, kind sections `[skills]`/`[mcp]`/`[channels]`
+  (+ machine-only `[workspaces]`); a KEY is a bare name (project; resolved against the workspace
+  line) or a full reference (machine); VALUES are `"latest"`, a 64-hex version, a
+  `github:<owner>/<repo>[#<commit>]` source, a path, `"off"` (machine-only), or an inline table
+  (`path`/`source` spell the origin in table form). A project uses ONE workspace; repo sets have
+  no row (`add <repo>` expands to per-skill rows); unknown top-level sections SKIP with a warning
+  (forward tolerance), and a newer `schema` refuses toward `self-update`. `topos fmt` writes the
+  normal form.
 - **Sessions.** A session = user × workspace × installation. `topos login` (RFC 8252 loopback when
   a local browser exists, else the RFC 8628 typed code) mints ONE workspace-scoped bearer
   credential in `identity/sessions.json` (0600). Login IS the standing acceptance — delivery is
@@ -25,6 +30,18 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   machine-local negative is the `"off"` row. A manifest row IS the demand: the reconcile converges
   a git row automatically, like every other kind, and the describe-then-`--yes` shape belongs to
   the `add` verb — where a person is present to read what a repo holds.
+- **`install` vs `update` — one reconcile, two lock postures.** In a project, `topos.lock`
+  records what every follow row resolved to (`manifest/lock`: sorted blocks — skills' versions
+  with `via` for channel-delivered ones, channels' member lists, mcp revisions; deterministic, no
+  timestamps). `install` (and EVERY `--quiet` hook run, either verb spelling) converges to the
+  lock: entries pin the fetch, a channel takes exactly its locked member list, a row the lock
+  lacks resolves once and its entry is written, an existing entry never moves; `--frozen` refuses
+  on any gap or failure and writes nothing (the CI mode). A typed `update` re-resolves follow
+  rows to current and rewrites the lock. A pinned apply leaves the go-back's `applied` sentinel
+  (`sync_engine::mark_applied_behind`), so unpinning reads behind and moves. The machine scope
+  has no lock and stays live. `topos workspace list|use` manages the machine-default workspace
+  (`sessions.json`'s `default`; login stars the first); ambient selection is `--workspace` →
+  `TOPOS_WORKSPACE` → the star.
 - **`update` is the manifest reconcile:** one delivery call per live session, per-scope resolution
   (explicit rows beat sets beat feed; pins never move), per-scope placement over per-scope stores
   (person = `~/.topos/`; project = the checkout's own `.topos/state/<user>/`, every project path
@@ -141,7 +158,7 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   about it on every command otherwise). A landing table's skipped rows are said HERE, once, and
   nowhere else. Nothing here can fail a sweep, and there is NO hot reload: the next process reads
   the table. `TOPOS_NO_HARNESS_REGISTRY_UPDATE` switches the lane off.
-- `manifest/` (`keys`, `document`, `dest`, `normal`, `scopes`) — the reference grammar, the
+- `manifest/` (`keys`, `document`, `dest`, `normal`, `scopes`, `lock`) — the reference grammar, the
   format-preserving `toml_edit` editor (property-tested exact inverse), the `dest` vocabulary
   (default destination spellings, the known-MCP-file table, and the one entry that is not a path —
   the `"*"` DEFAULT-REACH token), the normal form, scope discovery. `ops/manifest_edit` picks the file a

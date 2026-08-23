@@ -2011,7 +2011,7 @@ mod tests {
             vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let r = resolve_at(&home, &cwd);
         let m = r.machine();
@@ -2068,7 +2068,9 @@ mod tests {
         );
         // BOTH feed rows stand — a row outlives its session exactly as the cache does, so the
         // COUNT is what must stay session-scoped.
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/gone\" = \"*\"\n");
+        home.global(
+            "[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\"topos.sh/gone\" = \"latest\"\n",
+        );
 
         assert_eq!(awaiting_at(&home, &cwd), Some(0));
 
@@ -2103,7 +2105,7 @@ mod tests {
                 vec![assigned("deploy", None)],
                 Vec::new(),
             );
-            home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+            home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
             assert_eq!(awaiting_at(&home, &cwd), expected, "status {status}");
         }
     }
@@ -2136,11 +2138,11 @@ mod tests {
         assert_eq!(awaiting_at(&home, &cwd), Some(0));
 
         // The feed row demands the whole feed: both assignments count.
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         assert_eq!(awaiting_at(&home, &cwd), Some(2));
 
         // A global file with NO feed row for acme: the whole feed is withheld.
-        home.global("[bundles]\n\"github.com/acme/tools\" = \"*\"\n");
+        home.global("[skills]\ntools = \"github:acme/tools\"\n");
         assert_eq!(
             awaiting_at(&home, &cwd),
             Some(0),
@@ -2158,12 +2160,12 @@ mod tests {
         );
 
         // The feed row back, with ONE bundle switched off: the off bundle drops out of the count.
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/notes\" = \"off\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\n[skills]\n\"topos.sh/acme/notes\" = \"off\"\n");
         assert_eq!(awaiting_at(&home, &cwd), Some(1));
 
         // An EXPLICIT row claims a bundle whatever the feed does — a feed-less file still demands
         // the row it spells.
-        home.global("[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        home.global("[skills]\n\"topos.sh/acme/deploy\" = \"latest\"\n");
         assert_eq!(awaiting_at(&home, &cwd), Some(1));
     }
 
@@ -2190,7 +2192,9 @@ mod tests {
             Vec::new(),
         );
         // The file demands BOTH addresses; the COUNT is what must stay live-session-scoped.
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"other.test/acme\" = \"*\"\n");
+        home.global(
+            "[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\"other.test/acme\" = \"latest\"\n",
+        );
 
         assert_eq!(awaiting_at(&home, &cwd), Some(0));
 
@@ -2239,7 +2243,7 @@ mod tests {
             "acme",
             crate::sessions::SESSION_ACTIVE,
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let r = resolve_at(&home, &cwd);
         assert!(
@@ -2281,7 +2285,7 @@ mod tests {
             "acme",
             crate::sessions::SESSION_ACTIVE,
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         crate::sync_status::merge_delivered(
             &RealFs,
             &home.layout(),
@@ -2334,7 +2338,7 @@ mod tests {
             crate::sessions::SESSION_ACTIVE,
         );
         home.cache("w_acme", "topos.sh", "acme", Vec::new(), Vec::new());
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let r = resolve_at(&home, &cwd);
         assert_eq!(
@@ -2383,7 +2387,7 @@ mod tests {
             ],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        home.global("[skills]\n\"topos.sh/acme/deploy\" = \"latest\"\n");
 
         let r = resolve_at(&home, &cwd);
         let m = r.machine();
@@ -2445,8 +2449,10 @@ mod tests {
             Vec::new(),
         );
         home.global(
-            "[bundles]\n\
-             \"topos.sh/acme\" = \"*\"\n\
+            "[workspaces]\n\
+             \"topos.sh/acme\" = \"latest\"\n\
+             \n\
+             [skills]\n\
              \"topos.sh/acme/noisy\" = \"off\"\n\
              \"topos.sh/acme/gone\" = \"off\"\n",
         );
@@ -2495,7 +2501,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\n[skills]\n\"topos.sh/acme/deploy\" = \"latest\"\n");
 
         let r = resolve_at(&home, &cwd);
         assert!(
@@ -2540,7 +2546,7 @@ mod tests {
                 "legacy".to_owned(),
             )],
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/legacy\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\n[skills]\n\"topos.sh/acme/legacy\" = \"latest\"\n");
 
         let r = resolve_at(&home, &cwd);
         assert!(
@@ -2585,7 +2591,7 @@ mod tests {
             vec![assigned("triage", None), assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/beta/triage\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\n[skills]\n\"topos.sh/beta/triage\" = \"latest\"\n");
 
         let r = resolve_at(&home, &cwd);
         let regime = |ws: &str| {
@@ -2611,12 +2617,12 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(
             repo.join(MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/repo-wide\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\nrepo-wide = \"latest\"\n",
         )
         .unwrap();
         std::fs::write(
             nested.join(MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/api-only\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\napi-only = \"latest\"\n",
         )
         .unwrap();
         home.session(
@@ -2661,7 +2667,7 @@ mod tests {
             vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\n[skills]\n\"topos.sh/acme/deploy\" = \"latest\"\n");
 
         with_ctx(&home, Some(&cwd), |ctx| {
             let (all, cache) = read_sources(ctx).unwrap();
@@ -2737,7 +2743,7 @@ mod tests {
         let home = TempHome::new();
         let cwd = home.0.join("plain");
         std::fs::create_dir_all(&cwd).unwrap();
-        home.global("[bundles]\n\"topos.sh/acme/weather\" = \"*\"\n");
+        home.global("[skills]\n\"topos.sh/acme/weather\" = \"latest\"\n");
         record(&home, HELD);
         let row = |home: &TempHome, cwd: &std::path::Path, served: &str| {
             home.cache(
@@ -2805,7 +2811,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("server.json"), b"{}\n").unwrap();
         home.global(&format!(
-            "[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n",
+            "[mcp]\nweather = {{ path = \"{}\", kind = \"mcp\" }}\n",
             dir.display()
         ));
 

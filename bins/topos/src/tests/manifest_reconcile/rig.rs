@@ -155,7 +155,9 @@ impl Rig {
     /// The ordinary machine recipe after a login: the seeded session's feed row — exactly the
     /// line `topos login` writes on this machine's first connection to the workspace.
     pub(super) fn seed_feed(&self) {
-        self.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+        self.write_global(&format!(
+            "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+        ));
     }
 }
 
@@ -319,6 +321,19 @@ pub(super) fn empty_snapshot() -> DeliverySnapshot {
         declined: Vec::new(),
     }
 }
+/// [`delivered`] at an explicit pointer generation — the real server bumps it on every move.
+pub(super) fn delivered_at(
+    skill_id: &str,
+    name: &str,
+    v: &Version,
+    generation: u64,
+) -> DeliverySkill {
+    DeliverySkill {
+        generation,
+        ..delivered(skill_id, name, v)
+    }
+}
+
 pub(super) fn delivered(skill_id: &str, name: &str, v: &Version) -> DeliverySkill {
     DeliverySkill {
         skill_id: skill_id.into(),
@@ -548,13 +563,19 @@ pub(super) fn connect<'a>(
 }
 
 /// A bare hand-run `topos update` (no forge lane — the background posture): the scope rule applies,
-/// so it converges the PROJECT when a manifest covers the cwd and the MACHINE otherwise.
+/// so it converges the PROJECT when a manifest covers the cwd and the MACHINE otherwise. It is the
+/// verb `update` IS, so it carries [`ops::LockMode::Update`] — every follow row re-resolves to
+/// current and the lock is rewritten; the install-mode postures are `quiet_sweep` and the
+/// scope-selected sweeps below.
 pub(super) fn sweep(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutcome {
     ops::manifest_update(
         ctx,
         &connect(plane, dir),
         None,
-        &ops::ManifestUpdateOpts::default(),
+        &ops::ManifestUpdateOpts {
+            lock: ops::LockMode::Update,
+            ..ops::ManifestUpdateOpts::default()
+        },
     )
     .unwrap()
 }
@@ -1229,7 +1250,7 @@ pub(super) fn project_custody(
 ) -> Scratch {
     let proj = project(
         tag,
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, plane, dir);

@@ -152,7 +152,9 @@ fn a_global_file_withholds_the_feed_and_says_so_loudly() {
     let other = one_file(b"# other\n");
     // The file names ONE bundle and no feed row — it is a complete recipe, so the rest of what the
     // workspace assigns does not flow here.
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/other\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/other\" = \"latest\"\n"
+    ));
     let plane = FakePlane::new(log)
         .with_version("s_deploy", &deploy)
         .with_version("s_other", &other);
@@ -275,7 +277,7 @@ fn a_served_feed_never_earns_the_empty_exchange_line() {
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let noisy = one_file(b"# noisy\n");
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
     ));
     let plane = FakePlane::new(log).with_version("s_noisy", &noisy);
     plane.serves(vec![delivered("s_noisy", "noisy", &noisy)]);
@@ -304,7 +306,7 @@ fn an_off_row_withholds_exactly_its_bundle_from_a_flowing_feed() {
     let deploy = one_file(b"# deploy\n");
     let noisy = one_file(b"# noisy\n");
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
     ));
     let plane = FakePlane::new(log)
         .with_version("s_deploy", &deploy)
@@ -349,7 +351,7 @@ fn an_explicit_pinned_row_beats_the_feeds_version() {
     let old = one_file(b"# v1\n");
     let new = one_file(b"# v2\n");
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"{}\"\n",
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"{}\"\n",
         topos_core::digest::to_hex(&old.id)
     ));
     let plane = FakePlane::new(log)
@@ -382,7 +384,9 @@ fn a_declined_bundle_a_row_still_delivers_is_disclosed() {
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serve(DeliverySnapshot {
         skills: Vec::new(),
@@ -410,7 +414,7 @@ fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
     rig.seed_session();
     let proj = project(
         "proj",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -472,13 +476,13 @@ fn the_nearest_project_file_governs_whole() {
     rig.seed_session();
     let repo = project(
         "proj-outer",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/repo-wide\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\nrepo-wide = \"latest\"\n"),
     );
     let nested = repo.0.join("services/api");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(
         nested.join(crate::manifest::MANIFEST_FILE),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/api-only\" = \"*\"\n"),
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\napi-only = \"latest\"\n"),
     )
     .unwrap();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -521,7 +525,7 @@ fn the_same_bundle_at_both_scopes_lands_twice() {
     rig.seed_feed();
     let proj = project(
         "proj-two",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -603,8 +607,8 @@ fn a_channel_expands_and_an_explicit_row_of_the_same_identity_wins() {
     let proj = project(
         "proj-ch",
         &format!(
-            "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
-             \"{HOST}/{WS_NAME}/deploy\" = \"{}\"\n",
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"{}\"\n\
+             \n[channels]\nbackend = \"latest\"\n",
             topos_core::digest::to_hex(&old.id)
         ),
     );
@@ -661,7 +665,7 @@ fn a_workspace_row_without_a_session_is_an_honest_local_line() {
     // NO session at all — the file references a workspace this install never logged into.
     let proj = project(
         "proj-ns",
-        "[bundles]\n\"elsewhere.dev/ops/deploy\" = \"*\"\n",
+        "workspace = \"elsewhere.dev/ops\"\n\n[skills]\ndeploy = \"latest\"\n",
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
@@ -700,7 +704,7 @@ fn a_driven_manifest_that_fails_to_load_refuses_the_run_whole() {
 
     // A typo the grammar refuses: the driven scope's recipe is unreadable, so the run refuses —
     // no receipt, no partial sweep claims, and nothing cleaned.
-    rig.write_global("[bundles]\n\"not a reference\" = \"*\"\n");
+    rig.write_global("[skills]\n\"not a reference\" = \"latest\"\n");
     let err = ops::manifest_update(
         &ctx,
         &connect(&plane, &dir),
@@ -778,10 +782,10 @@ fn a_broken_manifest_in_an_undriven_scope_warns_and_freezes_it() {
 
     // Break the GLOBAL file, then drive the PROJECT scope only: the machine scope is not this
     // run's to claim, so its fault is a warning and its bytes freeze in place.
-    rig.write_global("[bundles]\n\"not a reference\" = \"*\"\n");
+    rig.write_global("[skills]\n\"not a reference\" = \"latest\"\n");
     let proj = project(
         "badfile-undriven-proj",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/api\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\napi = \"latest\"\n"),
     );
     let pctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&pctx, &plane, &dir);
@@ -817,7 +821,7 @@ fn two_scopes(tag: &str) -> TwoScopes {
     let deploy = one_file(b"# deploy\n");
     let proj = project(
         tag,
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/api\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\napi = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log)
@@ -961,7 +965,7 @@ fn a_frozen_project_manifest_refuses_and_never_falls_back_to_the_machine() {
     );
     let proj = project(
         "scope-frozen-proj",
-        "[bundles]\n\"not a reference\" = \"*\"\n",
+        "[skills]\n\"not a reference\" = \"latest\"\n",
     );
     let ctx = rig.ctx_at(Some(&proj.0));
     let err = ops::manifest_update(
@@ -996,7 +1000,7 @@ fn update_g_over_an_unreadable_file_refuses_naming_the_field() {
     let rig = Rig::new("stale-refuses");
     rig.seed_session();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ path = \"~/.claude/skills\" }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dir = \"~/.claude/skills\" }}\n"
     ));
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1014,7 +1018,7 @@ fn update_g_over_an_unreadable_file_refuses_naming_the_field() {
     assert_eq!(err.code(), "MANIFEST_INVALID");
     let msg = crate::render::safe_message(&err);
     assert!(
-        msg.contains("unknown field `path` — a workspace bundle takes"),
+        msg.contains("unknown field `dir` — a workspace bundle takes"),
         "the grammar's own teaching reaches the surfaces verbatim: {msg}"
     );
     assert!(msg.contains("topos.toml"), "the file is named: {msg}");
@@ -1033,7 +1037,7 @@ fn a_dest_dialect_fault_refuses_as_a_manifest_refusal_not_corrupt_state() {
     let rig = Rig::new("dialect-machine");
     rig.seed_session();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"skills\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"skills\"] }}\n"
     ));
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1065,7 +1069,7 @@ fn a_dest_dialect_fault_refuses_as_a_manifest_refusal_not_corrupt_state() {
     rig.seed_session();
     let proj = project(
         "dialect-project-proj",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/api\" = {{ dest = [\"/abs\"] }}\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\napi = {{ dest = [\"/abs\"] }}\n"),
     );
     let ctx = rig.ctx_at(Some(&proj.0));
     let err = ops::manifest_update(
@@ -1095,7 +1099,7 @@ fn the_quiet_sweep_refuses_a_broken_manifest_hard() {
     let rig = Rig::new("quiet-refuses");
     rig.seed_session();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ path = \"~/.claude/skills\" }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dir = \"~/.claude/skills\" }}\n"
     ));
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
     let dir = FakeDirectory::new(Vec::new(), Vec::new());

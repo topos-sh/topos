@@ -1421,7 +1421,7 @@ fn list_golden_matches_the_real_machine_scope_output() {
         "acme",
         crate::sessions::SESSION_ACTIVE,
     );
-    home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+    home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
     home.cache(
         "w_acme",
         "topos.sh",
@@ -2369,7 +2369,7 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
     // The hook landed in the harness settings.json (the only write outside ~/.topos/).
     let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
     assert!(
-        settings.contains("topos update --quiet --hook claude-code"),
+        settings.contains("topos install --quiet --hook claude-code"),
         "hook command installed, carrying the dialect marker that opts Claude Code into the \
          reload extension"
     );
@@ -2450,7 +2450,7 @@ fn the_already_tracked_refusal_names_the_claiming_manifest_row() {
     std::fs::write(
         &manifest,
         format!(
-            "[bundles]\n\"{}\" = \"*\"\n",
+            "[skills]\npr-describe = \"{}\"\n",
             root.canonicalize().unwrap().display()
         ),
     )

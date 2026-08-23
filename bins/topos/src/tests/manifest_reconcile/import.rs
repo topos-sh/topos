@@ -16,6 +16,22 @@ use crate::sidecar::Layout;
 
 use super::rig::*;
 
+/// A hand-run `topos update` from inside the checkout: the person-typed posture, which re-resolves
+/// every follow row and rewrites the project's lock (`LockMode::Update`) instead of installing
+/// exactly what the lock already records.
+fn update_hand_run(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect(plane, dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            lock: ops::LockMode::Update,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap()
+}
+
 // =================================================================================================
 // Self-ignore breadth: the forge IMPORT path stages the sentinel; a shipped ignore discloses.
 // =================================================================================================
@@ -44,7 +60,7 @@ fn git_status(repo: &std::path::Path) -> Option<String> {
 #[test]
 fn a_project_import_stages_the_sentinel_and_a_shipped_ignore_discloses() {
     let rig = Rig::new("import-sentinel");
-    let proj = project("proj-sentinel", "[bundles]\n");
+    let proj = project("proj-sentinel", "[skills]\n");
     let git = FakeGit::new(build_repo_targz(
         "o-r-aaaaaaaaaaaa1",
         &[("skills/alpha/SKILL.md", b"# alpha\n")],
@@ -139,7 +155,7 @@ fn a_delivered_bundle_shipping_a_non_self_ignoring_gitignore_warns_on_the_sweep(
     rig.seed_session();
     let proj = project(
         "proj-gitvisible",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = mk_version(&[
@@ -169,10 +185,11 @@ fn a_delivered_bundle_shipping_a_non_self_ignoring_gitignore_warns_on_the_sweep(
 fn an_interactive_add_of_a_git_source_always_describes_first() {
     // The describe is a property of the VERB, not of the origin. `add` is where a person is
     // present to read what a repo holds and where it would land, so every interactive add says it
-    // — including a re-add of a source already tracked here, and including one whose row is
-    // already standing in the file.
+    // — including a re-add of a source already tracked here, and including one whose rows are
+    // partly standing in the file. A whole-repo add expands to one row per discovered skill (a
+    // repo set has no v2 row), and the standing-row note names exactly which of them stand.
     let rig = Rig::new("row-no-trust");
-    let proj = project("proj-rowtrust", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let proj = project("proj-rowtrust", "[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -201,7 +218,8 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
         ops::AddRefOutcome::Described { data, yes_argv } => {
             assert_eq!(data.members, vec!["alpha".to_owned(), "beta".to_owned()]);
             let note = data.note.expect("the describe names the standing row");
-            assert!(note.contains("already records this row"), "{note}");
+            assert!(note.contains("already records alpha"), "{note}");
+            assert!(note.contains("records the rest"), "{note}");
             assert!(note.contains("demand, not consent"), "{note}");
             assert!(yes_argv.contains(&"--yes".to_owned()));
         }
@@ -350,7 +368,7 @@ fn a_project_scope_selector_import_converges_on_a_later_update() {
     // the row lived in a PROJECT manifest — the project reconcile reads the checkout's own store,
     // so it could never see the import and would re-install it forever.
     let rig = Rig::new("sel-project");
-    let proj = project("sel-proj", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let proj = project("sel-proj", "[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -424,65 +442,6 @@ fn ops_ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &Layout) -> Ctx<'a> {
     }
 }
 
-#[test]
-fn a_partially_landed_pinned_repo_set_converges_on_the_next_update() {
-    // A pinned set that landed 1 of 2 members reads "every tracked member is at the pin" — which
-    // is true and useless: the MISSING member never arrives. The recorded member set (what the
-    // archive held at that commit) is what makes the gap visible.
-    let rig = Rig::new("pin-partial");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[
-            ("skills/alpha/SKILL.md", b"# alpha\n"),
-            ("skills/beta/SKILL.md", b"# beta\n"),
-        ],
-    ));
-    // A PARTIAL landing: only `alpha` is imported (a member failure, a crash — the shape the
-    // gate's own receipt warns about).
-    match ops::add_forge_selected(
-        &ctx,
-        &connect(&plane, &dir),
-        &git,
-        "o/r",
-        &["alpha".to_owned()],
-        &[],
-        &[],
-        true,
-        true,
-    )
-    .unwrap()
-    {
-        ops::AddManyOutcome::Applied(items) => assert_eq!(items.len(), 1),
-        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
-    }
-    assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
-    assert!(!rig.home.0.join(".claude/skills/beta").exists());
-
-    // The recipe is now the PINNED SET at exactly the commit that landing sits on — every tracked
-    // member satisfies the pin, and only the recorded member set can tell that one is missing.
-    // (The pin is the fake archive's own `TOP/` commit suffix.)
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
-
-    // The explicit update sees the gap against the RECORDED member set and lands the rest.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        rig.home.0.join(".claude/skills/beta/SKILL.md").exists(),
-        "the missing member converges: {:?} / {:?}",
-        out.data.skills,
-        out.warnings
-    );
-}
-
 // =================================================================================================
 // Removing SEVERAL members of one set is ONE split; a bare name that names two rows refuses.
 // =================================================================================================
@@ -530,7 +489,7 @@ fn removing_two_members_of_one_set_leaves_neither() {
         }],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/backend\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let targets = vec!["alpha".to_owned(), "beta".to_owned()];
@@ -599,7 +558,7 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n\"github.com/o/deploy\" = \"*\"\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\ndeploy = \"github:o/tools\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let err = ops::remove_global(
@@ -614,11 +573,11 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = ways_out(&err);
     assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
-    assert!(msg.contains("github.com/o/deploy"), "{msg}");
+    assert!(msg.contains("github.com/o/tools/deploy"), "{msg}");
     // Nothing moved.
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
-    assert!(text.contains("github.com/o/deploy"), "{text}");
+    assert!(text.contains("github:o/tools"), "{text}");
 
     // Spelled in full, exactly one row answers — and it applies.
     let one = format!("{HOST}/{WS_NAME}/deploy");
@@ -641,7 +600,7 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
         "{text}"
     );
     assert!(
-        text.contains("github.com/o/deploy"),
+        text.contains("github:o/tools"),
         "the other row stands: {text}"
     );
 }
@@ -655,7 +614,7 @@ fn a_committed_topos_symlink_refuses_the_project_store() {
     // A repo can commit `.topos` as a symlink exactly as easily as `.claude/skills`. The store is
     // REFUSED, never followed — and a plain directory still works.
     let rig = Rig::new("store-escape");
-    let proj = project("store-escape-proj", "[bundles]\n");
+    let proj = project("store-escape-proj", "[skills]\n");
     let outside = Scratch::new("store-escape-outside");
     std::os::unix::fs::symlink(&outside.0, proj.0.join(".topos")).unwrap();
     let err = crate::sidecar::ensure_project_store(&rig.fs, &proj.0).unwrap_err();
@@ -673,7 +632,7 @@ fn a_committed_topos_symlink_refuses_the_project_store() {
     assert!(crate::sidecar::existing_project_store(&rig.fs, &proj.0).is_none());
 
     // A NORMAL checkout still mints its store.
-    let ok = project("store-ok-proj", "[bundles]\n");
+    let ok = project("store-ok-proj", "[skills]\n");
     let layout = crate::sidecar::ensure_project_store(&rig.fs, &ok.0).unwrap();
     assert!(layout.home().exists());
     assert!(crate::sidecar::existing_project_store(&rig.fs, &ok.0).is_some());
@@ -684,7 +643,7 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
     // The DEFAULT project root gets the override's rail: `.claude/skills` committed as a symlink
     // out of the checkout places nothing, and the sweep says so.
     let rig = Rig::new("root-escape");
-    let proj = project("root-escape-proj", "[bundles]\n");
+    let proj = project("root-escape-proj", "[skills]\n");
     let outside = Scratch::new("root-escape-outside");
     std::fs::create_dir_all(proj.0.join(".claude")).unwrap();
     std::os::unix::fs::symlink(&outside.0, proj.0.join(".claude/skills")).unwrap();
@@ -714,7 +673,7 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
     );
 
     // A NORMAL checkout still plans its in-repo dirs.
-    let ok = project("root-ok-proj", "[bundles]\n");
+    let ok = project("root-ok-proj", "[skills]\n");
     let ok_ctx = rig.ctx_at(Some(&ok.0));
     let plan = crate::placement::project_plan(
         &ok_ctx,
@@ -755,7 +714,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_says_nothing_about_
     let v1_hex = topos_core::digest::to_hex(&v1.id);
     let proj = project(
         "proj-split",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"{v1_hex}\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"{v1_hex}\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log)
@@ -818,7 +777,7 @@ fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() 
     let v2 = one_file(b"# deploy v2\n");
     let proj = project(
         "proj-behind",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log)
@@ -842,7 +801,7 @@ fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() 
     let mut listed = catalog_entry("s_deploy", "deploy", &v2);
     listed.generation = 2;
     let dir = FakeDirectory::new(vec![listed], Vec::new());
-    let out = sweep(&ctx, &plane, &dir);
+    let out = update_hand_run(&ctx, &plane, &dir);
     assert_eq!(
         std::fs::read(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
         b"# deploy v2\n",
@@ -899,7 +858,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
     let v1_hex = topos_core::digest::to_hex(&v1.id);
     let proj = project(
         "proj-pinned",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log)
@@ -910,7 +869,8 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
     // The MACHINE recipe pins the bundle to v1; the project takes whatever is current. Both land
     // v1 on the first sweep, which drives both scopes.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"{v1_hex}\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\
+         \"{HOST}/{WS_NAME}/deploy\" = \"{v1_hex}\"\n"
     ));
     plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
     let ctx = rig.ctx_at(Some(&proj.0));
@@ -929,7 +889,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
     let mut listed = catalog_entry("s_deploy", "deploy", &v2);
     listed.generation = 2;
     let dir2 = FakeDirectory::new(vec![listed.clone()], Vec::new());
-    let out = sweep(&ctx, &plane, &dir2);
+    let out = update_hand_run(&ctx, &plane, &dir2);
     assert_eq!(
         std::fs::read(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
         b"# deploy v2\n",
@@ -962,14 +922,15 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
     rig.seed_session();
     let proj = project(
         "proj-unpinned",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log)
         .with_version("s_deploy", &v1)
         .with_version("s_deploy", &v2);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\
+         \"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
     ));
     plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
     let ctx = rig.ctx_at(Some(&proj.0));
@@ -977,7 +938,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
     sweep_both(&ctx, &plane, &dir);
     plane.serves(vec![served]);
     let dir2 = FakeDirectory::new(vec![listed], Vec::new());
-    let out = sweep(&ctx, &plane, &dir2);
+    let out = update_hand_run(&ctx, &plane, &dir2);
     assert_eq!(
         out.data.behind_elsewhere,
         vec![topos_types::results::BehindElsewhere {
@@ -1011,10 +972,8 @@ fn a_channel_cannot_be_pinned_so_a_set_is_never_the_deliberate_fact() {
     let v1 = one_file(b"# deploy v1\n");
     let v1_hex = topos_core::digest::to_hex(&v1.id);
     for body in [
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"{v1_hex}\"\n"),
-        format!(
-            "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ version = \"{v1_hex}\" }}\n"
-        ),
+        format!("[channels]\n\"{HOST}/{WS_NAME}/backend\" = \"{v1_hex}\"\n"),
+        format!("[channels]\n\"{HOST}/{WS_NAME}/backend\" = {{ version = \"{v1_hex}\" }}\n"),
     ] {
         rig.write_global(&body);
         let err = crate::manifest::scopes::person_plan(&rig.fs, &rig.layout())
@@ -1035,7 +994,7 @@ fn an_off_row_is_never_reported_behind() {
     let v2 = one_file(b"# deploy v2\n");
     let proj = project(
         "proj-off",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log)
@@ -1051,7 +1010,8 @@ fn an_off_row_is_never_reported_behind() {
     // row is global-file-only, so the copy STAYS on disk at v1 — materially behind v2, and
     // deliberately so.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"off\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\
+         \"{HOST}/{WS_NAME}/deploy\" = \"off\"\n"
     ));
     let mut served = delivered("s_deploy", "deploy", &v2);
     served.generation = 2;
@@ -1059,7 +1019,7 @@ fn an_off_row_is_never_reported_behind() {
     let mut listed = catalog_entry("s_deploy", "deploy", &v2);
     listed.generation = 2;
     let dir = FakeDirectory::new(vec![listed], Vec::new());
-    let out = sweep(&ctx, &plane, &dir);
+    let out = update_hand_run(&ctx, &plane, &dir);
     assert_eq!(
         std::fs::read(rig.skills().join("deploy/SKILL.md")).unwrap(),
         b"# deploy v1\n",

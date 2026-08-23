@@ -88,15 +88,14 @@ pub(crate) fn init(
     // The lock fences topos's own writers; an OUTSIDE editor can still land the file between the
     // check above and the write — the exclusive create meets it as an existing file (the same
     // clean no-op receipt, the outside bytes standing), never an overwrite.
-    let created =
-        match crate::atomic::atomic_write_new(
+    let created = match crate::atomic::atomic_write_new(
         ctx.fs,
         &path,
         project_template(ws_line.as_ref().map(|(h, w)| (h.as_str(), w.as_str()))).as_bytes(),
     )? {
-            crate::atomic::NewOutcome::Written => true,
-            crate::atomic::NewOutcome::Exists => false,
-        };
+        crate::atomic::NewOutcome::Written => true,
+        crate::atomic::NewOutcome::Exists => false,
+    };
     // A FRESH file says what having one MEANS, which the lead's "record skills with `topos add`"
     // does not: this is now the file every project add here writes to, and the only one — an
     // `add` records rows, it never creates a manifest of its own.

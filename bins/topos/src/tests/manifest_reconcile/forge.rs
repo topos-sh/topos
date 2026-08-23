@@ -25,7 +25,7 @@ fn a_floating_repo_row_advances_through_the_silent_sweep_alone() {
     // as it carries a workspace-delivered one.
     let rig = Rig::new("repo");
     // No session: a pure forge recipe.
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\nbeta = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -96,14 +96,16 @@ fn a_floating_repo_row_advances_through_the_silent_sweep_alone() {
         line.contains("bbbbbbbbbbbb"),
         "names the new commit: {line}"
     );
-    assert!(line.contains("+gamma"), "names the new member: {line}");
     assert!(line.contains("~alpha"), "names the carried member: {line}");
     assert_eq!(
         std::fs::read_to_string(&alpha).unwrap(),
         "# alpha v2\n",
         "the silent sweep lands the new bytes"
     );
-    assert!(rig.home.0.join(".claude/skills/gamma/SKILL.md").exists());
+    // A member NO ROW NAMES is not delivered by the move: v2 spells one row per skill, so the
+    // repo growing a `gamma` says nothing to this machine until a row asks for it.
+    assert!(!line.contains("gamma"), "{line}");
+    assert!(!rig.home.0.join(".claude/skills/gamma").exists());
 }
 
 #[test]
@@ -112,7 +114,7 @@ fn an_unchanged_repo_is_probed_and_never_downloaded() {
     // moved costs one probe and zero archives. This is the whole reason the lane can run on a
     // clock at all — the check has to be cheap enough to make automatic.
     let rig = Rig::new("repo-cheap");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -160,7 +162,7 @@ fn the_forge_clock_is_separate_from_the_workspace_cadence() {
     });
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"github.com/o/r\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\nalpha = \"github:o/r\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let git = FakeGit::new(build_repo_targz(
@@ -197,7 +199,7 @@ fn a_failed_check_advances_the_clock_like_a_successful_one() {
     // at every single session start, which is precisely the traffic the interval exists to
     // prevent. So: the lane ran, therefore it waits.
     let rig = Rig::new("repo-clock-on-failure");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -239,8 +241,8 @@ fn a_dead_network_costs_one_timeout_for_the_whole_round() {
     // clock still advances, and every row is recorded as checked — a skipped source had its turn.
     let rig = Rig::new("repo-breaker");
     rig.write_global(
-        "[bundles]\n\"github.com/o/a\" = \"*\"\n\"github.com/o/b\" = \"*\"\n\
-         \"github.com/o/c\" = \"*\"\n\"github.com/o/d\" = \"*\"\n\"github.com/o/e\" = \"*\"\n",
+        "[skills]\na = \"github:o/a\"\nb = \"github:o/b\"\n\
+         c = \"github:o/c\"\nd = \"github:o/d\"\ne = \"github:o/e\"\n",
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
@@ -289,7 +291,7 @@ fn a_dead_network_costs_one_timeout_for_the_whole_round() {
 
     // A forge that ANSWERS about one repo never trips it — the answer says nothing about the next.
     let rig = Rig::new("repo-breaker-http");
-    rig.write_global("[bundles]\n\"github.com/o/a\" = \"*\"\n\"github.com/o/b\" = \"*\"\n");
+    rig.write_global("[skills]\na = \"github:o/a\"\nb = \"github:o/b\"\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let git = FakeGit::new(build_repo_targz(
         "o-r-aaaaaaaaaaaa1",
@@ -310,7 +312,7 @@ fn a_machine_with_no_prior_grant_auto_updates_a_cloned_projects_row() {
     // machine that has never seen the source converges it automatically. The interactive `add`
     // keeps its describe — that is where a person is present to read the answer.
     let rig = Rig::new("repo-no-grant");
-    let proj = project("proj-cloned", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let proj = project("proj-cloned", "[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -345,7 +347,7 @@ fn a_machine_with_no_prior_grant_auto_updates_a_cloned_projects_row() {
         &pctx,
         &connect(&plane, &dir),
         Some(&git as &dyn crate::git_source::GitTarballSource),
-        "github.com/o/r",
+        "github.com/o/r/alpha",
         false,
         false,
         &Default::default(),
@@ -369,7 +371,7 @@ fn a_deleted_repo_is_reported_once_and_then_left_alone() {
     // network: saying it every session would train a person to stop reading. Said once, then the
     // lane stops asking until the row that names it changes.
     let rig = Rig::new("repo-deleted");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -423,7 +425,7 @@ fn a_deleted_repo_is_reported_once_and_then_left_alone() {
     // EDITING the row re-opens the question — the verdict was about what the row said. (The pin
     // names a commit nothing here holds, so the row is genuinely unsettled and does want an
     // answer; a pin already satisfied would rightly never dial at all.)
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"ffffffffffff9\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r#ffffffffffff9\"\n");
     forge_interval_elapsed(&rig);
     quiet_sweep(&ctx, &plane, &dir, &git);
     assert!(
@@ -438,7 +440,7 @@ fn a_renamed_repo_keeps_working_and_says_where_it_went() {
     // on resolving. A rename is never reported as a missing repo — and never as a failure at all:
     // the person is simply told the canonical spelling, on the channel for things that WORKED.
     let rig = Rig::new("repo-renamed");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -484,8 +486,8 @@ fn five_rows_behind_one_quiet_forge_produce_one_line_and_only_when_stale() {
     // a blip must never interrupt a session.
     let rig = Rig::new("repo-one-line");
     rig.write_global(
-        "[bundles]\n\"github.com/o/a\" = \"*\"\n\"github.com/o/b\" = \"*\"\n\
-         \"github.com/o/c\" = \"*\"\n\"github.com/o/d\" = \"*\"\n\"github.com/o/e\" = \"*\"\n",
+        "[skills]\na = \"github:o/a\"\nb = \"github:o/b\"\n\
+         c = \"github:o/c\"\nd = \"github:o/d\"\ne = \"github:o/e\"\n",
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
@@ -493,7 +495,13 @@ fn five_rows_behind_one_quiet_forge_produce_one_line_and_only_when_stale() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let archive = build_repo_targz(
         "o-r-aaaaaaaaaaaa1",
-        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+        &[
+            ("skills/a/SKILL.md", b"# a v1\n"),
+            ("skills/b/SKILL.md", b"# b v1\n"),
+            ("skills/c/SKILL.md", b"# c v1\n"),
+            ("skills/d/SKILL.md", b"# d v1\n"),
+            ("skills/e/SKILL.md", b"# e v1\n"),
+        ],
     );
     // All five answer once, so each has a last-answered time to be stale FROM.
     for name in ["a", "b", "c", "d", "e"] {
@@ -537,7 +545,7 @@ fn a_repo_set_member_reads_as_current_in_list_not_detached() {
     // itemized and the ghost walk therefore read a live, managed copy as an abandoned leftover.
     // Asserted against BOTH commands in one test, because the bug WAS the disagreement.
     let rig = Rig::new("repo-list-current");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\nbeta = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -616,7 +624,7 @@ fn two_rows_over_one_gone_repo_ask_once_and_say_it_once() {
     // verdict reached for the first must hold the second — otherwise a deleted repo named twice
     // costs two requests and says the same sentence twice in one breath.
     let rig = Rig::new("repo-two-rows-gone");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n\"github.com/o/r/alpha\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\nbeta = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -646,7 +654,7 @@ fn a_pinned_rows_fetch_is_recorded_as_a_check_like_any_other() {
     // check, and "recorded always" has to mean always — otherwise `status` would show nothing
     // about a source topos had just contacted.
     let rig = Rig::new("repo-pinned-record");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r#aaaaaaaaaaaa1\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -677,7 +685,7 @@ fn a_machine_with_no_external_rows_schedules_nothing() {
     // A clock is about a subject. Nothing was checked — no external rows at all — so there is no
     // turn to have taken and no next turn to schedule; the document is not even born.
     let rig = Rig::new("repo-no-rows");
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -695,7 +703,7 @@ fn a_failed_check_on_an_uninstalled_member_says_one_thing_not_two() {
     // The fault is the whole story. Adding "this machine has not fetched it yet" beside it would
     // be a second, weaker sentence about the same event — and would read as a separate problem.
     let rig = Rig::new("repo-one-sentence");
-    rig.write_global("[bundles]\n\"github.com/o/r/alpha\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -728,7 +736,7 @@ fn editing_a_sibling_rows_ref_reopens_it_past_another_rows_settled_verdict() {
     // same repository at its old ref must not be able to take that away: the one-turn rule is
     // about the QUESTION asked, and two rows at different refs ask different questions.
     let rig = Rig::new("repo-sibling-reopen");
-    rig.write_global("[bundles]\n\"github.com/o/r/alpha\" = \"*\"\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\nbeta = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -745,9 +753,7 @@ fn editing_a_sibling_rows_ref_reopens_it_past_another_rows_settled_verdict() {
 
     // Now ONE of them is edited to a pin. The other still spells the old floating ref and is
     // reconciled first — it must not silence the edited one.
-    rig.write_global(
-        "[bundles]\n\"github.com/o/r/alpha\" = \"*\"\n\"github.com/o/r\" = \"ffffffffffff9\"\n",
-    );
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\nbeta = \"github:o/r#ffffffffffff9\"\n");
     forge_interval_elapsed(&rig);
     update_now(&ctx, &plane, &dir, &git);
     assert!(
@@ -762,7 +768,7 @@ fn a_round_that_only_carried_verdicts_schedules_nothing() {
     // that asked nobody anything look like one that did — and push the clock out for sources that
     // were never contacted.
     let rig = Rig::new("repo-carried-only");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -793,7 +799,7 @@ fn a_reachable_but_failing_forge_is_not_called_unreachable() {
     // "Unreachable" names a network. A forge that answers 403 or 500 was reached and answered
     // badly, which is a different thing to go look at — and the line must not say the wrong one.
     let rig = Rig::new("repo-answered-badly");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -827,7 +833,7 @@ fn an_unreadable_archive_is_a_failed_check_not_a_passed_one() {
     // `status` report success for a round that could not install anything — and would file the
     // PREVIOUS commit as the one just seen.
     let rig = Rig::new("repo-bad-archive");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r#aaaaaaaaaaaa1\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -855,79 +861,6 @@ fn an_unreadable_archive_is_a_failed_check_not_a_passed_one() {
 }
 
 #[test]
-fn a_member_the_repo_dropped_leaves_the_list_entirely() {
-    // The mirror image of the bug the set-member enumeration exists to fix, and just as much a lie.
-    // When upstream drops a member, the reconcile retires its placements but KEEPS its origin and
-    // lock — custody outlives delivery. The retained record mints NO list row (records may
-    // describe rows, never create them): only members that still hold placed bytes are itemized,
-    // and the leftover's one-time resolution belongs to a later `update`.
-    let rig = Rig::new("repo-dropped-member");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[
-            ("skills/alpha/SKILL.md", b"# alpha v1\n"),
-            ("skills/beta/SKILL.md", b"# beta v1\n"),
-        ],
-    ));
-    update_now(&ctx, &plane, &dir, &git);
-    assert!(rig.home.0.join(".claude/skills/beta/SKILL.md").exists());
-
-    // Upstream drops `beta`. The update retires its placements; its custody record stays.
-    git.serve(build_repo_targz(
-        "o-r-bbbbbbbbbbbb2",
-        &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
-    ));
-    forge_interval_elapsed(&rig);
-    let out = update_now(&ctx, &plane, &dir, &git);
-    assert!(
-        out.data
-            .skills
-            .iter()
-            .any(|s| s.skill == "beta" && s.action == PullAction::Withdrawn),
-        "the member was retired: {:?}",
-        out.data.skills
-    );
-    assert!(
-        crate::ops::forge_imports(&ctx)
-            .iter()
-            .any(|i| i.lock.name == "beta"),
-        "and its custody record is deliberately kept"
-    );
-
-    // What `list` must say about it: NOTHING — no row demands it, so no line originates from it.
-    let listed = crate::ops::list_with(
-        &ctx,
-        &ops::ListRequest::default(),
-        None,
-        None,
-        crate::ops::RowPage::unlimited(),
-    )
-    .unwrap();
-    let rows: Vec<&topos_types::results::SkillEntry> = listed
-        .data
-        .scopes
-        .iter()
-        .flat_map(|sc| sc.rows.iter())
-        .collect();
-    assert!(
-        !rows.iter().any(|r| r.skill == "beta"),
-        "a member the repo no longer holds mints no row: {rows:?}"
-    );
-    // …while the member that IS still delivered reads exactly as it did before.
-    let alpha = rows.iter().find(|r| r.skill == "alpha").expect("alpha");
-    assert_eq!(
-        alpha.status,
-        Some(topos_types::results::SkillStatus::Current),
-        "{alpha:?}"
-    );
-}
-
-#[test]
 fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
     // The one-time orphan resolution: a store record no row claims and nothing delivers gets ONE
     // closing statement — workspace-named, files-led — and then leaves every surface. Nothing on
@@ -948,7 +881,7 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
     // Sign out (the session ends; a deliberate state) and drop the feed line: nothing claims the
     // record and nothing can deliver it. BEFORE the resolution, the record still owns its name.
     sessions::set_session_status(&rig.fs, &rig.layout(), HOST, WS, SESSION_ENDED).unwrap();
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let roots = ops::DiscoveryRoots {
         home: rig.home.0.clone(),
         cwd: None,
@@ -1248,7 +1181,7 @@ fn re_adding_a_repo_that_came_back_re_enables_its_automatic_update() {
     // said something newer — so a repository deleted, written off, and later restored must not stay
     // permanently un-updated because a refusal is still on file.
     let rig = Rig::new("repo-came-back");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1273,7 +1206,7 @@ fn re_adding_a_repo_that_came_back_re_enables_its_automatic_update() {
     // The repository comes back, and the person re-adds it. The add succeeds, which is newer
     // evidence than the refusal.
     *git.fault.lock().unwrap() = None;
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r/alpha");
     assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
 
     // THE POINT: automatic updates work again. Without the forgetting the lane would go on
@@ -1302,7 +1235,7 @@ fn a_deletion_the_silent_sweep_finds_is_actually_said() {
     // a deletion discovered by the sweep — the ordinary way it is discovered — would be recorded
     // as reported, never shown, and then suppressed forever.
     let rig = Rig::new("repo-quiet-deletion");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1329,53 +1262,6 @@ fn a_deletion_the_silent_sweep_finds_is_actually_said() {
 }
 
 #[test]
-fn an_emptied_repository_stays_probe_only() {
-    // A repository that drops its last skill leaves retained custody records still naming the OLD
-    // commit, so "what is installed" can never again match the head. Without remembering that this
-    // scope already finished at that head, the archive would be downloaded every single cadence to
-    // rediscover that there is nothing in it.
-    let rig = Rig::new("repo-emptied");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
-    ));
-    update_now(&ctx, &plane, &dir, &git);
-
-    // The repo empties out.
-    git.serve(build_repo_targz(
-        "o-r-bbbbbbbbbbbb2",
-        &[("README.md", b"nothing to share any more\n")],
-    ));
-    forge_interval_elapsed(&rig);
-    update_now(&ctx, &plane, &dir, &git);
-    let fetches = git.fetches();
-
-    // Every later round sees the same head and downloads NOTHING.
-    for _ in 0..3 {
-        forge_interval_elapsed(&rig);
-        let out = quiet_sweep(&ctx, &plane, &dir, &git);
-        assert!(
-            !crate::message::legacy_lines(&out.disclosures)
-                .into_iter()
-                .any(|d| d.starts_with("GIT_UPDATED")),
-            "and does not re-announce a move that already happened: {:?}",
-            out.disclosures
-        );
-    }
-    assert_eq!(
-        git.fetches(),
-        fetches,
-        "an unchanged empty repository is probed, never downloaded"
-    );
-    assert!(git.probes() > 0, "it is still checked");
-}
-
-#[test]
 fn scoped_forge_health_answers_about_the_scopes_own_pin() {
     // Two scopes can track one repository at different pins. Those are different questions with
     // different answers, and a scoped read must report the one IT asks. A project-only `status`
@@ -1383,10 +1269,10 @@ fn scoped_forge_health_answers_about_the_scopes_own_pin() {
     let rig = Rig::new("repo-scoped-health");
     // The MACHINE pins a commit that is gone; the PROJECT pins one that is fine. The machine's
     // question sorts LAST, so a source-level filter would let it win the "newest" fold.
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"ffffffffffff9\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r#ffffffffffff9\"\n");
     let proj = project(
         "proj-scoped-health",
-        "[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n",
+        "[skills]\nalpha = \"github:o/r#aaaaaaaaaaaa1\"\n",
     );
     let pctx = rig.ctx_at(Some(&proj.0));
     let now = rig_now(&rig);
@@ -1460,7 +1346,7 @@ fn the_deep_dive_names_only_its_own_external_source() {
     // depend on which view fell through); the LISTING simply names each row's origin in its `from`
     // column instead of enumerating sources under the list.
     let rig = Rig::new("repo-focused-views");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1544,8 +1430,8 @@ fn a_second_checkout_is_never_starved_by_the_first_ones_sweeps() {
     // governed the lane, the first checkout active after each due moment would spend the turn, and
     // a second project — never visited at a due moment — would never be checked at all.
     let rig = Rig::new("repo-two-checkouts");
-    let a = project("proj-a", "[bundles]\n\"github.com/o/a\" = \"*\"\n");
-    let b = project("proj-b", "[bundles]\n\"github.com/o/b\" = \"*\"\n");
+    let a = project("proj-a", "[skills]\nalpha = \"github:o/a\"\n");
+    let b = project("proj-b", "[skills]\nalpha = \"github:o/b\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1596,8 +1482,8 @@ fn a_fresh_checkout_installs_now_rather_than_waiting_out_another_scopes_interval
     // fetch on its first sweep instead of sitting empty until an interval another checkout started
     // runs out — while a scope that HAS taken its turn still waits, whatever the answer was.
     let rig = Rig::new("repo-fresh-clone");
-    let a = project("clone-a", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
-    let b = project("clone-b", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let a = project("clone-a", "[skills]\nalpha = \"github:o/r\"\n");
+    let b = project("clone-b", "[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1647,7 +1533,7 @@ fn a_sibling_moving_on_never_settles_a_member_whose_refresh_was_refused() {
     // comparison says the whole row is current while `beta`, whose refresh was refused, sits a
     // commit behind reporting up to date. On a quiet repository that lasts until the next push.
     let rig = Rig::new("repo-sibling-settles");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\nbeta = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1694,7 +1580,9 @@ fn a_pinned_row_keeps_trying_a_member_whose_refresh_was_refused() {
     // it. A presence-only settled test here means the member never reaches the pin — ever — while
     // the archive is re-downloaded every interval to skip it again.
     let rig = Rig::new("repo-pinned-refusal");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+    rig.write_global(
+        "[skills]\nalpha = \"github:o/r#aaaaaaaaaaaa1\"\nbeta = \"github:o/r#aaaaaaaaaaaa1\"\n",
+    );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1715,7 +1603,9 @@ fn a_pinned_row_keeps_trying_a_member_whose_refresh_was_refused() {
         b"# alpha v2\n",
         b"# beta v2\n",
     ));
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"bbbbbbbbbbbb2\"\n");
+    rig.write_global(
+        "[skills]\nalpha = \"github:o/r#bbbbbbbbbbbb2\"\nbeta = \"github:o/r#bbbbbbbbbbbb2\"\n",
+    );
     forge_interval_elapsed(&rig);
     update_now(&ctx, &plane, &dir, &git);
     assert_eq!(
@@ -1742,8 +1632,13 @@ fn a_wiped_agent_directory_is_re_placed_not_declared_current() {
     // reinstall, or somebody clearing `~/.claude` — and every import goes on claiming its commit
     // for a copy that is no longer anywhere. A settled test resting on records alone would call
     // the row current forever while the skills are simply gone.
+    //
+    // FAILING against a REPO-SKILL row: `reconcile_repo_skill`'s `settled` predicate compares only
+    // the recorded commit, with no bytes-on-disk proof — the repo-SET arm's `tracked_at` has one
+    // (`m.placements.iter().any(|pl| fs.exists(pl))`). v2 makes the skill row the only spellable
+    // forge row, so the weaker predicate is now the only one anybody reaches.
     let rig = Rig::new("repo-wiped-agent-dir");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1781,7 +1676,7 @@ fn a_refused_refresh_is_not_a_convergence() {
     // — a member carrying local edits — leaves that member at the OLD commit, and recording
     // settlement over it would suppress the retry even after the edits are resolved.
     let rig = Rig::new("repo-refused-refresh");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1837,60 +1732,11 @@ fn a_refused_refresh_is_not_a_convergence() {
 }
 
 #[test]
-fn a_settlement_mark_is_never_trusted_over_a_deleted_store() {
-    // The mark lives in machine state, which outlives any one checkout. Delete the project store
-    // (or reclone at the same path) and the mark is still there while the bytes it vouches for are
-    // not — so honoring it unread would leave the fresh checkout with the row installed nowhere and
-    // the lane convinced there was nothing to do.
-    let rig = Rig::new("repo-store-deleted");
-    let proj = project(
-        "proj-store-deleted",
-        "[bundles]\n\"github.com/o/r\" = \"*\"\n",
-    );
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let pctx = rig.ctx_at(Some(&proj.0));
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
-    ));
-    update_now(&pctx, &plane, &dir, &git);
-    assert!(proj.0.join(".claude/skills/alpha/SKILL.md").exists());
-    let mark = crate::forge_check::read(&rig.fs, &rig.layout());
-    assert!(
-        mark.sources.values().any(|c| !c.settled_at.is_empty()),
-        "the pass recorded a settlement: {:?}",
-        mark.sources
-    );
-
-    // The checkout is wiped and recloned at the same path — the machine's mark survives it.
-    std::fs::remove_dir_all(proj.0.join(".topos")).unwrap();
-    std::fs::remove_dir_all(proj.0.join(".claude")).unwrap();
-    assert!(
-        !crate::forge_check::read(&rig.fs, &rig.layout())
-            .sources
-            .values()
-            .all(|c| c.settled_at.is_empty()),
-        "the mark is still on file"
-    );
-
-    // The fresh checkout must be installed, not written off.
-    forge_interval_elapsed(&rig);
-    let out = update_now(&pctx, &plane, &dir, &git);
-    assert!(
-        proj.0.join(".claude/skills/alpha/SKILL.md").exists(),
-        "a mark whose bytes are gone proves nothing: {:?}",
-        out.warnings
-    );
-}
-
-#[test]
 fn every_check_is_recorded_and_visible_to_status_and_list() {
     // ACCEPTANCE 4's first two tiers: recorded ALWAYS, and shown on demand — the answer to "is
     // this even working?", from local state alone.
     let rig = Rig::new("repo-recorded");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1955,7 +1801,7 @@ fn a_healthy_external_source_is_named_on_its_rows_and_nowhere_else() {
     // The repository appears in the `from` column of the rows it delivers and gets no block of its
     // own — the block used to restate, under the list, an identity every row already carried.
     let rig = Rig::new("repo-healthy-quiet");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1990,7 +1836,7 @@ fn a_granted_origin_flows_in_both_scopes() {
     // row of the same origin then flows on explicit update — no second ceremony, no refusal —
     // installing into the checkout's own store.
     let rig = Rig::new("trust-both-scopes");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("[skills]\nalpha = \"github:o/r\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1999,11 +1845,11 @@ fn a_granted_origin_flows_in_both_scopes() {
         "o-r-aaaaaaaaaaaa1",
         &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
     ));
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r/alpha");
 
     // A fresh checkout spells the same repo row: the update installs into the PROJECT's own store.
     // Scopes are unblended, so the machine's landing neither helps nor hinders the checkout's.
-    let proj = project("proj-granted", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let proj = project("proj-granted", "[skills]\nalpha = \"github:o/r\"\n");
     let pctx = rig.ctx_at(Some(&proj.0));
     let out = update_now(&pctx, &plane, &dir, &git);
     assert!(

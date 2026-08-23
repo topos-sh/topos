@@ -23,7 +23,9 @@ fn a_replaced_row_value_offers_only_the_exact_inverse() {
     let digest = "0123456789abcdef".repeat(4);
 
     // Replacing a `"*"` row with a pin: applied, the prior value named, the undo re-adds `"*"`.
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     let data = applied_add(&ctx, &plane, &dir, &format!("@{WS_NAME}/deploy@{digest}"));
     assert_eq!(
         data.undo,
@@ -77,7 +79,7 @@ fn a_replaced_row_value_offers_only_the_exact_inverse() {
 
     // A prior FIELDS value: no single command restores it — no undo, and the note says why.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\"] }}\n"
     ));
     let data = applied_add(&ctx, &plane, &dir, &format!("@{WS_NAME}/deploy@{digest}"));
     assert!(
@@ -101,7 +103,7 @@ fn destinations_extend_on_a_re_add_and_the_undo_takes_back_only_the_new_ones() {
 
     // The row already names ONE destination (written by hand — the person's own freeze).
     rig.write_global(&format!(
-        "[bundles]\n\"{reference}\" = {{ dest = [\"~/.codex/skills\"] }}\n"
+        "[skills]\n\"{reference}\" = {{ dest = [\"~/.codex/skills\"] }}\n"
     ));
     let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
     let text = std::fs::read_to_string(&manifest).unwrap();
@@ -152,7 +154,7 @@ fn destinations_extend_on_a_re_add_and_the_undo_takes_back_only_the_new_ones() {
     );
 
     // A brand-new row born WITH a destination is a whole-row add, so its inverse is the row drop.
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.codex/skills"]);
     assert_eq!(
         data.undo,
@@ -178,7 +180,7 @@ fn the_first_destination_on_a_row_that_reached_everywhere_keeps_that_reach() {
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let reference = format!("{HOST}/{WS_NAME}/deploy");
-    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"*\"\n"));
+    rig.write_global(&format!("[skills]\n\"{reference}\" = \"latest\"\n"));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
@@ -230,7 +232,7 @@ fn the_first_destination_on_a_row_that_reached_everywhere_keeps_that_reach() {
 
     // A PINNED row is the same story: the pin is what the row says beyond its reach, so the
     // collapse hands back the pin row itself, not a table spelling the pin and a lone token.
-    let pinned = format!("[bundles]\n\"{reference}\" = \"{}\"\n", "a".repeat(64));
+    let pinned = format!("[skills]\n\"{reference}\" = \"{}\"\n", "a".repeat(64));
     rig.write_global(&pinned);
     applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
     match ops::remove_global(
@@ -257,7 +259,7 @@ fn an_off_switch_is_never_extended_and_never_advertises_a_subtraction() {
     let (rig, plane, dir, _v) = add_rig("off-dest");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let reference = format!("{HOST}/{WS_NAME}/deploy");
-    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"off\"\n"));
+    rig.write_global(&format!("[skills]\n\"{reference}\" = \"off\"\n"));
 
     let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
     assert!(
@@ -287,7 +289,7 @@ fn a_pin_move_beside_a_destination_is_a_replacement_not_an_extend() {
     let reference = format!("{HOST}/{WS_NAME}/deploy");
     let old = "a".repeat(64);
     let new = "b".repeat(64);
-    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"{old}\"\n"));
+    rig.write_global(&format!("[skills]\n\"{reference}\" = \"{old}\"\n"));
 
     let data = applied_dest_add(
         &ctx,
@@ -342,7 +344,7 @@ fn a_narrowed_rows_current_set_comes_from_the_row_not_from_a_name_two_bundles_sh
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let reference = format!("{HOST}/{WS_NAME}/deploy");
-    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"*\"\n"));
+    rig.write_global(&format!("[skills]\n\"{reference}\" = \"latest\"\n"));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
@@ -392,7 +394,7 @@ fn the_governance_transfer_carries_the_rows_destinations_onto_the_workspace_row(
     rig.seed_session();
     let folder = untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ dest = [\"~/.codex/skills\", \"~/.cursor/skills\"] }}\n",
+        "[skills]\ndeploy = {{ path = \"{}\", dest = [\"~/.codex/skills\", \"~/.cursor/skills\"] }}\n",
         folder.display()
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -405,7 +407,7 @@ fn the_governance_transfer_carries_the_rows_destinations_onto_the_workspace_row(
     assert_eq!(
         text,
         format!(
-            "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\", \
+            "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\", \
              \"~/.cursor/skills\"] }}\n"
         ),
         "the path row is gone and the workspace row carries the same two folders"
@@ -415,13 +417,13 @@ fn the_governance_transfer_carries_the_rows_destinations_onto_the_workspace_row(
     let plain = Rig::new("govern-plain");
     plain.seed_session();
     let bare = untracked_skill(&plain.home.0, "deploy", b"# deploy\n");
-    plain.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", bare.display()));
+    plain.write_global(&format!("[skills]\ndeploy = \"{}\"\n", bare.display()));
     let pctx = plain.ctx_at(Some(&plain.work.0));
     ops::rewrite_to_governed(&pctx, "deploy", HOST, WS_NAME, &[bare]).unwrap();
     assert_eq!(
         std::fs::read_to_string(plain.layout().home().join(crate::manifest::MANIFEST_FILE))
             .unwrap(),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n")
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n")
     );
 }
 
@@ -438,7 +440,9 @@ fn an_off_switch_over_a_draft_applies_with_the_kept_disclosure() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let placed = install_feed_deploy(&rig, &plane, &dir);
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -463,7 +467,9 @@ fn an_off_switch_over_a_draft_applies_with_the_kept_disclosure() {
         other => panic!("a clean off switch applies immediately: {other:?}"),
     }
     // Lift the switch back for the drafted arm.
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     sweep(&ctx, &plane, &dir);
 
     // DRAFTED: the edited copy is KEPT IN PLACE by the eager uninstall, so nothing is
@@ -510,7 +516,9 @@ fn a_feed_drop_applies_immediately_and_uninstalls_in_the_same_invocation() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let placed = install_feed_deploy(&rig, &plane, &dir);
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -556,7 +564,9 @@ fn a_feed_drop_applies_immediately_and_uninstalls_in_the_same_invocation() {
     // destination that went, and the dir is gone before the command returns. (The kept copy is
     // the person's own file now; they delete it themselves before re-adopting the feed.)
     std::fs::remove_dir_all(&placed).unwrap();
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     sweep(&ctx, &plane, &dir);
     assert!(placed.join("SKILL.md").exists());
     let out = ops::remove_global(
@@ -620,7 +630,7 @@ fn a_set_split_carries_the_lines_fields_onto_survivors() {
         }],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ dest = [\"~/.codex/skills\"] }}\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/backend\" = {{ dest = [\"~/.codex/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -731,8 +741,8 @@ fn a_set_split_never_overwrites_a_survivors_explicit_row() {
     );
     let pin = topos_core::digest::to_hex(&p.id);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ dest = [\"~/.codex/skills\"] }}\n\
-         \"{HOST}/{WS_NAME}/pinned\" = \"{pin}\"\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/backend\" = {{ dest = [\"~/.codex/skills\"] }}\n\n\
+         [skills]\n\"{HOST}/{WS_NAME}/pinned\" = \"{pin}\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -880,7 +890,7 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
     // rewrite left behind); the NEXT update converges the transfer, idempotently, disclosed.
     let canonical_src = src.canonicalize().unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = \"*\"\n",
+        "[skills]\ndeploy = \"{}\"\n",
         canonical_src.display()
     ));
     let out = ops::manifest_update(
@@ -948,7 +958,7 @@ fn a_landed_publish_leaves_its_own_version_current_before_any_sweep() {
     // The machine recipe demands it by path — the line the landed publish transfers to the
     // workspace reference.
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = \"*\"\n",
+        "[skills]\ndeploy = \"{}\"\n",
         src.canonicalize().unwrap().display()
     ));
     sync_status::record(
@@ -1048,7 +1058,7 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
-    let proj = project("proj-pending", "[bundles]\n");
+    let proj = project("proj-pending", "[skills]\n");
 
     // A local skill adopted into the PROJECT's own store (the checkout's engine state).
     let src = proj.0.join("deploy");
@@ -1111,7 +1121,7 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
     // from the PROJECT store, idempotently, disclosed.
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
-        "[bundles]\n\"./deploy\" = \"*\"\n",
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"./deploy\"\n").as_str(),
     )
     .unwrap();
     let out = ops::manifest_update(
@@ -1128,8 +1138,10 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
     assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
     let text = std::fs::read_to_string(proj.0.join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(
-        text.contains(&format!("{HOST}/{WS_NAME}/deploy")),
-        "the canonical reference stands in the PROJECT file: {text}"
+        text.contains(&format!("workspace = \"{HOST}/{WS_NAME}\""))
+            && text.contains("deploy = \"latest\""),
+        "the canonical reference stands in the PROJECT file — bare against its workspace \
+         line: {text}"
     );
     assert!(!text.contains("./deploy"), "the path line is gone: {text}");
 }
@@ -1166,7 +1178,7 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
     let canonical_src = src.canonicalize().unwrap();
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = \"*\"\n",
+        "[skills]\ndeploy = \"{}\"\n",
         canonical_src.display()
     ));
 
@@ -1175,7 +1187,7 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
     // stands for the removal that already finished before the lock was taken.
     let racing = manifest.clone();
     let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 2, move || {
-        std::fs::write(&racing, "[bundles]\n").unwrap();
+        std::fs::write(&racing, "[skills]\n").unwrap();
     });
     let hooked = Ctx {
         fs: &fs,
@@ -1291,7 +1303,7 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
     // GENESIS-observed local sync.
     let canonical_src = src.canonicalize().unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = \"*\"\n",
+        "[skills]\ndeploy = \"{}\"\n",
         canonical_src.display()
     ));
     let out = ops::manifest_update(

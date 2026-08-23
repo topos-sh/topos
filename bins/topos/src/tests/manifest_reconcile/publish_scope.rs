@@ -25,10 +25,12 @@ fn both_scopes(
     plane: &FakePlane,
     dir: &FakeDirectory,
 ) -> (Scratch, std::path::PathBuf, std::path::PathBuf) {
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     let proj = project(
         tag,
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep_both(&ctx, plane, dir);

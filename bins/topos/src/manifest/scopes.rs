@@ -328,21 +328,24 @@ mod tests {
     fn a_plan_partitions_feeds_offs_things_and_sets() {
         let d = digest();
         let plan = global_plan(&format!(
-            "[bundles]\n\
-             \"topos.sh/acme\" = \"*\"\n\
+            "[workspaces]\n\
+             \"topos.sh/acme\" = \"latest\"\n\
+             \n\
+             [skills]\n\
              \"topos.sh/acme/noisy\" = \"off\"\n\
              \"topos.sh/beta/deploy\" = \"{d}\"\n\
-             \"topos.sh/beta/channels/eng\" = \"*\"\n\
-             \"github.com/o/r\" = \"*\"\n\
-             \"github.com/o/r/s\" = \"*\"\n\
-             \"./tools/x\" = \"*\"\n"
+             s = \"github:o/r\"\n\
+             x = \"./tools/x\"\n\
+             \n\
+             [channels]\n\
+             \"topos.sh/beta/eng\" = \"latest\"\n"
         ));
         assert_eq!(plan.feeds, vec![("topos.sh".into(), "acme".into())]);
         assert_eq!(plan.offs.len(), 1);
         // Things: the pinned bundle, the repo skill, the local folder.
         assert_eq!(plan.things.len(), 3);
-        // Sets: the channel and the repo set.
-        assert_eq!(plan.sets.len(), 2);
+        // Sets: the channel (a repo SET has no v2 row to write).
+        assert_eq!(plan.sets.len(), 1);
         assert!(plan.file_backed());
         assert!(plan.has_feed("topos.sh", "acme"));
         assert!(!plan.has_feed("topos.sh", "beta"));
@@ -374,10 +377,12 @@ mod tests {
     #[test]
     fn regimes_phrase_per_workspace() {
         let plan = global_plan(
-            "[bundles]\n\
-             \"topos.sh/acme\" = \"*\"\n\
+            "[workspaces]\n\
+             \"topos.sh/acme\" = \"latest\"\n\
+             \n\
+             [skills]\n\
              \"topos.sh/acme/noisy\" = \"off\"\n\
-             \"topos.sh/beta/deploy\" = \"*\"\n",
+             \"topos.sh/beta/deploy\" = \"latest\"\n",
         );
         assert_eq!(
             plan.regime("topos.sh", "acme", 0).as_deref(),
@@ -394,10 +399,10 @@ mod tests {
     fn plan_rows_answer_pin_fields_and_names() {
         let d = digest();
         let plan = global_plan(&format!(
-            "[bundles]\n\
+            "[skills]\n\
              \"topos.sh/acme/a\" = \"{d}\"\n\
-             \"topos.sh/acme/b\" = {{ version = \"*\", name = \"local-b\" }}\n\
-             \"topos.sh/acme/c\" = \"*\"\n"
+             \"topos.sh/acme/b\" = {{ name = \"local-b\" }}\n\
+             \"topos.sh/acme/c\" = \"latest\"\n"
         ));
         let by_leaf = |l: &str| {
             plan.things
@@ -417,9 +422,11 @@ mod tests {
         // A dest row is an ordinary fields row to the partitioner — the reconcile reads the
         // field; the plan only carries it.
         let plan = global_plan(
-            "[bundles]\n\
+            "[skills]\n\
              \"topos.sh/acme/deploy\" = { dest = [\"~/.codex/skills\", \"~/.claude/skills\"] }\n\
-             \"topos.sh/acme/channels/eng\" = { dest = [\"~/.agents/skills\"] }\n",
+             \n\
+             [channels]\n\
+             \"topos.sh/acme/eng\" = { dest = [\"~/.agents/skills\"] }\n",
         );
         assert_eq!(
             plan.things[0].fields().dest,
@@ -444,12 +451,12 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(
             repo.join(MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/repo-wide\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\nrepo-wide = \"latest\"\n",
         )
         .unwrap();
         std::fs::write(
             nested.join(MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/api-only\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\napi-only = \"latest\"\n",
         )
         .unwrap();
         // The NEAREST file wins whole — the ancestor's rows never blend in.

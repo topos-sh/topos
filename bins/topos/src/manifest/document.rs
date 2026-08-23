@@ -2096,7 +2096,10 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
             .set_row("~/two/linear", &EntryValue::Star, BundleKind::Skill)
             .unwrap_err();
         assert!(e.message.contains("already names another row"), "{e}");
-        assert!(ed.row("~/one/linear").is_some(), "the standing row survives");
+        assert!(
+            ed.row("~/one/linear").is_some(),
+            "the standing row survives"
+        );
         // A distinct `name` field resolves the collision.
         ed.set_row(
             "~/two/linear",

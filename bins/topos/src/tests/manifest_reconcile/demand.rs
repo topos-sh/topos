@@ -32,7 +32,11 @@ fn a_name_whose_machine_row_still_stands_refuses_toward_the_machine_file() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     ops::add(&ctx, &src).unwrap();
     let canonical = src.canonicalize().unwrap();
-    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", canonical.display()));
+    rig.write_global(&format!(
+        "[skills]\n{} = \"{}\"\n",
+        canonical.file_name().unwrap().to_str().unwrap(),
+        canonical.display()
+    ));
 
     let named_connect = |_s: &Session| ops::SessionTransports {
         plane: Box::new(plane.clone()),
@@ -71,7 +75,7 @@ fn a_name_whose_machine_row_still_stands_refuses_toward_the_machine_file() {
         &Default::default(),
     )
     .expect("the offered command is runnable");
-    assert_eq!(global_text(&rig), "[bundles]\n");
+    assert_eq!(global_text(&rig), "[skills]\n");
 }
 
 /// PATH_MISSING names a command that WORKS. The row lives in the machine-wide file, so the drop
@@ -91,7 +95,11 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
     std::fs::write(src.join("SKILL.md"), b"# weather\n").unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let canonical = src.canonicalize().unwrap();
-    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", canonical.display()));
+    rig.write_global(&format!(
+        "[skills]\n{} = \"{}\"\n",
+        canonical.file_name().unwrap().to_str().unwrap(),
+        canonical.display()
+    ));
 
     // The folder goes; the row stays. That is the state PATH_MISSING exists to report.
     std::fs::remove_dir_all(&src).unwrap();
@@ -193,7 +201,7 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         &Default::default(),
     )
     .expect("the offered command is runnable");
-    assert_eq!(global_text(&rig), "[bundles]\n");
+    assert_eq!(global_text(&rig), "[skills]\n");
     let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     assert!(
         !crate::message::legacy_lines(&out.warnings)
@@ -223,7 +231,7 @@ fn a_gone_folders_row_states_the_fact_and_withholds_the_undo() {
     std::fs::write(src.join("SKILL.md"), b"# solo\n").unwrap();
     let canonical = src.canonicalize().unwrap();
     let raw = canonical.display().to_string();
-    rig.write_global(&format!("[bundles]\n\"{raw}\" = \"*\"\n"));
+    rig.write_global(&format!("[skills]\nsolo = \"{raw}\"\n"));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     std::fs::remove_dir_all(&src).unwrap();
 
@@ -288,7 +296,7 @@ fn a_gone_folders_row_states_the_fact_and_withholds_the_undo() {
         "an inverse that must fail is withheld: {:?}",
         data.undo
     );
-    assert_eq!(global_text(&rig), "[bundles]\n");
+    assert_eq!(global_text(&rig), "[skills]\n");
 }
 
 /// TWO ROWS, TWO FOLDERS, ONE NAME — and TWO failures. A gone folder's bundle is counted under
@@ -311,7 +319,7 @@ fn two_same_named_local_rows_whose_folders_are_gone_are_two_failures() {
         refs.push(src.canonicalize().unwrap());
     }
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = \"*\"\n\"{}\" = \"*\"\n",
+        "[skills]\nlinear = \"{}\"\nlinear-2 = \"{}\"\n",
         refs[0].display(),
         refs[1].display()
     ));
@@ -364,7 +372,11 @@ fn an_update_never_calls_a_drafted_bundle_all_up_to_date() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     ops::add(&ctx, &src).unwrap();
     let canonical = src.canonicalize().unwrap();
-    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", canonical.display()));
+    rig.write_global(&format!(
+        "[skills]\n{} = \"{}\"\n",
+        canonical.file_name().unwrap().to_str().unwrap(),
+        canonical.display()
+    ));
 
     // CLEAN: nothing owed, nothing unshared — the compact sentence is true and stays.
     let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
@@ -451,7 +463,7 @@ fn a_record_no_row_demands_takes_the_classic_delete_and_spares_the_adopted_folde
     let sid = crate::id::SkillId::parse(&added.skill_id.expect("the adopt minted a record"))
         .expect("a minted id parses");
     // NO row anywhere demands it.
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
 
     let named_connect = |_s: &Session| ops::SessionTransports {
         plane: Box::new(plane.clone()),
@@ -509,10 +521,10 @@ fn a_parent_checkouts_row_refuses_the_nested_classic_delete() {
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
 
     // The OUTER checkout adopts `quaggamap` and keeps the row.
-    let outer = project("zq-nested-outer", "[bundles]\n");
+    let outer = project("zq-nested-outer", "");
     let src = outer.0.join("skills/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     let outer_ctx = rig.ctx_at(Some(&outer.0));
@@ -528,7 +540,7 @@ fn a_parent_checkouts_row_refuses_the_nested_classic_delete() {
     // A checkout NESTED inside it, whose own file demands nothing.
     let inner = outer.0.join("packages/inner");
     std::fs::create_dir_all(inner.join(".git")).unwrap();
-    std::fs::write(inner.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    std::fs::write(inner.join(crate::manifest::MANIFEST_FILE), "").unwrap();
     let ctx = rig.ctx_at(Some(&inner));
 
     // The resolver universe needs a directory that ANSWERS `me`.
@@ -564,7 +576,7 @@ fn a_parent_checkouts_row_refuses_the_nested_classic_delete() {
     );
 
     // (b) GENUINELY ORPHANED — no row in ANY scope's file — still takes the classic arm.
-    std::fs::write(&outer_manifest, "[bundles]\n").unwrap();
+    std::fs::write(&outer_manifest, "").unwrap();
     let outcome = ops::remove(
         &ctx,
         &connectors,
