@@ -57,6 +57,31 @@ export function uniformNotFound(): Response {
   );
 }
 
+/**
+ * A machine token presented where only a person's session may act. Typed on purpose — the
+ * caller HOLDS a token (the prefix is client-known, so naming the refusal reveals nothing
+ * about whether that token is live), and "not found" would send them debugging the wrong
+ * thing. Every write lane answers this; the read lanes that accept tokens never see it.
+ */
+export function machineTokenRefused(): Response {
+  return new Response(
+    JSON.stringify(
+      errorEnvelope("error", {
+        code: "MACHINE_TOKEN_READ_ONLY",
+        outcome: "PERMANENT_FAILURE",
+        retryable: false,
+        affected: {},
+        context: {
+          message:
+            "machine tokens are read-only — this action needs a person's session (run `topos login`)",
+        },
+        next_actions: [],
+      }),
+    ),
+    { status: 403, headers: JSON_HEADERS },
+  );
+}
+
 /** A malformed body or identifier — the message names the problem, never an internal detail. */
 export function badRequest(message: string): Response {
   return new Response(

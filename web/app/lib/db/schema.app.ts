@@ -194,6 +194,69 @@ export const cliSession = webSchema.table(
   ],
 );
 
+// ── Machine tokens — headless read access (CI, VMs, sandboxes) ──────────────────────────────
+
+/**
+ * A MACHINE TOKEN is a workspace's own headless credential: minted by an owner on the web,
+ * shown once, stored as a hash — the same custody shape as a session credential. It is NOT a
+ * person: nothing here touches `user` or `seat`, and every write lane refuses it — a token may
+ * fetch the catalog and object bytes and report what a machine applied, nothing more. Revoke
+ * DELETES the row (history = audit), and its service sessions go with it (CASCADE).
+ */
+export const machineToken = webSchema.table(
+  "machine_token",
+  {
+    /** 'mt_…', server-minted. */
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    /** The owner-given label ("github-actions", "staging-vm") — display only. */
+    name: text("name").notNull(),
+    /** SHA-256 of the one bearer ('tpt_…'); the plaintext is shown once and never stored. */
+    tokenSha256: bytea("token_sha256").notNull().unique(),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("machine_token_workspace_idx").on(table.workspaceId),
+    check("machine_token_sha256_check", sql`octet_length(${table.tokenSha256}) = 32`),
+  ],
+);
+
+/**
+ * A SERVICE SESSION is one machine seen using a machine token — auto-created at first use per
+ * (token, reported name), bumped on every request, and listed apart from people's machines.
+ * Ephemeral by design: a row idle past the service-session window is deleted lazily on the
+ * token's next resolve (CI runners come and go; nothing here is history — audit is). The
+ * `applied` summary is the machine's own last report, replaced wholesale, so the sessions page
+ * can show what a runner holds without touching the per-person report tables.
+ */
+export const serviceSession = webSchema.table(
+  "service_session",
+  {
+    /** 'ss_…', server-minted. */
+    id: text("id").primaryKey(),
+    tokenId: text("token_id")
+      .notNull()
+      .references(() => machineToken.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    /** The run's self-reported label (falls back to the token name) — display only. */
+    displayName: text("display_name").notNull(),
+    /** The machine's last applied-state report: [{skill_id, version_id}] — display only. */
+    applied: jsonb("applied"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("service_session_token_name_idx").on(table.tokenId, table.displayName),
+    index("service_session_workspace_idx").on(table.workspaceId),
+  ],
+);
+
 /**
  * The gh-style login flow (browser approval). The flow starts WORKSPACE-LESS: the workspace is
  * chosen (or created) at the browser approval, where the approver's seats are known, and the

@@ -1,6 +1,7 @@
 import { data, redirect } from "react-router";
 import { composition } from "@/composition.server";
-import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
+import { bearerToken, machineTokenRefused, uniformNotFound } from "@/lib/api/wire.server";
+import { MACHINE_TOKEN_PREFIX, tokenActor } from "@/lib/db/queries.tokens.server";
 import {
   seatOf,
   sessionActor,
@@ -344,6 +345,10 @@ export async function requireSessionActor(
   if (credential === null) {
     throw uniformNotFound();
   }
+  if (credential.startsWith(MACHINE_TOKEN_PREFIX)) {
+    // A machine token where only a person may act — typed, so the caller debugs the right thing.
+    throw machineTokenRefused();
+  }
   const row = await sessionActor(workspaceId, credential);
   if (row === null) {
     throw uniformNotFound();
@@ -377,6 +382,9 @@ export async function requireSessionActorPreBody(request: Request): Promise<Sess
   if (credential === null) {
     throw uniformNotFound();
   }
+  if (credential.startsWith(MACHINE_TOKEN_PREFIX)) {
+    throw machineTokenRefused();
+  }
   const row = await sessionActorByCredential(credential);
   if (row === null || row.sessionStatus !== "active") {
     throw uniformNotFound();
@@ -390,3 +398,56 @@ export async function requireSessionActorPreBody(request: Request): Promise<Sess
     sessionStatus: row.sessionStatus,
   } as SessionActor;
 }
+
+/**
+ * The machine-token principal — NOT a person: no user, no seat, no role. Only the read lanes
+ * accept it (`requireReadActor`); every session-only guard answers a token with the typed
+ * read-only refusal. `machine: true` is the discriminant a route branches on.
+ */
+export type TokenActor = {
+  readonly machine: true;
+  readonly workspaceId: string;
+  readonly tokenId: string;
+  readonly tokenName: string;
+  readonly serviceSessionId: string;
+};
+
+/** The read lanes' actor: a person's session, or a machine token. */
+export type ReadActor = SessionActor | TokenActor;
+
+export function isTokenActor(actor: ReadActor): actor is TokenActor {
+  return "machine" in actor && actor.machine === true;
+}
+
+/**
+ * The read lanes' front door: the session resolve exactly as `requireSessionActor`, plus the
+ * machine-token path — a `tpt_…` bearer resolves token → live service session (upserted from
+ * the optional `x-topos-machine` reported name), fail-closed to the SAME uniform 404 an
+ * unknown session credential gets (no token-liveness oracle). Which lanes call this is the
+ * whole authorization surface of a token: catalog and object reads, and the applied report.
+ */
+export async function requireReadActor(
+  request: Request,
+  workspaceId: string,
+  opts: { allowPending?: boolean } = {},
+): Promise<ReadActor> {
+  const credential = bearerToken(request);
+  if (credential === null) {
+    throw uniformNotFound();
+  }
+  if (credential.startsWith(MACHINE_TOKEN_PREFIX)) {
+    const row = await tokenActor(workspaceId, credential, request.headers.get("x-topos-machine"));
+    if (row === null) {
+      throw uniformNotFound();
+    }
+    return {
+      machine: true,
+      workspaceId,
+      tokenId: row.tokenId,
+      tokenName: row.tokenName,
+      serviceSessionId: row.serviceSessionId,
+    };
+  }
+  return await requireSessionActor(request, workspaceId, opts);
+}
+
