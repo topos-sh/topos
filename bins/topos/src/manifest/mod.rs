@@ -25,6 +25,7 @@ pub(crate) mod dest;
 pub(crate) mod document;
 pub(crate) mod keys;
 pub(crate) mod lock;
+pub(crate) mod migrate;
 pub(crate) mod normal;
 pub(crate) mod scopes;
 
