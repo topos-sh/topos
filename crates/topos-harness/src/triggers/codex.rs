@@ -379,8 +379,8 @@ fn plan_feature(current: Option<&[u8]>) -> FeaturePlan {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SENTINEL;
     use super::super::testutil::{ErrConfig, MemConfig};
-    use super::super::{SENTINEL, SHELL_SWEEP_LINE};
     use super::*;
 
     fn a<'c>(cfg: &'c MemConfig) -> Codex<'c> {

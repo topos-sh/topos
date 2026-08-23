@@ -77,7 +77,7 @@ pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a
 #[cfg(test)]
 mod tests {
     use super::super::testutil::MemConfig;
-    use super::super::{SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter};
+    use super::super::{SENTINEL, TriggerAdapter};
     use super::*;
 
     fn a<'c>(cfg: &'c MemConfig) -> JsonHooks<'c> {

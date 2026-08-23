@@ -16,7 +16,7 @@
 //! model-free shell job persisted in OpenClaw's own SQLite, idempotent by declaration key (a
 //! re-add answers `created:false`, same job — the key IS the ownership marker), firing on a
 //! 1-minute cadence. The registered shell line is the same guarded sweep the Claude Code hook
-//! runs — `topos update --quiet` behind a `command -v` guard with an exit-0 tail (the job runs
+//! runs — `topos install --quiet` behind a `command -v` guard with an exit-0 tail (the job runs
 //! via `sh -lc`, so the guard works; a cleanly-failing job never trips OpenClaw's error
 //! counters, and an orphaned job after a topos uninstall no-ops silently). The sweep self-
 //! throttles client-side (TTL + single-flight), so the 1-minute cadence is cheap.
@@ -76,7 +76,8 @@ const CRON_EVERY: &str = "1m";
 /// The job's shell payload (OpenClaw runs it via `sh -lc`). The `command -v` guard + exit-0 tail
 /// mirror the Claude Code hook line: a machine that lost the `topos` binary (an uninstall; the
 /// job surviving in OpenClaw's store) no-ops CLEANLY, so the job never accumulates error state.
-const CRON_COMMAND: &str = "command -v topos >/dev/null 2>&1 && topos update --quiet || true";
+const CRON_COMMAND: &str =
+    "command -v topos >/dev/null 2>&1 && topos install --quiet --from openclaw || true";
 
 /// The `OpenClaw` adapter — [`HarnessAdapter`] + [`TriggerAdapter`]. Holds the resolved config home
 /// and the [`CommandRunner`] port (the `openclaw cron` CLI) — both injected, so tests point the home
@@ -589,7 +590,7 @@ mod tests {
         // job (topos uninstalled, OpenClaw later restarted) no-ops cleanly instead of erroring
         // forever in the scheduler's run log.
         assert!(CRON_COMMAND.starts_with("command -v topos"));
-        assert!(CRON_COMMAND.contains("topos update --quiet"));
+        assert!(CRON_COMMAND.contains("topos install --quiet --from openclaw"));
         assert!(CRON_COMMAND.ends_with("|| true"));
     }
 

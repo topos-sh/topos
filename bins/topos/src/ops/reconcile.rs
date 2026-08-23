@@ -980,62 +980,6 @@ impl<'a> ForgeLane<'a> {
             .unwrap_or_default()
     }
 
-    /// Whether this question was already reconciled to completion in this scope AT `head`, AND the
-    /// scope's store still proves it — every member that head holds is tracked here, at that head.
-    ///
-    /// The re-proof is the whole point. The mark lives in machine state, which outlives any one
-    /// checkout: delete a project's store or reclone at the same path and the mark survives while
-    /// the bytes it vouches for do not. Trusting it unread would leave the fresh checkout with the
-    /// row installed nowhere and the lane convinced there was nothing to do. A head holding NO
-    /// members has nothing to prove, which is the case the mark exists for.
-    fn settled_here(
-        &self,
-        origin: &str,
-        git_ref: &str,
-        scope: &str,
-        head: &str,
-        tracked_at: impl Fn(&str, &str) -> bool,
-    ) -> bool {
-        if head.is_empty() {
-            return false;
-        }
-        self.prior
-            .sources
-            .get(&forge_check::question(origin, git_ref))
-            .and_then(|c| c.settled_at.get(scope))
-            .is_some_and(|mark| {
-                mark.head == head && mark.members.iter().all(|m| tracked_at(m, head))
-            })
-    }
-
-    /// Record that this question is fully converged in this scope at `head`, holding `members`.
-    fn note_settled(
-        &self,
-        origin: &str,
-        git_ref: &str,
-        scope: &str,
-        head: &str,
-        members: &[String],
-    ) {
-        if head.is_empty() {
-            return;
-        }
-        let key = forge_check::question(origin, git_ref);
-        let carried = self.carried_settled(&key);
-        let mut seen = self.seen.borrow_mut();
-        let entry = seen.entry(key).or_default();
-        if entry.settled_at.is_empty() {
-            entry.settled_at = carried;
-        }
-        entry.settled_at.insert(
-            scope.to_owned(),
-            forge_check::Settled {
-                head: head.to_owned(),
-                members: members.to_vec(),
-            },
-        );
-    }
-
     /// A final refusal, as the one sentence a person gets about it.
     fn announce_gone(&self, origin: &str, reason: &str) {
         let line = format!(
@@ -3018,230 +2962,226 @@ fn reconcile_set<'a>(
     targets: &mut Targets,
     sweep: &mut Sweep,
 ) {
-    match &row.shape {
-        KeyShape::Channel {
-            host,
-            workspace,
-            channel,
-        } => {
-            let set_selected = targets.hit(&[
-                row.reference.as_str(),
-                channel.as_str(),
-                row.display_name().as_str(),
-            ]);
-            let Some(run) = find_run(env.runs, Some(host), workspace) else {
-                sweep.note_set_failure(None, channel, &sc.scope);
-                sweep
-                    .warnings
-                    .push(not_connected_line(&row.reference, host, workspace));
-                return;
-            };
-            let Some(index) = run.channels(&mut sweep.warnings) else {
-                sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
-                return;
-            };
-            let Some(ch) = index.channels.iter().find(|c| &c.name == channel) else {
-                sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
-                sweep.warnings.push(crate::message::failure(
-                    "NOT_AVAILABLE",
-                    format!(
-                        "\"{}\" ({}): {} has no channel by this name, or it is not visible with \
+    // KeyShape::RepoSet is an INPUT classification only (`add <repo>` expands it to per-skill
+    // rows); no v2 manifest carries a set row, so a channel is the one set shape to converge.
+    if let KeyShape::Channel {
+        host,
+        workspace,
+        channel,
+    } = &row.shape
+    {
+        let set_selected = targets.hit(&[
+            row.reference.as_str(),
+            channel.as_str(),
+            row.display_name().as_str(),
+        ]);
+        let Some(run) = find_run(env.runs, Some(host), workspace) else {
+            sweep.note_set_failure(None, channel, &sc.scope);
+            sweep
+                .warnings
+                .push(not_connected_line(&row.reference, host, workspace));
+            return;
+        };
+        let Some(index) = run.channels(&mut sweep.warnings) else {
+            sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
+            return;
+        };
+        let Some(ch) = index.channels.iter().find(|c| &c.name == channel) else {
+            sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
+            sweep.warnings.push(crate::message::failure(
+                "NOT_AVAILABLE",
+                format!(
+                    "\"{}\" ({}): {} has no channel by this name, or it is not visible with \
                          your access. Check the spelling in topos.toml, or ask a workspace owner \
                          to add you to it.",
-                        row.reference, sc.label, run.session.workspace_name
-                    ),
-                ));
-                return;
+                    row.reference, sc.label, run.session.workspace_name
+                ),
+            ));
+            return;
+        };
+        let Some(catalog) = run.catalog(&mut sweep.warnings) else {
+            sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
+            return;
+        };
+        let members: Vec<String> = ch.skills.iter().map(|s| s.skill_id.clone()).collect();
+        // The LOCK's member list freezes a project channel's resolution: a member the server
+        // added since the lock was written is not taken (it arrives as a `topos update`
+        // diff), and a locked member the server no longer serves earns its own line.
+        let locked_members: Option<Vec<String>> =
+            sc.locked_members(channel).map(<[String]>::to_vec);
+        // The batch this channel converges — its members the catalog still serves, minus the
+        // ones an explicit row of the SAME scope owns (its version and fields win, and the set
+        // adds nothing), minus what `--target` narrowing skips and what an earlier source in
+        // this sweep already claimed. Every filter runs HERE, in visit order, so the activity
+        // line counts exactly what this run will sync — never "(6 of 20)" over nineteen skips.
+        // (`targets.hit`/`mention`/`claimed` mutate sweep bookkeeping; hoisting them keeps each
+        // evaluated once per member, in the same order the loop below visits.)
+        // `claimed` reads what EARLIER sources synced; a duplicate id WITHIN this channel's own
+        // index passes it every time (nothing syncs until the loop below), so the batch tracks
+        // its own picks too — a duplicate row is bookkept (hit/mention) but never counted.
+        let mut picked: HashSet<&str> = HashSet::new();
+        // ONE channel, members of BOTH kinds — matched against the catalog's two lists, in
+        // the order the batch will visit them, so the activity line counts one set.
+        let batch: Vec<ChannelMember<'_>> = members
+            .iter()
+            .filter_map(|member| {
+                let found = catalog
+                    .skills
+                    .iter()
+                    .find(|e| &e.skill_id == member)
+                    .map(ChannelMember::Skill)
+                    .or_else(|| {
+                        catalog
+                            .mcp_servers
+                            .iter()
+                            .find(|e| &e.skill_id == member)
+                            .map(ChannelMember::Server)
+                    })?;
+                // Archived / no current members simply are not in the catalog — nothing to
+                // deliver, and nothing to count.
+                if sc.plan.explicit_claims(host, workspace, found.name()) {
+                    return None;
+                }
+                // A frozen channel takes exactly its locked members.
+                if let Some(locked) = &locked_members
+                    && !locked.iter().any(|m| m == found.name())
+                {
+                    return None;
+                }
+                if !set_selected && !targets.hit(&[found.name()]) {
+                    return None;
+                }
+                sweep.mention(&sc.label, found.name());
+                if sweep.claimed(&sc.label, found.skill_id()) {
+                    return None;
+                }
+                // An unparseable id can never open a phase (the sync guard refuses it first),
+                // so it must not count either — same warning, raised where it is excluded.
+                if SkillId::parse(found.skill_id()).is_err() {
+                    sweep.warnings.push(bad_id(found.name()));
+                    return None;
+                }
+                picked.insert(found.skill_id()).then_some(found)
+            })
+            .collect();
+        if sc.lock.is_some() {
+            sweep.lock_harvest.channels.insert(
+                channel.clone(),
+                batch.iter().map(|m| m.name().to_owned()).collect(),
+            );
+        }
+        let total = batch.len();
+        for (position, member) in batch.into_iter().enumerate() {
+            let step = Some(Step {
+                index: position + 1,
+                total,
+            });
+            // Book the provenance BEFORE the sync (a per-item failure does not unmake the fact
+            // that this channel provides the name).
+            sweep.delivered.push((
+                run.session.workspace_id.clone(),
+                member.skill_id().to_owned(),
+                DeliveredSkill {
+                    name: member.name().to_owned(),
+                    review_required: false,
+                    served_version: member.served_version(),
+                    withdrawn: false,
+                    via_channels: vec![channel.clone()],
+                    via_manifest: true,
+                    assigned_by: None,
+                    kind: member.kind_tag(),
+                    harness_states: Vec::new(),
+                    picked: false,
+                },
+            ));
+            let entry = match member {
+                ChannelMember::Skill(entry) => entry,
+                // TWO arrays, one per kind. A channel carries members of both kinds, so one
+                // `dest` could not speak for them: it FREEZES the skill members' placement
+                // folders, and `mcp_dest` — and only `mcp_dest` — narrows the mcp members to
+                // config files. A channel with no `mcp_dest` does not narrow them at all.
+                ChannelMember::Server(server) => {
+                    if sc.lock.is_some() {
+                        sweep
+                            .lock_harvest
+                            .mcp
+                            .insert(server.name.clone(), server.revision_id.clone());
+                    }
+                    let narrowing = mcp_filter(
+                        sc,
+                        row.fields().mcp_dest,
+                        &server.name,
+                        &DestVoice::Channel {
+                            channel,
+                            identity: server.skill_id.as_str(),
+                        },
+                        &mut sweep.mcp_warned_dests,
+                        &mut sweep.advisories,
+                        &mut sweep.warnings,
+                    );
+                    // ONE BUNDLE, ONE BUCKET: a narrowing that maps nothing places this
+                    // member nowhere, so it is counted a failed bundle and its receipt row
+                    // stands down — exactly what a converge that could not place already
+                    // does. Marked by identity here and resolved in [`run_mcp_converge`],
+                    // where the row's index is known.
+                    if narrowing.unreachable.is_some() {
+                        sweep
+                            .mcp_zero_reach
+                            .insert((sc.label.clone(), server.skill_id.clone()));
+                    }
+                    let Some(delivered) = ServerDelivery::from_catalog(server) else {
+                        sweep.warnings.push(unreadable_server_document(
+                            &server.name,
+                            &sc.label,
+                            &run.session.workspace_name,
+                        ));
+                        sweep
+                            .failed_bundles
+                            .insert((sc.label.clone(), server.skill_id.clone()));
+                        continue;
+                    };
+                    sync_workspace_server(
+                        env,
+                        sc,
+                        run,
+                        &ServerTarget {
+                            skill_id: &server.skill_id,
+                            name: &server.name,
+                            delivered: Some(delivered),
+                            reach: narrowing.filter,
+                            unreachable: narrowing.unreachable,
+                            step,
+                        },
+                        sweep,
+                    );
+                    continue;
+                }
             };
-            let Some(catalog) = run.catalog(&mut sweep.warnings) else {
-                sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
-                return;
+            let Some(kind) = served_kind(&entry.kind, &entry.name, &sc.label, &mut sweep.warnings)
+            else {
+                continue;
             };
-            let members: Vec<String> = ch.skills.iter().map(|s| s.skill_id.clone()).collect();
-            // The LOCK's member list freezes a project channel's resolution: a member the server
-            // added since the lock was written is not taken (it arrives as a `topos update`
-            // diff), and a locked member the server no longer serves earns its own line.
-            let locked_members: Option<Vec<String>> =
-                sc.locked_members(channel).map(<[String]>::to_vec);
-            // The batch this channel converges — its members the catalog still serves, minus the
-            // ones an explicit row of the SAME scope owns (its version and fields win, and the set
-            // adds nothing), minus what `--target` narrowing skips and what an earlier source in
-            // this sweep already claimed. Every filter runs HERE, in visit order, so the activity
-            // line counts exactly what this run will sync — never "(6 of 20)" over nineteen skips.
-            // (`targets.hit`/`mention`/`claimed` mutate sweep bookkeeping; hoisting them keeps each
-            // evaluated once per member, in the same order the loop below visits.)
-            // `claimed` reads what EARLIER sources synced; a duplicate id WITHIN this channel's own
-            // index passes it every time (nothing syncs until the loop below), so the batch tracks
-            // its own picks too — a duplicate row is bookkept (hit/mention) but never counted.
-            let mut picked: HashSet<&str> = HashSet::new();
-            // ONE channel, members of BOTH kinds — matched against the catalog's two lists, in
-            // the order the batch will visit them, so the activity line counts one set.
-            let batch: Vec<ChannelMember<'_>> = members
-                .iter()
-                .filter_map(|member| {
-                    let found = catalog
-                        .skills
-                        .iter()
-                        .find(|e| &e.skill_id == member)
-                        .map(ChannelMember::Skill)
-                        .or_else(|| {
-                            catalog
-                                .mcp_servers
-                                .iter()
-                                .find(|e| &e.skill_id == member)
-                                .map(ChannelMember::Server)
-                        })?;
-                    // Archived / no current members simply are not in the catalog — nothing to
-                    // deliver, and nothing to count.
-                    if sc.plan.explicit_claims(host, workspace, found.name()) {
-                        return None;
-                    }
-                    // A frozen channel takes exactly its locked members.
-                    if let Some(locked) = &locked_members
-                        && !locked.iter().any(|m| m == found.name())
-                    {
-                        return None;
-                    }
-                    if !set_selected && !targets.hit(&[found.name()]) {
-                        return None;
-                    }
-                    sweep.mention(&sc.label, found.name());
-                    if sweep.claimed(&sc.label, found.skill_id()) {
-                        return None;
-                    }
-                    // An unparseable id can never open a phase (the sync guard refuses it first),
-                    // so it must not count either — same warning, raised where it is excluded.
-                    if SkillId::parse(found.skill_id()).is_err() {
-                        sweep.warnings.push(bad_id(found.name()));
-                        return None;
-                    }
-                    picked.insert(found.skill_id()).then_some(found)
-                })
-                .collect();
+            let display = entry.name.clone();
+            let pin = sc.lock_pin(&entry.name);
             if sc.lock.is_some() {
-                sweep.lock_harvest.channels.insert(
-                    channel.clone(),
-                    batch.iter().map(|m| m.name().to_owned()).collect(),
+                sweep.lock_harvest.skills.insert(
+                    entry.name.clone(),
+                    LockSkill {
+                        version: Some(pin.clone().unwrap_or_else(|| entry.version_id.clone())),
+                        via: Some(channel.clone()),
+                        ..LockSkill::default()
+                    },
                 );
             }
-            let total = batch.len();
-            for (position, member) in batch.into_iter().enumerate() {
-                let step = Some(Step {
-                    index: position + 1,
-                    total,
-                });
-                // Book the provenance BEFORE the sync (a per-item failure does not unmake the fact
-                // that this channel provides the name).
-                sweep.delivered.push((
-                    run.session.workspace_id.clone(),
-                    member.skill_id().to_owned(),
-                    DeliveredSkill {
-                        name: member.name().to_owned(),
-                        review_required: false,
-                        served_version: member.served_version(),
-                        withdrawn: false,
-                        via_channels: vec![channel.clone()],
-                        via_manifest: true,
-                        assigned_by: None,
-                        kind: member.kind_tag(),
-                        harness_states: Vec::new(),
-                        picked: false,
-                    },
-                ));
-                let entry = match member {
-                    ChannelMember::Skill(entry) => entry,
-                    // TWO arrays, one per kind. A channel carries members of both kinds, so one
-                    // `dest` could not speak for them: it FREEZES the skill members' placement
-                    // folders, and `mcp_dest` — and only `mcp_dest` — narrows the mcp members to
-                    // config files. A channel with no `mcp_dest` does not narrow them at all.
-                    ChannelMember::Server(server) => {
-                        if sc.lock.is_some() {
-                            sweep
-                                .lock_harvest
-                                .mcp
-                                .insert(server.name.clone(), server.revision_id.clone());
-                        }
-                        let narrowing = mcp_filter(
-                            sc,
-                            row.fields().mcp_dest,
-                            &server.name,
-                            &DestVoice::Channel {
-                                channel,
-                                identity: server.skill_id.as_str(),
-                            },
-                            &mut sweep.mcp_warned_dests,
-                            &mut sweep.advisories,
-                            &mut sweep.warnings,
-                        );
-                        // ONE BUNDLE, ONE BUCKET: a narrowing that maps nothing places this
-                        // member nowhere, so it is counted a failed bundle and its receipt row
-                        // stands down — exactly what a converge that could not place already
-                        // does. Marked by identity here and resolved in [`run_mcp_converge`],
-                        // where the row's index is known.
-                        if narrowing.unreachable.is_some() {
-                            sweep
-                                .mcp_zero_reach
-                                .insert((sc.label.clone(), server.skill_id.clone()));
-                        }
-                        let Some(delivered) = ServerDelivery::from_catalog(server) else {
-                            sweep.warnings.push(unreadable_server_document(
-                                &server.name,
-                                &sc.label,
-                                &run.session.workspace_name,
-                            ));
-                            sweep
-                                .failed_bundles
-                                .insert((sc.label.clone(), server.skill_id.clone()));
-                            continue;
-                        };
-                        sync_workspace_server(
-                            env,
-                            sc,
-                            run,
-                            &ServerTarget {
-                                skill_id: &server.skill_id,
-                                name: &server.name,
-                                delivered: Some(delivered),
-                                reach: narrowing.filter,
-                                unreachable: narrowing.unreachable,
-                                step,
-                            },
-                            sweep,
-                        );
-                        continue;
-                    }
-                };
-                let Some(kind) =
-                    served_kind(&entry.kind, &entry.name, &sc.label, &mut sweep.warnings)
-                else {
-                    continue;
-                };
-                let display = entry.name.clone();
-                let pin = sc.lock_pin(&entry.name);
-                if sc.lock.is_some() {
-                    sweep.lock_harvest.skills.insert(
-                        entry.name.clone(),
-                        LockSkill {
-                            version: Some(pin.clone().unwrap_or_else(|| entry.version_id.clone())),
-                            via: Some(channel.clone()),
-                            ..LockSkill::default()
-                        },
-                    );
-                }
-                let st = SyncTarget {
-                    target: CatalogTarget::from_entry(entry, kind),
-                    pin,
-                    display,
-                    dest: row.fields().dest,
-                    step,
-                };
-                sync_workspace_skill(env, sc, run, &st, sweep);
-            }
+            let st = SyncTarget {
+                target: CatalogTarget::from_entry(entry, kind),
+                pin,
+                display,
+                dest: row.fields().dest,
+                step,
+            };
+            sync_workspace_skill(env, sc, run, &st, sweep);
         }
-        KeyShape::RepoSet { host, owner, repo } => {
-            reconcile_repo_set(env, sc, row, host, owner, repo, targets, sweep);
-        }
-        _ => {}
     }
 }
 
@@ -4730,358 +4670,6 @@ fn forge_store_layout(ctx: &Ctx<'_>, scope: &ResolvedScope) -> crate::sidecar::L
 /// (which commit does it point at now?) and downloaded only when that answer differs from what is
 /// recorded, so a repo that has not moved costs one small request instead of an archive. A pinned
 /// row NEVER moves: a tracked import whose recorded commit prefix-matches the pin is up to date, and
-/// a pin that MOVED re-imports at the new pin. Tracked members ABSENT from the freshly-fetched
-/// archive get the ordinary undemanded cleaning (snapshot-first) in the same update that rendered
-/// them `-member`.
-#[allow(clippy::too_many_arguments)]
-fn reconcile_repo_set(
-    env: &Env<'_>,
-    sc: &ScopeCtx<'_>,
-    row: &PlanRow,
-    host: &str,
-    owner: &str,
-    repo: &str,
-    targets: &mut Targets,
-    sweep: &mut Sweep,
-) {
-    let origin = format!("{host}/{owner}/{repo}");
-    let set_selected = targets.hit(&[row.reference.as_str(), repo, row.display_name().as_str()]);
-    // Every store read/write below runs against THIS scope's store — a project row's imports
-    // live in the project's own store, so two checkouts of one repo row never share state.
-    let store_layout = forge_store_layout(env.ctx, &sc.scope);
-    let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
-    // THE ROW IS DEMAND, and it is demand BEFORE anything below can return early: the members
-    // this scope already tracks for the origin are mentioned first, so the undemanded clean can
-    // never read a failed check as a drop. A run that installs nothing must destroy nothing
-    // either — the same reason a transient fetch failure never retires a tracked member (the
-    // mention is what protects both).
-    let tracked = tracked_repo_members(&sctx, &origin);
-    for import in &tracked {
-        sweep.mention(&sc.label, &import.lock.name);
-    }
-    let pin = row.pin();
-    // The row's own placement decision (`dest = [...]`, written by a `-a` selector import): one
-    // converge SLOT per named destination dir, so a refresh keeps each copy where it was asked
-    // for instead of re-landing it in the default dir. No field = one default slot = the old
-    // behavior.
-    let row_dest = row.fields().dest.unwrap_or_default();
-    let roots = discovery_roots(env.ctx, &sc.scope);
-    let global = matches!(sc.scope, ResolvedScope::Person);
-    let slots_for = |name: &str| -> Vec<DestSlot<'_>> {
-        dest_slots(&sctx, roots.as_ref(), global, &row_dest, &tracked, name)
-    };
-    let is_tracked_name = |name: &str| slots_for(name).iter().all(|s| s.import.is_some());
-    // Tracked, AT a given commit, and its BYTES STILL ON DISK — the one predicate every
-    // "nothing to do here" decision in this arm is allowed to rest on.
-    //
-    // Presence alone is not convergence: a refresh the engine refused (local edits, a busy lock)
-    // leaves that member tracked at the OLD commit while its siblings move on. And a record alone
-    // is not bytes: the sidecar survives a wiped agent directory — an ordinary harness reinstall —
-    // so an import can claim a commit for a copy that is no longer anywhere.
-    let tracked_at = |name: &str, at: &str| {
-        let slots = slots_for(name);
-        !slots.is_empty()
-            && slots.iter().all(|s| {
-                s.import.is_some_and(|i| {
-                    commit_matches(i.origin.commit.as_deref().unwrap_or_default(), at)
-                        && doc::read_map(sctx.fs, &sctx.layout.published(&i.sid).map)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|m| {
-                                m.placements.iter().any(|pl| sctx.fs.exists(Path::new(pl)))
-                            })
-                })
-            })
-    };
-    // EVERY member the last landing recorded, each really converged at `at`.
-    //
-    // Every member, not the first one: `forge_imports` sorts by name, so a "the recorded commit
-    // matches" test reads the ALPHABETICALLY FIRST member's commit and calls the whole row settled
-    // on it. A repo holding `alpha` and `beta` where only `beta`'s refresh was refused then looks
-    // converged the moment `alpha` moves — and `beta` sits a commit behind, reporting up to date,
-    // with no event left to heal it.
-    let recorded_all_at = |at: &str| {
-        !tracked.is_empty()
-            && recorded_member_set(&tracked)
-                .is_some_and(|members| members.iter().all(|m| tracked_at(m, at)))
-    };
-
-    // A pinned row that every tracked member already satisfies is settled — no forge call, ever.
-    // (A granted origin with NOTHING tracked yet in this scope's store — a partial add landing,
-    // a fresh checkout of a trusted row — is never "satisfied": the fetch below converges it.)
-    //
-    // "Every tracked member" is NOT "every member": a batch that landed two of five leaves two
-    // rows, both at the pin, and would read as settled forever. So the predicate compares the
-    // tracked names against the member set RECORDED at landing — the archive's own contents at
-    // that commit — and a missing member makes the explicit update refetch and converge it.
-    //
-    // An import that recorded NO member set is not evidence of completeness either: "nothing is
-    // missing" and "nothing is known" are different answers, and reading the second as the first
-    // pins an import to whatever partial landing it happens to hold, forever. So the absent record
-    // is UNSETTLED and the row keeps converging until a landing writes one.
-    let members_complete = recorded_member_set(&tracked)
-        .is_some_and(|recorded| recorded.iter().all(|m| is_tracked_name(m)));
-    let pin_satisfied = pin.as_ref().is_some_and(|p| {
-        !tracked.is_empty()
-            && members_complete
-            && tracked
-                .iter()
-                .all(|i| commit_matches(i.origin.commit.as_deref().unwrap_or_default(), p))
-    });
-
-    let converge_in_place = |sweep: &mut Sweep, targets: &mut Targets| {
-        for import in &tracked {
-            if !set_selected && !targets.hit(&[import.lock.name.as_str()]) {
-                continue;
-            }
-            sweep.push(plain_row(
-                &import.lock.name,
-                PullAction::UpToDate,
-                None,
-                &sc.label,
-            ));
-        }
-    };
-    let Some(lane) = env.forge.filter(|_| !pin_satisfied) else {
-        // Not dialing this round (the clock says wait), or settled: converge in place.
-        converge_in_place(sweep, targets);
-        return;
-    };
-    let git_ref = pin.clone().unwrap_or_default();
-    if let Some(hold) = lane.hold(&origin, &git_ref, &sc.label) {
-        forge_hold_line(sc, &row.reference, &hold, sweep);
-        converge_in_place(sweep, targets);
-        return;
-    }
-
-    let spec = crate::source::RemoteSpec {
-        host: crate::source::GitHost::GitHub,
-        owner: owner.to_owned(),
-        repo: repo.to_owned(),
-        git_ref: pin.clone(),
-        subdir: None,
-    };
-    // THE CHEAP CHECK. A floating row asks what the default branch points at now; if that is what
-    // is already installed and the recorded member list is fully landed, the round is over for
-    // this source without a byte of archive moving. A PINNED row skips the probe: it is either
-    // settled above (and never dials) or must fetch the pinned bytes regardless.
-    if pin.is_none() {
-        let head = match lane.probe(&origin, &git_ref, &spec) {
-            Ok(h) => h,
-            Err(e) => {
-                // Ending here is the point: falling through to the archive would pay a second
-                // round-trip for an answer the first one already failed to get.
-                //
-                // What failed is the SOURCE, not one member of it, so the row's own reference is
-                // both its identity and the word the line says — it names a repository, and two
-                // rows of one scope never share one.
-                note_item_failure(
-                    env.ctx,
-                    &mut sweep.warnings,
-                    &mut sweep.failed_bundles,
-                    &sc.label,
-                    &row.reference,
-                    &row.reference,
-                    &e,
-                );
-                converge_in_place(sweep, targets);
-                return;
-            }
-        };
-        renamed_line(&origin, &head, sweep);
-        let unchanged = recorded_all_at(&head.commit)
-            // …or this scope already finished with this exact head AND its store still proves it.
-            // The mark answers the one case nothing installed can — a repository holding no skills
-            // at all — but it is machine state vouching for a checkout's bytes, so it is never
-            // taken on trust.
-            || lane.settled_here(&origin, &git_ref, &sc.label, &head.commit, tracked_at);
-        if unchanged {
-            converge_in_place(sweep, targets);
-            return;
-        }
-    }
-    let targz = match lane.fetch(&origin, &git_ref, &spec) {
-        Ok(t) => t,
-        Err(e) => {
-            note_item_failure(
-                env.ctx,
-                &mut sweep.warnings,
-                &mut sweep.failed_bundles,
-                &sc.label,
-                &row.reference,
-                &row.reference,
-                &e,
-            );
-            converge_in_place(sweep, targets);
-            return;
-        }
-    };
-    let tree = match crate::git_source::extract_tree(&targz) {
-        Ok(t) => t,
-        Err(e) => {
-            // An archive that arrived and would not decode is a FAILED check, not a passed one:
-            // the request succeeded, the answer did not.
-            lane.note_fault(&origin, &git_ref, &e);
-            note_item_failure(
-                env.ctx,
-                &mut sweep.warnings,
-                &mut sweep.failed_bundles,
-                &sc.label,
-                &row.reference,
-                &row.reference,
-                &e,
-            );
-            converge_in_place(sweep, targets);
-            return;
-        }
-    };
-    let resolved = tree.commit.clone().unwrap_or_default();
-    lane.note_landed(&origin, &git_ref, &resolved);
-    let recorded = tracked
-        .first()
-        .and_then(|i| i.origin.commit.clone())
-        .unwrap_or_default();
-    let discovered = tree.skill_names(None, repo);
-    for name in &discovered {
-        sweep.mention(&sc.label, name);
-    }
-    // Every discovered member really sits on the fetched commit: settled. (An UNTRACKED member at
-    // the same commit — a partial add landing — still installs below.)
-    //
-    // A PINNED row reaches this every due round, because a pin nothing satisfies never settles
-    // above. Testing presence here rather than the commit meant a member whose refresh was refused
-    // was skipped before the install loop could try again — and a pin never moves, so unlike the
-    // floating row there was no later push to heal it: a permanent silent non-update, re-fetching
-    // the same archive every interval to skip the same member.
-    //
-    // "Nothing to do" also means nothing to UNDO: a member the archive no longer holds has to be
-    // retired by the loop below, so a row whose repository dropped something is never settled here.
-    // (The old commit comparison guarded that by accident; a repository that emptied out entirely
-    // would otherwise short-circuit past its own cleanup.)
-    let nothing_to_retire = tracked.iter().all(|i| {
-        discovered
-            .iter()
-            .any(|d| i.lock.name == *d || subdir_leaf(&i.origin).as_deref() == Some(d))
-    });
-    if !resolved.is_empty()
-        && nothing_to_retire
-        && discovered.iter().all(|d| tracked_at(d, &resolved))
-    {
-        for import in &tracked {
-            if !set_selected && !targets.hit(&[import.lock.name.as_str()]) {
-                continue;
-            }
-            sweep.push(plain_row(
-                &import.lock.name,
-                PullAction::UpToDate,
-                None,
-                &sc.label,
-            ));
-        }
-        return;
-    }
-    // Members the NEW archive no longer holds leave with it: the ordinary undemanded clean
-    // (snapshot-first — an edited copy is committed into the store before any dir goes), in this
-    // scope's own store. The `-member` the receipt line rendered is thereby true on disk.
-    for import in &tracked {
-        let still_held = discovered
-            .iter()
-            .any(|d| import.lock.name == *d || subdir_leaf(&import.origin).as_deref() == Some(d));
-        if still_held || (!set_selected && !targets.hit(&[import.lock.name.as_str()])) {
-            continue;
-        }
-        match clean_written_placements(
-            &sctx,
-            &import.sid,
-            matches!(sc.scope, ResolvedScope::Person),
-        ) {
-            Ok(Some(name)) => sweep.push(plain_row(&name, PullAction::Withdrawn, None, &sc.label)),
-            Ok(None) => {}
-            Err(e) => note_item_failure(
-                env.ctx,
-                &mut sweep.warnings,
-                &mut sweep.failed_bundles,
-                &sc.label,
-                import.sid.as_str(),
-                &import.lock.name,
-                &e,
-            ),
-        }
-    }
-    let decisions_before = sweep.decisions.len();
-    for name in &discovered {
-        if !set_selected && !targets.hit(&[name.as_str()]) {
-            continue;
-        }
-        let slots = slots_for(name);
-        // EVERY slot's copy already at the fetched commit AND still on disk is settled — only the
-        // unfilled, moved, or vanished ones go through the install/refresh below. The same rule as
-        // every other "nothing to do" test in this arm, for the same reason: a record whose bytes
-        // were wiped out from under it is not a copy.
-        if !resolved.is_empty() && tracked_at(name, &resolved) {
-            let landed = slots
-                .first()
-                .and_then(|s| s.import)
-                .map_or_else(|| name.clone(), |i| i.lock.name.clone());
-            sweep.push(plain_row(&landed, PullAction::UpToDate, None, &sc.label));
-            continue;
-        }
-        install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, name, &slots, sweep);
-    }
-    // The commit motion this update landed — a DISCLOSURE of what worked, beside the rows that
-    // carry the members. It must not ride the channel the summary counts as failures, and it is
-    // said only NOW, once every member has had its turn: a member that stood down for a DECISION
-    // did not move, so the line does not list it as one that did. With every member standing down
-    // there is nothing left for this line to add — the decision rows already say, in words a
-    // person can act on, that the source has a newer version.
-    let blocked: Vec<String> = sweep.decisions[decisions_before..]
-        .iter()
-        .map(|d| d.name.clone())
-        .collect();
-    let all_blocked = !discovered.is_empty() && discovered.iter().all(|d| blocked.contains(d));
-    if !recorded.is_empty()
-        && !resolved.is_empty()
-        && !commit_matches(&recorded, &resolved)
-        && !all_blocked
-    {
-        sweep.disclosures.push(git_updated_line(
-            &origin,
-            &recorded,
-            &resolved,
-            &tracked,
-            &discovered,
-            &blocked,
-        ));
-    }
-    // The pass finished. CONVERGENCE IS RE-READ FROM THE STORE, not inferred from the plan: the
-    // slot view above was captured before any of the installs ran, and it only ever asked whether
-    // a member was tracked at all. A refresh the engine REFUSED — a member carrying local edits, a
-    // lock it could not take — leaves that member tracked at the OLD commit and would otherwise
-    // pass, writing a settlement mark over work that never happened and suppressing the retry
-    // until upstream moved again. So the mark is written only when every discovered member really
-    // is at the resolved head, which is also true, vacuously and correctly, of a head holding none.
-    let converged = {
-        let landed = tracked_repo_members(&sctx, &origin);
-        let at_head = |name: &str| {
-            let slots = dest_slots(&sctx, roots.as_ref(), global, &row_dest, &landed, name);
-            !slots.is_empty()
-                && slots.iter().all(|s| {
-                    s.import.is_some_and(|i| {
-                        commit_matches(i.origin.commit.as_deref().unwrap_or_default(), &resolved)
-                    })
-                })
-        };
-        discovered.iter().all(|d| at_head(d))
-    };
-    if converged {
-        lane.note_settled(&origin, &git_ref, &sc.label, &resolved, &discovered);
-    }
-}
-
-/// ONE skill inside a repo, by its leaf directory name (or the literal `subdir` the row spells).
-/// The ORIGIN must already be granted in the machine's trust registry (the add gate's ceremony
-/// covered the source); a new member of a trusted origin then flows on explicit update.
-#[allow(clippy::too_many_arguments)]
 /// Whether an import's placed bytes still stand on disk — the commit alone is a record, and a
 /// record over a wiped agent directory must converge, never read as current (the same proof the
 /// set arm's `tracked_at` runs).
@@ -5753,51 +5341,6 @@ fn renamed_line(origin: &str, head: &RepoHead, sweep: &mut Sweep) {
     }
 }
 
-/// The ONE receipt line a moved git source earns: what it was, what it is, and which members that
-/// moved — a source that silently swaps bytes under an agent is exactly what this line prevents.
-///
-/// `blocked` names the members that stood down for a DECISION. They are dropped from BOTH readings:
-/// nothing of theirs moved, so they are neither a member that changed nor — the mistake worth
-/// guarding — a member that left.
-fn git_updated_line(
-    origin: &str,
-    old: &str,
-    new: &str,
-    tracked: &[ForgeImport],
-    discovered: &[String],
-    blocked: &[String],
-) -> Message {
-    let had: Vec<&str> = tracked
-        .iter()
-        .map(|i| i.lock.name.as_str())
-        .filter(|n| !blocked.iter().any(|b| b == n))
-        .collect();
-    let mut parts: Vec<String> = Vec::new();
-    for name in discovered.iter().filter(|d| !blocked.contains(d)) {
-        if had.contains(&name.as_str()) {
-            parts.push(format!("~{name}"));
-        } else {
-            parts.push(format!("+{name}"));
-        }
-    }
-    for name in &had {
-        if !discovered.iter().any(|d| d == name) {
-            parts.push(format!("-{name}"));
-        }
-    }
-    let mut line = format!(
-        "{origin}: moved from {} to {}",
-        short_commit(old),
-        short_commit(new)
-    );
-    if !parts.is_empty() {
-        line.push_str("; bundles: ");
-        line.push_str(&parts.join(" "));
-    }
-    line.push('.');
-    crate::message::disclosure("GIT_UPDATED", line)
-}
-
 /// A commit's first 12 characters — enough to recognize, short enough to read.
 fn short_commit(c: &str) -> &str {
     &c[..c.len().min(12)]
@@ -5864,28 +5407,6 @@ pub(crate) fn tracked_repo_members(ctx: &Ctx<'_>, origin_source: &str) -> Vec<Fo
         .into_iter()
         .filter(|i| i.origin.source == origin_source)
         .collect()
-}
-
-/// The MEMBER SET a pinned repo-set row must see landed before it is settled: the union of the
-/// member lists the tracked imports recorded at landing. `None` when NO tracked import records one
-/// — the caller then cannot tell a partial landing from a complete one and keeps the weaker
-/// predicate rather than inventing a fact.
-fn recorded_member_set(tracked: &[ForgeImport]) -> Option<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
-    let mut any = false;
-    for import in tracked {
-        if import.members.is_empty() {
-            continue;
-        }
-        any = true;
-        out.extend(import.members.iter().cloned());
-    }
-    if !any {
-        return None;
-    }
-    out.sort();
-    out.dedup();
-    Some(out)
 }
 
 /// The last segment of a recorded in-repo path (`skills/alpha` → `alpha`).
@@ -6979,44 +6500,6 @@ pub(crate) fn orphan_fact(
     }
 }
 
-/// A row-dropped bundle's by-choice clean over ONE store: exactly the placements topos itself
-/// WROTE (`materialized_sha` present and NOT the `adopted_source` marker — the user's own
-/// adopted-in-place dir carries a baseline sha for drift detection but is never deleted),
-/// snapshot-first; the sync doc is NOT reset. With `exclude_project` (the HOME store's posture)
-/// placements inside some project checkout are left alone — a project manifest may still demand
-/// the bundle there, and that checkout reconciles lazily when visited; a PROJECT store passes
-/// `false` (its placements are its own). `Ok(Some(name))` when something was actually cleaned.
-fn clean_written_placements(
-    ctx: &Ctx<'_>,
-    sid: &SkillId,
-    exclude_project: bool,
-) -> Result<Option<String>, ClientError> {
-    let sp = ctx.layout.published(sid);
-    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
-    let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
-    let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
-    let (Some(lock), Some(map)) = (lock, map) else {
-        return Ok(None);
-    };
-    let targets: Vec<usize> = map
-        .placements
-        .iter()
-        .zip(&map.placement_state)
-        .enumerate()
-        .filter(|(_, (p, st))| {
-            st.materialized_sha.is_some()
-                && !st.adopted_source
-                && (!exclude_project || !is_project_placement(ctx, Path::new(p)))
-        })
-        .map(|(i, _)| i)
-        .collect();
-    if targets.is_empty() {
-        return Ok(None);
-    }
-    clean_placements(ctx, sid, &lock, &map, &targets)?;
-    Ok(Some(lock.name))
-}
-
 /// What one BY-CHOICE clean concluded: the bundle's name, the destinations actually uninstalled,
 /// and the edited (or unreadable) copies kept in place — display paths, `~`-abbreviated.
 pub(super) struct ByChoiceClean {
@@ -7222,7 +6705,6 @@ pub(crate) struct ForgeImport {
     pub sid: SkillId,
     pub lock: Lock,
     pub origin: topos_types::results::SkillOrigin,
-    pub members: Vec<String>,
 }
 
 /// Whether a reported action MOVED BYTES on disk — the difference between an invocation that did
@@ -7265,7 +6747,6 @@ pub(crate) fn forge_imports(ctx: &Ctx<'_>) -> Vec<ForgeImport> {
             sid,
             lock,
             origin: origin.origin,
-            members: origin.members,
         });
     }
     out.sort_by(|a, b| a.lock.name.cmp(&b.lock.name));
