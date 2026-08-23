@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
 import type { LastSetLine } from "@/components/policy/last-set-line";
+import { type MachineTokenView, MachineTokensPanel } from "@/components/policy/machine-tokens-panel";
 import { McpGatewayPolicyPanel } from "@/components/policy/mcp-gateway-panel";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
@@ -22,6 +23,11 @@ import {
   workspacePolicyOf,
 } from "@/lib/db/queries.policy.server";
 import { setReviewDefault } from "@/lib/db/queries.server";
+import {
+  machineTokensOf,
+  mintMachineToken,
+  revokeMachineToken,
+} from "@/lib/db/queries.tokens.server";
 import { useWsPath } from "@/lib/ws-path";
 import { workspaceAddress } from "@/lib/ws-url.server";
 
@@ -56,6 +62,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     lastSessionApproval,
     lastMaxAge,
     lastMcpGateway,
+    machineTokens,
   ] = await Promise.all([
     workspacePolicyOf(actor),
     lastAuditEventOfKind(actor, "policy_review_default"),
@@ -66,10 +73,20 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     lastAuditEventOfKind(actor, "policy_session_approval"),
     lastAuditEventOfKind(actor, "policy_session_max_age"),
     lastAuditEventOfKind(actor, "policy_mcp_gateway"),
+    isOwner ? machineTokensOf(workspace.id) : Promise.resolve([]),
   ]);
   return {
     isOwner,
     registrationGoverns,
+    machineTokens: machineTokens.map(
+      (t): MachineTokenView => ({
+        tokenId: t.tokenId,
+        name: t.name,
+        createdAt: t.createdAt.toISOString(),
+        lastUsedAt: t.lastUsedAt === null ? null : t.lastUsedAt.toISOString(),
+        serviceSessions: t.serviceSessions,
+      }),
+    ),
     slug: workspace.name,
     shareAddress: workspaceAddress(request, workspace.name),
     reviewRequired: policy.protectionDefault === "reviewed",
@@ -123,6 +140,12 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "set-session-max-age") {
     return sessionMaxAgeIntent(request, ws, formData);
+  }
+  if (intent === "mint-token") {
+    return await mintTokenIntent(request, workspace.id, formData);
+  }
+  if (intent === "revoke-token") {
+    return await revokeTokenIntent(request, workspace.id, formData);
   }
   if (intent === "set-mcp-gateway") {
     return mcpGatewayIntent(request, ws, formData);
@@ -263,6 +286,61 @@ async function sessionApprovalIntent(request: Request, ws: string, formData: For
   return { intent: "set-session-approval" as const, ...result };
 }
 
+/**
+ * Mint a machine token — owner-gated like every knob. The reply carries the plaintext EXACTLY
+ * ONCE (nothing stores it); the audit row lands in the mint's own transaction.
+ */
+async function mintTokenIntent(request: Request, ws: string, formData: FormData) {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const name = String(formData.get("token_name") ?? "").trim();
+  if (name === "" || name.length > 80) {
+    return data(
+      {
+        intent: "mint-token" as const,
+        status: "error" as const,
+        error: "Name the token (80 characters or fewer).",
+      },
+      { status: 400 },
+    );
+  }
+  try {
+    const minted = await mintMachineToken(ws, name, {
+      userId: owner.userId,
+      display: owner.display,
+    });
+    return { intent: "mint-token" as const, status: "ok" as const, tokenName: name, secret: minted.secret };
+  } catch {
+    return data(
+      { intent: "mint-token" as const, status: "error" as const, error: SERVER_ERROR },
+      { status: 500 },
+    );
+  }
+}
+
+/** Revoke = delete; the token's service sessions cascade away. Owner-gated, audited. */
+async function revokeTokenIntent(request: Request, ws: string, formData: FormData) {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const tokenId = String(formData.get("token_id") ?? "");
+  try {
+    const outcome = await revokeMachineToken(ws, tokenId, {
+      userId: owner.userId,
+      display: owner.display,
+    });
+    if (outcome === "not_found") {
+      return data(
+        { intent: "revoke-token" as const, status: "error" as const, error: "Already revoked." },
+        { status: 404 },
+      );
+    }
+    return { intent: "revoke-token" as const, status: "ok" as const };
+  } catch {
+    return data(
+      { intent: "revoke-token" as const, status: "error" as const, error: SERVER_ERROR },
+      { status: 500 },
+    );
+  }
+}
+
 export default function WorkspaceSettings() {
   const {
     isOwner,
@@ -276,6 +354,7 @@ export default function WorkspaceSettings() {
     sessionMaxAgeMs,
     mcpGateway,
     lastSet,
+    machineTokens,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
@@ -318,6 +397,7 @@ export default function WorkspaceSettings() {
         mcpGateway={mcpGateway}
         lastSet={lastSet.mcpGateway}
       />
+      {isOwner && <MachineTokensPanel tokens={machineTokens} />}
       {registrationGoverns && (
         <RegistrationPanel
           isOwner={isOwner}

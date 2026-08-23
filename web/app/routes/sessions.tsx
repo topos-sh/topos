@@ -3,6 +3,7 @@ import { Form, Link, useActionData, useLoaderData, useNavigation } from "react-r
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime, shortDevice } from "@/components/format";
 import { SettingsTabs } from "@/components/settings-tabs";
+import { workspaceServiceSessions } from "@/lib/db/queries.tokens.server";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
@@ -33,7 +34,19 @@ export function meta({ params }: { params: { ws?: string } }) {
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { actor } = await requireMemberInScope(request, params);
-  return { view: await workspaceSessions(actor), isOwner: actor.role === "owner" };
+  const view = await workspaceSessions(actor);
+  // Service machines (CI runners on a machine token) are workspace facts, not a person's — they
+  // ride only the whole-workspace view the reviewer+ roles see.
+  const serviceSessions = view.wholeWorkspace
+    ? (await workspaceServiceSessions(actor.workspaceId)).map((row) => ({
+        serviceSessionId: row.serviceSessionId,
+        tokenName: row.tokenName,
+        displayName: row.displayName,
+        lastSeenAtMs: row.lastSeenAt.getTime(),
+        appliedCount: row.appliedCount,
+      }))
+    : [];
+  return { view, serviceSessions, isOwner: actor.role === "owner" };
 }
 
 /**
@@ -79,7 +92,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 export default function SessionsPage() {
-  const { view, isOwner } = useLoaderData<typeof loader>();
+  const { view, serviceSessions, isOwner } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const wsPath = useWsPath();
   const active = view.sessions.filter((s) => s.status === "active");
@@ -122,6 +135,7 @@ export default function SessionsPage() {
           isOwner={isOwner}
           stalenessWindowMs={view.stalenessWindowMs}
         />
+        {serviceSessions.length > 0 && <ServiceMachines rows={serviceSessions} />}
       </div>
     </TooltipProvider>
   );
@@ -729,3 +743,49 @@ function formatWindow(ms: number): string {
   const days = Math.round(ms / 86_400_000);
   return days === 1 ? "1 day" : `${days} day`;
 }
+
+/**
+ * Service machines — runs seen on a machine token (CI, VMs, sandboxes), listed apart from
+ * people's machines and collapsed by default: they come and go on their own (idle rows expire),
+ * so they inform rather than demand attention. Tokens are managed in Settings.
+ */
+function ServiceMachines({
+  rows,
+}: {
+  rows: {
+    serviceSessionId: string;
+    tokenName: string;
+    displayName: string;
+    lastSeenAtMs: number;
+    appliedCount: number | null;
+  }[];
+}) {
+  return (
+    <details className="group">
+      <summary className="cursor-pointer select-none text-dim text-sm">
+        Service machines ({rows.length}) — CI and other runs on a machine token
+      </summary>
+      <Card className="mt-3 divide-y divide-line-soft px-4 py-1">
+        {rows.map((row) => (
+          <div
+            key={row.serviceSessionId}
+            className="flex items-center justify-between gap-3 py-2"
+          >
+            <div className="min-w-0">
+              <p className="truncate text-ink text-sm font-medium">{row.displayName}</p>
+              <p className="text-dim text-sm">
+                token <span className="font-mono">{row.tokenName}</span>
+                {row.appliedCount !== null &&
+                  ` · ${row.appliedCount} ${row.appliedCount === 1 ? "bundle" : "bundles"} applied`}
+              </p>
+            </div>
+            <span className="shrink-0 text-faint text-sm">
+              {relativeTime(new Date(row.lastSeenAtMs))}
+            </span>
+          </div>
+        ))}
+      </Card>
+    </details>
+  );
+}
+
