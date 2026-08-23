@@ -106,8 +106,10 @@ A committed `topos.toml` can freeze that per entry instead — `dest` names the 
 project-relative folders a line delivers into, and detection stops mattering for it:
 
 ```toml title="topos.toml"
-[bundles]
-"topos.sh/acme/code-review" = { version = "*", dest = ["prompts/skills"] }
+workspace = "topos.sh/acme"
+
+[skills]
+code-review = { dest = ["prompts/skills"] }
 ```
 
 Each entry must stay inside the checkout — relative, no `..`, not absolute — because a file

@@ -1768,6 +1768,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "publish".to_owned(),
         ok: true,
         data: serde_json::to_value(PublishData {
+            project_locked_version: None,
             manifest: None,
             reference: None,
             converted_from: None,
