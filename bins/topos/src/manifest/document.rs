@@ -1254,11 +1254,9 @@ pub(crate) fn spell_row(
                 .unwrap_or(raw)
                 .to_string()
         }),
-        KeyShape::RepoSkill { skill, .. } => value
-            .fields()
-            .name
-            .clone()
-            .unwrap_or_else(|| skill.clone()),
+        KeyShape::RepoSkill { skill, .. } => {
+            value.fields().name.clone().unwrap_or_else(|| skill.clone())
+        }
         KeyShape::RepoSet { .. } => return Err(repo_set_unspellable(reference)),
     };
     Ok(RowSpelling {
@@ -1455,13 +1453,12 @@ impl ManifestEditor {
 
         // Edited in place, wherever it currently is spelled (its section may disagree with the
         // asked kind — the standing spelling wins; `fmt` reorganizes).
-        if let Some((section, key)) = self.locate(reference) {
-            if let Some(Item::Table(t)) = self.doc.get_mut(section.header())
-                && let Some(item) = t.get_mut(&key)
-            {
-                *item = spelling.item;
-                return Ok(());
-            }
+        if let Some((section, key)) = self.locate(reference)
+            && let Some(Item::Table(t)) = self.doc.get_mut(section.header())
+            && let Some(item) = t.get_mut(&key)
+        {
+            *item = spelling.item;
+            return Ok(());
         }
 
         let header = spelling.section.header();
@@ -1816,12 +1813,18 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
 
     #[test]
     fn bare_names_need_the_workspace_line() {
-        let e = parse_manifest("[skills]\ncode-review = \"latest\"\n", ManifestScope::Project)
-            .unwrap_err();
+        let e = parse_manifest(
+            "[skills]\ncode-review = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
         assert!(e.message.contains("workspace = "), "{e}");
         // The machine file teaches the full spelling instead.
-        let e = parse_manifest("[skills]\ncode-review = \"latest\"\n", ManifestScope::Global)
-            .unwrap_err();
+        let e = parse_manifest(
+            "[skills]\ncode-review = \"latest\"\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
         assert!(e.message.contains("in full"), "{e}");
         // A repo/path row needs no workspace line in either file.
         let doc = parse_project("[skills]\nx = \"github:o/r\"\ny = \"./tools/y\"\n");
@@ -1860,11 +1863,8 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
         )
         .unwrap_err();
         assert!(e.message.contains("latest"), "{e}");
-        let e = parse_manifest(
-            "[workspaces]\nacme = \"latest\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
+        let e =
+            parse_manifest("[workspaces]\nacme = \"latest\"\n", ManifestScope::Global).unwrap_err();
         assert!(e.message.contains("workspace address"), "{e}");
     }
 
@@ -1903,11 +1903,14 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
     fn source_values_validate_their_pins() {
         let doc = parse_project("[skills]\nx = \"github:o/r#deadbeef00\"\n");
         assert_eq!(doc.rows[0].value, EntryValue::Pin("deadbeef00".into()));
-        let e = parse_manifest("[skills]\nx = \"github:o/r#main\"\n", ManifestScope::Project)
-            .unwrap_err();
+        let e = parse_manifest(
+            "[skills]\nx = \"github:o/r#main\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
         assert!(e.message.contains("commit hash"), "{e}");
-        let e = parse_manifest("[skills]\nx = \"github:oops\"\n", ManifestScope::Project)
-            .unwrap_err();
+        let e =
+            parse_manifest("[skills]\nx = \"github:oops\"\n", ManifestScope::Project).unwrap_err();
         assert!(e.message.contains("github:<owner>/<repo>"), "{e}");
         // bitbucket rides the same shape; `.git` strips.
         let doc = parse_project("[skills]\nx = \"bitbucket:o/r.git\"\n");
@@ -1983,7 +1986,10 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
             ),
         ] {
             let mut ed = ManifestEditor::open(&input, ManifestScope::Global).unwrap();
-            assert!(ed.row(reference).is_none(), "corpus rows must not pre-exist");
+            assert!(
+                ed.row(reference).is_none(),
+                "corpus rows must not pre-exist"
+            );
             ed.set_row(reference, &value, kind).unwrap();
             assert!(ed.row(reference).is_some());
             assert!(ed.remove_row(reference));

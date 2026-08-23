@@ -671,10 +671,6 @@ fn pick_copy(
 /// copies left alone — populated when the folder was a CHOICE: a `--dest` among several edited
 /// copies, or (through `cross_scope`) a copy in a scope other than the one the command stands in.
 ///
-/// With a single edited copy in the standing scope there is nothing to say: that copy IS the draft,
-/// a `--dest` naming it asks for exactly what a bare publish would do, and a `from …` line would
-/// name a folder the reader never had to choose between.
-
 /// The version the CWD project's `topos.lock` holds this bundle at, when it is not the one just
 /// shipped — the repo keeps running its locked version until someone runs `topos update` there,
 /// and the receipt says so the first time rather than letting the author wonder.
@@ -691,6 +687,13 @@ fn project_locked_behind(ctx: &Ctx<'_>, name: &str, shipped: &str) -> Option<Str
     (locked != shipped).then_some(locked)
 }
 
+/// The two disclosure fields a publish carries — the folder shipped FROM and the other edited
+/// copies left alone — populated when the folder was a CHOICE: a `--dest` among several edited
+/// copies, or (through `cross_scope`) a copy in a scope other than the one the command stands in.
+///
+/// With a single edited copy in the standing scope there is nothing to say: that copy IS the draft,
+/// a `--dest` naming it asks for exactly what a bare publish would do, and a `from …` line would
+/// name a folder the reader never had to choose between.
 fn from_disclosure(
     picked: Option<&super::dest_select::SelectedCopy>,
     cross_scope: Option<String>,
