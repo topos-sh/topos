@@ -79,6 +79,7 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     // whole session-start hook on an unknown field.
     hook_dialect: None,
     root_seed: None,
+    command_sentinel: true,
     live_kind: CurrencyKind::SessionStart, // what fires when live; never reported live (see above)
     placed_state: TriggerState::Inactive,
     note: Some(NOTE),

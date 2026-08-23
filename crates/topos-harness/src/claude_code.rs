@@ -63,6 +63,7 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     handler_async: true,
     hook_dialect: Some("claude-code"),
     root_seed: None,
+    command_sentinel: true,
     live_kind: CurrencyKind::SessionStart,
     placed_state: TriggerState::Active,
     note: None,

@@ -28,8 +28,8 @@ use topos_types::{CurrencyKind, TriggerState};
 use crate::{ConfigStore, trigger_report};
 
 use super::{
-    EditPlan, PLAIN_SWEEP, SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerArtifact,
-    TriggerReport,
+    EditPlan, GUARDED_SWEEP, PLAIN_SWEEP, SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter,
+    TriggerArtifact, TriggerReport,
 };
 
 /// One instance's parameterization of the shared JSON-hooks machinery.
@@ -71,9 +71,14 @@ pub(crate) struct JsonHooksSpec {
     /// command unmarked, which is what earns the schema-conservative answer a strict validator
     /// accepts (see [`SHELL_SWEEP_LINE`]).
     pub(crate) hook_dialect: Option<&'static str>,
-    /// A top-level key seeded ONLY when the file is created from scratch (e.g. a schema
-    /// `version`); an existing file's own value is never touched.
+    /// A top-level key seeded whenever it is ABSENT (e.g. a schema `version` a harness's own
+    /// validator requires); an existing value is never touched.
     pub(crate) root_seed: Option<(&'static str, u64)>,
+    /// Whether the registered command carries the trailing ownership [`SENTINEL`] comment.
+    /// `false` for a surface that may append a payload AFTER the command text (older Cursor
+    /// builds deliver the hook payload as a heredoc — a trailing `#` comment swallows it);
+    /// ownership there keys on the exact canonical command instead.
+    pub(crate) command_sentinel: bool,
     /// What fires when this instance's trigger is provably live.
     pub(crate) live_kind: CurrencyKind,
     /// What a successful registration honestly reports: `Active` only where the written artifact
@@ -228,18 +233,22 @@ pub(super) fn parse(current: Option<&[u8]>) -> Parsed {
 }
 
 fn plan_install(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPlan {
-    let (mut root, fresh) = match parse(current) {
-        Parsed::Fresh => (Value::Object(Map::new()), true),
-        Parsed::Value(v) => (v, false),
+    let mut root = match parse(current) {
+        Parsed::Fresh => Value::Object(Map::new()),
+        Parsed::Value(v) => v,
         Parsed::Malformed => return EditPlan::Leave(TriggerState::Degraded, None),
     };
-    // Seed the schema key (e.g. `version`) only on a from-scratch file — an existing file's own
-    // value, or its deliberate absence, is the user's.
-    if fresh
-        && let Some((key, seed)) = spec.root_seed
+    // Seed the schema key (e.g. `version`) whenever it is ABSENT — an existing VALUE is the
+    // user's and is never touched, but absence is a fault to heal, not a choice to respect:
+    // Cursor's own config validator refuses the WHOLE file (the user's hooks included) when the
+    // numeric `version` is missing, proven against its shipped loader (2026-08).
+    let mut seeded = false;
+    if let Some((key, seed)) = spec.root_seed
         && let Some(obj) = root.as_object_mut()
+        && !obj.contains_key(key)
     {
         obj.insert(key.to_owned(), Value::from(seed));
+        seeded = true;
     }
     // Navigate to (creating) the event entries; a wrong-typed key anywhere fails closed.
     let Some(entries) = entries_mut(&mut root, spec) else {
@@ -255,7 +264,7 @@ fn plan_install(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPla
             } else {
                 migrate_flat(spec, entries)
             };
-            if changed {
+            if changed || seeded {
                 match serialize(&root) {
                     Some(bytes) => EditPlan::Write(bytes, spec.placed_state, spec.note),
                     None => EditPlan::Leave(TriggerState::Degraded, None),
@@ -295,7 +304,7 @@ fn plan_remove(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPlan
             if spec.grouped {
                 scrub_grouped(spec, entries);
             } else {
-                entries.retain(|e| !command_of(spec, e).is_some_and(is_managed_command));
+                entries.retain(|e| !command_of(spec, e).is_some_and(|c| managed(spec, c)));
             }
             prune_empty(&mut root, spec);
             match serialize(&root) {
@@ -364,7 +373,7 @@ fn commands<'v>(spec: &JsonHooksSpec, entries: &'v [Value]) -> Vec<&'v str> {
 fn classify(spec: &JsonHooksSpec, entries: &[Value]) -> Classification {
     let mut unmanaged = false;
     for cmd in commands(spec, entries) {
-        if is_managed_command(cmd) {
+        if managed(spec, cmd) {
             return Classification::Managed;
         }
         if super::is_hand_rolled_sweep(cmd) {
@@ -391,15 +400,25 @@ pub(super) fn is_managed_command(cmd: &str) -> bool {
     cmd.contains(SENTINEL)
 }
 
+/// The spec-aware ownership question this family asks: the sentinel — or, on a sentinel-less
+/// surface, the exact canonical sweep line (a hand-written identical line adopts as ours, which
+/// a rewrite-in-place makes idempotent).
+fn managed(spec: &JsonHooksSpec, cmd: &str) -> bool {
+    is_managed_command(cmd) || (!spec.command_sentinel && cmd == sweep_command(spec))
+}
+
 /// The shell sweep line this instance registers: the shared [`SHELL_SWEEP_LINE`] verbatim, or — for
 /// a harness that declares a hook dialect — the same line with its `--hook <harness>` marker on the
 /// sweep. The two spellings can therefore never drift: there is one line, plus one declared marker.
 pub(crate) fn sweep_command(spec: &JsonHooksSpec) -> String {
+    let base = if spec.command_sentinel {
+        SHELL_SWEEP_LINE
+    } else {
+        GUARDED_SWEEP
+    };
     match spec.hook_dialect {
-        None => SHELL_SWEEP_LINE.to_owned(),
-        Some(harness) => {
-            SHELL_SWEEP_LINE.replace(PLAIN_SWEEP, &format!("{PLAIN_SWEEP} --hook {harness}"))
-        }
+        None => base.to_owned(),
+        Some(harness) => base.replace(PLAIN_SWEEP, &format!("{PLAIN_SWEEP} --hook {harness}")),
     }
 }
 
@@ -459,10 +478,10 @@ fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
         };
         let ours = handlers
             .iter()
-            .filter(|h| command_of(spec, h).is_some_and(is_managed_command))
+            .filter(|h| command_of(spec, h).is_some_and(|c| managed(spec, c)))
             .count();
         if ours > 0 && ours < handlers.len() {
-            handlers.retain(|h| !command_of(spec, h).is_some_and(is_managed_command));
+            handlers.retain(|h| !command_of(spec, h).is_some_and(|c| managed(spec, c)));
             changed = true;
         }
     }
@@ -475,7 +494,7 @@ fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
         };
         let mut ours = false;
         for handler in handlers.iter_mut() {
-            if !command_of(spec, handler).is_some_and(is_managed_command) {
+            if !command_of(spec, handler).is_some_and(|c| managed(spec, c)) {
                 continue;
             }
             ours = true;
@@ -519,7 +538,7 @@ fn migrate_grouped(spec: &JsonHooksSpec, groups: &mut Vec<Value>) -> bool {
 fn migrate_flat(spec: &JsonHooksSpec, entries: &mut [Value]) -> bool {
     let mut changed = false;
     for entry in entries.iter_mut() {
-        if command_of(spec, entry).is_some_and(is_managed_command)
+        if command_of(spec, entry).is_some_and(|c| managed(spec, c))
             && *entry != canonical_handler(spec)
         {
             *entry = canonical_handler(spec);

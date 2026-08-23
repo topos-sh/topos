@@ -86,9 +86,12 @@ pub(crate) const SENTINEL: &str = "# topos:currency";
 pub(crate) const GUARDED_SWEEP: &str =
     "command -v topos >/dev/null 2>&1 && topos install --quiet || true";
 
-/// The ONE shell-string sweep line every shell surface here registers: the guarded sweep + the
-/// trailing ownership [`SENTINEL`] (inert under `sh -c`, and inert as a `bash` hook command —
-/// which is why every surface can carry ownership inside the command itself).
+/// The shell-string sweep line most shell surfaces here register: the guarded sweep + the
+/// trailing ownership [`SENTINEL`] (inert under `sh -c`). NOT every surface can carry it:
+/// older Cursor builds deliver the hook payload as a heredoc APPENDED to the command text, and a
+/// trailing `#` comment swallows the redirection — cursor's spec therefore registers
+/// [`GUARDED_SWEEP`] bare and keys ownership on the exact command (proven against Cursor's
+/// shipped hook transport, 2026-08).
 ///
 /// It carries NO `--hook <harness>` marker, and that is the point: unmarked is the
 /// schema-conservative default. A changed sweep then answers with `hookEventName` +
