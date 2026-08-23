@@ -73,7 +73,7 @@ mod tests {
 // Shape per the Amp plugin manual (vendor docs, unverified — Amp is closed source): a
 // session-start listener running the topos update sweep through Amp's shell API; failures are
 // swallowed (updating is best-effort, never session-breaking).
-const sweep = async () => { try { await amp.shell("topos update --quiet") } catch {} }
+const sweep = async () => { try { await amp.shell("topos install --quiet") } catch {} }
 sweep()
 amp.on("session.start", () => sweep())
 "#;

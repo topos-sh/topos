@@ -260,7 +260,7 @@ mod tests {
         \"hooks\": [
           {
             \"async\": true,
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet --hook claude-code || true  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet --hook claude-code || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -280,8 +280,8 @@ mod tests {
         assert_eq!(
             hook_command(),
             crate::triggers::SHELL_SWEEP_LINE.replace(
-                "topos update --quiet",
-                "topos update --quiet --hook claude-code"
+                "topos install --quiet",
+                "topos install --quiet --hook claude-code"
             ),
             "the Claude Code command is the shared sweep line + the dialect marker"
         );
@@ -441,10 +441,11 @@ mod tests {
     }
 
     #[test]
-    fn rearming_over_an_old_pull_hook_replaces_it_with_exactly_one_update_hook() {
+    fn rearming_over_an_old_pull_hook_replaces_it_with_exactly_one_current_hook() {
         // A config already holding the FULL old managed hook line — the `topos pull --quiet` command
-        // carrying our sentinel. Re-arming must recognize it (sentinel alone), rewrite it to the new
-        // `topos update` command IN PLACE, and never append a second managed group beside it.
+        // carrying our sentinel. Re-arming must recognize it (sentinel alone), rewrite it to the
+        // current `topos install` command IN PLACE, and never append a second managed group beside
+        // it.
         let old =
             "command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency";
         let cfg = MemConfig::with(&format!(
@@ -463,8 +464,8 @@ mod tests {
             "exactly ONE managed hook line — never a duplicate"
         );
         assert!(
-            text.contains("topos update --quiet --hook claude-code"),
-            "rewritten to the new update command, carrying the dialect marker"
+            text.contains("topos install --quiet --hook claude-code"),
+            "rewritten to the current install command, carrying the dialect marker"
         );
         assert!(
             !text.contains("topos pull"),
@@ -582,7 +583,7 @@ mod tests {
         );
         let home = PathBuf::from("/h");
         trigger(&home, &cfg).install();
-        assert!(cfg.text().unwrap().contains("topos update"));
+        assert!(cfg.text().unwrap().contains("topos install"));
 
         let report = trigger(&home, &cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);

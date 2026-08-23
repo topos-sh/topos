@@ -153,6 +153,44 @@ pub(crate) enum Command {
         /// update`.
         #[arg(long = "force")]
         force: bool,
+        /// Machinery: `topos install` runs through this verb's plumbing with install semantics.
+        #[arg(long, hide = true)]
+        install: bool,
+        /// Machinery: `topos install --frozen` rides here.
+        #[arg(long, hide = true)]
+        frozen: bool,
+    },
+    /// Get what's declared, changing no decisions. In a project: place exactly what topos.lock
+    /// records (verified against its checksums); a topos.toml line the lock does not know yet is
+    /// resolved once and its lock entry written — an existing entry never moves. On your
+    /// machine-wide set: the newest of what follows you. `topos update` is the verb that moves
+    /// versions.
+    Install {
+        /// Install only your machine-wide skills, even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
+        /// Fail instead of writing anything when topos.lock and topos.toml disagree, anything
+        /// cannot be fetched, or a checksum does not match — the CI mode (like `npm ci`).
+        #[arg(long)]
+        frozen: bool,
+        /// Print nothing on stdout — the mode the session-start hook uses.
+        #[arg(long)]
+        quiet: bool,
+        /// With `--quiet`: skip the run entirely when one already completed within this many
+        /// seconds. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes it.
+        #[arg(long, value_name = "SECONDS")]
+        ttl: Option<u64>,
+        /// Which agent's trigger is calling (machinery for registered triggers).
+        #[arg(long, value_name = "HARNESS", hide = true)]
+        hook: Option<String>,
+    },
+    /// Which workspace commands act on. `list` shows every workspace this machine is signed
+    /// into, with a `*` on the default; `use <name>` moves the default. A command's
+    /// `--workspace` flag and the `TOPOS_WORKSPACE` environment variable both beat the default
+    /// for one invocation; inside a project, the project file's `workspace = ` line does too.
+    Workspace {
+        #[command(subcommand)]
+        cmd: WorkspaceCmd,
     },
     /// Log this machine in to topos. Opens your browser for a one-click approval, where you
     /// choose (or create) the workspace to join. The first login to a workspace records its feed
@@ -191,6 +229,10 @@ pub(crate) enum Command {
         /// Write the machine-wide file (`~/.topos/topos.toml`) instead of this folder's.
         #[arg(long, short = 'g')]
         global: bool,
+        /// The workspace this project's bare names use (`<host>/<name>`). Defaults to your
+        /// machine default workspace (`topos workspace list`).
+        #[arg(long, value_name = "ADDRESS", conflicts_with = "global")]
+        workspace: Option<String>,
     },
     /// Tidy a `topos.toml`: group and sort its lines into the standard layout. Comments
     /// survive; meaning never changes. Formats this folder's file, or your machine-wide one
@@ -565,6 +607,19 @@ pub(crate) enum Command {
 /// The `auth` subcommands — `status` is the one that remains (sessions are managed by the
 /// top-level `login`/`logout`).
 #[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceCmd {
+    /// The signed-in workspaces, `*` on the machine default.
+    List,
+    /// Set the machine default workspace.
+    #[command(name = "use")]
+    Use {
+        /// The workspace: its name, or `<host>/<name>` when one name is signed in on two servers.
+        name: String,
+    },
+}
+
+/// The `auth` sub-verbs.
+#[derive(Debug, clap::Subcommand)]
 pub(crate) enum AuthCmd {
     /// Show each workspace login and whether it still works, plus the state of the auto-update
     /// hooks. Changes nothing.
@@ -582,6 +637,8 @@ impl Command {
             Command::Fmt { .. } => "fmt",
             // `pull` is a hidden alias of `update` — the envelope always reads "update".
             Command::Update { .. } => "update",
+            Command::Install { .. } => "install",
+            Command::Workspace { .. } => "workspace",
             Command::Add { .. } => "add",
             Command::Remove { .. } => "remove",
             Command::List { .. } => "list",

@@ -674,6 +674,23 @@ fn pick_copy(
 /// With a single edited copy in the standing scope there is nothing to say: that copy IS the draft,
 /// a `--dest` naming it asks for exactly what a bare publish would do, and a `from …` line would
 /// name a folder the reader never had to choose between.
+
+/// The version the CWD project's `topos.lock` holds this bundle at, when it is not the one just
+/// shipped — the repo keeps running its locked version until someone runs `topos update` there,
+/// and the receipt says so the first time rather than letting the author wonder.
+fn project_locked_behind(ctx: &Ctx<'_>, name: &str, shipped: &str) -> Option<String> {
+    let roots = ctx.roots.as_ref()?;
+    let cwd = roots.cwd.clone()?;
+    let dir = crate::manifest::scopes::nearest_manifest_dir(ctx.fs, &cwd, Some(&roots.home))?;
+    let bytes = ctx
+        .fs
+        .read_opt(&dir.join(crate::manifest::lock::LOCK_FILE))
+        .ok()??;
+    let doc = crate::manifest::lock::LockDoc::parse(&String::from_utf8_lossy(&bytes)).ok()?;
+    let locked = doc.skills.get(name)?.version.clone()?;
+    (locked != shipped).then_some(locked)
+}
+
 fn from_disclosure(
     picked: Option<&super::dest_select::SelectedCopy>,
     cross_scope: Option<String>,
@@ -1693,6 +1710,11 @@ fn map_outcome(
             let (from_placement, other_edited) =
                 from_disclosure(picked, disclosure.cross_from.clone());
             Ok(PublishOutcome::Published(PublishData {
+                project_locked_version: project_locked_behind(
+                    ctx,
+                    skill_name,
+                    &rec.candidate_commit,
+                ),
                 skill_id: rec.skill_id.clone(),
                 name: skill_name.to_owned(),
                 version_id: rec.candidate_commit.clone(),

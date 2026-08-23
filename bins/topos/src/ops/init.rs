@@ -36,10 +36,28 @@ fn inside_a_git_repo(fs: &dyn crate::fs_seam::FsOps, cwd: &Path) -> bool {
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] when a project `init` has no working directory; an io failure.
-pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError> {
+pub(crate) fn init(
+    ctx: &Ctx<'_>,
+    global: bool,
+    workspace: Option<&str>,
+) -> Result<InitData, ClientError> {
     if global {
         return init_global(ctx);
     }
+    // The project file's one workspace: the flag when given (validated), else the machine
+    // default (`topos workspace use` moves it), else the template's commented line teaches.
+    let ws_line: Option<(String, String)> = match workspace {
+        Some(addr) => Some(
+            crate::manifest::document::parse_workspace_line(addr)
+                .map_err(|e| ClientError::InvalidArgument(e.message))?,
+        ),
+        None => crate::sessions::read_sessions(ctx.fs, &ctx.layout)
+            .ok()
+            .and_then(|all| {
+                all.default_session()
+                    .map(|s| (s.host.clone(), s.workspace_name.clone()))
+            }),
+    };
     let cwd = ctx
         .roots
         .as_ref()
@@ -71,7 +89,11 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
     // check above and the write — the exclusive create meets it as an existing file (the same
     // clean no-op receipt, the outside bytes standing), never an overwrite.
     let created =
-        match crate::atomic::atomic_write_new(ctx.fs, &path, project_template(None).as_bytes())? {
+        match crate::atomic::atomic_write_new(
+        ctx.fs,
+        &path,
+        project_template(ws_line.as_ref().map(|(h, w)| (h.as_str(), w.as_str()))).as_bytes(),
+    )? {
             crate::atomic::NewOutcome::Written => true,
             crate::atomic::NewOutcome::Exists => false,
         };
@@ -187,7 +209,7 @@ mod tests {
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         with_ctx(&home, Some(&repo), |ctx| {
-            let first = init(ctx, false).unwrap();
+            let first = init(ctx, false, None).unwrap();
             assert!(first.created);
             // A fresh file says what it is for — and, inside a repo, nothing about travel.
             let note = first
@@ -214,7 +236,7 @@ mod tests {
                 "# hand-edited\n[bundles]\n\"./a\" = \"*\"\n",
             )
             .unwrap();
-            let second = init(ctx, false).unwrap();
+            let second = init(ctx, false, None).unwrap();
             assert!(!second.created);
             let text = std::fs::read_to_string(&first.manifest).unwrap();
             assert!(text.contains("hand-edited"), "{text}");
@@ -227,14 +249,14 @@ mod tests {
         let stray = home.join("stray");
         std::fs::create_dir_all(&stray).unwrap();
         with_ctx(&home, Some(&stray), |ctx| {
-            let out = init(ctx, false).unwrap();
+            let out = init(ctx, false, None).unwrap();
             assert!(out.created);
             // Both disclosures ride one note: what the file is for, and that it won't travel.
             let note = out.note.clone().expect("a created file carries its note");
             assert!(note.contains("every `topos add`"), "{note}");
             assert!(note.contains("git"), "{note}");
             // The idempotent no-op keeps ONLY the travel note (nothing was created to explain).
-            let again = init(ctx, false).unwrap();
+            let again = init(ctx, false, None).unwrap();
             assert!(!again.created);
             let again_note = again.note.clone().expect("the travel note stands");
             assert!(again_note.contains("git"), "{again_note}");
@@ -246,7 +268,7 @@ mod tests {
     fn init_without_a_working_directory_refuses_typed() {
         let home = scratch("nocwd");
         with_ctx(&home, None, |ctx| {
-            let err = init(ctx, false).unwrap_err();
+            let err = init(ctx, false, None).unwrap_err();
             assert_eq!(err.code(), "INVALID_ARGUMENT");
         });
     }
@@ -287,7 +309,7 @@ mod tests {
                 cwd: Some(repo.clone()),
             }),
         };
-        let out = init(&ctx, false).unwrap();
+        let out = init(&ctx, false, None).unwrap();
         assert!(
             !out.created,
             "the racer's file is an existing file — the receipt is the no-op, never an overwrite"
@@ -305,7 +327,7 @@ mod tests {
         let home = scratch("global");
         with_ctx(&home, None, |ctx| {
             // With no session, the file is born with just its header — and says so.
-            let first = init(ctx, true).unwrap();
+            let first = init(ctx, true, None).unwrap();
             assert!(first.created);
             assert!(
                 first.note.as_deref().is_some_and(|n| n.contains("header")),
@@ -314,7 +336,7 @@ mod tests {
             let text = std::fs::read_to_string(&first.manifest).unwrap();
             assert!(text.contains("# topos.toml"), "{text}");
             // Idempotent: the second run leaves the bytes alone and says so.
-            let second = init(ctx, true).unwrap();
+            let second = init(ctx, true, None).unwrap();
             assert!(!second.created);
             assert!(
                 second

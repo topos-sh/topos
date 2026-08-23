@@ -12,7 +12,7 @@ use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter, OpenClaw, registry, triggers};
 use topos_types::HarnessId;
 
-use crate::cli::{AuthCmd, Cli, Command};
+use crate::cli::{AuthCmd, WorkspaceCmd, Cli, Command};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
@@ -73,6 +73,32 @@ fn dispatch() -> ExitCode {
     // loudly. The version nag never rides the bare invocation — orientation stays offline.
     let Some(command) = cli.command else {
         return run_bare(cli.json, cli.workspace, &argv);
+    };
+    // `install` IS the reconcile with install semantics — normalized here so every downstream
+    // matcher (the quiet-sweep gates, the version-check exclusion) sees one verb.
+    let command = match command {
+        Command::Install {
+            global,
+            frozen,
+            quiet,
+            ttl,
+            hook,
+        } => Command::Update {
+            targets: Vec::new(),
+            global,
+            reset: false,
+            agent: None,
+            dest: None,
+            yes: false,
+            keep_mine: false,
+            quiet,
+            ttl,
+            hook,
+            force: false,
+            install: true,
+            frozen,
+        },
+        other => other,
     };
     let check = version_check_applies(&command) && ops::version_check_env_allows();
     let code = run_command(cli.json, cli.workspace, command, false, &argv);
@@ -457,16 +483,21 @@ fn run_command(
     let web_origin = resolve_web_origin(std::env::var("TOPOS_PLANE_URL").ok());
 
     match command {
+        Command::Install { .. } => {
+            // Normalized into the update plumbing before dispatch (`run`), so this arm is a
+            // structural impossibility rather than a behavior.
+            unreachable!("`topos install` normalizes to the update plumbing at parse")
+        }
         // Dispatched BEFORE state recovery above — the read-only promise admits no sweep write.
         Command::Status { .. } => unreachable!("status dispatches before state recovery"),
         // Dispatched at the top of this function — a protocol stream starts before any of this.
         Command::Relay { .. } => unreachable!("relay dispatches before every other surface"),
         // `init` — create this folder's `topos.toml`, or (with `-g`) materialize the global
         // manifest (idempotent; a no-op receipt when the file exists).
-        Command::Init { global } => finish(
+        Command::Init { global, workspace } => finish(
             json,
             cmd_name,
-            ops::init(&ctx, global),
+            ops::init(&ctx, global, workspace.as_deref()),
             render::init_tty,
             &diag,
         ),
@@ -1526,7 +1557,20 @@ fn run_command(
             ttl,
             hook,
             force,
+            install,
+            frozen,
         } => {
+            // Which way this run treats the project's lock: `install` (and every quiet hook run)
+            // converges to it; a typed `update` re-resolves and rewrites it.
+            let lock_mode = if install || quiet {
+                if frozen {
+                    ops::LockMode::Frozen
+                } else {
+                    ops::LockMode::Install
+                }
+            } else {
+                ops::LockMode::Update
+            };
             // The scope flag decides which STORE every targeted arm below resolves in — and, since
             // the store it resolves in is the store it writes, which copy it acts on. It is
             // computed here, ahead of the special modes: `-g` inside a project must mean the
@@ -1664,6 +1708,12 @@ fn run_command(
                             ops::ForgeCadence::Scheduled
                         } else {
                             ops::ForgeCadence::Now
+                        },
+                        // A quiet (hook) run never moves the lock: install semantics, always.
+                        lock: if quiet {
+                            ops::LockMode::Install
+                        } else {
+                            lock_mode
                         },
                     },
                 )
@@ -1896,6 +1946,20 @@ fn run_command(
                 });
             finish(json, cmd_name, result, render::self_update_tty, &diag)
         }
+        Command::Workspace { cmd } => match cmd {
+            WorkspaceCmd::List => finish_workspace_list(
+                json,
+                cmd_name,
+                ops::workspace_list(ctx.fs, &ctx.layout),
+                &diag,
+            ),
+            WorkspaceCmd::Use { name } => finish_workspace_use(
+                json,
+                cmd_name,
+                ops::workspace_switch(ctx.fs, &ctx.layout, &name),
+                &diag,
+            ),
+        },
         Command::Auth { cmd } => {
             let connectors = ops::AuthConnectors {
                 session: &connect_session_transports,
@@ -1994,6 +2058,46 @@ fn finish_verify(
 /// `auth status`'s finisher — like [`finish`], plus the signed-out fix as structural next actions
 /// (the prose half rides `auth_status_tty`): a never-enrolled install gets the join template, an
 /// enrolled-but-signed-out one the concrete `auth login`.
+fn finish_workspace_list(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::WorkspaceListData, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                outln!("{}", render::workspace_list_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+fn finish_workspace_use(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::WorkspaceUseData, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                outln!("{}", render::workspace_use_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
 fn finish_auth_status(
     json: bool,
     command: &str,

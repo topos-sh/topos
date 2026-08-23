@@ -1,5 +1,5 @@
 //! `triggers` — auto-update triggers: ONE [`TriggerAdapter`] port covering every trigger-capable
-//! harness, all running the ONE sweep (`topos update --quiet`, which self-throttles client-side, so
+//! harness, all running the ONE sweep (`topos install --quiet`, which self-throttles client-side, so
 //! session-shaped re-fires are cheap). The sweep is SCHEMA-CONSERVATIVE unless a harness declares a
 //! hook dialect: an unmarked command answers with `hookEventName` + `additionalContext` only,
 //! because most harnesses are not proven to tolerate more and one of them (codex) rejects unknown
@@ -84,7 +84,7 @@ pub(crate) const SENTINEL: &str = "# topos:currency";
 /// never surfaces as a hook error. Every shell surface composes from here: [`SHELL_SWEEP_LINE`] is
 /// this line plus the sentinel.
 pub(crate) const GUARDED_SWEEP: &str =
-    "command -v topos >/dev/null 2>&1 && topos update --quiet || true";
+    "command -v topos >/dev/null 2>&1 && topos install --quiet || true";
 
 /// The ONE shell-string sweep line every shell surface here registers: the guarded sweep + the
 /// trailing ownership [`SENTINEL`] (inert under `sh -c`, and inert as a `bash` hook command —
@@ -99,12 +99,12 @@ pub(crate) const GUARDED_SWEEP: &str =
 /// line — pinned against drift by that adapter's
 /// `the_hook_command_is_the_shared_shell_sweep_plus_the_dialect_marker` test.
 pub(crate) const SHELL_SWEEP_LINE: &str =
-    "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency";
+    "command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency";
 
 /// The plain argv sweep for non-shell / code surfaces: plugin code runs this and swallows
 /// failures itself (no shell guard is possible there, and none is needed — the plugin's own
 /// try/catch is the exit-0 tail's analog). Unmarked, so the conservative dialect applies.
-pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
+pub(crate) const PLAIN_SWEEP: &str = "topos install --quiet";
 
 /// Whether a command a person wrote themselves INVOKES a topos auto-update sweep — the
 /// hand-rolled-hook probe every trigger engine runs on a command carrying NO [`SENTINEL`], so such
@@ -132,7 +132,7 @@ pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
 /// reaches this predicate at all, because [`toml_lines::basic_string_value`] reads only basic
 /// (double-quoted) strings and reports nothing for a value it cannot delimit exactly.
 pub(crate) fn is_hand_rolled_sweep(cmd: &str) -> bool {
-    ["topos update", "topos pull"]
+    ["topos install", "topos update", "topos pull"]
         .iter()
         .any(|verb| invokes_at_command_start(cmd, verb))
 }
@@ -372,6 +372,7 @@ mod tests {
     #[test]
     fn the_hand_rolled_probe_matches_invocations_and_not_mentions() {
         for invocation in [
+            "topos install",
             "topos update",
             "topos update --quiet",
             "topos pull",
@@ -399,6 +400,7 @@ mod tests {
             // A token boundary, not a prefix match.
             "topos updated",
             "topos updates --all",
+            "topos installed",
             "mytopos update",
             // Named as an argument, not run.
             "echo topos update",

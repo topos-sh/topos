@@ -62,7 +62,7 @@ mod tests {
   \"hooks\": {
     \"sessionStart\": [
       {
-        \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency\"
+        \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency\"
       }
     ]
   },

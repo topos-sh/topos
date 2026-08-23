@@ -67,6 +67,10 @@ pub(crate) struct Sessions {
     pub schema_version: u32,
     #[serde(default)]
     pub sessions: Vec<Session>,
+    /// The machine DEFAULT workspace (`<host>/<name>`): what ambient commands act on outside a
+    /// project. Login stars the first workspace; `topos workspace use` moves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
 }
 
 impl Sessions {
@@ -119,13 +123,26 @@ impl Sessions {
             .find(|s| s.host == host && s.workspace_name == workspace_name)
     }
 
-    /// The one session an ambient act targets: exactly one live session, or a typed choice.
+    /// The session the machine DEFAULT names, when it is set and not ended.
+    pub(crate) fn default_session(&self) -> Option<&Session> {
+        let addr = self.default.as_deref()?;
+        match self.find(addr) {
+            Ok(Some(s)) if s.status != SESSION_ENDED => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The one session an ambient act targets, by the boring precedence developers know:
+    /// `--workspace` → `TOPOS_WORKSPACE` → the starred machine default → the only live session →
+    /// a typed refusal listing the choices.
     ///
     /// # Errors
     /// [`ClientError::Enrollment`] with the login hint when there are none;
     /// [`ClientError::WorkspaceSelection`] naming the joined workspaces when there are several.
     pub(crate) fn resolve_target(&self, explicit: Option<&str>) -> Result<&Session, ClientError> {
-        if let Some(ws) = explicit {
+        let env = std::env::var("TOPOS_WORKSPACE").ok().filter(|s| !s.is_empty());
+        let explicit = explicit.map(str::to_owned).or(env);
+        if let Some(ws) = explicit.as_deref() {
             let found = self.find(ws)?.ok_or_else(|| {
                 ClientError::WorkspaceSelection(format!(
                     "this machine is not logged into workspace '{ws}' — it is logged into: {}",
@@ -146,6 +163,9 @@ impl Sessions {
             }
             return Ok(found);
         }
+        if let Some(s) = self.default_session() {
+            return Ok(s);
+        }
         let live: Vec<&Session> = self.live().collect();
         match live.as_slice() {
             [] => Err(ClientError::SessionRequired {
@@ -156,8 +176,8 @@ impl Sessions {
             }),
             [only] => Ok(only),
             _ => Err(ClientError::WorkspaceSelection(format!(
-                "this machine is logged into more than one workspace ({}) — pass `--workspace \
-                 <name>` to choose one",
+                "this machine is logged into more than one workspace ({}) — `topos workspace \
+                 use <name>` sets the default, or pass `--workspace <name>` for one command",
                 self.names().join(", ")
             ))),
         }
@@ -217,7 +237,52 @@ pub(crate) fn upsert_session(
         (a.host.as_str(), a.workspace_name.as_str())
             .cmp(&(b.host.as_str(), b.workspace_name.as_str()))
     });
+    // The FIRST workspace a machine joins becomes its default — the gcloud/git shape: there is
+    // always a current thing, and `topos workspace use` moves it.
+    if all.default.is_none()
+        && let Some(s) = all.sessions.iter().find(|s| s.status != SESSION_ENDED)
+    {
+        all.default = Some(format!("{}/{}", s.host, s.workspace_name));
+    }
     write_sessions_locked(fs, layout, &all)
+}
+
+/// Set the machine default workspace (the `topos workspace use` write): the name resolves
+/// through [`Sessions::find`]'s grammar, and the previous default rides back for the receipt.
+///
+/// # Errors
+/// An unknown or ambiguous name refuses typed; the identity file's own failures.
+pub(crate) fn set_default(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    name: &str,
+) -> Result<(Option<String>, Session), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let mut all = read_sessions(fs, layout)?;
+    let found = all
+        .find(name)?
+        .ok_or_else(|| {
+            ClientError::WorkspaceSelection(format!(
+                "this machine is not logged into workspace '{name}' — it is logged into: {}",
+                all.names().join(", ")
+            ))
+        })?
+        .clone();
+    if found.status == SESSION_ENDED {
+        let address = format!("{}/{}", found.host, found.workspace_name);
+        return Err(ClientError::SessionRequired {
+            message: format!(
+                "the session for '{}' has ended — reconnect with `topos login {address}`",
+                found.workspace_name
+            ),
+            address,
+        });
+    }
+    let previous = all.default.clone();
+    all.default = Some(format!("{}/{}", found.host, found.workspace_name));
+    all.schema_version = PERSISTED_SCHEMA_VERSION;
+    write_sessions_locked(fs, layout, &all)?;
+    Ok((previous, found))
 }
 
 /// Flip one session's LOCAL status (active↔pending, or the local `ended` mark), keyed by the

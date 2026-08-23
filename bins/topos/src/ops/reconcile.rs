@@ -47,6 +47,7 @@ use crate::forge_check::{self, CheckFailure, SourceCheck};
 use crate::git_source::{GitTarballSource, RepoHead};
 use crate::id::SkillId;
 use crate::manifest::keys::KeyShape;
+use crate::manifest::lock::{LOCK_FILE, LockDoc, LockSkill};
 use crate::manifest::scopes::{self, PlanRow, ResolvedScope, ScopePlan};
 use crate::plane::{
     DeliveryMcpServer, DeliverySkill, DeliverySnapshot, DirectorySource, FollowContext,
@@ -89,6 +90,21 @@ pub(crate) enum UpdateScope {
     Both,
 }
 
+/// How a project's `topos.lock` steers this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LockMode {
+    /// `topos install` and every `--quiet` sweep: the lock pins the project's versions; rows the
+    /// lock does not know are resolved ONCE and their entries written; existing entries never
+    /// move.
+    #[default]
+    Install,
+    /// `topos install --frozen` (CI): refuse when the lock and topos.toml disagree, on any
+    /// missing access, and on any fetch failure — and write nothing.
+    Frozen,
+    /// `topos update`: re-resolve every follow row to current and rewrite the lock.
+    Update,
+}
+
 /// How a reconcile behaves.
 #[derive(Default)]
 pub(crate) struct ManifestUpdateOpts {
@@ -111,6 +127,8 @@ pub(crate) struct ManifestUpdateOpts {
     pub scope: UpdateScope,
     /// Whether this run may contact a forge now, or only when the auto-update clock says so.
     pub forge: ForgeCadence,
+    /// How the project's `topos.lock` steers this run (machine scope ignores it).
+    pub lock: LockMode,
 }
 
 /// When a run is allowed to contact a forge.
@@ -467,6 +485,9 @@ struct Sweep {
     /// `(workspace id, channel)` expansions that FAILED this run — their members freeze, and their
     /// cache rows must survive the sweep that could not see the member list.
     failed_channels: HashSet<(String, String)>,
+    /// What the PROJECT scope resolved this run — the material `topos.lock` is written from.
+    /// Only project-scope sync sites push here (`ScopeCtx::lock` is `Some`).
+    lock_harvest: LockDoc,
     /// Feed ADDRESSES whose empty serve is already disclosed. A feed may be adopted by more than
     /// one recipe; the fact is the workspace's, not a scope's, so it is said once per run.
     empty_feeds: HashSet<String>,
@@ -1056,6 +1077,44 @@ struct ScopeCtx<'a> {
     scope: ResolvedScope,
     label: String,
     plan: &'a ScopePlan,
+    /// The project's lock steering (project scope only; `None` = the machine scope, unlocked).
+    lock: Option<&'a LockState>,
+}
+
+/// The loaded lock + the mode this run runs it under.
+struct LockState {
+    mode: LockMode,
+    doc: LockDoc,
+}
+
+impl ScopeCtx<'_> {
+    /// The lock's version pin for a workspace bundle row (install semantics only — `update`
+    /// re-resolves, so it takes no pin from the lock).
+    fn lock_pin(&self, name: &str) -> Option<String> {
+        let lock = self.lock?;
+        if lock.mode == LockMode::Update {
+            return None;
+        }
+        lock.doc.skills.get(name).and_then(|s| s.version.clone())
+    }
+
+    /// The lock's commit for a repo-skill row (install semantics only).
+    fn lock_commit(&self, name: &str) -> Option<String> {
+        let lock = self.lock?;
+        if lock.mode == LockMode::Update {
+            return None;
+        }
+        lock.doc.skills.get(name).and_then(|s| s.commit.clone())
+    }
+
+    /// The frozen member list for a channel, when the lock holds one (install semantics only).
+    fn locked_members(&self, channel: &str) -> Option<&[String]> {
+        let lock = self.lock?;
+        if lock.mode == LockMode::Update {
+            return None;
+        }
+        lock.doc.channels.get(channel).map(Vec::as_slice)
+    }
 }
 
 /// What `update <target>…` narrowed the sweep to (empty = everything).
@@ -1445,6 +1504,62 @@ pub(crate) fn manifest_update(
         }
     }
 
+    // ---- 3b. The project's lock: load it, and under `--frozen` prove it covers the recipe
+    // before anything is dialed on its behalf. `update` loads it too (the write-back preserves
+    // explicit pins), but takes no pins from it. ----
+    let mut lock_state: Option<LockState> = None;
+    if driven.project && let Some((dir, plan)) = &project {
+        let lock_path = dir.join(LOCK_FILE);
+        let doc = match ctx.fs.read_opt(&lock_path) {
+            Ok(Some(bytes)) => match LockDoc::parse(&String::from_utf8_lossy(&bytes)) {
+                Ok(doc) => {
+                    for w in &doc.warnings {
+                        sweep.warnings.push(crate::message::advisory("LOCK_NEWER", w.clone()));
+                    }
+                    doc
+                }
+                Err(e) => {
+                    return Err(ClientError::InvalidArgument(format!(
+                        "{}: {} — fix or delete the file and run `topos update`",
+                        lock_path.display(),
+                        e.message
+                    )));
+                }
+            },
+            Ok(None) | Err(_) => LockDoc::default(),
+        };
+        if opts.lock == LockMode::Frozen {
+            let mut missing: Vec<String> = Vec::new();
+            for row in plan.things.iter().chain(plan.sets.iter()) {
+                let name = row.shape.leaf_name();
+                let covered = match &row.shape {
+                    KeyShape::WorkspaceBundle { .. } => {
+                        doc.skills.contains_key(name) || doc.mcp.contains_key(name)
+                    }
+                    KeyShape::RepoSkill { .. } => doc
+                        .skills
+                        .get(name)
+                        .is_some_and(|s| s.commit.is_some()),
+                    KeyShape::Channel { .. } => doc.channels.contains_key(name),
+                    _ => true,
+                };
+                if !covered {
+                    missing.push(name.to_owned());
+                }
+            }
+            if !missing.is_empty() {
+                return Err(ClientError::InvalidArgument(format!(
+                    "--frozen: topos.lock does not cover {} — run `topos update` and commit the                      lock",
+                    missing.join(", ")
+                )));
+            }
+        }
+        lock_state = Some(LockState {
+            mode: opts.lock,
+            doc,
+        });
+    }
+
     // ---- 4. Reconcile the driven scope(s), unblended. ----
     let mut targets = Targets::new(&opts.targets);
     if driven.project
@@ -1454,6 +1569,7 @@ pub(crate) fn manifest_update(
             scope: ResolvedScope::Project { dir: dir.clone() },
             label: ResolvedScope::Project { dir: dir.clone() }.label(),
             plan,
+            lock: lock_state.as_ref(),
         };
         reconcile_scope(&env, &sc, &mut targets, &mut sweep);
     }
@@ -1464,6 +1580,7 @@ pub(crate) fn manifest_update(
             scope: ResolvedScope::Person,
             label: ResolvedScope::Person.label(),
             plan,
+            lock: None,
         };
         reconcile_scope(&env, &sc, &mut targets, &mut sweep);
     }
@@ -1858,6 +1975,82 @@ pub(crate) fn manifest_update(
         jitter_ms,
     );
 
+    // ---- 10. The project's lock, closed out. `--frozen` turns any project failure into the
+    // run's failure (a pipeline must not go green over a half-installed recipe) and writes
+    // nothing; otherwise the lock is written back — install fills what was missing and keeps
+    // every standing entry; update rewrites what this run re-resolved. A targeted run overlays
+    // only what it visited; only a FULL sweep may drop entries whose rows are gone. ----
+    if let (Some(state), Some((dir, plan))) = (&lock_state, &project)
+        && driven.project
+    {
+        if state.mode == LockMode::Frozen {
+            if !sweep.failed_bundles.is_empty() || !sweep.failed_channels.is_empty() {
+                return Err(ClientError::InvalidArgument(
+                    "--frozen: not everything the lock names could be fetched and placed — see                      the warnings above"
+                        .into(),
+                ));
+            }
+        } else {
+            let targeted = !opts.targets.is_empty();
+            let mut newdoc = if state.mode == LockMode::Update && !targeted {
+                sweep.lock_harvest.clone()
+            } else {
+                // Install (and every targeted run): standing entries win — except a targeted
+                // UPDATE, whose visited entries take their re-resolved values; harvest fills
+                // gaps; a full install drops entries whose rows are gone.
+                let mut d = if targeted {
+                    state.doc.clone()
+                } else {
+                    LockDoc::default()
+                };
+                d.warnings = Vec::new();
+                for (name, skill) in &sweep.lock_harvest.skills {
+                    let keep_standing = state.mode != LockMode::Update;
+                    let value = if keep_standing {
+                        state.doc.skills.get(name).cloned().unwrap_or_else(|| skill.clone())
+                    } else {
+                        skill.clone()
+                    };
+                    d.skills.insert(name.clone(), value);
+                }
+                for (name, rev) in &sweep.lock_harvest.mcp {
+                    let value = if state.mode != LockMode::Update {
+                        state.doc.mcp.get(name).cloned().unwrap_or_else(|| rev.clone())
+                    } else {
+                        rev.clone()
+                    };
+                    d.mcp.insert(name.clone(), value);
+                }
+                for (name, members) in &sweep.lock_harvest.channels {
+                    let value = if state.mode != LockMode::Update {
+                        state.doc.channels.get(name).cloned().unwrap_or_else(|| members.clone())
+                    } else {
+                        members.clone()
+                    };
+                    d.channels.insert(name.clone(), value);
+                }
+                d
+            };
+            newdoc.workspace = plan.workspace.as_ref().map(|(h, w)| format!("{h}/{w}"));
+            newdoc.warnings = Vec::new();
+            let has_entries = !(newdoc.skills.is_empty()
+                && newdoc.mcp.is_empty()
+                && newdoc.channels.is_empty());
+            let path = dir.join(LOCK_FILE);
+            let old = ctx
+                .fs
+                .read_opt(&path)
+                .ok()
+                .flatten()
+                .map(|b| String::from_utf8_lossy(&b).into_owned());
+            let text = newdoc.serialize();
+            // Born only when there is something to record; rewritten only on a real change.
+            if (has_entries || old.is_some()) && old.as_deref() != Some(text.as_str()) {
+                let _ = crate::atomic::atomic_write(ctx.fs, &path, text.as_bytes());
+            }
+        }
+    }
+
     Ok(PullOutcome {
         data: PullData {
             skills: sweep.rows,
@@ -2109,6 +2302,12 @@ fn reconcile_thing<'a>(
             // made of different things. A connected server is looked for first and, when it is
             // the one this row names, takes its own path whole.
             if let Some(entry) = catalog.mcp_servers.iter().find(|e| &e.name == bundle) {
+                if sc.lock.is_some() {
+                    sweep
+                        .lock_harvest
+                        .mcp
+                        .insert(bundle.clone(), entry.revision_id.clone());
+                }
                 sweep.explicit.insert(entry.skill_id.clone());
                 sweep.delivered.push((
                     run.session.workspace_id.clone(),
@@ -2200,9 +2399,19 @@ fn reconcile_thing<'a>(
                     picked: false,
                 },
             ));
+            let pin = row.pin().or_else(|| sc.lock_pin(bundle));
+            if sc.lock.is_some() {
+                sweep.lock_harvest.skills.insert(
+                    bundle.clone(),
+                    LockSkill {
+                        version: Some(pin.clone().unwrap_or_else(|| target.version_id.clone())),
+                        ..LockSkill::default()
+                    },
+                );
+            }
             let st = SyncTarget {
                 target,
-                pin: row.pin(),
+                pin,
                 display: display.clone(),
                 // A skill row's dest is its frozen placement plan.
                 dest: row.fields().dest,
@@ -2687,6 +2896,10 @@ fn reconcile_set<'a>(
                 return;
             };
             let members: Vec<String> = ch.skills.iter().map(|s| s.skill_id.clone()).collect();
+            // The LOCK's member list freezes a project channel's resolution: a member the server
+            // added since the lock was written is not taken (it arrives as a `topos update`
+            // diff), and a locked member the server no longer serves earns its own line.
+            let locked_members: Option<Vec<String>> = sc.locked_members(channel).map(<[String]>::to_vec);
             // The batch this channel converges — its members the catalog still serves, minus the
             // ones an explicit row of the SAME scope owns (its version and fields win, and the set
             // adds nothing), minus what `--target` narrowing skips and what an earlier source in
@@ -2720,6 +2933,12 @@ fn reconcile_set<'a>(
                     if sc.plan.explicit_claims(host, workspace, found.name()) {
                         return None;
                     }
+                    // A frozen channel takes exactly its locked members.
+                    if let Some(locked) = &locked_members
+                        && !locked.iter().any(|m| m == found.name())
+                    {
+                        return None;
+                    }
                     if !set_selected && !targets.hit(&[found.name()]) {
                         return None;
                     }
@@ -2736,6 +2955,12 @@ fn reconcile_set<'a>(
                     picked.insert(found.skill_id()).then_some(found)
                 })
                 .collect();
+            if sc.lock.is_some() {
+                sweep.lock_harvest.channels.insert(
+                    channel.clone(),
+                    batch.iter().map(|m| m.name().to_owned()).collect(),
+                );
+            }
             let total = batch.len();
             for (position, member) in batch.into_iter().enumerate() {
                 let step = Some(Step {
@@ -2767,6 +2992,12 @@ fn reconcile_set<'a>(
                     // folders, and `mcp_dest` — and only `mcp_dest` — narrows the mcp members to
                     // config files. A channel with no `mcp_dest` does not narrow them at all.
                     ChannelMember::Server(server) => {
+                        if sc.lock.is_some() {
+                            sweep
+                                .lock_harvest
+                                .mcp
+                                .insert(server.name.clone(), server.revision_id.clone());
+                        }
                         let narrowing = mcp_filter(
                             sc,
                             row.fields().mcp_dest,
@@ -2823,9 +3054,20 @@ fn reconcile_set<'a>(
                     continue;
                 };
                 let display = entry.name.clone();
+                let pin = sc.lock_pin(&entry.name);
+                if sc.lock.is_some() {
+                    sweep.lock_harvest.skills.insert(
+                        entry.name.clone(),
+                        LockSkill {
+                            version: Some(pin.clone().unwrap_or_else(|| entry.version_id.clone())),
+                            via: Some(channel.clone()),
+                            ..LockSkill::default()
+                        },
+                    );
+                }
                 let st = SyncTarget {
                     target: CatalogTarget::from_entry(entry, kind),
-                    pin: None,
+                    pin,
                     display,
                     dest: row.fields().dest,
                     step,
@@ -4682,7 +4924,25 @@ fn reconcile_repo_skill(
     let global = matches!(sc.scope, ResolvedScope::Person);
     let slots = dest_slots(&sctx, roots.as_ref(), global, &row_dest, &members, skill);
     let tracked = slots.first().and_then(|s| s.import);
-    let pin = row.pin();
+    let pin = row.pin().or_else(|| sc.lock_commit(skill));
+    if sc.lock.is_some() {
+        let commit = pin.clone().or_else(|| {
+            tracked.and_then(|i| i.origin.commit.clone())
+        });
+        if let Some(commit) = commit {
+            sweep.lock_harvest.skills.insert(
+                skill.to_owned(),
+                LockSkill {
+                    source: Some(format!(
+                        "{}:{owner}/{repo}",
+                        if host == "bitbucket.org" { "bitbucket" } else { "github" }
+                    )),
+                    commit: Some(commit),
+                    ..LockSkill::default()
+                },
+            );
+        }
+    }
     let pin_satisfied = pin.as_ref().is_some_and(|p| {
         slots.iter().all(|s| {
             s.import

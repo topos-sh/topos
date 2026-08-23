@@ -45,7 +45,7 @@ const HOOK_CONFIG: &str = r#"{
       {
         "hooks": [
           {
-            "command": "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency",
+            "command": "command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency",
             "timeout": 60,
             "type": "command"
           }

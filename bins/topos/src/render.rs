@@ -2869,6 +2869,35 @@ pub(crate) fn auth_status_next_actions(d: &crate::ops::AuthStatusData) -> Vec<Ne
     )]
 }
 
+/// `workspace list`, for a terminal: one row per workspace, `*` on the machine default.
+pub(crate) fn workspace_list_tty(d: &topos_types::results::WorkspaceListData) -> String {
+    if d.workspaces.is_empty() {
+        return "not logged into any workspace — run `topos login <workspace-address>`".to_owned();
+    }
+    let mut out = String::new();
+    for row in &d.workspaces {
+        let star = if row.default { "*" } else { " " };
+        let state = match row.status.as_str() {
+            "active" => String::new(),
+            other => format!(" — {other}"),
+        };
+        out.push_str(&format!("{star} {} ({}){state}\n", row.address, row.display_name));
+    }
+    if d.default.is_none() {
+        out.push_str("no default set — `topos workspace use <name>` sets one\n");
+    }
+    out.pop();
+    out
+}
+
+/// `workspace use`, for a terminal.
+pub(crate) fn workspace_use_tty(d: &topos_types::results::WorkspaceUseData) -> String {
+    match &d.previous {
+        Some(prev) => format!("default workspace: {} (was {prev})", d.address),
+        None => format!("default workspace: {}", d.address),
+    }
+}
+
 pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     let mut s = match (&d.principal, d.signed_in) {
         (Some(p), true) => format!("Signed in as {p}"),
@@ -3566,6 +3595,16 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         out.push_str(&format!(
             "\n{}",
             other_scope_clause(other, &data.name, false)
+        ));
+    }
+    // The cwd project keeps running its LOCKED version until someone updates it there — said
+    // once, on the receipt, so the author never wonders why the repo did not move.
+    if let Some(locked) = &data.project_locked_version {
+        out.push_str(&format!(
+            "\nthis project is locked to {}@{} — `topos update {}` takes your change here",
+            data.name,
+            short(locked),
+            data.name
         ));
     }
     // The KIND the catalog now records — stated because it is what decides how every receiving
