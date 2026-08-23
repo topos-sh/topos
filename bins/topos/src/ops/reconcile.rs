@@ -2380,11 +2380,14 @@ pub(crate) fn manifest_update(
                         demanded.insert(m.clone());
                     }
                 }
+                // Prune by the row's LEAF KEY — the lock's identity. A `name`-overridden row
+                // harvests under its key; pruning by display name would delete the entry the
+                // same run just wrote.
                 let channel_rows: HashSet<String> = plan
                     .sets
                     .iter()
                     .filter(|r| matches!(r.shape, KeyShape::Channel { .. }))
-                    .map(|r| r.display_name())
+                    .map(|r| r.shape.leaf_name().to_owned())
                     .collect();
                 newdoc
                     .channels
@@ -2395,7 +2398,7 @@ pub(crate) fn manifest_update(
                     .things
                     .iter()
                     .chain(plan.sets.iter())
-                    .map(|r| r.display_name())
+                    .map(|r| r.shape.leaf_name().to_owned())
                     .collect();
                 for members in newdoc.channels.values() {
                     for m in members {
@@ -2764,10 +2767,11 @@ fn reconcile_thing<'a>(
             let Some(catalog) = run.catalog(&mut sweep.warnings) else {
                 return;
             };
-            // ONE catalog, TWO lists — the same split the feed makes, because the two kinds are
-            // made of different things. A connected server is looked for first and, when it is
-            // the one this row names, takes its own path whole.
-            if let Some(entry) = catalog.mcp_servers.iter().find(|e| &e.name == bundle) {
+            // ONE catalog, TWO lists — and the row's SECTION picks the list: `[mcp]` resolves
+            // only among servers, `[skills]` only among file skills. A same-named entry of the
+            // other kind is not this row's target and must never install in its place.
+            let mcp_row = matches!(row.kind(), BundleKind::Mcp);
+            if mcp_row && let Some(entry) = catalog.mcp_servers.iter().find(|e| &e.name == bundle) {
                 match locked_mcp_decision(env.ctx, sc, bundle, &entry.skill_id, &entry.revision_id)
                 {
                     LockedMcp::Held => {
@@ -2895,6 +2899,20 @@ fn reconcile_thing<'a>(
                     },
                     sweep,
                 );
+                return;
+            }
+            if mcp_row {
+                // The section is the kind: no server by this name means NOT AVAILABLE — a file
+                // skill sharing the name is another thing, never a substitute.
+                sweep.warnings.push(crate::message::failure(
+                    "NOT_AVAILABLE",
+                    format!(
+                        "\"{}\" ({}): {} does not share an MCP server by this name, or it is \
+                         not visible with your access. Check the spelling in topos.toml (a file \
+                         skill of the same name lives under [skills]), or ask a workspace owner.",
+                        row.reference, sc.label, run.session.workspace_name
+                    ),
+                ));
                 return;
             }
             let Some(entry) = catalog.skills.iter().find(|e| &e.name == bundle) else {
