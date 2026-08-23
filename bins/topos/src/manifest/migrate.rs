@@ -229,15 +229,28 @@ pub(crate) fn migrate_v1(
                 };
                 let mut value = migrate_ws_value(plain_value.as_deref(), &fields);
                 // An [mcp] row takes no version pin in v2 — a carried one is dropped, said.
+                // BOTH spellings: a plain pinned string, and an inline table whose `version`
+                // field carries the pin (leaving either would rewrite the file into one the
+                // v2 parser then refuses — a migration must never strand its own output).
                 if section == Section::Mcp {
-                    let pinned = value.as_str().is_some_and(|v| v != "latest" && v != "off");
-                    if pinned {
+                    let is_pin = |v: &str| v != "latest" && v != "off";
+                    let plain_pin = value.as_str().is_some_and(is_pin);
+                    let table_pin = value
+                        .as_inline_table()
+                        .and_then(|t| t.get("version"))
+                        .and_then(Value::as_str)
+                        .is_some_and(is_pin);
+                    if plain_pin || table_pin {
                         notes.push(format!(
                             "`{}` — an MCP server takes no version pin in v2; the pin was \
                              dropped (the lock records the delivered revision)",
                             row.reference
                         ));
-                        value = Value::from("latest");
+                        if plain_pin {
+                            value = Value::from("latest");
+                        } else if let Some(t) = value.as_inline_table_mut() {
+                            t.insert("version", Value::from("latest"));
+                        }
                     }
                 }
                 push(section, key, value, &mut notes, &row.reference);
