@@ -1,7 +1,8 @@
 import type { ActionFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { isTokenActor, requireReadActor } from "@/lib/auth/guards.server";
+import { serviceReportApplied } from "@/lib/db/queries.tokens.server";
 import { type ReportedHarnessState, reportApplied } from "@/lib/db/queries.lane.server";
 
 /**
@@ -123,9 +124,9 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "PUT") {
     return uniformNotFound();
   }
-  // AUTH BEFORE THE BODY — the lane-wide order: only an authenticated session can make this
+  // AUTH BEFORE THE BODY — the lane-wide order: only an authenticated caller can make this
   // tier buffer against the report cap (which is sized generously; see above).
-  const actor = await requireSessionActor(request, params.ws ?? "");
+  const actor = await requireReadActor(request, params.ws ?? "");
   const body = await readCappedBody(request, BODY_CAP, "report body");
   if (body instanceof Response) {
     return body;
@@ -166,6 +167,12 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
       return badRequest(harnesses);
     }
     applied.push({ skillId: row.skill_id, versionId: row.version_id, harnesses });
+  }
+  if (isTokenActor(actor)) {
+    // A machine's report is its own summary on the service session — the per-person report
+    // tables (and the fleet view they feed) stay exactly as people's machines wrote them.
+    await serviceReportApplied(actor.serviceSessionId, applied);
+    return new Response(null, { status: 204 });
   }
   const outcome = await reportApplied(actor, applied);
   if (outcome === "session_ended") {

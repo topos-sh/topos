@@ -4,7 +4,7 @@ import {
   actorFromSession,
   type MemberActor,
   memberInScope,
-  requireSessionActor,
+  requireReadActor,
   workspaceInScope,
 } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
@@ -46,7 +46,7 @@ import {
  */
 
 interface RegistryScope {
-  actor: MemberActor | Awaited<ReturnType<typeof requireSessionActor>>;
+  actor: MemberActor | Awaited<ReturnType<typeof requireReadActor>>;
 }
 
 /**
@@ -64,7 +64,7 @@ async function registryScope(
     return null;
   }
   if (bearerToken(request) !== null) {
-    return { actor: await requireSessionActor(request, workspace.id) };
+    return { actor: await requireReadActor(request, workspace.id) };
   }
   const session = await getAuth().api.getSession({ headers: request.headers });
   const user = actorFromSession(session);

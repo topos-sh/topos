@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { requireReadActor } from "@/lib/auth/guards.server";
 import { laneMcpServersIndex, laneSkillsIndex } from "@/lib/db/queries.lane.server";
 
 /**
@@ -18,7 +18,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (gated !== null) {
     return gated;
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
+  const actor = await requireReadActor(request, params.ws ?? "");
   const [skills, mcpServers] = await Promise.all([
     laneSkillsIndex(actor),
     laneMcpServersIndex(actor),
