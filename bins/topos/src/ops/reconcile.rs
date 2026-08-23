@@ -46,8 +46,11 @@ use crate::error::{ClientError, FetchFault};
 use crate::forge_check::{self, CheckFailure, SourceCheck};
 use crate::git_source::{GitTarballSource, RepoHead};
 use crate::id::SkillId;
+use crate::manifest::MANIFEST_FILE;
+use crate::manifest::document::ManifestScope;
 use crate::manifest::keys::KeyShape;
 use crate::manifest::lock::{LOCK_FILE, LockDoc, LockSkill};
+use crate::manifest::migrate;
 use crate::manifest::scopes::{self, PlanRow, ResolvedScope, ScopePlan};
 use crate::plane::{
     DeliveryMcpServer, DeliverySkill, DeliverySnapshot, DirectorySource, FollowContext,
@@ -1208,6 +1211,108 @@ fn manifest_invalid(e: &ClientError) -> Message {
     )
 }
 
+/// The one-shot v1→v2 rewrite of any manifest this run would read — the global file and the
+/// nearest project file. Pure mapping in [`crate::manifest::migrate`]; this owns the lock, the
+/// under-lock re-read, and the compare-and-swap write. Kinds the file cannot state come from
+/// the delivery cache; a bundle the cache does not know files under `[skills]` with a note.
+///
+/// # Errors
+/// `--frozen` meeting a v1 file (frozen writes nothing — the refusal names the unfrozen run);
+/// a project file that cannot migrate mechanically (several workspaces); an io/lock failure.
+fn migrate_v1_manifests(
+    ctx: &Ctx<'_>,
+    prior_sync: &sync_status::SyncStatus,
+    frozen: bool,
+    sweep: &mut Sweep,
+) -> Result<(), ClientError> {
+    let mut candidates: Vec<(std::path::PathBuf, ManifestScope)> =
+        vec![(ctx.layout.home().join(MANIFEST_FILE), ManifestScope::Global)];
+    if let Some(cwd) = ctx.roots.as_ref().and_then(|r| r.cwd.as_deref()) {
+        let home = ctx.roots.as_ref().map(|r| r.home.as_path());
+        if let Some(dir) = scopes::nearest_manifest_dir(ctx.fs, cwd, home) {
+            candidates.push((dir.join(MANIFEST_FILE), ManifestScope::Project));
+        }
+    }
+    for (path, scope) in candidates {
+        let Some(bytes) = ctx.fs.read_opt(&path)? else {
+            continue;
+        };
+        // Non-UTF-8 and non-TOML fall through to the parse's own refusal.
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if !migrate::is_v1(&text) {
+            continue;
+        }
+        if frozen {
+            return Err(ClientError::ManifestInvalid(format!(
+                "{}: the old (v1) topos.toml format — `--frozen` writes nothing; run \
+                 `topos install` once without it to migrate",
+                path.display()
+            )));
+        }
+        let _guard = super::manifest_edit::lock_manifest(ctx, &path)?;
+        // Re-read under the lock — the same discipline every manifest write keeps.
+        let Some(bytes) = ctx.fs.read_opt(&path)? else {
+            continue;
+        };
+        let Ok(current) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if !migrate::is_v1(&current) {
+            continue;
+        }
+        let kind_of = |host: &str, ws: &str, bundle: &str| -> Option<BundleKind> {
+            prior_sync.workspaces.values().find_map(|w| {
+                if w.host.as_deref() != Some(host) || w.workspace_name.as_deref() != Some(ws) {
+                    return None;
+                }
+                w.delivered
+                    .values()
+                    .find(|d| d.name == bundle)
+                    .map(|d| match d.kind.as_deref() {
+                        Some("mcp") => BundleKind::Mcp,
+                        _ => BundleKind::Skill,
+                    })
+            })
+        };
+        match migrate::migrate_v1(&current, scope, &kind_of) {
+            Ok(m) => {
+                match crate::atomic::atomic_write_cas(
+                    ctx.fs,
+                    &path,
+                    m.text.as_bytes(),
+                    Some(current.as_bytes()),
+                )? {
+                    crate::atomic::CasOutcome::Written => {
+                        sweep.disclosures.push(crate::message::disclosure(
+                            "MANIFEST_MIGRATED",
+                            format!(
+                                "migrated {} to the v2 topos.toml format (schema = 1)",
+                                path.display()
+                            ),
+                        ));
+                        for note in m.notes {
+                            sweep
+                                .disclosures
+                                .push(crate::message::disclosure("MANIFEST_MIGRATED", note));
+                        }
+                    }
+                    // An outside writer got there first; the next run re-decides.
+                    crate::atomic::CasOutcome::Changed => {}
+                }
+            }
+            Err(why) => {
+                return Err(ClientError::ManifestInvalid(format!(
+                    "{}: {why}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The reconcile (see the module doc). Returns the [`PullOutcome`] shape the hook and the `update`
 /// finishers consume — `access_gone` carries the sessions that answered the uniform 404 (ended
 /// server-side), `unreachable` the sessions that got no fresh delivery for any other reason — the
@@ -1246,6 +1351,12 @@ pub(crate) fn manifest_update(
             sync_status::SyncStatus::default()
         }
     };
+
+    // ---- 0.b. The ONE-SHOT v1 migration, before any plan loads. A pre-schema `[bundles]`
+    // file would parse as a refusal (never as empty), so an upgraded machine heals here — the
+    // sweep is the one place with the write authority and the local kind knowledge (the
+    // delivery cache). `--frozen` writes nothing, so it refuses instead of migrating. ----
+    migrate_v1_manifests(ctx, &prior_sync, opts.lock == LockMode::Frozen, &mut sweep)?;
 
     // ---- 1. Build the two scope plans, FIRST. A manifest this run would DRIVE that fails to
     // load REFUSES the run whole — before any session is dialed, any state is touched, or any

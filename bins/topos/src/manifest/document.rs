@@ -758,6 +758,15 @@ pub(crate) fn parse_document(
                     let ws = out.workspace.clone();
                     parse_section(t, section, scope, ws.as_ref(), &mut seen, &mut out)?;
                 }
+                None if key == "bundles" => {
+                    // The ONE unknown section that is never "newer": `[bundles]` is the v1
+                    // grammar. Skipping it would silently deliver nothing on an upgraded
+                    // machine, so it refuses toward the sweep, which migrates the file whole.
+                    return Err(plain(
+                        "this is the old (v1) topos.toml format — run `topos install` once to \
+                         migrate it to v2 (schema = 1)",
+                    ));
+                }
                 None => {
                     // Forward tolerance: a section this build does not know is skipped whole,
                     // with one line saying so — never a refusal.
@@ -1791,6 +1800,15 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
     }
 
     #[test]
+    fn a_v1_bundles_file_refuses_toward_the_migrating_install() {
+        for scope in [ManifestScope::Global, ManifestScope::Project] {
+            let e = parse_manifest("[bundles]\n\"topos.sh/acme/x\" = \"*\"\n", scope).unwrap_err();
+            assert!(e.message.contains("old (v1)"), "{e}");
+            assert!(e.message.contains("topos install"), "{e}");
+        }
+    }
+
+    #[test]
     fn unknown_sections_skip_with_a_warning() {
         let doc = parse_project(
             "schema = 1\nworkspace = \"topos.sh/acme\"\n\n[skills]\nx = \"latest\"\n\n\
@@ -1891,12 +1909,8 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
         )
         .unwrap_err();
         assert!(e.message.contains("latest"), "{e}");
-        // A v1 [bundles] section is an unknown section — skipped with the update-shaped warning,
-        // so a machine mid-migration sees the message rather than a refusal. (The migration
-        // itself is the sweep's rewrite.)
-        let doc = parse_global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
-        assert_eq!(doc.rows.len(), 0);
-        assert_eq!(doc.warnings.len(), 1);
+        // A v1 [bundles] section refuses toward the migrating install — asserted in
+        // `a_v1_bundles_file_refuses_toward_the_migrating_install`.
         // A path KEY teaches the value spelling.
         let e = parse_manifest(
             "[skills]\n\"./tools/x\" = \"latest\"\n",
