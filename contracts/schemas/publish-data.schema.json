@@ -108,6 +108,13 @@
         "null"
       ]
     },
+    "project_locked_version": {
+      "description": "The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the\nversion this publish just shipped — the receipt's \"this project is locked\" line.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "reference": {
       "description": "The canonical workspace reference the manifest now stores. **INFERRED** (additive-only).",
       "type": [

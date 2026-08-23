@@ -160,7 +160,7 @@ topos status [OPTIONS]
 
 ### `topos login`
 
-Log this machine in to topos. Opens your browser for a one-click approval, where you choose (or create) the workspace to join. The first login to a workspace records its feed line (`"<host>/<workspace>" = "*"`) in `~/.topos/topos.toml` — from then on, whatever that workspace delivers to you installs here and stays updated by itself; delete the line (`topos remove -g @<workspace>`) and it stays deleted — login never re-adds it. Bare `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go straight to it, or paste an invitation link. To join another workspace, log in again — already logged in to that server, it takes no browser.
+Log this machine in to topos. Opens your browser for a one-click approval, where you choose (or create) the workspace to join. The first login to a workspace records its feed line (`[workspaces] "<host>/<workspace>" = "latest"`) in `~/.topos/topos.toml` — from then on, whatever that workspace delivers to you installs here and stays updated by itself; delete the line (`topos remove -g @<workspace>`) and it stays deleted — login never re-adds it. Bare `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go straight to it, or paste an invitation link. To join another workspace, log in again — already logged in to that server, it takes no browser.
 
 ```
 topos login [OPTIONS] [ADDRESS]

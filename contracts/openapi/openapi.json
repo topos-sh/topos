@@ -2898,6 +2898,13 @@
             ],
             "description": "The channel whose placement was WITHHELD by its curated mode (the receipt's\n`details.placement = curated_role_required`): the publish itself landed — catalog + moved\npointer — but the skill's reference was NOT placed into this channel (the `--to` target, or\nthe default `everyone` for a brand-new skill). A reviewer or owner places it\n(`topos channel add <channel> <skill>`). **INFERRED** (additive-only)."
           },
+          "project_locked_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the\nversion this publish just shipped — the receipt's \"this project is locked\" line."
+          },
           "reference": {
             "type": [
               "string",

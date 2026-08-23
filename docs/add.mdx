@@ -81,11 +81,15 @@ Each `add` records **one line** in the nearest [`topos.toml`](/docs/topos-toml) 
 folder, and delivers in the same command:
 
 ```toml title="topos.toml — committed to the repo"
-[bundles]
-"topos.sh/acme/code-review" = "*"                       # the team's current version
-"topos.sh/acme/channels/backend" = "*"                  # a whole channel
-"./tools/my-skill" = "*"                                # a folder in this repo
-"github.com/vercel-labs/skills/find-skills" = "*"       # tracks the repo; moves on `topos update`
+workspace = "topos.sh/acme"
+
+[skills]
+code-review = "latest"                       # the team's current version
+my-skill    = "./tools/my-skill"             # a folder in this repo
+find-skills = "github:vercel-labs/skills"    # a repo skill; moves on `topos update`
+
+[channels]
+backend = "latest"                           # a whole channel
 ```
 
 **Commit that file**: everyone who works in the repo then gets the same skills, delivered to their
@@ -113,7 +117,7 @@ topos add code-review -g
 
 `-g` edits `~/.topos/topos.toml` — this machine's own list — instead of the project's. That file
 is the **complete** list for this machine: what it names is what you get. Most of it writes
-itself — `topos login` records a workspace's feed line (`"topos.sh/acme" = "*"`) the first time
+itself — `topos login` records a workspace's feed line (`[workspaces] "topos.sh/acme" = "latest"`) the first time
 this machine connects, so everything the workspace gives you flows with no editing. Delete a feed
 line and it stays deleted (login never re-adds it); a `-g` add then records exactly the lines you
 choose.

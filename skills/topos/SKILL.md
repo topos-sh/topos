@@ -145,7 +145,7 @@ reserved `"*"` entry, which IS that row's default reach — and on `remove` they
 destination: the row keeps the rest, and removing the last one removes the row. Removing a row
 also uninstalls the copies it placed, in the same command (an edited copy stays in place,
 disclosed). `~/.topos/topos.toml` is always the machine's whole
-truth: a workspace's feed flows only while its `"<host>/<workspace>" = "*"` line is in the file.
+truth: a workspace's feed flows only while its `[workspaces] "<host>/<workspace>" = "latest"` line is in the file.
 `topos login` writes that line automatically the first time this machine connects to a workspace
 and never again — a line you delete stays deleted (`remove -g @<workspace>` is the spelled
 inverse), and with no file nothing is demanded machine-wide. `remove -g @<workspace>` applies
@@ -171,7 +171,7 @@ vendors that skill — a teammate clones, runs `topos update`, and has it with n
 
 ## The manifest format
 
-One `[bundles]` namespace; a row's key is its reference, its value a version (`"*"` tracks
+Sections per kind (`[skills]`/`[mcp]`/`[channels]`); a row's key is its name, its value a version (`"latest"` tracks
 current) or a table adding `dest`. Before hand-editing a `topos.toml`, read `manifest.md` next to
 this file — it is the full grammar, including channels' two arrays and the global file's two
 exclusive spellings.
@@ -231,7 +231,7 @@ topos logout [<workspace>|--all]  # end it — skills, drafts, and manifests sta
 
 The workspace is chosen — or created — in the browser approval, where the human's workspaces
 are known; one click connects. Login IS the acceptance: on this machine's first connection to a
-workspace it writes the feed line (`"<host>/<workspace>" = "*"`) into `~/.topos/topos.toml`, and
+workspace it writes the feed line (`[workspaces] "<host>/<workspace>" = "latest"`) into `~/.topos/topos.toml`, and
 from then on everything that workspace gives this person arrives silently — the receipt leads
 with the undo (`topos remove -g @<workspace>`), and a line the human deleted is never re-added
 by a later login. Further workspaces are further logins — and once this machine is logged in to
