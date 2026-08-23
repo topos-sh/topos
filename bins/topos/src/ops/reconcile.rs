@@ -5499,6 +5499,23 @@ fn reconcile_repo_skill(
         }
     };
     lane.note_landed(&origin, &git_ref, &tree.commit.clone().unwrap_or_default());
+    // A FIRST install of an unpinned row has no recorded commit until this fetch resolves one —
+    // harvest it now, or bytes land with no lock entry and the next `--frozen` refuses the very
+    // checkout the fill contract promised it. An entry the pre-fetch pass already wrote (a pin,
+    // a tracked import) stands.
+    if sc.lock.is_some()
+        && let Some(resolved) = tree.commit.clone().filter(|c| !c.is_empty())
+    {
+        sweep
+            .lock_harvest
+            .skills
+            .entry(skill.to_owned())
+            .or_insert_with(|| LockSkill {
+                source: Some(source_spelling.clone()),
+                commit: Some(resolved),
+                ..LockSkill::default()
+            });
+    }
     // The source's motion, said only once the re-import has had its turn (see below).
     let mut motion: Option<Message> = None;
     // Every slot's copy at the same commit is settled: nothing moves without a real change.
