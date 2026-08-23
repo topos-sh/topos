@@ -126,8 +126,7 @@ mod tests {
         let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
         assert_eq!(root["version"], 1, "seeded beside the unmanaged entry");
         assert_eq!(
-            root["hooks"]["sessionStart"][0]["command"],
-            "topos update --quiet",
+            root["hooks"]["sessionStart"][0]["command"], "topos update --quiet",
             "the person's entry is left exactly as written"
         );
 
