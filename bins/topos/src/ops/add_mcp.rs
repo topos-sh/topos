@@ -175,10 +175,10 @@ pub(crate) fn add_mcp(
         McpSourceShape::Path(dir) => {
             return Err(ClientError::InvalidArgument(format!(
                 "`{source}` is a folder on this machine — a server only this machine runs is a \
-                 line in your topos.toml, not something to share: add `\"{}\" = {{ kind = \"mcp\" \
-                 }}` under [bundles], then run 'topos update'. To share this server with your \
-                 workspace, `topos add --kind mcp <its registry name or the https link to its \
-                 server.json>`",
+                 line in your topos.toml, not something to share: add `<name> = {{ path = \
+                 \"{}\", kind = \"mcp\" }}` under `[mcp]`, then run 'topos install'. To share \
+                 this server with your workspace, `topos add --kind mcp <its registry name or \
+                 the https link to its server.json>`",
                 dir.display()
             )));
         }

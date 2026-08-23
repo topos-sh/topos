@@ -2881,7 +2881,10 @@ pub(crate) fn workspace_list_tty(d: &topos_types::results::WorkspaceListData) ->
             "active" => String::new(),
             other => format!(" — {other}"),
         };
-        out.push_str(&format!("{star} {} ({}){state}\n", row.address, row.display_name));
+        out.push_str(&format!(
+            "{star} {} ({}){state}\n",
+            row.address, row.display_name
+        ));
     }
     if d.default.is_none() {
         out.push_str("no default set — `topos workspace use <name>` sets one\n");
@@ -5925,6 +5928,7 @@ mod tests {
             from_machine: false,
             other_scope_draft: None,
             other_edited: Vec::new(),
+            project_locked_version: None,
         }
     }
 

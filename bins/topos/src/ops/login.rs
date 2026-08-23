@@ -722,7 +722,8 @@ fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> (bool, Option<
                 false,
                 Some(format!(
                     "{} could not be opened ({}) — it was left untouched; add \
-                     `\"{reference}\" = \"*\"` there to take {workspace}'s whole feed",
+                     `\"{reference}\" = \"latest\"` under `[workspaces]` there to take \
+                     {workspace}'s whole feed",
                     target.path.display(),
                     e.detail()
                 )),
@@ -735,7 +736,11 @@ fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> (bool, Option<
         let _ = crate::connected::record(ctx.fs, &ctx.layout, host, workspace);
         return (false, None);
     }
-    if let Err(e) = editor.set_row(&reference, &EntryValue::Star, crate::bundle_kind::BundleKind::Skill) {
+    if let Err(e) = editor.set_row(
+        &reference,
+        &EntryValue::Star,
+        crate::bundle_kind::BundleKind::Skill,
+    ) {
         return (
             false,
             Some(format!(
@@ -1369,7 +1374,7 @@ mod tests {
                 assert_eq!(armed.state, topos_types::TriggerState::Active);
                 let settings = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
                 assert!(
-                    settings.contains("topos update --quiet --hook claude-code"),
+                    settings.contains("topos install --quiet --hook claude-code"),
                     "the managed sweep landed in the harness config: {settings}"
                 );
                 assert!(
@@ -1829,7 +1834,11 @@ mod tests {
                 assert!(done.manifest_note.is_none());
                 // The file was CREATED (header only) and holds exactly this feed line.
                 let text = std::fs::read_to_string(global_manifest(ctx)).unwrap();
-                assert!(text.contains("\"topos.example.com/eng\" = \"*\""), "{text}");
+                assert!(text.contains("[workspaces]"), "{text}");
+                assert!(
+                    text.contains("\"topos.example.com/eng\" = \"latest\""),
+                    "{text}"
+                );
                 // The witness holds the workspace, keyed host + NAME — never on any receipt.
                 assert_eq!(
                     crate::connected::first_connection(
@@ -1917,14 +1926,14 @@ mod tests {
                 login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
                 login(ctx, connectors, None, false).unwrap();
                 // The person deletes the line — a deliberate act login must not argue with.
-                std::fs::write(global_manifest(ctx), "[bundles]\n").unwrap();
+                std::fs::write(global_manifest(ctx), "schema = 1\n").unwrap();
                 let again = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
                 assert!(again.pending.is_none(), "already connected — no ceremony");
                 assert!(!again.feed_row_added);
                 assert!(again.undo.is_empty());
                 assert_eq!(
                     std::fs::read_to_string(global_manifest(ctx)).unwrap(),
-                    "[bundles]\n",
+                    "schema = 1\n",
                     "login never re-adds"
                 );
                 // The re-login receipt is the one line, byte-exact.
@@ -1947,7 +1956,7 @@ mod tests {
             rig.with(|connectors| {
                 login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
                 login(ctx, connectors, None, false).unwrap();
-                std::fs::write(global_manifest(ctx), "[bundles]\n").unwrap();
+                std::fs::write(global_manifest(ctx), "schema = 1\n").unwrap();
                 // End the session entirely. The witness is NOT a session record: it must stay.
                 let revoke = |_b: &str, _c: &str| -> Box<dyn GovernanceSource> {
                     Box::new(FakeRevoke {
@@ -1970,7 +1979,7 @@ mod tests {
                 assert!(!done.feed_row_added);
                 assert_eq!(
                     std::fs::read_to_string(global_manifest(ctx)).unwrap(),
-                    "[bundles]\n"
+                    "schema = 1\n"
                 );
             });
         });
@@ -1986,7 +1995,7 @@ mod tests {
             std::fs::create_dir_all(ctx.layout.home()).unwrap();
             std::fs::write(
                 global_manifest(ctx),
-                "[bundles]\n\"topos.example.com/eng\" = \"*\"\n",
+                "[workspaces]\n\"topos.example.com/eng\" = \"latest\"\n",
             )
             .unwrap();
             crate::connected::record(ctx.fs, &ctx.layout, "topos.example.com", "eng").unwrap();
@@ -2014,11 +2023,11 @@ mod tests {
                 assert!(done.feed_row_added, "the new name is a first connection");
                 let text = std::fs::read_to_string(global_manifest(ctx)).unwrap();
                 assert!(
-                    text.contains("\"topos.example.com/engineering\" = \"*\""),
+                    text.contains("\"topos.example.com/engineering\" = \"latest\""),
                     "{text}"
                 );
                 assert!(
-                    text.contains("\"topos.example.com/eng\" = \"*\""),
+                    text.contains("\"topos.example.com/eng\" = \"latest\""),
                     "the old line is not this login's to delete: {text}"
                 );
             });
