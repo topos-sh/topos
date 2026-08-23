@@ -1,0 +1,56 @@
+---
+title: Topos in CI
+description: Machine tokens give pipelines, VMs, and sandboxes read-only access — no login ceremony.
+sidebar_label: CI and headless
+---
+
+A machine needs no person at the keyboard to install what a project declares. A **machine
+token** is the workspace's headless credential: an owner mints it on the web, a pipeline
+presents it in an environment variable, and every run appears under Sessions as a service
+machine — listed apart from people's machines, expiring on its own after a week idle.
+
+Tokens are **read-only**. A run holding one can fetch the workspace catalog and bundle bytes
+and report what it applied — it can never publish, invite, protect, revert, or review. Anything
+that changes the workspace needs a person's session.
+
+<Note>
+  The CLI-side surface described here (`TOPOS_TOKEN` and `topos install --frozen`) arrives in
+  this release train — mint tokens and wire your pipeline now, and the commands light up with
+  the CLI update.
+</Note>
+
+## Mint a token
+
+Workspace **Settings → Machine tokens** (owners only): name it after what runs it —
+`github-actions`, `staging-vm`. The token is shown **once**, at mint. Store it in your CI
+provider's secret store, revoke it from the same panel when it should stop working.
+
+## The three-line workflow
+
+```yaml title="A GitHub Actions step"
+- run: curl -fsSL https://topos.sh/install | sh
+- run: topos install --frozen
+  env:
+    TOPOS_TOKEN: ${{ secrets.TOPOS_TOKEN }}
+```
+
+`TOPOS_TOKEN` authenticates the run — no `topos login`, no browser. `--frozen` is the CI
+posture: install exactly what the project's committed files name, verify every byte against
+the recorded hashes, and fail loudly on any disagreement or anything unreachable — nothing is
+written or resolved on the fly.
+
+## What a run can see
+
+- The workspace catalog and the exact bundle versions a project pins — enough to converge a
+  checkout.
+- Nothing person-scoped: a token has no feed, no notices, no identity beyond the token's name.
+
+MCP servers whose configuration references per-machine secrets resolve them from the run's own
+environment — export those values in the pipeline alongside `TOPOS_TOKEN`.
+
+## Housekeeping
+
+Each distinct run name shows as one service machine (set `x-topos-machine` if your runner wants
+a stable label; the token's name is the default). Idle service machines are cleaned up
+automatically; revoking a token removes its machines with it. Both acts land in the audit
+trail.
