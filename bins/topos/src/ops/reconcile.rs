@@ -1413,13 +1413,47 @@ pub(crate) fn manifest_update(
     let scope_label = driven.label(project_display.as_deref());
 
     // ---- 2. Dial each live session's delivery. ----
-    let all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let mut all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    // A machine token (`TOPOS_TOKEN`) stands in for a session on a machine that has none — the
+    // CI path. It is READ-ONLY server-side, so it serves the PROJECT's lock-driven fetches and
+    // the applied report, never a person's feed. Synthesized only for the project file's own
+    // workspace, only where no live session already covers it; the workspace-id slot carries
+    // the ADDRESS, which the server's token lane resolves to its own workspace.
+    if let Ok(token) = std::env::var("TOPOS_TOKEN")
+        && !token.trim().is_empty()
+        && let Some((t_host, t_ws)) = project.as_ref().and_then(|(_, p)| p.workspace.clone())
+        && !all_sessions
+            .sessions
+            .iter()
+            .any(|s| s.status != SESSION_ENDED && s.host == t_host && s.workspace_name == t_ws)
+    {
+        all_sessions.sessions.push(Session {
+            base_url: format!("https://{t_host}"),
+            workspace_id: t_ws.clone(),
+            workspace_name: t_ws,
+            host: t_host,
+            display_name: "machine token".to_owned(),
+            session_id: "sn_machine_token".to_owned(),
+            credential: token,
+            status: SESSION_ACTIVE.to_owned(),
+            logged_in_at: 0,
+        });
+    }
     let mut runs: Vec<SessionRun> = Vec::new();
     for s in &all_sessions.sessions {
         if s.status == SESSION_ENDED {
             continue; // the one typed line printed when it flipped; login is the way back
         }
         let transports = connect(s);
+        if s.credential
+            .starts_with(crate::plane_http::MACHINE_TOKEN_PREFIX)
+        {
+            // A machine token has no person feed — the delivery lane refuses it by design. The
+            // offline-shaped run serves the project's fetches and the applied report, and its
+            // absence of a snapshot is not a fault to warn about.
+            runs.push(offline_run(s, transports));
+            continue;
+        }
         match transports.plane.fetch_delivery(&s.workspace_id) {
             Ok(snap) if snap.link_status == LinkStatus::Pending => {
                 // No data flows over a pending session — skip QUIETLY (a `status`-visible fact;

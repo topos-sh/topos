@@ -21,6 +21,7 @@ mod rig;
 mod scope;
 mod scope_verbs;
 mod sweep;
+mod token;
 mod write_path;
 mod write_row;
 

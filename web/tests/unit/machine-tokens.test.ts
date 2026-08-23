@@ -71,6 +71,20 @@ describe("resolve", () => {
     expect(await t.tokenActor(ws, `${t.MACHINE_TOKEN_PREFIX}nope`, null)).toBeNull();
   });
 
+  it("accepts the workspace ADDRESS as the path ref and resolves to the id", async () => {
+    // A CI checkout knows only the address its committed topos.toml names; the token itself is
+    // what scopes access, so either spelling of its OWN workspace resolves — and the actor
+    // carries the RESOLVED id either way.
+    const t = await tokens();
+    const minted = await t.mintMachineToken(ws, "ci-addr", actor);
+    const name = await db.q<{ name: string }>(`SELECT name FROM web.workspace WHERE id = $1`, [
+      ws,
+    ]);
+    const hit = await t.tokenActor(name[0]?.name ?? "", minted.secret, null);
+    expect(hit?.workspaceId).toBe(ws);
+    expect(await t.tokenActor("not-this-workspace", minted.secret, null)).toBeNull();
+  });
+
   it("upserts ONE service session per reported name and bumps last_seen", async () => {
     const t = await tokens();
     const minted = await t.mintMachineToken(ws, "runner", actor);
