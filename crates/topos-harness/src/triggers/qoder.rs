@@ -88,7 +88,7 @@ mod tests {
       {
         \"hooks\": [
           {
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet --from qoder || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -171,7 +171,10 @@ mod tests {
         );
         a(&cfg).install();
         assert_eq!(
-            cfg.text(CONFIG).unwrap().matches(SHELL_SWEEP_LINE).count(),
+            cfg.text(CONFIG)
+                .unwrap()
+                .matches(&super::super::cc_hooks::sweep_command(&SPEC))
+                .count(),
             1
         );
 

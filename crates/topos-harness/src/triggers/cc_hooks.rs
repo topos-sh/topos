@@ -146,6 +146,13 @@ impl<'a> JsonHooks<'a> {
 }
 
 impl TriggerAdapter for JsonHooks<'_> {
+    fn pending_step(&self) -> Option<&'static str> {
+        // A spec that floors its placed state below Active names the consent still owed.
+        (self.spec.placed_state != TriggerState::Active)
+            .then_some(self.spec.note)
+            .flatten()
+    }
+
     fn slug(&self) -> &'static str {
         self.spec.slug
     }
@@ -416,8 +423,12 @@ pub(crate) fn sweep_command(spec: &JsonHooksSpec) -> String {
     } else {
         GUARDED_SWEEP
     };
+    // Every instance NAMES ITS CALLER: a dialect-declaring harness with `--hook <harness>`
+    // (which selects the stdout shape AND leaves the run evidence), everyone else with the
+    // evidence-only `--from <slug>` — argv is invisible to a hook-output validator, so the
+    // conservative stdout contract is untouched.
     match spec.hook_dialect {
-        None => base.to_owned(),
+        None => base.replace(PLAIN_SWEEP, &format!("{PLAIN_SWEEP} --from {}", spec.slug)),
         Some(harness) => base.replace(PLAIN_SWEEP, &format!("{PLAIN_SWEEP} --hook {harness}")),
     }
 }
@@ -694,7 +705,7 @@ mod tests {
         assert!(groups[1].get("matcher").is_none(), "ours is matcher-free");
         assert_eq!(
             groups[1]["hooks"][0]["command"].as_str().unwrap(),
-            SHELL_SWEEP_LINE
+            sweep_command(grouped())
         );
 
         // Idempotent: the relocated shape is canonical — a rerun writes nothing.
@@ -722,7 +733,7 @@ mod tests {
         assert_eq!(groups.len(), 1, "rewritten in place");
         assert_eq!(
             groups[0]["hooks"][0]["command"].as_str().unwrap(),
-            SHELL_SWEEP_LINE
+            sweep_command(grouped())
         );
     }
 

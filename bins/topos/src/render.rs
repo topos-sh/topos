@@ -2529,18 +2529,51 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             // which proves the trigger is REGISTERED — the same word the install receipt uses for
             // exactly that evidence level (see [`trigger_lines`]). `active` is reserved there, for
             // a report that stated a live update moment.
-            let state = match t.armed {
-                Some(true) => "registered",
-                Some(false) => "not registered",
-                None => "not checked",
-            };
-            s.push_str(&format!("\n  {}: {state}", t.agent));
-            if let Some(n) = &t.note {
-                s.push_str(&format!(" — {n}"));
+            // Observed evidence beats the footprint word: a hook seen RUNNING is the answer
+            // "is this even working?" wants, and a registered-but-never-seen row says exactly
+            // that, with the one-time step the harness still owes when there is one.
+            match (t.armed, t.last_run_age_ms) {
+                (Some(true), Some(age)) => {
+                    s.push_str(&format!(
+                        "\n  {}: last auto-update {}",
+                        t.agent,
+                        ago_ms(age)
+                    ));
+                }
+                (Some(true), None) => {
+                    s.push_str(&format!("\n  {}: registered, never seen running", t.agent));
+                    if let Some(n) = &t.note {
+                        s.push_str(&format!(" — {n}"));
+                    }
+                }
+                (Some(false), _) => {
+                    s.push_str(&format!("\n  {}: not registered", t.agent));
+                    if let Some(n) = &t.note {
+                        s.push_str(&format!(" — {n}"));
+                    }
+                }
+                (None, _) => {
+                    s.push_str(&format!("\n  {}: not checked", t.agent));
+                    if let Some(n) = &t.note {
+                        s.push_str(&format!(" — {n}"));
+                    }
+                }
             }
         }
     }
     s
+}
+
+/// A duration ago, in the coarsest honest unit: "just now" under a minute, then minutes, hours,
+/// days. Coarse on purpose — the line answers "is this working?", not "when exactly".
+fn ago_ms(age_ms: i64) -> String {
+    let mins = age_ms / 60_000;
+    match mins {
+        0 => "just now".to_owned(),
+        1..=59 => format!("{mins}m ago"),
+        60..=1439 => format!("{}h ago", mins / 60),
+        _ => format!("{}d ago", mins / 1440),
+    }
 }
 
 /// The external sources' last auto-update check — the plain answer to "is this even working?".
@@ -9464,11 +9497,13 @@ mod tests {
                     agent: "claude-code".to_owned(),
                     armed: Some(true),
                     note: None,
+                    last_run_age_ms: None,
                 },
                 StatusTrigger {
                     agent: "openclaw".to_owned(),
                     armed: None,
                     note: Some("presence needs a live scheduler query".to_owned()),
+                    last_run_age_ms: None,
                 },
             ],
             forge: Vec::new(),

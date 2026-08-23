@@ -260,6 +260,12 @@ pub trait TriggerAdapter {
     /// Provable presence of OUR trigger artifact right now (the health probe). Anything
     /// unprovable answers `false` — presence is never claimed on faith.
     fn present(&self) -> bool;
+    /// The one-time step the HARNESS still owes before a registered trigger can fire, where one
+    /// exists (Codex's in-app hook approval) — what a status line names beside "registered,
+    /// never seen running". `None` (the default) where registration alone suffices.
+    fn pending_step(&self) -> Option<&'static str> {
+        None
+    }
     /// Every artifact a scrub of this trigger REACHES — what a preview names. A filesystem
     /// artifact is disclosed as a [`TriggerArtifact::Path`] only where it can be confirmed ours
     /// right now (never a skill file, and never a path `uninstall` DELETES: a shared config the

@@ -148,6 +148,10 @@ pub(crate) enum Command {
         /// unrecognized name — gets the conservative document every agent's schema accepts.
         #[arg(long, value_name = "HARNESS", hide = true)]
         hook: Option<String>,
+        /// Which agent's trigger is calling, for the EVIDENCE alone (machinery): records "this
+        /// agent's hook ran" for `status`, changing nothing about the sweep's output.
+        #[arg(long, value_name = "HARNESS", hide = true)]
+        from: Option<String>,
         /// Re-create managed skill folders that exist but are damaged — topos normally protects a
         /// changed folder as your own edit. Deleted folders come back on an ordinary `topos
         /// update`.
@@ -183,6 +187,9 @@ pub(crate) enum Command {
         /// Which agent's trigger is calling (machinery for registered triggers).
         #[arg(long, value_name = "HARNESS", hide = true)]
         hook: Option<String>,
+        /// Which agent's trigger is calling, for the EVIDENCE alone (machinery).
+        #[arg(long, value_name = "HARNESS", hide = true)]
+        from: Option<String>,
     },
     /// Which workspace commands act on. `list` shows every workspace this machine is signed
     /// into, with a `*` on the default; `use <name>` moves the default. A command's

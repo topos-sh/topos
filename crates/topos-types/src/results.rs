@@ -2695,6 +2695,12 @@ pub struct StatusTrigger {
     /// A short honesty note (e.g. why `armed` is unknown), when one is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// How long ago this agent's hook last RAN a sweep on this machine (milliseconds), when one
+    /// has ever been observed — the evidence that turns "registered" into "seen working". Only
+    /// hooks that name their caller can leave it (`--hook`/`--from`), so absence never proves a
+    /// trigger dead. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_age_ms: Option<i64>,
 }
 
 // =================================================================================================
