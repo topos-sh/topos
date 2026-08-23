@@ -74,6 +74,12 @@ pub(crate) fn session_universe(
             continue;
         }
         let transports = connect(s);
+        // ONE activity line per workspace — the three member reads underneath would otherwise
+        // each announce their own "contacting <host>", seven lines for one governance op.
+        let _phase = crate::progress::phase(
+            ctx.progress,
+            &format!("reading {}/{}", s.host, s.workspace_name),
+        );
         match universe_for(&*transports.directory, &s.workspace_id, &s.host) {
             Ok(names) => {
                 universe.push(names);

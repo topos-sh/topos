@@ -628,6 +628,9 @@ struct Env<'a> {
     /// The ONE connected host the `@ws` sugar resolves at — how installed/removed receipt rows
     /// qualify their names (`@ws/name` there, the full `host/ws/name` everywhere else).
     default_host: Option<String>,
+    /// The activity verb the progress lines lead with — "installing" on install-semantics runs
+    /// (install, the quiet hooks), "updating" on a typed update.
+    verb: &'static str,
 }
 
 impl Env<'_> {
@@ -1587,6 +1590,11 @@ pub(crate) fn manifest_update(
         forge: lane.as_ref(),
         prior: &prior_sync,
         default_host: super::manifest_edit::default_host(ctx),
+        verb: if opts.lock == LockMode::Update {
+            "updating"
+        } else {
+            "installing"
+        },
     };
 
     // ---- 3. `--force`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project.
@@ -2212,6 +2220,58 @@ pub(crate) fn manifest_update(
             };
             newdoc.workspace = plan.workspace.as_ref().map(|(h, w)| format!("{h}/{w}"));
             newdoc.warnings = Vec::new();
+            // `update`'s PROMISED receipt: the old → new rows, from the one place both stand —
+            // the lock being replaced and the lock about to be written. Version moves say both
+            // ends; a channel says its member changes. Install runs say nothing here (their
+            // lock never moves an entry).
+            if state.mode == LockMode::Update {
+                let short = |v: &str| v[..v.len().min(12)].to_owned();
+                for (name, new_skill) in &newdoc.skills {
+                    let old_v = state
+                        .doc
+                        .skills
+                        .get(name)
+                        .and_then(|s| s.version.as_deref().or(s.commit.as_deref()));
+                    let new_v = new_skill.version.as_deref().or(new_skill.commit.as_deref());
+                    if let (Some(o), Some(n)) = (old_v, new_v)
+                        && o != n
+                    {
+                        pin_lines.push(crate::message::disclosure(
+                            "LOCK_MOVED",
+                            format!("{name}: {} → {}", short(o), short(n)),
+                        ));
+                    }
+                }
+                for (name, members) in &newdoc.channels {
+                    let old_members = state.doc.channels.get(name);
+                    let added: Vec<&str> = members
+                        .iter()
+                        .filter(|m| !old_members.is_some_and(|o| o.contains(m)))
+                        .map(String::as_str)
+                        .collect();
+                    let removed: Vec<&str> = old_members
+                        .map(|o| {
+                            o.iter()
+                                .filter(|m| !members.contains(m))
+                                .map(String::as_str)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if old_members.is_some() && (!added.is_empty() || !removed.is_empty()) {
+                        let mut parts = Vec::new();
+                        for a in &added {
+                            parts.push(format!("+{a}"));
+                        }
+                        for r in &removed {
+                            parts.push(format!("-{r}"));
+                        }
+                        pin_lines.push(crate::message::disclosure(
+                            "LOCK_MOVED",
+                            format!("channel {name}: {}", parts.join(" ")),
+                        ));
+                    }
+                }
+            }
             let has_entries =
                 !(newdoc.skills.is_empty() && newdoc.mcp.is_empty() && newdoc.channels.is_empty());
             let path = dir.join(LOCK_FILE);
@@ -3736,10 +3796,10 @@ struct Step {
 impl Step {
     /// The activity label for `display` at this position — or the uncounted form when the item came
     /// from a lone row.
-    fn label(step: Option<Self>, display: &str) -> String {
+    fn label(step: Option<Self>, display: &str, verb: &str) -> String {
         match step {
-            Some(Self { index, total }) => format!("updating {display} ({index} of {total})"),
-            None => format!("updating {display}"),
+            Some(Self { index, total }) => format!("{verb} {display} ({index} of {total})"),
+            None => format!("{verb} {display}"),
         }
     }
 }
@@ -3764,7 +3824,7 @@ fn sync_workspace_skill<'a>(
     // The activity line for this item — opened AFTER the dedupe claim, so a bundle two rows both
     // name is announced once, and held for the whole converge (the engine's own `downloading …`
     // fallback stays quiet underneath it: naming the item beats naming the step).
-    let _phase = crate::progress::phase(ctx.progress, &Step::label(st.step, &st.display));
+    let _phase = crate::progress::phase(ctx.progress, &Step::label(st.step, &st.display, env.verb));
     // The row's pin overrides the served version (the engine fetches by version id, so an older pin
     // resolves as long as the plane still serves its bytes).
     let version_id = st
@@ -4057,7 +4117,7 @@ fn sync_workspace_server(
     if !sweep.claim(&sc.label, st.skill_id) {
         return; // already reconciled in this scope under another row
     }
-    let _phase = crate::progress::phase(ctx.progress, &Step::label(st.step, st.name));
+    let _phase = crate::progress::phase(ctx.progress, &Step::label(st.step, st.name, env.verb));
     // The scope decides the STORE the record lives in: person → the home layout; project → the
     // checkout's own store. Per-scope state is the independence guarantee, exactly as for files.
     let store_layout = match &sc.scope {
@@ -7418,18 +7478,18 @@ mod tests {
         // A channel or a feed hands the sweep a batch, so the line says where in it we are —
         // 1-based, because "0 of 7" reads as nothing having started.
         assert_eq!(
-            Step::label(Some(Step { index: 1, total: 7 }), "docs"),
+            Step::label(Some(Step { index: 1, total: 7 }), "docs", "updating"),
             "updating docs (1 of 7)"
         );
         assert_eq!(
-            Step::label(Some(Step { index: 7, total: 7 }), "docs"),
+            Step::label(Some(Step { index: 7, total: 7 }), "docs", "updating"),
             "updating docs (7 of 7)"
         );
         // A lone explicit row is a batch of one and says so by not counting.
-        assert_eq!(Step::label(None, "docs"), "updating docs");
+        assert_eq!(Step::label(None, "docs", "updating"), "updating docs");
         // The label carries the DISPLAY name (the folder the person sees), never an opaque id.
         assert_eq!(
-            Step::label(None, "deploy-runbook"),
+            Step::label(None, "deploy-runbook", "updating"),
             "updating deploy-runbook"
         );
     }

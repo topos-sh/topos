@@ -46,11 +46,13 @@ themselves current — no one runs anything to receive updates.
     off switch on every row.
   </Step>
   <Step title="Share a skill">
-    Point `publish` at any skill folder you already have — here, one in your agent's skills
-    directory. A bare run is a preview: it prints exactly what would happen and changes nothing.
+    Adopt any skill folder you already have — here, one in your agent's skills directory —
+    then publish it. The bare `publish` is a preview: it prints exactly what would happen and
+    changes nothing until `--yes`.
 
     ```bash
-    topos publish ~/.claude/skills/pr-describe
+    topos add ~/.claude/skills/pr-describe
+    topos publish pr-describe
     topos publish pr-describe --yes
     ```
 

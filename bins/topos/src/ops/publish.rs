@@ -282,7 +282,7 @@ pub(crate) fn publish_describe(
         }
         Err(ClientError::NoSuchSkill { .. }) => {
             return Err(ClientError::InvalidArgument(format!(
-                "'{source_str}' is not tracked yet — a describe will not adopt it (that would change \
+                "'{source_str}' is not tracked yet — publish won't adopt an untracked folder (that would change \
                  this machine before you confirm). Run `topos add {source_str}` first to preview it, \
                  or `topos publish {source_str} --yes` to adopt and ship in one step."
             )));
@@ -468,9 +468,12 @@ pub(crate) fn publish_describe(
     // The teammate handoff — same source data as the share line (the members' deep link above
     // 404s for a non-member, so recruiting a teammate takes this join line instead).
     let invite_line = me.as_ref().and_then(|m| teammate_invite_line(&m.address));
-    // The `<host>/<workspace>` handle the describe's header names the destination by — same read,
-    // and `None` when it does not validate (the header falls back to the display name).
-    let workspace_address = me.as_ref().and_then(|m| workspace_handle(&m.address));
+    // The `<host>/<workspace>` handle the describe's header names the destination by — the
+    // LANE's own record first (always the full host/workspace pair), the network read's answer
+    // only as the fallback: the two receipts must spell one workspace one way.
+    let workspace_address = Some(format!("{}/{}", lane.host, lane.workspace_name))
+        .filter(|_| !lane.host.is_empty())
+        .or_else(|| me.as_ref().and_then(|m| workspace_handle(&m.address)));
     let undo = undo_is_restorative(followed, gate)
         .then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
     // The predicted-conflict preview: when this copy is BEHIND the last-known observed `current`
@@ -1705,10 +1708,8 @@ fn map_outcome(
             let placement_missing =
                 (placement_outcome.as_deref() == Some("channel_not_found")).then(target_channel);
             let address = address();
-            let workspace_address = address
-                .as_deref()
-                .and_then(workspace_handle)
-                .or_else(session_address);
+            let workspace_address =
+                session_address().or_else(|| address.as_deref().and_then(workspace_handle));
             let share_line = address
                 .as_deref()
                 .map(|a| format!("{a}/skills/{skill_name}"));
@@ -1773,10 +1774,8 @@ fn map_outcome(
             // it: `current` never moved, so there is no prior state to restore — the author's
             // escape is `review <handle> --withdraw`, which the renderer names.
             let address = address();
-            let workspace_address = address
-                .as_deref()
-                .and_then(workspace_handle)
-                .or_else(session_address);
+            let workspace_address =
+                session_address().or_else(|| address.as_deref().and_then(workspace_handle));
             let share_line = address
                 .as_deref()
                 .map(|a| format!("{a}/skills/{skill_name}"));

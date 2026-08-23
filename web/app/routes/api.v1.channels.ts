@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { isTokenActor, requireReadActor } from "@/lib/auth/guards.server";
 import { laneChannels } from "@/lib/db/queries.lane.server";
 
 /**
@@ -14,8 +14,14 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (gated !== null) {
     return gated;
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
-  const channels = await laneChannels(actor);
+  // A machine token reads this lane too: a CI checkout with [channels] rows resolves their
+  // member lists here. A token is nobody in particular, so `included` answers only the
+  // everyone-wide assignments for it.
+  const actor = await requireReadActor(request, params.ws ?? "");
+  const channels = await laneChannels({
+    workspaceId: actor.workspaceId,
+    userId: isTokenActor(actor) ? null : actor.userId,
+  });
   const body = {
     channels: channels.map((c) => ({
       name: c.name,

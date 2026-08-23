@@ -1695,19 +1695,22 @@ pub(crate) fn project_template(workspace: Option<(&str, &str)>) -> String {
         None => "# workspace = \"topos.sh/<workspace>\"   # the one workspace bare names use\n"
             .to_string(),
     };
+    // The example block lives WHOLLY ABOVE the live lines: a later `add` appends its real
+    // table at the document's end, and a template that trailed the file would end up printed
+    // BELOW the table it exemplifies.
     format!(
         "# topos.toml — what this repo's agents use, identical for every contributor.\n\
          # Managed by the topos CLI; hand-edits are welcome. `topos install` places exactly\n\
          # what topos.lock records; `topos update` moves it and rewrites the lock.\n\
-         schema = 1\n\
-         {ws_line}\
          #\n\
          # [skills]\n\
          # code-review = \"latest\"                      # a team skill, following\n\
          # find-skills = \"github:vercel-labs/skills\"   # a public repo skill\n\
          #\n\
          # [channels]\n\
-         # backend = \"latest\"\n"
+         # backend = \"latest\"\n\
+         schema = 1\n\
+         {ws_line}"
     )
 }
 

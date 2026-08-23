@@ -372,12 +372,22 @@ fn a_lock_held_project_reports_held_once_and_never_fast_forwards_forever() {
         assert!(lock_text(&proj.0).contains(&hex(&v1)), "lock never bumped");
     }
 
-    // `update` is what moves it — and it actually moves despite the generations.
-    sweep(&ctx, &plane, &dir);
+    // `update` is what moves it — it actually moves despite the generations, and the receipt
+    // carries the promised old → new row.
+    let out = sweep(&ctx, &plane, &dir);
     assert_eq!(
         std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
         "# v2\n",
         "update re-resolves and lands"
     );
     assert!(lock_text(&proj.0).contains(&hex(&v2)));
+    assert!(
+        out.disclosures.iter().any(|m| {
+            m.code.as_deref() == Some("LOCK_MOVED")
+                && m.text.starts_with("deploy: ")
+                && m.text.contains(" → ")
+        }),
+        "{:?}",
+        out.disclosures
+    );
 }
