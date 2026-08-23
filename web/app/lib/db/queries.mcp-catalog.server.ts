@@ -1742,7 +1742,7 @@ function workspaceRegistrySelect(workspaceId: string) {
  * (a pin, else the server's current), plus its own private servers.
  */
 export async function workspaceRegistryServers(
-  actor: ReadActor,
+  actor: MemberActor | ReadActor,
   page: { cursor?: string | null; limit?: number },
 ): Promise<McpRegistryPage> {
   const limit = page.limit ?? MCP_REGISTRY_PAGE_DEFAULT;
@@ -1761,7 +1761,7 @@ export async function workspaceRegistryServers(
  * same name: inside a workspace, the workspace's answer is the answer.
  */
 export async function workspaceRegistryServer(
-  actor: ReadActor,
+  actor: MemberActor | ReadActor,
   serverName: string,
 ): Promise<McpRegistryRow | null> {
   const rows = await getDb().execute(sql`
