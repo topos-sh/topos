@@ -1689,9 +1689,9 @@ pub(crate) fn materialized_global(workspaces: &[(String, String)]) -> String {
 
 /// A commented PROJECT template. With a workspace the line is written; without, the line is
 /// shown commented. Parses clean as [`ManifestScope::Project`].
-pub(crate) fn project_template(workspace: Option<(&str, &str)>) -> String {
+pub(crate) fn project_template(workspace: Option<(&str, &str)>, scheme: Option<&str>) -> String {
     let ws_line = match workspace {
-        Some((host, ws)) => format!("workspace = \"{host}/{ws}\"\n"),
+        Some((host, ws)) => format!("workspace = \"{}{host}/{ws}\"\n", scheme.unwrap_or("")),
         None => "# workspace = \"topos.sh/<workspace>\"   # the one workspace bare names use\n"
             .to_string(),
     };
@@ -2226,8 +2226,8 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
         )]));
         assert_eq!(doc.rows.len(), 1);
         assert!(matches!(doc.rows[0].shape, KeyShape::Feed { .. }));
-        parse_project(&project_template(None));
-        let doc = parse_project(&project_template(Some(("topos.sh", "acme"))));
+        parse_project(&project_template(None, None));
+        let doc = parse_project(&project_template(Some(("topos.sh", "acme")), None));
         assert_eq!(
             doc.workspace,
             Some(("topos.sh".to_string(), "acme".to_string()))

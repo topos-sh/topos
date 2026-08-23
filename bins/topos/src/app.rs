@@ -75,7 +75,8 @@ fn dispatch() -> ExitCode {
         return run_bare(cli.json, cli.workspace, &argv);
     };
     // `install` IS the reconcile with install semantics — normalized here so every downstream
-    // matcher (the quiet-sweep gates, the version-check exclusion) sees one verb.
+    // matcher (the quiet-sweep gates, the version-check exclusion) sees one verb; the carrier
+    // `install: true` keeps the user's verb for the envelope (`Command::name`).
     let command = match command {
         Command::Install {
             global,
@@ -1655,7 +1656,10 @@ fn run_command(
             }
             let mut _sweep_guard = None;
             if bare_sweep {
-                if quiet {
+                // FROZEN dominates quiet: a CI line that spelled --frozen came for the
+                // validation, so the TTL throttle may never skip it — it takes the plain
+                // single-flight lock like an explicit run.
+                if quiet && lock_mode != ops::LockMode::Frozen {
                     match ops::quiet_gate(&fs, &ctx.layout, now_ms, ops::resolve_ttl_ms(ttl)) {
                         Ok(ops::QuietGate::Run(guard)) => _sweep_guard = Some(guard),
                         // Skipped (fresh, or another sweep in flight): byte-silent success.
@@ -1727,8 +1731,10 @@ fn run_command(
                         } else {
                             ops::ForgeCadence::Now
                         },
-                        // A quiet (hook) run never moves the lock: install semantics, always.
-                        lock: if quiet {
+                        // A quiet (hook) run never moves the lock: install semantics — except
+                        // FROZEN, which dominates everything: a CI line that spelled --frozen
+                        // must validate whatever else rides the invocation.
+                        lock: if quiet && lock_mode != ops::LockMode::Frozen {
                             ops::LockMode::Install
                         } else {
                             lock_mode

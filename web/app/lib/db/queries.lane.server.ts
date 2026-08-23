@@ -1,7 +1,7 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { composition } from "@/composition.server";
-import type { SessionActor } from "@/lib/auth/guards.server";
+import type { ReadActor, SessionActor } from "@/lib/auth/guards.server";
 import { CATALOG_BUNDLE_KINDS } from "@/lib/bundle-base";
 import {
   auditInTx,
@@ -586,10 +586,10 @@ export interface LaneChannel {
 }
 
 /** The workspace channels index (`GET /channels`) — name-sorted, the default included. */
-export async function laneChannels(actor: {
-  workspaceId: string;
-  userId: string | null;
-}): Promise<LaneChannel[]> {
+export async function laneChannels(actor: ReadActor): Promise<LaneChannel[]> {
+  // A machine token is nobody in particular: membership answers only the everyone-wide
+  // assignments for it.
+  const userId = "machine" in actor ? null : actor.userId;
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
@@ -614,7 +614,7 @@ export async function laneChannels(actor: {
         SELECT ch.id, ch.name, ch.mode, ch.is_default,
           EXISTS (SELECT 1 FROM web.assignment a
                   WHERE a.channel_id = ch.id AND a.workspace_id = ${ws}
-                    AND (a.user_id = ${actor.userId} OR a.user_id IS NULL)) AS included
+                    AND (a.user_id = ${userId} OR a.user_id IS NULL)) AS included
         FROM web.channel ch
         WHERE ch.workspace_id = ${ws}
         ORDER BY ch.name
@@ -954,8 +954,9 @@ export interface LaneMcpIndexEntry {
 /** The workspace catalog — every FILE bundle holding a `current`, ordered by id. A connected
  *  server holds no pointer and is served by `laneMcpServersIndex` below. */
 export async function laneSkillsIndex(
-  // Only the workspace scope is read — session and token actors both pass.
-  actor: { readonly workspaceId: string },
+  // Only the workspace scope is read — session and token actors both pass, and only the
+  // guard can mint either (the brand is the proof).
+  actor: ReadActor,
 ): Promise<LaneSkillIndexEntry[]> {
   const ws = actor.workspaceId;
   const rows = await getDb()

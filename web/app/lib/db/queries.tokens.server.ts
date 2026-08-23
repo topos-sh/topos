@@ -38,7 +38,10 @@ export interface MachineTokenRow {
 export async function machineTokensOf(workspaceId: string): Promise<MachineTokenRow[]> {
   const rows = await getDb().execute(sql`
     SELECT mt.id, mt.name, mt.created_at, mt.last_used_at,
-      (SELECT COUNT(*) FROM web.service_session ss WHERE ss.token_id = mt.id) AS sessions
+      (SELECT COUNT(*) FROM web.service_session ss
+        WHERE ss.token_id = mt.id
+          AND ss.last_seen_at >= now() - make_interval(secs => ${SERVICE_SESSION_IDLE_MS} / 1000.0)
+      ) AS sessions
     FROM web.machine_token mt
     WHERE mt.workspace_id = ${workspaceId}
     ORDER BY mt.name, mt.id
@@ -210,6 +213,7 @@ export async function workspaceServiceSessions(workspaceId: string): Promise<Ser
     FROM web.service_session ss
     JOIN web.machine_token mt ON mt.id = ss.token_id
     WHERE ss.workspace_id = ${workspaceId}
+      AND ss.last_seen_at >= now() - make_interval(secs => ${SERVICE_SESSION_IDLE_MS} / 1000.0)
     ORDER BY ss.last_seen_at DESC, ss.id
   `);
   return (rows.rows as Record<string, unknown>[]).map((r) => ({

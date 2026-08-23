@@ -954,6 +954,9 @@ pub(crate) struct UreqDeviceClient {
     /// login-only).
     credential: Option<String>,
     agent: ureq::Agent,
+    /// Mirrors [`UreqPlane::machine_label`] — one machine, one label, on every lane a token
+    /// dials.
+    machine_label: Option<String>,
     /// The ACTIVITY sink — this lane carries short metadata calls and small JSON writes, so all it
     /// has to say is which server it is waiting on, and only when the verb named nothing better.
     /// Silent by default; [`Self::with_progress`] wires the real one.
@@ -975,11 +978,28 @@ impl UreqDeviceClient {
     /// over the same agent configuration as [`UreqPlane`] (status-as-error OFF + the connect/recv/body
     /// timeouts). Login-only callers pass `None` (those routes are unauthenticated).
     pub(crate) fn new(base_url: String, credential: Option<String>) -> Self {
+        let machine_label = credential
+            .as_deref()
+            .is_some_and(|c| c.starts_with(MACHINE_TOKEN_PREFIX))
+            .then(|| std::env::var("TOPOS_MACHINE").ok())
+            .flatten()
+            .filter(|l| !l.trim().is_empty());
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             credential,
             agent: ureq::Agent::new_with_config(agent_config()),
+            machine_label,
             progress: Rc::new(progress::Silent),
+        }
+    }
+
+    /// One machine, ONE label: the catalog reads send the same `x-topos-machine` the object and
+    /// report lanes do, or a custom label and the token-name fallback would surface one CI run
+    /// as two service machines.
+    fn labeled<T>(&self, req: ureq::RequestBuilder<T>) -> ureq::RequestBuilder<T> {
+        match &self.machine_label {
+            Some(l) => req.header("x-topos-machine", l),
+            None => req,
         }
     }
 
@@ -1059,7 +1079,7 @@ impl UreqDeviceClient {
             .post(url)
             .header("content-type", "application/json");
         if let Some(cred) = credential {
-            req = req.header("authorization", format!("Bearer {cred}"));
+            req = self.labeled(req.header("authorization", format!("Bearer {cred}")));
         }
         let resp = req
             .send(payload.as_slice())
@@ -1408,9 +1428,11 @@ impl UreqDeviceClient {
         let url = format!("{}{path}", self.base_url);
         let _phase = self.dialing();
         let resp = self
-            .agent
-            .get(&url)
-            .header("authorization", format!("Bearer {credential}"))
+            .labeled(
+                self.agent
+                    .get(&url)
+                    .header("authorization", format!("Bearer {credential}")),
+            )
             .call()
             .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?;
         let status = resp.status().as_u16();

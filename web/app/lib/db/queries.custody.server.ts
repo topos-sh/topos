@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { composition } from "@/composition.server";
-import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
+import type { MemberActor, ReadActor, SessionActor } from "@/lib/auth/guards.server";
 import { auditInTx, mintProposalId } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import {
@@ -92,7 +92,7 @@ export interface PublishTarget {
  * MemberActor suffices (a SessionActor IS one structurally) — the review pages share it. */
 export async function publishTargetOf(
   // Only the workspace scope is read — structural, so member, session, and token actors all pass.
-  actor: { readonly workspaceId: string },
+  actor: ReadActor,
   bundleId: string,
 ): Promise<PublishTarget | undefined> {
   const rows = await getDb()

@@ -405,6 +405,7 @@ export async function requireSessionActorPreBody(request: Request): Promise<Sess
  * read-only refusal. `machine: true` is the discriminant a route branches on.
  */
 export type TokenActor = {
+  readonly [actorBrand]: true;
   readonly machine: true;
   readonly workspaceId: string;
   readonly tokenId: string;
@@ -441,6 +442,7 @@ export async function requireReadActor(
       throw uniformNotFound();
     }
     return {
+      [actorBrand]: true,
       machine: true,
       // The RESOLVED id, never the path's ref — the ref may be the address slug (a CI checkout
       // knows only its committed file's address), and every downstream query keys on the id.
