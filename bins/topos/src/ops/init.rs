@@ -71,7 +71,7 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
     // check above and the write — the exclusive create meets it as an existing file (the same
     // clean no-op receipt, the outside bytes standing), never an overwrite.
     let created =
-        match crate::atomic::atomic_write_new(ctx.fs, &path, project_template().as_bytes())? {
+        match crate::atomic::atomic_write_new(ctx.fs, &path, project_template(None).as_bytes())? {
             crate::atomic::NewOutcome::Written => true,
             crate::atomic::NewOutcome::Exists => false,
         };

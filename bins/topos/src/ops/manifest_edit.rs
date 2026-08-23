@@ -403,7 +403,7 @@ pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened
             ),
         ),
         ManifestScope::Project => (
-            project_template(),
+            project_template(None),
             format!("created {}", target.path.display()),
         ),
     };
@@ -583,6 +583,7 @@ pub(super) fn write_row(
     target: &EditTarget,
     reference: &str,
     value: &EntryValue,
+    kind: crate::bundle_kind::BundleKind,
 ) -> Result<(), ClientError> {
     let global = target.scope == ManifestScope::Global;
     // Held across read → edit → write: another process's row must not be born and lost inside it.
@@ -617,7 +618,7 @@ pub(super) fn write_row(
         return Ok(());
     }
     editor
-        .set_row(reference, value)
+        .set_row(reference, value, kind)
         .map_err(|e| ClientError::InvalidArgument(e.message))?;
     editor.write(ctx.fs, &target.path)?;
     // An EXTEND is not a replace, so it does not read as one: the row kept everything it had and
@@ -870,7 +871,7 @@ pub(crate) fn note_added_in(
         Some(p) => EntryValue::Pin(p.to_owned()),
         None => EntryValue::Star,
     };
-    write_row(ctx, data, target, reference, &value)
+    write_row(ctx, data, target, reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))
 }
 
 /// Record a PATH-adopted bundle in `target`: the dir-relative `./` spelling when the source sits
@@ -983,7 +984,7 @@ fn note_added_path_row_in(
             ..crate::manifest::document::EntryFields::default()
         }),
     };
-    write_row(ctx, data, target, &reference, &value)
+    write_row(ctx, data, target, &reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))
 }
 
 /// [`note_added_path_in`] resolving the target from the scope flag — the BACKSTOP for a caller
@@ -1174,7 +1175,7 @@ pub(crate) fn note_added_remote(
         dest: Some(dest.to_vec()),
         ..Default::default()
     });
-    write_row(ctx, data, target, &reference, &value)
+    write_row(ctx, data, target, &reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))
 }
 
 /// The `dest` spellings a `-a` selection records for its slugs — the scope-correct skills-root
@@ -3690,7 +3691,7 @@ fn apply_arms(
             Arm::OffWrite { reference, .. } => {
                 edited = true;
                 editor
-                    .set_row(reference, &EntryValue::Off)
+                    .set_row(reference, &EntryValue::Off, crate::bundle_kind::BundleKind::Skill)
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
             Arm::DestNarrow {
@@ -3698,7 +3699,11 @@ fn apply_arms(
             } => {
                 edited = true;
                 editor
-                    .set_row(reference, value)
+                    .set_row(
+                        reference,
+                        value,
+                        value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill),
+                    )
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
             // The row is touched ONLY where the claim put something on it; the record-side drop
@@ -3710,7 +3715,11 @@ fn apply_arms(
             } => {
                 edited = true;
                 editor
-                    .set_row(reference, value)
+                    .set_row(
+                        reference,
+                        value,
+                        value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill),
+                    )
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
             Arm::ClaimDetach { value: None, .. } => {}
@@ -3741,7 +3750,13 @@ fn apply_arms(
                     let (member_value, _, _) =
                         split_carriage(set, member_kind(ctx, target, set, member));
                     editor
-                        .set_row(&reference, &member_value)
+                        .set_row(
+                            &reference,
+                            &member_value,
+                            member_value
+                                .declared_kind()
+                                .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+                        )
                         .map_err(|e| ClientError::InvalidArgument(e.message))?;
                 }
             }

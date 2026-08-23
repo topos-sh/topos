@@ -1,54 +1,50 @@
-//! The NEW `topos.toml` document — one `[bundles]` namespace.
+//! The `topos.toml` document — the v2 sectioned grammar.
 //!
-//! THE JOIN RULE: an entry's reference is its TOML key path under `[bundles]`, segments joined
-//! with `/`. A quoted key may carry slashes — opaque to TOML, transparent to the join — so these
-//! three spell the SAME entry and parse identically:
+//! A manifest is a short, readable statement of intent. Top level: `schema = 1`, an optional
+//! `workspace = "<host>/<workspace>"` line (project files), and the kind sections:
 //!
 //! ```toml
-//! [bundles]
-//! "topos.sh/acme/code-review" = "*"
+//! schema = 1
+//! workspace = "topos.sh/acme"
+//!
+//! [skills]
+//! code-review     = "latest"                        # follows the team's current version
+//! release-process = "3f9c…(64 hex)"                 # pinned
+//! find-skills     = "github:vercel-labs/skills"     # a repo skill; the key is the skill name
+//! sql-style       = "github:acme/tools#9d0e8c17"    # pinned to a commit
+//! local-notes     = "./tools/local-notes"           # a folder in this repo
+//!
+//! [mcp]
+//! linear = "latest"
+//!
+//! [channels]
+//! backend = "latest"
 //! ```
-//! ```toml
-//! [bundles."topos.sh"]
-//! "acme/code-review" = "*"
-//! ```
-//! ```toml
-//! [bundles."topos.sh/acme"]
-//! code-review = "*"
-//! ```
 //!
-//! An ENTRY is always one line — `<ref> = <value>` where the value is a version string or an
-//! inline table of fields (multiline inline tables included; TOML 1.1). A `[bundles.…]` section
-//! header is always GROUPING, never an entry: a section opened per bundle (holding `version =`)
-//! joins into a path no reference shape matches and refuses with the way back. Two spellings
-//! joining to one reference are a parse error; a top-level table other than `bundles`
-//! refuses too — this file is a complete recipe, and a typo must not silently drop demand.
+//! THE KEY IS THE NAME. In a PROJECT file every workspace-bundle and channel key is the BARE
+//! name, resolved against the file's one `workspace =` line — a project uses one workspace, the
+//! way a checkout has one origin. In the MACHINE file (`~/.topos/topos.toml`) there is no
+//! workspace line: workspace keys are spelled in full (`"topos.sh/acme/code-review"`), and one
+//! extra section exists — `[workspaces]`, the feed rows `topos login` writes
+//! (`"<host>/<ws>" = "latest"`: everything that workspace currently gives you).
 //!
-//! Values are validated BY SHAPE ([`KeyShape`]): things take a version (`"*"`, a 64-hex digest
-//! for workspace bundles, a 7–40-hex commit for forge things) or fields; a channel takes no
-//! `version`; a repo set takes `"*"`/a commit; the feed takes exactly `"*"`. `"off"` — the
-//! per-bundle switch — is legal only on a workspace bundle row in the GLOBAL file, and feed rows
-//! are global-only too (a project manifest is a repo fact, identical for every contributor).
+//! VALUES are the same everywhere: `"latest"` (follow), a version pin (64-hex digest for
+//! workspace bundles; `github:owner/repo#<commit>` pins a repo skill), `"off"` (machine file
+//! only — the personal switch), a path (`"./tools/x"` — a local folder), or an inline table of
+//! fields (`version`, `path`, `source`, `dest`, `mcp_dest`, `name`, `subdir`, `kind`).
 //!
-//! PLACEMENT is ONE field: `dest`, an array of destinations. A row without `dest` reaches every
-//! agent this machine has, now and later (detection decides); a row with `dest` places at exactly
-//! what it names. The machine file spells machine paths (`~/`-prefixed or absolute); a project
-//! file spells relative paths inside the checkout — except the reserved `"*"` token
-//! ([`super::dest::DEFAULT_REACH`]), which is not a path: it stands for the reach the row would
-//! have with no `dest` at all, so entries beside it ADD to that reach instead of replacing it. A
-//! row whose only field is `dest = ["*"]` says exactly what a bare `"*"` row says, and the normal
-//! form writes it that way.
+//! FORWARD TOLERANCE: an unknown top-level section is SKIPPED with one warning naming it (a
+//! newer topos wrote it; updating gets it) — never a refusal, so a future kind cannot brick an
+//! older CLI. Garbage INSIDE a known section still refuses with the way back. A `schema` newer
+//! than this build refuses toward `topos self-update`.
 //!
-//! A CHANNEL row carries members of BOTH kinds, so one array cannot speak for them: its `dest`
-//! names placement FOLDERS for its skill members and `mcp_dest` names CONFIG FILES for its mcp
-//! members. Each narrows only its own kind, and a channel with no `mcp_dest` does not narrow its
-//! mcp members at all. A bundle row needs no such split — its kind already says which one `dest`
-//! means.
+//! The `[mcp]` and `[skills]` sections carry the same row shapes; the section names the KIND the
+//! row's bundle is delivered as, and each parsed row remembers its section so the editor and the
+//! normal form spell it back where it came from.
 //!
-//! [`ManifestEditor`] edits format-preserving over `toml_edit` with a hard INVERSE property:
-//! adding a row and removing it restores the input byte-for-byte, and vice versa — see
-//! [`ManifestEditor::set_row`] / [`ManifestEditor::remove_row`]. Deterministic reorganization
-//! (grouping, sorting) is the `fmt` normal form's job, never the editor's.
+//! [`ManifestEditor`] edits format-preserving over `toml_edit` with the INVERSE property: adding
+//! a row and removing it restores the input byte-for-byte, and vice versa. Deterministic
+//! reorganization (sorting, section order) is the `fmt` normal form's job, never the editor's.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -56,17 +52,64 @@ use std::path::Path;
 
 use toml_edit::{Array, Decor, DocumentMut, InlineTable, Item, Table, Value};
 
+use crate::bundle_kind::BundleKind;
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
 use crate::manifest::keys::{KeyShape, classify_key};
 
+/// The manifest format this build reads and writes.
+pub(crate) const SCHEMA: i64 = 1;
+
 /// Which manifest a text IS: the machine-personal global file (`~/.topos/topos.toml`) or a
-/// project's committed `<project>/topos.toml`. Feed rows and `"off"` are global-only; everything
-/// else reads identically in both.
+/// project's committed `<project>/topos.toml`. Feed rows (`[workspaces]`) and `"off"` are
+/// machine-only; bare workspace keys are project-only (they need the `workspace =` line).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ManifestScope {
     Global,
     Project,
+}
+
+/// Which section a row is spelled in — remembered from the parse so edits and the normal form
+/// put a row back where it belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SectionKind {
+    Skills,
+    Mcp,
+    Channels,
+    Workspaces,
+}
+
+impl SectionKind {
+    pub(crate) fn header(self) -> &'static str {
+        match self {
+            SectionKind::Skills => "skills",
+            SectionKind::Mcp => "mcp",
+            SectionKind::Channels => "channels",
+            SectionKind::Workspaces => "workspaces",
+        }
+    }
+
+    fn of(header: &str) -> Option<Self> {
+        match header {
+            "skills" => Some(SectionKind::Skills),
+            "mcp" => Some(SectionKind::Mcp),
+            "channels" => Some(SectionKind::Channels),
+            "workspaces" => Some(SectionKind::Workspaces),
+            _ => None,
+        }
+    }
+
+    /// The section a row of this shape + kind belongs in.
+    pub(crate) fn for_row(shape: &KeyShape, kind: BundleKind) -> Self {
+        match shape {
+            KeyShape::Feed { .. } => SectionKind::Workspaces,
+            KeyShape::Channel { .. } => SectionKind::Channels,
+            _ => match kind {
+                BundleKind::Skill => SectionKind::Skills,
+                BundleKind::Mcp => SectionKind::Mcp,
+            },
+        }
+    }
 }
 
 /// The inline-table form of an entry value — every field optional, legality decided per shape.
@@ -88,11 +131,11 @@ pub(crate) struct EntryFields {
 /// One entry's parsed value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EntryValue {
-    /// `"*"` — track what the reference currently serves.
+    /// `"latest"` — track what the reference currently serves.
     Star,
-    /// `"off"` — the per-bundle switch (workspace bundles, global file only).
+    /// `"off"` — the per-bundle switch (workspace bundles, machine file only).
     Off,
-    /// A version pin: a 64-hex digest (workspace bundle) or a 7–40-hex commit (forge thing).
+    /// A version pin: a 64-hex digest (workspace bundle) or a 7–40-hex commit (repo skill).
     Pin(String),
     /// An inline table of fields.
     Fields(EntryFields),
@@ -116,10 +159,10 @@ impl EntryValue {
     /// The bundle kind this value DECLARES, against the closed vocabulary: an absent `kind` field
     /// (and every non-table spelling) is the default skill; `None` means the row names a kind this
     /// build does not own, which is not a skill either.
-    pub(crate) fn declared_kind(&self) -> Option<crate::bundle_kind::BundleKind> {
+    pub(crate) fn declared_kind(&self) -> Option<BundleKind> {
         match self {
-            EntryValue::Fields(f) => crate::bundle_kind::BundleKind::of_tag(f.kind.as_deref()),
-            _ => Some(crate::bundle_kind::BundleKind::Skill),
+            EntryValue::Fields(f) => BundleKind::of_tag(f.kind.as_deref()),
+            _ => Some(BundleKind::Skill),
         }
     }
 }
@@ -128,18 +171,26 @@ impl EntryValue {
 /// deterministically (canonical field order, single-line inline tables).
 pub(crate) type EntryValueSpelling = EntryValue;
 
-/// One parsed `[bundles]` row: the joined reference, its shape, its validated value.
+/// One parsed row: the canonical joined reference, its shape, its validated value, and the
+/// section it is spelled in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BundleRow {
     pub reference: String,
     pub shape: KeyShape,
     pub value: EntryValue,
+    pub section: SectionKind,
 }
 
-/// A parsed manifest: rows in file order.
+/// A parsed manifest: rows in file order, the workspace line (when one stands), and the
+/// forward-tolerance warnings (unknown sections skipped).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ManifestDoc {
     pub rows: Vec<BundleRow>,
+    /// The `workspace = "<host>/<ws>"` line, split — `None` in the machine file, and in a
+    /// project file holding only repo/path rows.
+    pub workspace: Option<(String, String)>,
+    /// One line per unknown top-level section skipped — surfaced, never fatal.
+    pub warnings: Vec<String>,
 }
 
 /// A typed manifest refusal — names the specific fault AND the specific fix.
@@ -170,17 +221,20 @@ fn at(key: &str, message: impl Into<String>) -> ManifestError {
     }
 }
 
-/// The complete field vocabulary — what a key must be to count as a mis-shelved FIELD (the
-/// section-as-entry teaching) rather than an unknown word.
-const FIELD_NAMES: [&str; 6] = ["version", "dest", "mcp_dest", "name", "subdir", "kind"];
+/// The complete field vocabulary — what a key must be to count as a mis-shelved FIELD rather
+/// than an unknown word. `path` and `source` are spelling (they pick the shape), the rest ride
+/// [`EntryFields`].
+const FIELD_NAMES: [&str; 8] = [
+    "version", "path", "source", "dest", "mcp_dest", "name", "subdir", "kind",
+];
 
-/// The fields legal on each shape. The feed takes none (its value is exactly `"*"`).
+/// The fields legal on each shape (`path`/`source` excluded — they ARE the shape).
 pub(crate) fn legal_fields(shape: &KeyShape) -> &'static [&'static str] {
     match shape {
         KeyShape::WorkspaceBundle { .. } => &["version", "dest", "name"],
         KeyShape::RepoSkill { .. } => &["version", "dest", "name", "subdir", "kind"],
         KeyShape::LocalPath { .. } => &["dest", "name", "kind"],
-        KeyShape::RepoSet { .. } => &["dest"],
+        KeyShape::RepoSet { .. } => &[],
         KeyShape::Channel { .. } => &["dest", "mcp_dest"],
         KeyShape::Feed { .. } => &[],
     }
@@ -198,38 +252,26 @@ fn is_hex(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn joined(prefix: &[String], key: &str) -> String {
-    if prefix.is_empty() {
-        key.to_string()
-    } else {
-        format!("{}/{key}", prefix.join("/"))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Validation shared by the parser and the editor
 // ---------------------------------------------------------------------------
 
-fn feed_exact_star(reference: &str) -> ManifestError {
+fn feed_exact_latest(reference: &str) -> ManifestError {
     at(
         reference,
         format!(
-            "the feed takes exactly `\"*\"` — `{reference}` means whatever the workspace \
-             currently serves; pin or configure individual bundles on their own rows",
+            "a workspace row takes exactly `\"latest\"` — `{reference}` means whatever the \
+             workspace currently gives you; pin individual bundles on their own rows",
         ),
     )
 }
 
-fn feed_in_project(reference: &str, shape: &KeyShape) -> ManifestError {
-    let ws = shape.workspace_key().unwrap_or_default();
+fn feed_in_project(reference: &str) -> ManifestError {
     at(
         reference,
-        format!(
-            "`{reference}` is a feed row — personal by nature, so it lives in the global \
-             manifest (`~/.topos/topos.toml`) only; a project manifest is a repo fact, identical \
-             for every contributor, and a channel (`{ws}/channels/<name>`) is the repo-shaped \
-             set to name here",
-        ),
+        "`[workspaces]` is personal by nature and lives in the machine file \
+         (`~/.topos/topos.toml`) only — a project file is a repo fact, identical for every \
+         contributor; name the bundles or channels this project uses on their own rows",
     )
 }
 
@@ -238,8 +280,8 @@ fn off_check(reference: &str, shape: &KeyShape, scope: ManifestScope) -> Result<
         (KeyShape::WorkspaceBundle { .. }, ManifestScope::Global) => Ok(()),
         (KeyShape::WorkspaceBundle { .. }, ManifestScope::Project) => Err(at(
             reference,
-            "`\"off\"` is the personal switch and lives in the global manifest \
-             (`~/.topos/topos.toml`) only — a project manifest is a repo fact, identical for \
+            "`\"off\"` is the personal switch and lives in the machine file \
+             (`~/.topos/topos.toml`) only — a project file is a repo fact, identical for \
              every contributor; to keep a bundle out of this project, remove the row that \
              brings it",
         )),
@@ -264,7 +306,7 @@ fn pin_check(reference: &str, shape: &KeyShape, s: &str) -> Result<(), ManifestE
                     reference,
                     format!(
                         "`{s}` does not pin `{reference}` — a workspace bundle pins the full \
-                         64-character version digest; `\"*\"` tracks current",
+                         64-character version digest; `\"latest\"` follows the team's current",
                     ),
                 ))
             }
@@ -277,30 +319,31 @@ fn pin_check(reference: &str, shape: &KeyShape, s: &str) -> Result<(), ManifestE
                     reference,
                     format!(
                         "`{s}` does not pin `{reference}` — a git pin is a commit hash (7 to 40 \
-                         hex characters); `\"*\"` tracks the default branch",
+                         hex characters); without `#<commit>` the row follows the default branch",
                     ),
                 ))
             }
         }
         KeyShape::LocalPath { .. } => Err(at(
             reference,
-            "a local folder has no versions to pin — its value is `\"*\"` or an inline table \
+            "a local folder has no versions to pin — its value is its path, or an inline table \
              of fields",
         )),
         KeyShape::Channel { .. } => Err(at(
             reference,
-            "a channel takes no pin — its value is `\"*\"` or an inline table (without \
+            "a channel takes no pin — its value is `\"latest\"` or an inline table (without \
              `version`)",
         )),
-        KeyShape::Feed { .. } => Err(feed_exact_star(reference)),
+        KeyShape::Feed { .. } => Err(feed_exact_latest(reference)),
     }
 }
 
 /// DRY-RUN one row: classify the reference and validate the value against its shape + scope —
 /// exactly what [`ManifestEditor::set_row`] would do, without a file, an editor, or a write. A
-/// caller whose write is preceded by a durable side effect (a granted forge origin, a minted
-/// store) proves the row is writable FIRST, so a refusal cannot land after the consent it was
-/// supposed to gate.
+/// caller whose write is preceded by a durable side effect proves the row is writable FIRST, so
+/// a refusal cannot land after the consent it was supposed to gate. (What this cannot know is a
+/// project file's one-workspace rule — that needs the document, and [`ManifestEditor::set_row`]
+/// enforces it.)
 ///
 /// # Errors
 /// The reference must classify, and the value must be legal for its shape and this scope.
@@ -323,12 +366,15 @@ fn check_value(
 ) -> Result<(), ManifestError> {
     if matches!(shape, KeyShape::Feed { .. }) {
         if scope == ManifestScope::Project {
-            return Err(feed_in_project(reference, shape));
+            return Err(feed_in_project(reference));
         }
         return match value {
             EntryValue::Star => Ok(()),
-            _ => Err(feed_exact_star(reference)),
+            _ => Err(feed_exact_latest(reference)),
         };
+    }
+    if matches!(shape, KeyShape::RepoSet { .. }) {
+        return Err(repo_set_unspellable(reference));
     }
     match value {
         EntryValue::Star => Ok(()),
@@ -338,11 +384,21 @@ fn check_value(
     }
 }
 
+/// The refusal a repo-set row earns — v2 spells individual skills, and `topos add <repo>` writes
+/// one row per skill it discovers.
+fn repo_set_unspellable(reference: &str) -> ManifestError {
+    at(
+        reference,
+        format!(
+            "`{reference}` names a whole repo — a manifest row names ONE skill: \
+             `<name> = \"github:<owner>/<repo>\"` (the key is the skill's name inside the repo); \
+             `topos add {reference}` writes a row per skill it finds",
+        ),
+    )
+}
+
 /// The field-legality half, on an already-typed [`EntryFields`] — including the `dest` rules the
-/// scope decides: the machine file names machine paths (`~/`-prefixed or absolute), a project
-/// file names relative paths contained inside the checkout, and a local MCP row's dest entries
-/// must be config files the harness descriptor table knows (their format must be known to edit
-/// them).
+/// scope decides.
 fn fields_check(
     reference: &str,
     shape: &KeyShape,
@@ -366,15 +422,13 @@ fn fields_check(
     // A repo row cannot carry an MCP bundle: an MCP server is delivered from a workspace catalog,
     // so the row refuses at LOAD rather than parsing into a demand nothing could ever converge.
     if matches!(shape, KeyShape::RepoSkill { .. })
-        && f.kind.as_deref() == Some(crate::bundle_kind::BundleKind::Mcp.as_str())
+        && f.kind.as_deref() == Some(BundleKind::Mcp.as_str())
     {
         return Err(mcp_needs_a_workspace(reference));
     }
-    // The kind VOCABULARY is closed in a hand-written file exactly as it is at the server door: a
-    // word no kind of this build owns names delivery mechanics nothing here can run, so it refuses
-    // at LOAD rather than parsing into a demand that would be placed as a skill.
+    // The kind VOCABULARY is closed in a hand-written file exactly as it is at the server door.
     if let Some(word) = f.kind.as_deref()
-        && crate::bundle_kind::BundleKind::parse(word).is_none()
+        && BundleKind::parse(word).is_none()
     {
         return Err(unknown_kind(reference, word));
     }
@@ -382,7 +436,7 @@ fn fields_check(
         if v == "off" {
             return Err(off_in_table(reference));
         }
-        if v != "*" {
+        if v != "latest" {
             pin_check(reference, shape, v)?;
         }
     }
@@ -390,11 +444,9 @@ fn fields_check(
         dest_list_check(reference, "dest", scope, dest)?;
         // A local MCP row's kind is knowable at load — its dest entries are config FILES and
         // must come from the descriptor table (an unknown file's format cannot be edited).
-        // Workspace rows learn their kind at delivery; the reconcile enforces the same rule.
         if matches!(shape, KeyShape::LocalPath { .. })
-            && f.kind.as_deref() == Some(crate::bundle_kind::BundleKind::Mcp.as_str())
+            && f.kind.as_deref() == Some(BundleKind::Mcp.as_str())
         {
-            // The default-reach token names no file, so there is none to know the format of.
             for entry in super::dest::named_entries(dest) {
                 if super::dest::mcp_slug_for_dest(&entry, scope).is_none() {
                     return Err(at(reference, super::dest::unknown_mcp_file(&entry, scope)));
@@ -402,16 +454,10 @@ fn fields_check(
             }
         }
     }
-    // A channel's `mcp_dest` takes the same path dialect and nothing more. Which files it names is
-    // NOT settled here: a channel expands at delivery, so whether it has any mcp member at all is
-    // unknowable at load — an entry no harness claims is the reconcile's to report, against the
-    // members that actually resolved, rather than a refusal that would take the channel's skill
-    // members down with it.
+    // A channel's `mcp_dest` takes the same path dialect and nothing more; which files it names
+    // resolves at delivery.
     if let Some(mcp_dest) = &f.mcp_dest {
         dest_list_check(reference, "mcp_dest", scope, mcp_dest)?;
-        // The DEFAULT-REACH token is a BUNDLE ROW's `dest` grammar and nothing else: it stands for
-        // what one row would reach carrying no `dest`, while `mcp_dest` is a filter over a set's
-        // members. Naming it here has no reading, so it refuses rather than parsing into one.
         if super::dest::carries_default_reach(mcp_dest) {
             return Err(at(
                 reference,
@@ -427,9 +473,7 @@ fn fields_check(
     Ok(())
 }
 
-/// One destination array's shape rules: it names at least one entry, and every entry speaks the
-/// scope's path dialect. `field` is the spelling the refusal quotes, so `dest` and `mcp_dest`
-/// teach with their own word.
+/// One destination array's shape rules.
 fn dest_list_check(
     reference: &str,
     field: &str,
@@ -437,8 +481,6 @@ fn dest_list_check(
     entries: &[String],
 ) -> Result<(), ManifestError> {
     if entries.is_empty() {
-        // `mcp_dest` opens on a vowel SOUND ("em-cee-pee"), so the article is spelled for the word
-        // rather than for its first letter.
         let article = if field == "mcp_dest" { "an" } else { "a" };
         return Err(at(
             reference,
@@ -454,11 +496,7 @@ fn dest_list_check(
     Ok(())
 }
 
-/// The per-scope `dest` path dialect (the two-sided rule, enforced at load like feed/`"off"`):
-/// the machine file names machine paths, a project file names checkout-contained relative paths.
-/// The dialect check for ONE dest entry, reference-free — the `--dest` literal's validation (the
-/// same rules [`check_row`] runs over a whole row, so a selector can refuse before any side
-/// effect with the grammar's own words).
+/// The dialect check for ONE dest entry, reference-free — the `--dest` literal's validation.
 ///
 /// # Errors
 /// As the grammar's per-entry rule: machine files name machine paths, project files relative
@@ -479,7 +517,6 @@ fn dest_entry_check(
             format!("`{field}` entries are non-empty directory strings"),
         ));
     }
-    // The default-reach token is the one entry that is not a path, so no dialect rules it.
     if entry == super::dest::DEFAULT_REACH {
         return Ok(());
     }
@@ -525,27 +562,24 @@ fn illegal_field(reference: &str, shape: &KeyShape, field: &str) -> ManifestErro
     )
 }
 
-/// The refusal a repo row tagged `kind = "mcp"` earns — the one place that teaches where an MCP
-/// bundle comes from.
+/// The refusal a repo row tagged `kind = "mcp"` earns.
 fn mcp_needs_a_workspace(reference: &str) -> ManifestError {
     at(
         reference,
         format!(
             "`kind = \"mcp\"` does not fit a repo skill — `{reference}` cannot deliver an MCP \
-             server; publish the bundle to a workspace and name it here as \
-             `<host>/<workspace>/<bundle>`"
+             server; publish the bundle to a workspace and name it in `[mcp]`"
         ),
     )
 }
 
-/// The refusal a row naming a kind topos does not deliver earns — the same teaching the server
-/// door gives, in this file's idiom: what was written, and the whole vocabulary that exists.
+/// The refusal a row naming a kind topos does not deliver earns.
 fn unknown_kind(reference: &str, word: &str) -> ManifestError {
     at(
         reference,
         format!(
             "`kind = \"{word}\"` on `{reference}` is not a kind topos delivers — known kinds: {}",
-            crate::bundle_kind::BundleKind::known_list()
+            BundleKind::known_list()
         ),
     )
 }
@@ -553,8 +587,112 @@ fn unknown_kind(reference: &str, word: &str) -> ManifestError {
 fn off_in_table(reference: &str) -> ManifestError {
     at(
         reference,
-        "`off` is a whole value (`\"<ref>\" = \"off\"`) — never a field",
+        "`off` is a whole value (`<name> = \"off\"`) — never a field",
     )
+}
+
+// ---------------------------------------------------------------------------
+// The workspace line + the source-value grammar
+// ---------------------------------------------------------------------------
+
+/// Parse a `workspace = "<host>/<workspace>"` line's value.
+pub(crate) fn parse_workspace_line(s: &str) -> Result<(String, String), ManifestError> {
+    match classify_key(s) {
+        Ok(KeyShape::Feed { host, workspace }) => Ok((host, workspace)),
+        _ => Err(plain(format!(
+            "`workspace = \"{s}\"` is not a workspace address — the line is \
+             `workspace = \"<host>/<workspace>\"` (e.g. `topos.sh/acme`)",
+        ))),
+    }
+}
+
+/// A parsed `github:`/`bitbucket:` source value: the forge host, owner, repo, and the optional
+/// `#<commit>` pin.
+struct SourceValue {
+    host: String,
+    owner: String,
+    repo: String,
+    pin: Option<String>,
+}
+
+/// Parse a source value: `github:<owner>/<repo>[#<commit>]` (`bitbucket:` rides the same
+/// shape). The commit is 7–40 hex; a branch or tag is not a pin.
+fn parse_source_value(key: &str, s: &str) -> Result<SourceValue, ManifestError> {
+    let (host, rest) = if let Some(rest) = s.strip_prefix("github:") {
+        ("github.com", rest)
+    } else if let Some(rest) = s.strip_prefix("bitbucket:") {
+        ("bitbucket.org", rest)
+    } else {
+        return Err(at(
+            key,
+            format!("`{s}` is not a source — a repo skill is `github:<owner>/<repo>[#<commit>]`"),
+        ));
+    };
+    let (path, pin) = match rest.split_once('#') {
+        Some((path, p)) => {
+            if (7..=40).contains(&p.len()) && is_hex(p) {
+                (path, Some(p.to_ascii_lowercase()))
+            } else {
+                return Err(at(
+                    key,
+                    format!(
+                        "`#{p}` does not pin `{s}` — a git pin is a commit hash (7 to 40 hex \
+                         characters); without `#<commit>` the row follows the default branch",
+                    ),
+                ));
+            }
+        }
+        None => (rest, None),
+    };
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        [owner, repo] if !owner.is_empty() && !repo.is_empty() => {
+            let repo = repo.trim_end_matches(".git");
+            if repo.is_empty() {
+                return Err(at(
+                    key,
+                    format!(
+                        "`{s}` is not a source — a repo skill is \
+                         `github:<owner>/<repo>[#<commit>]`"
+                    ),
+                ));
+            }
+            Ok(SourceValue {
+                host: host.to_string(),
+                owner: (*owner).to_string(),
+                repo: repo.to_string(),
+                pin,
+            })
+        }
+        _ => Err(at(
+            key,
+            format!("`{s}` is not a source — a repo skill is `github:<owner>/<repo>[#<commit>]`"),
+        )),
+    }
+}
+
+/// Spell a repo skill's source value back: `github:<owner>/<repo>`.
+fn spell_source(host: &str, owner: &str, repo: &str) -> String {
+    let scheme = if host == "bitbucket.org" {
+        "bitbucket"
+    } else {
+        "github"
+    };
+    format!("{scheme}:{owner}/{repo}")
+}
+
+/// The one NAME charset for section keys (bare names): lowercase letters, digits, hyphens,
+/// starting alphanumeric — the same rule the reference grammar uses.
+fn is_bare_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn is_path_key(s: &str) -> bool {
+    s.starts_with("./") || s.starts_with("../") || s.starts_with('/') || s.starts_with("~/")
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +700,7 @@ fn off_in_table(reference: &str) -> ManifestError {
 // ---------------------------------------------------------------------------
 
 /// Parse + validate a manifest text. Rows come back in file order; every refusal names the
-/// specific fault and the specific fix.
+/// specific fault and the specific fix; unknown top-level sections skip into `warnings`.
 pub(crate) fn parse_manifest(
     text: &str,
     scope: ManifestScope,
@@ -578,100 +716,324 @@ pub(crate) fn parse_document(
     doc: &DocumentMut,
     scope: ManifestScope,
 ) -> Result<ManifestDoc, ManifestError> {
-    for (key, _) in doc.iter() {
-        if key != "bundles" {
+    let mut out = ManifestDoc::default();
+
+    // Top-level scalars first: `schema` (forward-refusing) and `workspace` (project files).
+    if let Some(item) = doc.get("schema") {
+        let v = item.as_integer().ok_or_else(|| {
+            plain("`schema` is a number — this build writes and reads `schema = 1`")
+        })?;
+        if v > SCHEMA {
             return Err(plain(format!(
-                "unknown top-level `{key}` — a manifest holds `[bundles]` only; a typo here \
-                 would silently drop what it names, so it refuses instead",
+                "this file is `schema = {v}` — written by a newer topos than this one reads; \
+                 run `topos self-update`",
             )));
         }
     }
-    let mut rows = Vec::new();
-    if let Some(item) = doc.get("bundles") {
-        let Item::Table(t) = item else {
+    if let Some(item) = doc.get("workspace") {
+        let s = item.as_str().ok_or_else(|| {
+            plain("`workspace` is a string — `workspace = \"<host>/<workspace>\"`")
+        })?;
+        if scope == ManifestScope::Global {
             return Err(plain(
-                "`bundles` is a section — spell it `[bundles]` with one entry per line",
+                "the machine-wide file has no `workspace` line — it can hold bundles from any \
+                 workspace, so every workspace key is spelled in full \
+                 (`\"<host>/<workspace>/<name>\"`)",
             ));
-        };
-        let mut prefix = Vec::new();
-        let mut seen = HashSet::new();
-        collect_rows(t, &mut prefix, scope, &mut seen, &mut rows)?;
+        }
+        out.workspace = Some(parse_workspace_line(s)?);
     }
-    Ok(ManifestDoc { rows })
-}
 
-fn collect_rows(
-    table: &Table,
-    prefix: &mut Vec<String>,
-    scope: ManifestScope,
-    seen: &mut HashSet<String>,
-    out: &mut Vec<BundleRow>,
-) -> Result<(), ManifestError> {
-    for (key, item) in table.iter() {
-        match item {
-            Item::None => {}
-            Item::Value(v) => {
-                let reference = joined(prefix, key);
-                let shape = classify_entry(&reference)?;
-                if matches!(shape, KeyShape::Feed { .. }) && scope == ManifestScope::Project {
-                    return Err(feed_in_project(&reference, &shape));
+    let mut seen: HashSet<String> = HashSet::new();
+    for (key, item) in doc.iter() {
+        match key {
+            "schema" | "workspace" => {}
+            _ => match SectionKind::of(key) {
+                Some(section) => {
+                    let Item::Table(t) = item else {
+                        return Err(plain(format!(
+                            "`{key}` is a section — spell it `[{key}]` with one entry per line",
+                        )));
+                    };
+                    let ws = out.workspace.clone();
+                    parse_section(t, section, scope, ws.as_ref(), &mut seen, &mut out)?;
                 }
-                if !seen.insert(reference.clone()) {
-                    return Err(at(
-                        &reference,
-                        format!(
-                            "`{reference}` is spelled twice — two keys join to the same \
-                             reference; keep one line",
-                        ),
+                None => {
+                    // Forward tolerance: a section this build does not know is skipped whole,
+                    // with one line saying so — never a refusal.
+                    out.warnings.push(format!(
+                        "this file also uses [{key}] — this topos does not read it; \
+                         `topos self-update` gets it",
                     ));
                 }
-                let value = value_of(&reference, &shape, scope, v)?;
-                out.push(BundleRow {
-                    reference,
-                    shape,
-                    value,
-                });
-            }
-            Item::Table(t) => {
-                prefix.push(key.to_string());
-                collect_rows(t, prefix, scope, seen, out)?;
-                prefix.pop();
-            }
-            Item::ArrayOfTables(_) => {
+            },
+        }
+    }
+    Ok(out)
+}
+
+/// Parse one known section's rows.
+fn parse_section(
+    table: &Table,
+    section: SectionKind,
+    scope: ManifestScope,
+    workspace: Option<&(String, String)>,
+    seen: &mut HashSet<String>,
+    out: &mut ManifestDoc,
+) -> Result<(), ManifestError> {
+    if section == SectionKind::Workspaces && scope == ManifestScope::Project {
+        return Err(feed_in_project(
+            table
+                .iter()
+                .next()
+                .map(|(k, _)| k)
+                .unwrap_or("<host>/<workspace>"),
+        ));
+    }
+    for (key, item) in table.iter() {
+        let v = match item {
+            Item::None => continue,
+            Item::Value(v) => v,
+            Item::Table(_) | Item::ArrayOfTables(_) => {
                 return Err(at(
-                    &joined(prefix, key),
-                    "`[[…]]` array tables are not manifest entries — an entry is one line: \
-                     `<ref> = <value>`",
+                    key,
+                    format!(
+                        "`[{}.{key}]` is not an entry — an entry is one line: \
+                         `<name> = <value>`; use an inline table for fields \
+                         (`{key} = {{ … }}`)",
+                        section.header()
+                    ),
                 ));
             }
+        };
+        let row = parse_row(key, v, section, scope, workspace)?;
+        if !seen.insert(row.reference.clone()) {
+            return Err(at(
+                &row.reference,
+                format!(
+                    "`{}` is spelled twice — two keys resolve to the same reference; keep one \
+                     line",
+                    row.reference
+                ),
+            ));
         }
+        out.rows.push(row);
     }
     Ok(())
 }
 
-/// Classify a joined key; a failure whose leaf is a FIELD name on a parent that IS a valid
-/// reference gets the section-as-entry teaching (a section per bundle holding `version = …`
-/// joins into `<ref>/version`).
-fn classify_entry(reference: &str) -> Result<KeyShape, ManifestError> {
-    classify_key(reference).map_err(|e| {
-        let leaf = reference.rsplit('/').next().unwrap_or(reference);
-        if leaf != reference
-            && FIELD_NAMES.contains(&leaf)
-            && classify_key(&reference[..reference.len() - leaf.len() - 1]).is_ok()
-        {
-            let parent = &reference[..reference.len() - leaf.len() - 1];
-            at(
-                reference,
-                format!(
-                    "`{reference}` reads as field `{leaf}` on `{parent}` — an entry is one \
-                     line: `<ref> = <value>`; use an inline table for fields \
-                     (`\"{parent}\" = {{ {leaf} = … }}`)",
-                ),
-            )
-        } else {
-            at(reference, e.message)
-        }
+/// Resolve one section key + value into a row: the key names the thing, the value says which
+/// version (and, for paths and repo skills, where it comes from).
+fn parse_row(
+    key: &str,
+    v: &Value,
+    section: SectionKind,
+    scope: ManifestScope,
+    workspace: Option<&(String, String)>,
+) -> Result<BundleRow, ManifestError> {
+    if section == SectionKind::Workspaces {
+        // Feed rows: full `<host>/<ws>` keys, exactly `"latest"`.
+        let shape = match classify_key(key) {
+            Ok(shape @ KeyShape::Feed { .. }) => shape,
+            _ => {
+                return Err(at(
+                    key,
+                    format!(
+                        "`{key}` is not a workspace address — a `[workspaces]` row is \
+                         `\"<host>/<workspace>\" = \"latest\"`",
+                    ),
+                ));
+            }
+        };
+        let value = match v.as_str() {
+            Some("latest") => EntryValue::Star,
+            _ => return Err(feed_exact_latest(key)),
+        };
+        return Ok(BundleRow {
+            reference: shape.canonical(),
+            shape,
+            value,
+            section,
+        });
+    }
+
+    let shape = resolve_key(key, v, section, scope, workspace)?;
+    let value = value_of(key, &shape, scope, v)?;
+    check_value(&shape.canonical(), &shape, scope, &value)?;
+    Ok(BundleRow {
+        reference: shape.canonical(),
+        shape,
+        value,
+        section,
     })
+}
+
+/// Classify one [skills]/[mcp]/[channels] key against its value into a canonical shape.
+fn resolve_key(
+    key: &str,
+    v: &Value,
+    section: SectionKind,
+    scope: ManifestScope,
+    workspace: Option<&(String, String)>,
+) -> Result<KeyShape, ManifestError> {
+    // The VALUE can settle the shape regardless of the key: a path value is a local folder, a
+    // `github:` value a repo skill (the key is the name either way).
+    let str_value = v.as_str();
+    if let Some(s) = str_value
+        && is_path_key(s)
+    {
+        return Ok(KeyShape::LocalPath { raw: s.to_string() });
+    }
+    if let Some(s) = str_value
+        && (s.starts_with("github:") || s.starts_with("bitbucket:"))
+    {
+        let src = parse_source_value(key, s)?;
+        return Ok(KeyShape::RepoSkill {
+            host: src.host,
+            owner: src.owner,
+            repo: src.repo,
+            skill: key.to_string(),
+        });
+    }
+    if let Some(t) = v.as_inline_table() {
+        if let Some(p) = t.get("path").and_then(Value::as_str) {
+            return Ok(KeyShape::LocalPath { raw: p.to_string() });
+        }
+        if let Some(s) = t.get("source").and_then(Value::as_str) {
+            let src = parse_source_value(key, s)?;
+            return Ok(KeyShape::RepoSkill {
+                host: src.host,
+                owner: src.owner,
+                repo: src.repo,
+                skill: key.to_string(),
+            });
+        }
+    }
+
+    // No source in the value: the key itself names a workspace thing.
+    if is_bare_name(key) {
+        let Some((host, ws)) = workspace else {
+            return Err(at(
+                key,
+                match scope {
+                    ManifestScope::Project => format!(
+                        "`{key}` is a bare name and this file has no `workspace = ` line — add \
+                         `workspace = \"<host>/<workspace>\"` at the top, or spell the row's \
+                         source in its value",
+                    ),
+                    ManifestScope::Global => format!(
+                        "`{key}` is a bare name — the machine-wide file spells workspace keys in \
+                         full: `\"<host>/<workspace>/{key}\"`",
+                    ),
+                },
+            ));
+        };
+        return Ok(match section {
+            SectionKind::Channels => KeyShape::Channel {
+                host: host.clone(),
+                workspace: ws.clone(),
+                channel: key.to_string(),
+            },
+            _ => KeyShape::WorkspaceBundle {
+                host: host.clone(),
+                workspace: ws.clone(),
+                bundle: key.to_string(),
+            },
+        });
+    }
+
+    // A full reference key.
+    match classify_key(key) {
+        Ok(shape @ KeyShape::WorkspaceBundle { .. }) if section != SectionKind::Channels => {
+            project_one_workspace_check(key, &shape, scope, workspace)?;
+            Ok(shape)
+        }
+        // In [channels], a three-segment `<host>/<ws>/<name>` key names the channel.
+        Ok(KeyShape::WorkspaceBundle {
+            host,
+            workspace: ws,
+            bundle,
+        }) => {
+            let shape = KeyShape::Channel {
+                host,
+                workspace: ws,
+                channel: bundle,
+            };
+            project_one_workspace_check(key, &shape, scope, workspace)?;
+            Ok(shape)
+        }
+        Ok(shape @ KeyShape::Channel { .. }) => {
+            if section != SectionKind::Channels {
+                return Err(at(
+                    key,
+                    format!("`{key}` is a channel — its row lives in `[channels]`"),
+                ));
+            }
+            project_one_workspace_check(key, &shape, scope, workspace)?;
+            Ok(shape)
+        }
+        Ok(KeyShape::LocalPath { raw }) => Err(at(
+            &raw,
+            format!(
+                "a path is a VALUE, not a key — spell the row `<name> = \"{raw}\"` (the key is \
+                 the bundle's name)",
+            ),
+        )),
+        Ok(KeyShape::RepoSet { .. } | KeyShape::RepoSkill { .. }) => Err(at(
+            key,
+            "a repo is a VALUE, not a key — spell the row \
+             `<name> = \"github:<owner>/<repo>\"` (the key is the skill's name)",
+        )),
+        Ok(KeyShape::Feed { .. }) => Err(at(
+            key,
+            format!(
+                "`{key}` names a whole workspace — its row lives in `[workspaces]` (machine \
+                 file); a project names the bundles and channels it uses on their own rows",
+            ),
+        )),
+        Err(e) => Err(at(key, e.message)),
+    }
+}
+
+/// A project file uses ONE workspace: a full workspace reference must match the `workspace =`
+/// line (spelled bare), and without the line the file holds no workspace rows at all.
+fn project_one_workspace_check(
+    key: &str,
+    shape: &KeyShape,
+    scope: ManifestScope,
+    workspace: Option<&(String, String)>,
+) -> Result<(), ManifestError> {
+    if scope != ManifestScope::Project {
+        return Ok(());
+    }
+    let leaf = shape.leaf_name();
+    match workspace {
+        Some((host, ws)) if shape.workspace_key().as_deref() == Some(&format!("{host}/{ws}")) => {
+            Err(at(
+                key,
+                format!(
+                    "`{key}` spells this project's own workspace — the key is the bare name: \
+                     `{leaf}`",
+                ),
+            ))
+        }
+        Some((host, ws)) => Err(at(
+            key,
+            format!(
+                "`{key}` names another workspace — this project uses `{host}/{ws}` (its \
+                 `workspace = ` line), and a project uses one workspace the way a checkout has \
+                 one origin",
+            ),
+        )),
+        None => Err(at(
+            key,
+            format!(
+                "this file has no `workspace = ` line — add \
+                 `workspace = \"{}\"` at the top and spell the key bare: `{leaf}`",
+                shape.workspace_key().unwrap_or_default()
+            ),
+        )),
+    }
 }
 
 fn value_type_noun(v: &Value) -> &'static str {
@@ -686,28 +1048,27 @@ fn value_type_noun(v: &Value) -> &'static str {
 }
 
 fn value_of(
-    reference: &str,
+    key: &str,
     shape: &KeyShape,
     scope: ManifestScope,
     v: &Value,
 ) -> Result<EntryValue, ManifestError> {
     match v {
-        Value::String(s) => string_value(reference, shape, scope, s.value()),
+        Value::String(s) => string_value(key, shape, scope, s.value()),
         Value::InlineTable(t) => {
-            let fields = fields_of(reference, shape, t)?;
-            fields_check(reference, shape, scope, &fields)?;
+            let fields = fields_of(key, shape, t)?;
             Ok(EntryValue::Fields(fields))
         }
         Value::Array(_) => Err(at(
-            reference,
-            "an array is not an entry value — an entry is `<ref> = \"<version>\"` or \
-             `<ref> = { <fields> }`",
+            key,
+            "an array is not an entry value — an entry is `<name> = \"<version>\"` or \
+             `<name> = { <fields> }`",
         )),
         other => Err(at(
-            reference,
+            key,
             format!(
-                "a {} is not an entry value — an entry is `<ref> = \"<version>\"` or \
-                 `<ref> = {{ <fields> }}`",
+                "a {} is not an entry value — an entry is `<name> = \"<version>\"` or \
+                 `<name> = {{ <fields> }}`",
                 value_type_noun(other)
             ),
         )),
@@ -715,44 +1076,58 @@ fn value_of(
 }
 
 fn string_value(
-    reference: &str,
+    key: &str,
     shape: &KeyShape,
     scope: ManifestScope,
     s: &str,
 ) -> Result<EntryValue, ManifestError> {
-    if matches!(shape, KeyShape::Feed { .. }) {
-        return if s == "*" {
-            Ok(EntryValue::Star)
-        } else {
-            Err(feed_exact_star(reference))
-        };
+    // A path value IS the local row's identity; a source value carries its own pin.
+    if matches!(shape, KeyShape::LocalPath { .. }) && is_path_key(s) {
+        return Ok(EntryValue::Star);
+    }
+    if matches!(shape, KeyShape::RepoSkill { .. })
+        && (s.starts_with("github:") || s.starts_with("bitbucket:"))
+    {
+        let src = parse_source_value(key, s)?;
+        return Ok(match src.pin {
+            Some(p) => EntryValue::Pin(p),
+            None => EntryValue::Star,
+        });
     }
     match s {
-        "*" => Ok(EntryValue::Star),
-        "off" => off_check(reference, shape, scope).map(|()| EntryValue::Off),
-        _ => pin_check(reference, shape, s).map(|()| EntryValue::Pin(s.to_string())),
+        "latest" => Ok(EntryValue::Star),
+        "off" => off_check(key, shape, scope).map(|()| EntryValue::Off),
+        "*" => Err(at(
+            key,
+            "`\"*\"` is not a value — `\"latest\"` follows the team's current version",
+        )),
+        _ => pin_check(key, shape, s).map(|()| EntryValue::Pin(s.to_string())),
     }
 }
 
-/// Read an inline table's fields, refusing unknown keys and per-field type faults; the per-shape
-/// legality runs after, in [`fields_check`].
-fn fields_of(
-    reference: &str,
-    shape: &KeyShape,
-    t: &InlineTable,
-) -> Result<EntryFields, ManifestError> {
-    if matches!(shape, KeyShape::Feed { .. }) {
-        return Err(feed_exact_star(reference));
-    }
+/// Read an inline table's fields, refusing unknown keys and per-field type faults; `path` and
+/// `source` were already consumed by shape resolution and are checked for fit only.
+fn fields_of(key: &str, shape: &KeyShape, t: &InlineTable) -> Result<EntryFields, ManifestError> {
     let legal = legal_fields(shape);
     let mut f = EntryFields::default();
     for (k, v) in t.iter() {
+        if k == "path" || k == "source" {
+            let fits = (matches!(shape, KeyShape::LocalPath { .. }) && k == "path")
+                || (matches!(shape, KeyShape::RepoSkill { .. }) && k == "source");
+            if !fits {
+                return Err(at(
+                    key,
+                    format!("`{k}` does not fit a {} row", shape.noun()),
+                ));
+            }
+            continue;
+        }
         if !legal.contains(&k) {
             return Err(if FIELD_NAMES.contains(&k) {
-                illegal_field(reference, shape, k)
+                illegal_field(key, shape, k)
             } else {
                 at(
-                    reference,
+                    key,
                     format!(
                         "unknown field `{k}` — a {} takes {}",
                         shape.noun(),
@@ -763,45 +1138,46 @@ fn fields_of(
         }
         match k {
             "version" => {
-                let s = v
-                    .as_str()
-                    .ok_or_else(|| at(reference, "`version` is a string"))?;
+                let s = v.as_str().ok_or_else(|| at(key, "`version` is a string"))?;
                 if s == "off" {
-                    return Err(off_in_table(reference));
+                    return Err(off_in_table(key));
                 }
                 f.version = Some(s.to_string());
             }
-            "dest" => f.dest = Some(dest_of(reference, "dest", v)?),
-            "mcp_dest" => f.mcp_dest = Some(dest_of(reference, "mcp_dest", v)?),
+            "dest" => f.dest = Some(dest_of(key, "dest", v)?),
+            "mcp_dest" => f.mcp_dest = Some(dest_of(key, "mcp_dest", v)?),
             "name" => {
                 f.name = Some(
                     v.as_str()
-                        .ok_or_else(|| at(reference, "`name` is a string"))?
+                        .ok_or_else(|| at(key, "`name` is a string"))?
                         .to_string(),
                 );
             }
             "subdir" => {
                 f.subdir = Some(
                     v.as_str()
-                        .ok_or_else(|| at(reference, "`subdir` is a string"))?
+                        .ok_or_else(|| at(key, "`subdir` is a string"))?
                         .to_string(),
                 );
             }
             "kind" => {
                 f.kind = Some(
                     v.as_str()
-                        .ok_or_else(|| at(reference, "`kind` is a string"))?
+                        .ok_or_else(|| at(key, "`kind` is a string"))?
                         .to_string(),
                 );
             }
             _ => {}
         }
     }
+    // `version = "latest"` is the default spelled out — normalize away.
+    if f.version.as_deref() == Some("latest") {
+        f.version = None;
+    }
     Ok(f)
 }
 
-/// Parse a `dest`/`mcp_dest` value: an array of destination strings (emptiness and dialect are
-/// [`fields_check`]'s judgment — this is only the type gate).
+/// Parse a `dest`/`mcp_dest` value: an array of destination strings.
 fn dest_of(reference: &str, field: &str, v: &Value) -> Result<Vec<String>, ManifestError> {
     let example = if field == "mcp_dest" {
         "~/.cursor/mcp.json"
@@ -823,351 +1199,136 @@ fn dest_of(reference: &str, field: &str, v: &Value) -> Result<Vec<String>, Manif
 }
 
 // ---------------------------------------------------------------------------
-// The editor
+// Spelling — how a canonical (reference, value) renders into section + key + value
 // ---------------------------------------------------------------------------
 
-/// The format-preserving editor with the INVERSE property: for a row that did not pre-exist,
-/// `set_row` then `remove_row` restores the input byte-for-byte; for one that did (spelled the
-/// way [`value_item`] spells it), `remove_row` then `set_row` does too. The editor never creates
-/// a grouping section (rows land in an EXISTING workspace section, else flat) and never deletes
-/// a section header it did not itself mint — an empty section is harmless grouping; the `fmt`
-/// normal form prunes and reorganizes.
-pub(crate) struct ManifestEditor {
-    doc: DocumentMut,
+/// One row's spelling in the file: which section, what key, what value item.
+pub(crate) struct RowSpelling {
+    pub section: SectionKind,
+    pub key: String,
+    pub item: Item,
+}
+
+/// Spell one canonical row for a file of `scope` whose workspace line is `workspace`. The
+/// project one-workspace rule is enforced here (the editor's write door).
+///
+/// # Errors
+/// A repo set has no v2 spelling; a project row must belong to the file's workspace.
+pub(crate) fn spell_row(
+    reference: &str,
+    shape: &KeyShape,
+    value: &EntryValue,
+    kind: BundleKind,
     scope: ManifestScope,
-    /// Every section path present at open — `remove_row` prunes only tables THIS editor minted,
-    /// so a hand-authored grouping header always survives.
-    preexisting: HashSet<Vec<String>>,
-    /// The EXACT text this editor was built from (`None` = a fresh document; the file is
-    /// expected absent). [`Self::write`]'s compare-and-swap re-reads the file immediately before
-    /// its rename and refuses on any drift — an outside editor's bytes are never overwritten by
-    /// a document prepared from an older reading.
-    opened_from: Option<String>,
+    workspace: Option<&(String, String)>,
+) -> Result<RowSpelling, ManifestError> {
+    let section = SectionKind::for_row(shape, kind);
+    let key = match shape {
+        KeyShape::Feed { host, workspace } => format!("{host}/{workspace}"),
+        KeyShape::Channel {
+            host,
+            workspace: ws,
+            channel,
+        } => match scope {
+            ManifestScope::Project => {
+                require_own_workspace(reference, host, ws, workspace)?;
+                channel.clone()
+            }
+            ManifestScope::Global => format!("{host}/{ws}/{channel}"),
+        },
+        KeyShape::WorkspaceBundle {
+            host,
+            workspace: ws,
+            bundle,
+        } => match scope {
+            ManifestScope::Project => {
+                require_own_workspace(reference, host, ws, workspace)?;
+                bundle.clone()
+            }
+            ManifestScope::Global => format!("{host}/{ws}/{bundle}"),
+        },
+        KeyShape::LocalPath { raw } => value.fields().name.clone().unwrap_or_else(|| {
+            raw.trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(raw)
+                .to_string()
+        }),
+        KeyShape::RepoSkill { skill, .. } => value
+            .fields()
+            .name
+            .clone()
+            .unwrap_or_else(|| skill.clone()),
+        KeyShape::RepoSet { .. } => return Err(repo_set_unspellable(reference)),
+    };
+    Ok(RowSpelling {
+        section,
+        key,
+        item: spell_value(shape, value),
+    })
 }
 
-impl ManifestEditor {
-    /// Open a manifest text for editing; the WHOLE document is validated first, so the edit
-    /// methods never meet a shape the parser would refuse.
-    pub(crate) fn open(text: &str, scope: ManifestScope) -> Result<Self, ManifestError> {
-        let doc: DocumentMut = text
-            .parse()
-            .map_err(|e| plain(format!("not valid TOML: {e}")))?;
-        parse_document(&doc, scope)?;
-        let mut preexisting = HashSet::new();
-        record_tables(doc.as_table(), &mut Vec::new(), &mut preexisting);
-        Ok(Self {
-            doc,
-            scope,
-            preexisting,
-            opened_from: Some(text.to_owned()),
-        })
-    }
-
-    /// Upsert one row. An existing spelling (any grouping level) is edited IN PLACE — never
-    /// re-homed. A new row lands in its workspace's `[bundles."<host>/<ws>"]` section when one
-    /// already exists, else flat under `[bundles]`; a feed row always lands flat. A new section
-    /// header is never created here — only `fmt` reorganizes.
-    ///
-    /// # Errors
-    /// The reference must classify and the value must be legal for its shape and this file's
-    /// scope — the same rules [`parse_manifest`] enforces, so the editor cannot write a file
-    /// `open` would refuse.
-    pub(crate) fn set_row(
-        &mut self,
-        reference: &str,
-        value: &EntryValueSpelling,
-    ) -> Result<(), ManifestError> {
-        let shape = classify_key(reference).map_err(|e| at(reference, e.message))?;
-        check_value(reference, &shape, self.scope, value)?;
-
-        if let Some((group, leaf)) = self.locate(reference) {
-            let mut path = vec!["bundles".to_string()];
-            path.extend(group);
-            let table =
-                table_at_mut(self.doc.as_table_mut(), &path).expect("row located a moment ago");
-            if let Some(item) = table.get_mut(&leaf) {
-                *item = value_item(value);
-            }
-            return Ok(());
-        }
-
-        // TOML cannot hold a value and a table at one key path — a workspace's feed row and its
-        // grouping section are that collision, so the feed refuses while the group stands.
-        if matches!(shape, KeyShape::Feed { .. })
-            && self
-                .bundles()
-                .is_some_and(|b| b.get(reference).is_some_and(Item::is_table))
-        {
-            return Err(at(
-                reference,
-                format!(
-                    "`{reference}` has grouped rows (`[bundles.\"{reference}\"]`) — TOML cannot \
-                     hold the feed row and the grouping at one key; spell the grouped rows flat \
-                     under `[bundles]` first",
-                ),
-            ));
-        }
-
-        let target = match (shape.workspace_key(), shape.section_tail()) {
-            (Some(ws), Some(tail))
-                if self
-                    .bundles()
-                    .is_some_and(|b| b.get(&ws).is_some_and(Item::is_table)) =>
-            {
-                Some((ws, tail))
-            }
-            _ => None,
-        };
-        self.ensure_bundles();
-        let bundles = self.doc["bundles"].as_table_mut().expect("just ensured");
-        match target {
-            Some((ws, tail)) => {
-                bundles
-                    .get_mut(&ws)
-                    .and_then(Item::as_table_mut)
-                    .expect("section just probed")
-                    .insert(&tail, value_item(value));
-            }
-            None => {
-                bundles.insert(reference, value_item(value));
-            }
-        }
-        Ok(())
-    }
-
-    /// Remove one row, wherever it is spelled. A preceding standalone comment SURVIVES (only
-    /// the line's own trailing comment may go with it); a grouping header this editor did not
-    /// mint survives too, even empty.
-    pub(crate) fn remove_row(&mut self, reference: &str) -> bool {
-        let Some((group, leaf)) = self.locate(reference) else {
-            return false;
-        };
-        let mut path = vec!["bundles".to_string()];
-        path.extend(group);
-        let mut orphan: Option<String> = None;
-        {
-            let table =
-                table_at_mut(self.doc.as_table_mut(), &path).expect("row located a moment ago");
-            let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
-            let idx = keys
-                .iter()
-                .position(|k| *k == leaf)
-                .expect("row located a moment ago");
-            let prefix = table
-                .key(&leaf)
-                .map(|k| decor_prefix(k.leaf_decor()))
-                .unwrap_or_default();
-            table.remove(&leaf);
-            if prefix.contains('#') {
-                // The standalone comment above the removed line moves onto whatever follows.
-                match keys.get(idx + 1) {
-                    Some(next) => match table.get_mut(next) {
-                        Some(Item::Table(t)) => {
-                            let existing = decor_prefix(t.decor());
-                            t.decor_mut().set_prefix(prefix + &existing);
-                        }
-                        Some(_) => {
-                            if let Some(mut km) = table.key_mut(next) {
-                                let existing = decor_prefix(km.leaf_decor());
-                                km.leaf_decor_mut().set_prefix(prefix + &existing);
-                            }
-                        }
-                        None => orphan = Some(prefix),
-                    },
-                    None => orphan = Some(prefix),
-                }
-            }
-        }
-        if let Some(comment) = orphan {
-            append_trailing(&mut self.doc, &comment);
-        }
-        self.prune(path);
-        true
-    }
-
-    /// Look one row up by reference, wherever it is spelled.
-    pub(crate) fn row(&self, reference: &str) -> Option<BundleRow> {
-        let (group, leaf) = self.locate(reference)?;
-        let mut path = vec!["bundles".to_string()];
-        path.extend(group);
-        let table = table_at(self.doc.as_table(), &path)?;
-        let Item::Value(v) = table.get(&leaf)? else {
-            return None;
-        };
-        let shape = classify_key(reference).ok()?;
-        let value = value_of(reference, &shape, self.scope, v).ok()?;
-        Some(BundleRow {
-            reference: reference.to_string(),
-            shape,
-            value,
-        })
-    }
-
-    /// The serialized document (what [`Self::write`] persists).
-    pub(crate) fn rendered(&self) -> String {
-        self.doc.to_string()
-    }
-
-    /// Persist atomically through the one crash-safe write — as a COMPARE-AND-SWAP against the
-    /// text this editor was opened from (absence, for a fresh document). The manifest lock
-    /// serializes topos's own writers, but it cannot fence a person's editor or a `sed`: the
-    /// file is re-read immediately before the atomic rename and byte-compared; any drift refuses
-    /// with the typed [`ClientError::ManifestChanged`] — staged document discarded, the outside
-    /// writer's bytes untouched, the re-run reads the file as it now is. The syscall pair
-    /// between that final compare and the rename is the accepted residual (documented in
-    /// `crate::ops::manifest_edit`'s module doc).
-    ///
-    /// # Errors
-    /// [`ClientError::ManifestChanged`] on the compare mismatch; otherwise the underlying
-    /// filesystem failure.
-    pub(crate) fn write(&self, fs: &dyn FsOps, path: &Path) -> Result<(), ClientError> {
-        let expected = self.opened_from.as_ref().map(|t| t.as_bytes());
-        match crate::atomic::atomic_write_cas(fs, path, self.rendered().as_bytes(), expected)? {
-            crate::atomic::CasOutcome::Written => Ok(()),
-            crate::atomic::CasOutcome::Changed => Err(ClientError::ManifestChanged {
-                path: path.display().to_string(),
-            }),
-        }
-    }
-
-    fn bundles(&self) -> Option<&Table> {
-        self.doc.get("bundles").and_then(Item::as_table)
-    }
-
-    fn locate(&self, reference: &str) -> Option<(Vec<String>, String)> {
-        let mut prefix = Vec::new();
-        find_row_in(self.bundles()?, &mut prefix, reference)
-    }
-
-    fn ensure_bundles(&mut self) {
-        if self.doc.get("bundles").is_some() {
-            return;
-        }
-        let mut t = Table::new();
-        t.set_implicit(false);
-        // A comment-only document parks its header in the TRAILING decor, which would serialize
-        // BELOW an inserted table — move it onto the first table's prefix so the header stays at
-        // the top (and `prune` moves it back if this table empties out again).
-        let trailing = self.doc.trailing().as_str().unwrap_or("").to_owned();
-        if !trailing.trim().is_empty() && self.doc.as_table().is_empty() {
-            self.doc.set_trailing("");
-            let mut prefix = trailing;
-            if !prefix.ends_with('\n') {
-                prefix.push('\n');
-            }
-            t.decor_mut().set_prefix(prefix);
-        }
-        self.doc.insert("bundles", Item::Table(t));
-    }
-
-    /// Delete now-empty grouping tables the editor itself minted (dotted-key chains always —
-    /// an empty dotted table cannot render); a PREEXISTING section header is never deleted.
-    fn prune(&mut self, mut path: Vec<String>) {
-        while !path.is_empty() {
-            let Some(t) = table_at(self.doc.as_table(), &path) else {
-                break;
-            };
-            if !t.is_empty() {
-                break;
-            }
-            if !t.is_dotted() && self.preexisting.contains(&path) {
-                break;
-            }
-            let prefix = decor_prefix(t.decor());
-            let leaf = path.pop().expect("loop guard");
-            {
-                let parent = if path.is_empty() {
-                    Some(self.doc.as_table_mut())
-                } else {
-                    table_at_mut(self.doc.as_table_mut(), &path)
-                };
-                let Some(parent) = parent else { break };
-                parent.remove(&leaf);
-            }
-            if !prefix.trim().is_empty() {
-                // The header comment `ensure_bundles` moved onto this table goes back where it
-                // came from.
-                append_trailing(&mut self.doc, &prefix);
-            }
-        }
+fn require_own_workspace(
+    reference: &str,
+    host: &str,
+    ws: &str,
+    workspace: Option<&(String, String)>,
+) -> Result<(), ManifestError> {
+    match workspace {
+        Some((h, w)) if h == host && w == ws => Ok(()),
+        Some((h, w)) => Err(at(
+            reference,
+            format!(
+                "`{reference}` names another workspace — this project uses `{h}/{w}` (its \
+                 `workspace = ` line), and a project uses one workspace the way a checkout \
+                 has one origin",
+            ),
+        )),
+        None => Err(at(
+            reference,
+            format!(
+                "this file has no `workspace = ` line — `topos init` writes it; a project \
+                 file needs `workspace = \"{host}/{ws}\"` before it can hold this row",
+            ),
+        )),
     }
 }
 
-fn record_tables(table: &Table, prefix: &mut Vec<String>, out: &mut HashSet<Vec<String>>) {
-    for (k, item) in table.iter() {
-        if let Item::Table(t) = item {
-            prefix.push(k.to_string());
-            out.insert(prefix.clone());
-            record_tables(t, prefix, out);
-            prefix.pop();
-        }
-    }
-}
-
-fn find_row_in(
-    table: &Table,
-    prefix: &mut Vec<String>,
-    want: &str,
-) -> Option<(Vec<String>, String)> {
-    for (k, item) in table.iter() {
-        match item {
-            Item::Value(_) => {
-                if joined(prefix, k) == want {
-                    return Some((prefix.clone(), k.to_string()));
-                }
-            }
-            Item::Table(t) => {
-                prefix.push(k.to_string());
-                if let Some(hit) = find_row_in(t, prefix, want) {
-                    return Some(hit);
-                }
-                prefix.pop();
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn table_at<'a>(mut t: &'a Table, path: &[String]) -> Option<&'a Table> {
-    for k in path {
-        t = t.get(k)?.as_table()?;
-    }
-    Some(t)
-}
-
-fn table_at_mut<'a>(mut t: &'a mut Table, path: &[String]) -> Option<&'a mut Table> {
-    for k in path {
-        t = t.get_mut(k)?.as_table_mut()?;
-    }
-    Some(t)
-}
-
-fn decor_prefix(d: &Decor) -> String {
-    d.prefix()
-        .and_then(|r| r.as_str())
-        .map(str::to_string)
-        .unwrap_or_default()
-}
-
-fn append_trailing(doc: &mut DocumentMut, extra: &str) {
-    let cur = doc.trailing().as_str().unwrap_or("").to_string();
-    doc.set_trailing(cur + extra);
-}
-
-/// Render a value deterministically: version strings plain, fields as a single-line inline
-/// table in canonical order (version, dest, name, subdir, kind). `dest` renders in its own normal
-/// form ([`super::dest::normal_dest`]: the default-reach token first, duplicates collapsed), so
-/// the editor's writes and `fmt` spell one array one way.
-pub(crate) fn value_item(v: &EntryValue) -> Item {
+/// Render a value deterministically for its shape: `"latest"` / a pin / `"off"` / the path or
+/// source spelling, and fields as a single-line inline table in canonical order (version, path,
+/// source, dest, mcp_dest, name, subdir, kind).
+pub(crate) fn spell_value(shape: &KeyShape, v: &EntryValue) -> Item {
+    let source = match shape {
+        KeyShape::RepoSkill {
+            host, owner, repo, ..
+        } => Some(spell_source(host, owner, repo)),
+        _ => None,
+    };
+    let path = match shape {
+        KeyShape::LocalPath { raw } => Some(raw.clone()),
+        _ => None,
+    };
     match v {
-        EntryValue::Star => toml_edit::value("*"),
+        EntryValue::Star => match (&source, &path) {
+            (Some(s), _) => toml_edit::value(s.as_str()),
+            (_, Some(p)) => toml_edit::value(p.as_str()),
+            _ => toml_edit::value("latest"),
+        },
         EntryValue::Off => toml_edit::value("off"),
-        EntryValue::Pin(p) => toml_edit::value(p.as_str()),
+        EntryValue::Pin(p) => match &source {
+            Some(s) => toml_edit::value(format!("{s}#{p}")),
+            None => toml_edit::value(p.as_str()),
+        },
         EntryValue::Fields(f) => {
             let mut t = InlineTable::new();
             if let Some(v) = &f.version {
                 t.insert("version", v.as_str().into());
+            }
+            if let Some(p) = &path {
+                t.insert("path", p.as_str().into());
+            }
+            if let Some(s) = &source {
+                t.insert("source", s.as_str().into());
             }
             if let Some(d) = &f.dest {
                 let mut a = Array::new();
@@ -1198,44 +1359,293 @@ pub(crate) fn value_item(v: &EntryValue) -> Item {
 }
 
 // ---------------------------------------------------------------------------
+// The editor
+// ---------------------------------------------------------------------------
+
+/// The format-preserving editor with the INVERSE property: for a row that did not pre-exist,
+/// `set_row` then `remove_row` restores the input byte-for-byte; for one that did (spelled the
+/// way [`spell_row`] spells it), `remove_row` then `set_row` does too. `remove_row` prunes only
+/// section headers this editor itself minted — a hand-authored one always survives.
+pub(crate) struct ManifestEditor {
+    doc: DocumentMut,
+    scope: ManifestScope,
+    workspace: Option<(String, String)>,
+    /// Every section header present at open — `remove_row` prunes only tables THIS editor
+    /// minted, so a hand-authored header always survives.
+    preexisting: HashSet<String>,
+    /// The EXACT text this editor was built from (`None` = a fresh document). [`Self::write`]'s
+    /// compare-and-swap re-reads the file immediately before its rename and refuses on drift.
+    opened_from: Option<String>,
+}
+
+impl ManifestEditor {
+    /// Open a manifest text for editing; the WHOLE document is validated first, so the edit
+    /// methods never meet a shape the parser would refuse.
+    pub(crate) fn open(text: &str, scope: ManifestScope) -> Result<Self, ManifestError> {
+        let doc: DocumentMut = text
+            .parse()
+            .map_err(|e| plain(format!("not valid TOML: {e}")))?;
+        let parsed = parse_document(&doc, scope)?;
+        let mut preexisting = HashSet::new();
+        for (k, item) in doc.iter() {
+            if item.is_table() {
+                preexisting.insert(k.to_string());
+            }
+        }
+        Ok(Self {
+            doc,
+            scope,
+            workspace: parsed.workspace,
+            preexisting,
+            opened_from: Some(text.to_owned()),
+        })
+    }
+
+    /// The document's `workspace = ` line, when one stands.
+    pub(crate) fn workspace(&self) -> Option<&(String, String)> {
+        self.workspace.as_ref()
+    }
+
+    /// Set the project file's `workspace = ` line. Refused when rows already resolve against a
+    /// DIFFERENT line — the bare keys would silently change meaning.
+    ///
+    /// # Errors
+    /// Machine files take no workspace line; a standing different line refuses.
+    pub(crate) fn set_workspace(&mut self, host: &str, ws: &str) -> Result<(), ManifestError> {
+        if self.scope == ManifestScope::Global {
+            return Err(plain("the machine-wide file has no `workspace` line"));
+        }
+        if let Some((h, w)) = &self.workspace
+            && (h != host || w != ws)
+        {
+            return Err(plain(format!(
+                "this file already uses `workspace = \"{h}/{w}\"` — its bare names resolve \
+                 against that line; a project uses one workspace",
+            )));
+        }
+        self.doc
+            .insert("workspace", toml_edit::value(format!("{host}/{ws}")));
+        self.workspace = Some((host.to_string(), ws.to_string()));
+        Ok(())
+    }
+
+    /// Upsert one row. An existing spelling is edited IN PLACE; a new row lands at the end of
+    /// its section (the section is minted when absent). `kind` picks `[skills]` vs `[mcp]` for
+    /// bundle rows; channels and feeds have their own sections regardless.
+    ///
+    /// # Errors
+    /// The reference must classify and the value must be legal for its shape, this file's scope,
+    /// and — in a project — the file's one workspace.
+    pub(crate) fn set_row(
+        &mut self,
+        reference: &str,
+        value: &EntryValueSpelling,
+        kind: BundleKind,
+    ) -> Result<(), ManifestError> {
+        let shape = classify_key(reference).map_err(|e| at(reference, e.message))?;
+        check_value(reference, &shape, self.scope, value)?;
+        let spelling = spell_row(
+            reference,
+            &shape,
+            value,
+            kind,
+            self.scope,
+            self.workspace.as_ref(),
+        )?;
+
+        // Edited in place, wherever it currently is spelled (its section may disagree with the
+        // asked kind — the standing spelling wins; `fmt` reorganizes).
+        if let Some((section, key)) = self.locate(reference) {
+            if let Some(Item::Table(t)) = self.doc.get_mut(section.header())
+                && let Some(item) = t.get_mut(&key)
+            {
+                *item = spelling.item;
+                return Ok(());
+            }
+        }
+
+        let header = spelling.section.header();
+        if self.doc.get(header).is_none() {
+            let mut t = Table::new();
+            t.set_implicit(false);
+            self.doc.insert(header, Item::Table(t));
+        }
+        let table = self.doc[header].as_table_mut().expect("just ensured");
+        table.insert(&spelling.key, spelling.item);
+        Ok(())
+    }
+
+    /// Remove one row, wherever it is spelled. A preceding standalone comment SURVIVES (only
+    /// the line's own trailing comment may go with it); a section header this editor did not
+    /// mint survives too, even empty.
+    pub(crate) fn remove_row(&mut self, reference: &str) -> bool {
+        let Some((section, key)) = self.locate(reference) else {
+            return false;
+        };
+        let header = section.header();
+        let mut orphan: Option<String> = None;
+        {
+            let Some(Item::Table(table)) = self.doc.get_mut(header) else {
+                return false;
+            };
+            let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
+            let Some(idx) = keys.iter().position(|k| *k == key) else {
+                return false;
+            };
+            let prefix = table
+                .key(&key)
+                .map(|k| decor_prefix(k.leaf_decor()))
+                .unwrap_or_default();
+            table.remove(&key);
+            if prefix.contains('#') {
+                match keys.get(idx + 1) {
+                    Some(next) => {
+                        if let Some(mut km) = table.key_mut(next) {
+                            let existing = decor_prefix(km.leaf_decor());
+                            km.leaf_decor_mut().set_prefix(prefix + &existing);
+                        }
+                    }
+                    None => orphan = Some(prefix),
+                }
+            }
+        }
+        if let Some(comment) = orphan {
+            append_trailing(&mut self.doc, &comment);
+        }
+        // Prune an empty section this editor minted; a preexisting header stays.
+        let empty = self
+            .doc
+            .get(header)
+            .and_then(Item::as_table)
+            .is_some_and(Table::is_empty);
+        if empty && !self.preexisting.contains(header) {
+            let prefix = self
+                .doc
+                .get(header)
+                .and_then(Item::as_table)
+                .map(|t| decor_prefix(t.decor()))
+                .unwrap_or_default();
+            self.doc.remove(header);
+            if !prefix.trim().is_empty() {
+                append_trailing(&mut self.doc, &prefix);
+            }
+        }
+        true
+    }
+
+    /// Look one row up by canonical reference, wherever it is spelled.
+    pub(crate) fn row(&self, reference: &str) -> Option<BundleRow> {
+        let (section, key) = self.locate(reference)?;
+        let Item::Table(t) = self.doc.get(section.header())? else {
+            return None;
+        };
+        let Item::Value(v) = t.get(&key)? else {
+            return None;
+        };
+        parse_row(&key, v, section, self.scope, self.workspace.as_ref()).ok()
+    }
+
+    /// The serialized document (what [`Self::write`] persists).
+    pub(crate) fn rendered(&self) -> String {
+        self.doc.to_string()
+    }
+
+    /// Persist atomically through the one crash-safe write — as a COMPARE-AND-SWAP against the
+    /// text this editor was opened from (absence, for a fresh document).
+    ///
+    /// # Errors
+    /// [`ClientError::ManifestChanged`] on the compare mismatch; otherwise the underlying
+    /// filesystem failure.
+    pub(crate) fn write(&self, fs: &dyn FsOps, path: &Path) -> Result<(), ClientError> {
+        let expected = self.opened_from.as_ref().map(|t| t.as_bytes());
+        match crate::atomic::atomic_write_cas(fs, path, self.rendered().as_bytes(), expected)? {
+            crate::atomic::CasOutcome::Written => Ok(()),
+            crate::atomic::CasOutcome::Changed => Err(ClientError::ManifestChanged {
+                path: path.display().to_string(),
+            }),
+        }
+    }
+
+    /// Find a canonical reference's current spelling: (section, key).
+    fn locate(&self, reference: &str) -> Option<(SectionKind, String)> {
+        for (header, item) in self.doc.iter() {
+            let Some(section) = SectionKind::of(header) else {
+                continue;
+            };
+            let Item::Table(t) = item else { continue };
+            for (key, val) in t.iter() {
+                let Item::Value(v) = val else { continue };
+                if let Ok(row) = parse_row(key, v, section, self.scope, self.workspace.as_ref())
+                    && row.reference == reference
+                {
+                    return Some((section, key.to_string()));
+                }
+            }
+        }
+        None
+    }
+}
+
+fn decor_prefix(d: &Decor) -> String {
+    d.prefix()
+        .and_then(|r| r.as_str())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+fn append_trailing(doc: &mut DocumentMut, extra: &str) {
+    let cur = doc.trailing().as_str().unwrap_or("").to_string();
+    doc.set_trailing(cur + extra);
+}
+
+// ---------------------------------------------------------------------------
 // File birth
 // ---------------------------------------------------------------------------
 
-/// The GLOBAL file's birth content: the header states the contract, then one feed row per
-/// `(host, workspace)` given. Ordinary birth passes NO rows — the file is the machine's complete
-/// recipe, and `topos login` is the only automatic feed-row author (it writes a workspace's row
-/// on this machine's first connection; a row someone deleted stays deleted). The one caller that
-/// passes rows is the upgrade migration, which spells out what the machine already received.
-/// Parses clean as [`ManifestScope::Global`].
+/// The MACHINE file's birth content: the header states the contract, then one `[workspaces]`
+/// row per `(host, workspace)` given. Ordinary birth passes NO rows — `topos login` is the only
+/// automatic feed-row author (it writes a workspace's row on this machine's first connection; a
+/// row someone deleted stays deleted). Parses clean as [`ManifestScope::Global`].
 pub(crate) fn materialized_global(workspaces: &[(String, String)]) -> String {
-    let mut doc = DocumentMut::new();
-    let mut t = Table::new();
-    t.set_implicit(false);
-    t.decor_mut().set_prefix(
+    let mut out = String::from(
         "# topos.toml — the complete recipe for what lands on this machine's personal scope.\n\
-         # Managed by the topos CLI; hand-edits are welcome. A feed row\n\
-         # (\"<host>/<workspace>\" = \"*\") tracks whatever that workspace currently serves you;\n\
-         # `topos login` adds one the first time this machine connects to a workspace, and never\n\
-         # re-adds one you delete — a deleted line stays deleted. Only the rows here deliver.\n",
+         # Managed by the topos CLI; hand-edits are welcome. A [workspaces] row\n\
+         # (\"<host>/<workspace>\" = \"latest\") tracks whatever that workspace currently\n\
+         # gives you; `topos login` adds one the first time this machine connects, and never\n\
+         # re-adds one you delete. Only the rows here deliver.\n\
+         schema = 1\n",
     );
-    for (host, workspace) in workspaces {
-        t.insert(&format!("{host}/{workspace}"), toml_edit::value("*"));
+    if !workspaces.is_empty() {
+        out.push_str("\n[workspaces]\n");
+        for (host, workspace) in workspaces {
+            out.push_str(&format!("\"{host}/{workspace}\" = \"latest\"\n"));
+        }
     }
-    doc.insert("bundles", Item::Table(t));
-    doc.to_string()
+    out
 }
 
-/// A commented, empty PROJECT template. Parses clean as [`ManifestScope::Project`].
-pub(crate) fn project_template() -> String {
-    "# topos.toml — the complete list of what this repo's agents use, identical for every\n\
-     # contributor. Managed by the topos CLI; hand-edits are welcome. One line per entry\n\
-     # under [bundles] — the key is the reference, the value a version or fields, e.g.\n\
-     #\n\
-     #   [bundles]\n\
-     #   \"topos.sh/<workspace>/channels/<name>\" = \"*\"    # a workspace channel\n\
-     #   \"github.com/<owner>/<repo>\" = \"*\"               # every skill in a repo\n\
-     #   \"./tools/<dir>\" = { dest = [\".claude/skills\"] }  # a folder in this repo\n"
-        .to_string()
+/// A commented PROJECT template. With a workspace the line is written; without, the line is
+/// shown commented. Parses clean as [`ManifestScope::Project`].
+pub(crate) fn project_template(workspace: Option<(&str, &str)>) -> String {
+    let ws_line = match workspace {
+        Some((host, ws)) => format!("workspace = \"{host}/{ws}\"\n"),
+        None => "# workspace = \"topos.sh/<workspace>\"   # the one workspace bare names use\n"
+            .to_string(),
+    };
+    format!(
+        "# topos.toml — what this repo's agents use, identical for every contributor.\n\
+         # Managed by the topos CLI; hand-edits are welcome. `topos install` places exactly\n\
+         # what topos.lock records; `topos update` moves it and rewrites the lock.\n\
+         schema = 1\n\
+         {ws_line}\
+         #\n\
+         # [skills]\n\
+         # code-review = \"latest\"                      # a team skill, following\n\
+         # find-skills = \"github:vercel-labs/skills\"   # a public repo skill\n\
+         #\n\
+         # [channels]\n\
+         # backend = \"latest\"\n"
+    )
 }
 
 #[cfg(test)]
@@ -1246,878 +1656,441 @@ mod tests {
         "0123456789abcdef".repeat(4)
     }
 
+    fn parse_project(text: &str) -> ManifestDoc {
+        parse_manifest(text, ManifestScope::Project).unwrap()
+    }
+
     fn parse_global(text: &str) -> ManifestDoc {
         parse_manifest(text, ManifestScope::Global).unwrap()
     }
 
-    /// The normative GLOBAL reference file. One adaptation from the ideal: TOML itself forbids
-    /// a value and a section at one key path, so a workspace with a grouping section
-    /// (`[bundles."topos.sh/acme"]`) cannot ALSO carry its feed row — the feeds here are other
-    /// workspaces (the flat spelling combines a feed with explicit rows; see
-    /// `a_feed_row_and_its_workspace_section_cannot_coexist`).
+    /// The normative PROJECT reference file.
+    fn project_reference_file() -> String {
+        r#"# What this repo's agents use.
+schema = 1
+workspace = "topos.sh/acme"
+
+[skills]
+code-review = "latest"
+release-process = "DIGEST"
+find-skills = "github:vercel-labs/skills"
+sql-style = "github:acme-corp/agent-skills#9d0e8c17"
+local-notes = "./tools/local-notes"
+deploy-guide = { version = "DIGEST", dest = [".claude/skills"] }
+
+[mcp]
+linear = "latest"
+
+[channels]
+backend = "latest"
+"#
+        .replace("DIGEST", &digest())
+    }
+
+    /// The normative MACHINE reference file.
     fn global_reference_file() -> String {
-        r#"# What this machine's agents get, beyond each workspace's feed.
-# Managed by the topos CLI; hand-edits are welcome.
+        r#"# What this machine's agents get.
+schema = 1
 
-[bundles]
-"topos.sh/beta" = "*"
-"topos.example.com/platform" = "*"
-"github.com/vercel-labs/skills" = "*"
-"github.com/anthropics/skills/pdf-tools" = "8c1f0a2"
-"~/dev/weather-server" = { kind = "mcp" }
+[workspaces]
+"topos.sh/acme" = "latest"
+"topos.example.com/platform" = "latest"
 
-[bundles."topos.sh/acme"]
-perf-review = "*"
-"channels/frontend" = "*"
-noisy-skill = "off"
-deploy-guide = {
-version = "DIGEST",
-dest = ["~/.claude/skills"],
-}
-db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
+[skills]
+"topos.sh/acme/perf-review" = "latest"
+"topos.sh/acme/noisy-skill" = "off"
+"topos.sh/acme/deploy-guide" = { version = "DIGEST", dest = ["~/.claude/skills"] }
+pdf-tools = "github:anthropics/skills#8c1f0a2"
+weather-server = { path = "~/dev/weather-server", kind = "mcp" }
+
+[channels]
+"topos.sh/acme/frontend" = "latest"
 "#
         .replace("DIGEST", &digest())
     }
 
     #[test]
-    fn the_global_reference_file_parses_row_by_row() {
-        let doc = parse_global(&global_reference_file());
+    fn the_project_reference_file_parses_row_by_row() {
+        let doc = parse_project(&project_reference_file());
+        assert_eq!(
+            doc.workspace,
+            Some(("topos.sh".to_string(), "acme".to_string()))
+        );
         let refs: Vec<&str> = doc.rows.iter().map(|r| r.reference.as_str()).collect();
         assert_eq!(
             refs,
             [
-                "topos.sh/beta",
-                "topos.example.com/platform",
-                "github.com/vercel-labs/skills",
-                "github.com/anthropics/skills/pdf-tools",
-                "~/dev/weather-server",
-                "topos.sh/acme/perf-review",
-                "topos.sh/acme/channels/frontend",
-                "topos.sh/acme/noisy-skill",
+                "topos.sh/acme/code-review",
+                "topos.sh/acme/release-process",
+                "github.com/vercel-labs/skills/find-skills",
+                "github.com/acme-corp/agent-skills/sql-style",
+                "./tools/local-notes",
                 "topos.sh/acme/deploy-guide",
-                "topos.sh/acme/db-conventions",
+                "topos.sh/acme/linear",
+                "topos.sh/acme/channels/backend",
             ],
-            "rows come back in file order"
+            "rows come back in file order; bare names resolve against the workspace line"
         );
-
-        // The two feed rows.
-        for i in [0, 1] {
-            assert!(matches!(doc.rows[i].shape, KeyShape::Feed { .. }), "{i}");
-            assert_eq!(doc.rows[i].value, EntryValue::Star, "{i}");
-        }
-        // The repo set tracks the default branch; the 4-segment repo skill is pinned.
-        assert!(matches!(doc.rows[2].shape, KeyShape::RepoSet { .. }));
+        assert_eq!(doc.rows[0].value, EntryValue::Star);
+        assert_eq!(doc.rows[1].value, EntryValue::Pin(digest()));
         assert_eq!(doc.rows[2].value, EntryValue::Star);
+        assert_eq!(doc.rows[3].value, EntryValue::Pin("9d0e8c17".into()));
         assert!(matches!(
             &doc.rows[3].shape,
-            KeyShape::RepoSkill { skill, .. } if skill == "pdf-tools"
+            KeyShape::RepoSkill { skill, .. } if skill == "sql-style"
         ));
-        assert_eq!(doc.rows[3].value, EntryValue::Pin("8c1f0a2".into()));
-        // The local folder carries its kind — the one place the manifest records what a local
-        // folder IS, and a closed vocabulary: `skill`, `mcp`.
         assert!(matches!(doc.rows[4].shape, KeyShape::LocalPath { .. }));
+        assert_eq!(doc.rows[6].section, SectionKind::Mcp);
+        assert!(matches!(
+            &doc.rows[7].shape,
+            KeyShape::Channel { channel, .. } if channel == "backend"
+        ));
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn the_machine_reference_file_parses_row_by_row() {
+        let doc = parse_global(&global_reference_file());
+        assert_eq!(doc.workspace, None);
+        let refs: Vec<&str> = doc.rows.iter().map(|r| r.reference.as_str()).collect();
         assert_eq!(
-            doc.rows[4].value,
+            refs,
+            [
+                "topos.sh/acme",
+                "topos.example.com/platform",
+                "topos.sh/acme/perf-review",
+                "topos.sh/acme/noisy-skill",
+                "topos.sh/acme/deploy-guide",
+                "github.com/anthropics/skills/pdf-tools",
+                "~/dev/weather-server",
+                "topos.sh/acme/channels/frontend",
+            ],
+        );
+        assert!(matches!(doc.rows[0].shape, KeyShape::Feed { .. }));
+        assert_eq!(doc.rows[3].value, EntryValue::Off);
+        assert_eq!(doc.rows[5].value, EntryValue::Pin("8c1f0a2".into()));
+        assert!(matches!(doc.rows[6].shape, KeyShape::LocalPath { .. }));
+        assert_eq!(
+            doc.rows[6].value,
             EntryValue::Fields(EntryFields {
                 kind: Some("mcp".into()),
                 ..EntryFields::default()
             })
         );
-        // The sectioned workspace rows: bundle, channel (spelled by its tail), the off switch.
-        assert!(matches!(
-            &doc.rows[5].shape,
-            KeyShape::WorkspaceBundle { bundle, .. } if bundle == "perf-review"
-        ));
-        assert!(matches!(
-            &doc.rows[6].shape,
-            KeyShape::Channel { channel, .. } if channel == "frontend"
-        ));
-        assert_eq!(doc.rows[7].value, EntryValue::Off);
-        // The MULTILINE inline table (TOML 1.1) parses like the single-line spelling.
-        assert_eq!(
-            doc.rows[8].value,
-            EntryValue::Fields(EntryFields {
-                version: Some(digest()),
-                dest: Some(vec!["~/.claude/skills".into()]),
-                ..EntryFields::default()
-            })
+    }
+
+    #[test]
+    fn unknown_sections_skip_with_a_warning() {
+        let doc = parse_project(
+            "schema = 1\nworkspace = \"topos.sh/acme\"\n\n[skills]\nx = \"latest\"\n\n\
+             [memories]\nteam-context = \"latest\"\n",
         );
-        // A several-destination dest row.
-        assert_eq!(
-            doc.rows[9].value,
-            EntryValue::Fields(EntryFields {
-                dest: Some(vec![
-                    "~/.agents/skills".into(),
-                    "~/.claude/knowledge".into()
-                ]),
-                ..EntryFields::default()
-            })
-        );
-    }
-
-    #[test]
-    fn the_project_reference_file_parses() {
-        let text = r#"[bundles]
-"topos.sh/acme/channels/backend" = "*"
-"topos.sh/acme/code-review" = "DIGEST"
-"github.com/vercel-labs/skills" = "*"
-"github.com/mattpocock/skills/grill-me" = "*"
-"./tools/release-checklist" = { dest = [".claude/skills", ".agents/skills"] }
-"#
-        .replace("DIGEST", &digest());
-        let doc = parse_manifest(&text, ManifestScope::Project).unwrap();
-        assert_eq!(doc.rows.len(), 5);
-        assert!(matches!(doc.rows[0].shape, KeyShape::Channel { .. }));
-        assert_eq!(doc.rows[1].value, EntryValue::Pin(digest()));
-        assert!(matches!(doc.rows[2].shape, KeyShape::RepoSet { .. }));
-        assert!(matches!(doc.rows[3].shape, KeyShape::RepoSkill { .. }));
-        assert_eq!(
-            doc.rows[4].value,
-            EntryValue::Fields(EntryFields {
-                dest: Some(vec![".claude/skills".into(), ".agents/skills".into()]),
-                ..EntryFields::default()
-            })
-        );
-    }
-
-    #[test]
-    fn feed_rows_and_off_are_global_only() {
-        // A feed row in a project file teaches the repo-shaped alternative.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme\" = \"*\"\n",
-            ManifestScope::Project,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("identical for every contributor"), "{e}");
-        assert!(e.message.contains("channels/<name>"), "{e}");
-        // `"off"` in a project file points at the global manifest.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/noisy\" = \"off\"\n",
-            ManifestScope::Project,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("global manifest"), "{e}");
-        // Both are fine in the global file.
-        let doc = parse_global(
-            "[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/noisy\" = \"off\"\n",
-        );
-        assert_eq!(doc.rows[0].value, EntryValue::Star);
-        assert_eq!(doc.rows[1].value, EntryValue::Off);
-    }
-
-    #[test]
-    fn the_three_join_spellings_parse_identically() {
-        let flat = parse_global("[bundles]\n\"topos.sh/acme/code-review\" = \"*\"\n");
-        let host = parse_global("[bundles.\"topos.sh\"]\n\"acme/code-review\" = \"*\"\n");
-        let ws = parse_global("[bundles.\"topos.sh/acme\"]\ncode-review = \"*\"\n");
-        assert_eq!(flat.rows, host.rows);
-        assert_eq!(flat.rows, ws.rows);
-        assert_eq!(flat.rows[0].reference, "topos.sh/acme/code-review");
-    }
-
-    #[test]
-    fn duplicate_joined_references_refuse() {
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = \"*\"\n\n[bundles.\"topos.sh/acme\"]\nx = \"*\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("spelled twice"), "{e}");
-        assert_eq!(e.key.as_deref(), Some("topos.sh/acme/x"));
-    }
-
-    #[test]
-    fn a_section_per_bundle_teaches_the_inline_table_form() {
-        let e = parse_manifest(
-            "[bundles.\"topos.sh/acme/deploy\"]\nversion = \"*\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("an entry is one line"), "{e}");
-        assert!(e.message.contains("inline table"), "{e}");
-    }
-
-    #[test]
-    fn a_feed_row_and_its_workspace_section_cannot_coexist() {
-        // TOML itself rejects a value and a table at one key path — the parse refuses at the
-        // TOML level, before any manifest rule runs.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme\" = \"*\"\n\n[bundles.\"topos.sh/acme\"]\nx = \"*\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("not valid TOML"), "{e}");
-        // The FLAT spelling is how a feed and explicit rows combine.
-        let doc = parse_global(
-            "[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/noisy\" = \"off\"\n",
-        );
-        assert_eq!(doc.rows.len(), 2);
-    }
-
-    #[test]
-    fn value_shape_mismatches_refuse_typed() {
-        let d = digest();
-        // A feed with a pin.
-        let e = parse_manifest(
-            &format!("[bundles]\n\"topos.sh/acme\" = \"{d}\"\n"),
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("exactly `\"*\"`"), "{e}");
-        // A channel with a version — string and field form both.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/channels/x\" = \"abc1234\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("channel takes no pin"), "{e}");
-        let e = parse_manifest(
-            &format!("[bundles]\n\"topos.sh/acme/channels/x\" = {{ version = \"{d}\" }}\n"),
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("drop `version`"), "{e}");
-        // A 64-hex digest on a forge thing (commits are 7–40).
-        let e = parse_manifest(
-            &format!("[bundles]\n\"github.com/o/r/s\" = \"{d}\"\n"),
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("7 to 40"), "{e}");
-        // A 7-hex commit on a workspace thing (digests are the full 64).
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = \"abc1234\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("64-character"), "{e}");
-        // A local folder takes no pin at all.
-        let e = parse_manifest(
-            "[bundles]\n\"./tools/x\" = \"abc1234\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("no versions to pin"), "{e}");
-        // Arrays and non-string scalars are typed refusals.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = [\"*\"]\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("array is not an entry value"), "{e}");
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = 3\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("number is not an entry value"), "{e}");
-        // `off` never rides inside a table.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { version = \"off\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("never a field"), "{e}");
-        // `off` fits only workspace bundles.
-        let e = parse_manifest(
-            "[bundles]\n\"github.com/o/r/s\" = \"off\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("switches a workspace bundle"), "{e}");
-    }
-
-    #[test]
-    fn key_shape_refusals_surface_through_the_parse() {
-        // The 5-segment forge key points at the subdir escape.
-        let e = parse_manifest(
-            "[bundles]\n\"github.com/o/r/deep/nested-dir\" = \"*\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("subdir"), "{e}");
-        // Unless the leaf reads as a FIELD on a valid parent reference — then the more precise
-        // section-as-entry teaching wins.
-        let e = parse_manifest(
-            "[bundles.\"github.com/o/r/deep\"]\nversion = \"x\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("an entry is one line"), "{e}");
-        // gitlab refuses plainly.
-        let e = parse_manifest(
-            "[bundles]\n\"gitlab.com/o/r\" = \"*\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("not supported yet"), "{e}");
-    }
-
-    #[test]
-    fn unknown_and_illegal_fields_refuse_typed() {
-        // An unknown field names itself and the legal set for the shape.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { destt = \"y\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("unknown field `destt`"), "{e}");
-        assert!(e.message.contains("`version`, `dest`, `name`"), "{e}");
-        // A known field on the wrong shape is its own refusal (subdir fits git things only).
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { subdir = \"y\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("`subdir` does not fit"), "{e}");
-        // A repo set takes `dest` only.
-        let e = parse_manifest(
-            "[bundles]\n\"github.com/o/r\" = { name = \"y\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("`name` does not fit a repo set"), "{e}");
-        // A local row no longer takes a version — its folder has no versions to pin.
-        let e = parse_manifest(
-            "[bundles]\n\"./tools/x\" = { version = \"*\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("`version` does not fit"), "{e}");
-        // A feed row takes no fields at all.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme\" = { dest = [\"~/x\"] }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("exactly `\"*\"`"), "{e}");
-    }
-
-    // -- the dest grammar ---------------------------------------------------
-
-    #[test]
-    fn an_empty_dest_refuses_toward_the_field_drop() {
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { dest = [] }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
+        assert_eq!(doc.rows.len(), 1, "the known section still parses");
+        assert_eq!(doc.warnings.len(), 1);
         assert!(
-            e.message.contains(
-                "a dest names at least one destination; drop the field to reach every agent"
-            ),
-            "{e}"
+            doc.warnings[0].contains("[memories]"),
+            "{}",
+            doc.warnings[0]
         );
-        // A channel's second array refuses the same way, in its own word.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/channels/backend\" = { mcp_dest = [] }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
         assert!(
-            e.message.contains(
-                "an mcp_dest names at least one destination; drop the field to reach every agent"
-            ),
-            "{e}"
+            doc.warnings[0].contains("self-update"),
+            "{}",
+            doc.warnings[0]
         );
     }
 
-    /// The `"*"` token is a `dest` entry no dialect rules: it is not a path, it is the reach the
-    /// row would have with no `dest` at all. It parses in BOTH scopes, beside named entries, and
-    /// on a local MCP row — whose named entries must still be config files the table knows.
     #[test]
-    fn the_default_reach_token_is_a_legal_dest_entry_in_both_scopes() {
-        let row = |doc: ManifestDoc| doc.rows[0].value.fields().dest.expect("a dest");
-        assert_eq!(
-            row(parse_global(
-                "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"*\", \"~/.codex/skills\"] }\n"
-            )),
-            vec!["*".to_owned(), "~/.codex/skills".to_owned()]
-        );
-        assert_eq!(
-            row(parse_manifest(
-                "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"*\", \".agents/skills\"] }\n",
-                ManifestScope::Project,
-            )
-            .unwrap()),
-            vec!["*".to_owned(), ".agents/skills".to_owned()]
-        );
-        // A local MCP row: the token names no file, so there is no format to refuse — and the
-        // entry beside it is checked exactly as it always was.
-        parse_global(
-            "[bundles]\n\"./tools/linear\" = { dest = [\"*\", \"~/.codex/config.toml\"], kind = \"mcp\" }\n",
-        );
-        let e = parse_manifest(
-            "[bundles]\n\"./tools/linear\" = { dest = [\"*\", \"~/.codex/notes.yaml\"], kind = \"mcp\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(
-            e.message
-                .contains("dest entry `~/.codex/notes.yaml` is not a known MCP config file"),
-            "{e}"
-        );
-    }
-
-    /// …and it is `dest` grammar ALONE. A channel's `mcp_dest` is a filter over that set's members,
-    /// not a reach of its own, so the token has no reading there and refuses at LOAD — naming the
-    /// rule and the way to reach every MCP-capable agent.
-    #[test]
-    fn the_default_reach_token_refuses_in_a_channels_mcp_dest() {
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/channels/backend\" = { mcp_dest = [\"*\"] }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(
-            e.message.contains(
-                "`mcp_dest` entry `*` is not a config file — `*` is a bundle row's `dest` token \
-                 for its default reach; drop `mcp_dest` to reach every MCP-capable agent"
-            ),
-            "{e}"
-        );
-        // Beside a real file it refuses the same way — the token is never one entry among many.
+    fn a_newer_schema_refuses_toward_self_update() {
+        let e = parse_manifest("schema = 2\n", ManifestScope::Project).unwrap_err();
+        assert!(e.message.contains("newer topos"), "{e}");
+        assert!(e.message.contains("self-update"), "{e}");
+        // Garbage inside a KNOWN section still refuses.
         assert!(
             parse_manifest(
-                "[bundles]\n\"topos.sh/acme/channels/backend\" = { mcp_dest = [\"~/.cursor/mcp.json\", \"*\"] }\n",
-                ManifestScope::Global,
+                "workspace = \"topos.sh/acme\"\n[skills]\nx = 3\n",
+                ManifestScope::Project
             )
             .is_err()
         );
     }
 
     #[test]
-    fn dest_entries_speak_the_scope_dialect() {
-        // Machine file: `~/`-prefixed or absolute; a relative entry names itself and the rule.
+    fn bare_names_need_the_workspace_line() {
+        let e = parse_manifest("[skills]\ncode-review = \"latest\"\n", ManifestScope::Project)
+            .unwrap_err();
+        assert!(e.message.contains("workspace = "), "{e}");
+        // The machine file teaches the full spelling instead.
+        let e = parse_manifest("[skills]\ncode-review = \"latest\"\n", ManifestScope::Global)
+            .unwrap_err();
+        assert!(e.message.contains("in full"), "{e}");
+        // A repo/path row needs no workspace line in either file.
+        let doc = parse_project("[skills]\nx = \"github:o/r\"\ny = \"./tools/y\"\n");
+        assert_eq!(doc.rows.len(), 2);
+    }
+
+    #[test]
+    fn a_project_uses_one_workspace() {
+        // A full key naming ANOTHER workspace refuses.
         let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"skills\"] }\n",
+            "workspace = \"topos.sh/acme\"\n[skills]\n\"topos.sh/other/x\" = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("one workspace"), "{e}");
+        // The project's OWN workspace spelled in full teaches the bare key.
+        let e = parse_manifest(
+            "workspace = \"topos.sh/acme\"\n[skills]\n\"topos.sh/acme/x\" = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("bare name"), "{e}");
+    }
+
+    #[test]
+    fn feeds_are_machine_only_and_exact() {
+        let e = parse_manifest(
+            "[workspaces]\n\"topos.sh/acme\" = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("machine file"), "{e}");
+        let e = parse_manifest(
+            "[workspaces]\n\"topos.sh/acme\" = \"1234\"\n",
             ManifestScope::Global,
         )
         .unwrap_err();
-        assert!(e.message.contains("dest entry `skills` is relative"), "{e}");
-        assert!(e.message.contains("`~/`-prefixed or absolute"), "{e}");
-        // Project file: relative and contained — absolute, `~`, and `..` all refuse.
-        for entry in ["/abs/skills", "~/skills", "../out"] {
-            let e = parse_manifest(
-                &format!("[bundles]\n\"topos.sh/acme/x\" = {{ dest = [\"{entry}\"] }}\n"),
-                ManifestScope::Project,
-            )
-            .unwrap_err();
-            assert!(
-                e.message
-                    .contains(&format!("dest entry `{entry}` leaves the checkout")),
-                "{entry}: {e}"
-            );
-        }
-        // The legal spellings parse.
-        parse_global("[bundles]\n\"topos.sh/acme/x\" = { dest = [\"~/.claude/skills\"] }\n");
-        parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { dest = [\".codex/skills\"] }\n",
+        assert!(e.message.contains("latest"), "{e}");
+        let e = parse_manifest(
+            "[workspaces]\nacme = \"latest\"\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("workspace address"), "{e}");
+    }
+
+    #[test]
+    fn old_grammar_spellings_refuse_with_the_way_back() {
+        // The v1 star value teaches "latest".
+        let e = parse_manifest(
+            "workspace = \"topos.sh/acme\"\n[skills]\nx = \"*\"\n",
             ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("latest"), "{e}");
+        // A v1 [bundles] section is an unknown section — skipped with the update-shaped warning,
+        // so a machine mid-migration sees the message rather than a refusal. (The migration
+        // itself is the sweep's rewrite.)
+        let doc = parse_global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        assert_eq!(doc.rows.len(), 0);
+        assert_eq!(doc.warnings.len(), 1);
+        // A path KEY teaches the value spelling.
+        let e = parse_manifest(
+            "[skills]\n\"./tools/x\" = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("VALUE, not a key"), "{e}");
+        // A repo KEY teaches the value spelling too.
+        let e = parse_manifest(
+            "[skills]\n\"github.com/o/r\" = \"latest\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("VALUE, not a key"), "{e}");
+    }
+
+    #[test]
+    fn source_values_validate_their_pins() {
+        let doc = parse_project("[skills]\nx = \"github:o/r#deadbeef00\"\n");
+        assert_eq!(doc.rows[0].value, EntryValue::Pin("deadbeef00".into()));
+        let e = parse_manifest("[skills]\nx = \"github:o/r#main\"\n", ManifestScope::Project)
+            .unwrap_err();
+        assert!(e.message.contains("commit hash"), "{e}");
+        let e = parse_manifest("[skills]\nx = \"github:oops\"\n", ManifestScope::Project)
+            .unwrap_err();
+        assert!(e.message.contains("github:<owner>/<repo>"), "{e}");
+        // bitbucket rides the same shape; `.git` strips.
+        let doc = parse_project("[skills]\nx = \"bitbucket:o/r.git\"\n");
+        assert!(matches!(
+            &doc.rows[0].shape,
+            KeyShape::RepoSkill { host, repo, .. } if host == "bitbucket.org" && repo == "r"
+        ));
+    }
+
+    #[test]
+    fn off_is_machine_only() {
+        let doc = parse_global("[skills]\n\"topos.sh/acme/x\" = \"off\"\n");
+        assert_eq!(doc.rows[0].value, EntryValue::Off);
+        let e = parse_manifest(
+            "workspace = \"topos.sh/acme\"\n[skills]\nx = \"off\"\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("machine file"), "{e}");
+    }
+
+    #[test]
+    fn duplicate_references_refuse() {
+        let e = parse_manifest(
+            "[skills]\n\"topos.sh/acme/x\" = \"latest\"\n\n[mcp]\n\"topos.sh/acme/x\" = \"latest\"\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("spelled twice"), "{e}");
+    }
+
+    #[test]
+    fn editor_set_and_remove_are_exact_inverses() {
+        let input = project_reference_file();
+        let mut ed = ManifestEditor::open(&input, ManifestScope::Project).unwrap();
+        ed.set_row(
+            "topos.sh/acme/new-skill",
+            &EntryValue::Star,
+            BundleKind::Skill,
         )
         .unwrap();
-        // An empty string is not a destination.
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"\"] }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("non-empty"), "{e}");
-    }
+        assert!(ed.rendered().contains("new-skill = \"latest\""));
+        assert!(ed.remove_row("topos.sh/acme/new-skill"));
+        assert_eq!(ed.rendered(), input, "add then remove restores the input");
 
-    #[test]
-    fn a_local_mcp_rows_dest_must_name_a_known_config_file() {
-        // Load-time: the row's kind is knowable, so an unknown file refuses with the list.
-        let e = parse_manifest(
-            "[bundles]\n\"./tools/linear\" = { dest = [\"~/.codex/config.yaml\"], kind = \"mcp\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(
-            e.message
-                .contains("dest entry `~/.codex/config.yaml` is not a known MCP config file"),
-            "{e}"
-        );
-        assert!(e.message.contains("~/.codex/config.toml"), "{e}");
-        // The known file parses — in both scopes, against the scope's own table.
-        parse_global(
-            "[bundles]\n\"./tools/linear\" = { dest = [\"~/.codex/config.toml\"], kind = \"mcp\" }\n",
-        );
-        parse_manifest(
-            "[bundles]\n\"./tools/linear\" = { dest = [\".codex/config.toml\"], kind = \"mcp\" }\n",
-            ManifestScope::Project,
-        )
-        .unwrap();
-        // A skill folder is fine on a NON-mcp local row (free-form folders are legal).
-        parse_global("[bundles]\n\"./tools/notes\" = { dest = [\"~/anywhere/at/all\"] }\n");
-    }
+        // Remove then re-add an existing row round-trips too.
+        let mut ed = ManifestEditor::open(&input, ManifestScope::Project).unwrap();
+        assert!(ed.remove_row("topos.sh/acme/linear"));
+        ed.set_row("topos.sh/acme/linear", &EntryValue::Star, BundleKind::Mcp)
+            .unwrap();
+        assert_eq!(ed.rendered(), input);
 
-    #[test]
-    fn a_repo_row_cannot_carry_an_mcp_bundle() {
-        // A repo SKILL row: `kind` is a legal field there, so the refusal is the kind VALUE's, and
-        // it teaches where an MCP bundle comes from.
-        for scope in [ManifestScope::Global, ManifestScope::Project] {
-            let e = parse_manifest(
-                "[bundles]\n\"github.com/o/r/tool\" = { version = \"*\", kind = \"mcp\" }\n",
-                scope,
-            )
-            .unwrap_err();
-            assert_eq!(e.key.as_deref(), Some("github.com/o/r/tool"), "{e}");
-            assert!(
-                e.message
-                    .contains("`kind = \"mcp\"` does not fit a repo skill")
-                    && e.message.contains("publish the bundle to a workspace"),
-                "{e}"
-            );
-        }
-        // A repo SET takes no `kind` at all — the field-legality refusal, unchanged.
-        let e = parse_manifest(
-            "[bundles]\n\"github.com/o/r\" = { kind = \"mcp\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("`kind` does not fit a repo set"), "{e}");
-        // The mcp arm is reached FIRST, so its teaching survives; a repo skill naming any OTHER
-        // unknown kind takes the vocabulary refusal below.
-        let e = parse_manifest(
-            "[bundles]\n\"github.com/o/r/tool\" = { kind = \"knowledge\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("known kinds: `skill`, `mcp`"), "{e}");
-    }
-
-    /// The kind VOCABULARY is closed in a hand-written file exactly as it is at the server door.
-    /// A word this build does not own would otherwise parse into a demand and be delivered as a
-    /// skill — the closed set is what makes that impossible, and the refusal names the whole
-    /// vocabulary so the fix is readable without opening the docs.
-    #[test]
-    fn a_row_naming_a_kind_topos_does_not_deliver_refuses_at_load() {
-        for scope in [ManifestScope::Global, ManifestScope::Project] {
-            let e = parse_manifest(
-                "[bundles]\n\"./tools/notes\" = { kind = \"knowledge\" }\n",
-                scope,
-            )
-            .unwrap_err();
-            assert_eq!(e.key.as_deref(), Some("./tools/notes"), "{e}");
-            assert_eq!(
-                e.message,
-                "`kind = \"knowledge\"` on `./tools/notes` is not a kind topos delivers — known \
-                 kinds: `skill`, `mcp`",
-                "{e}"
-            );
-        }
-        // Near-misses are words too: case and plurals name no kind either.
-        for word in ["Skill", "MCP", "skills", ""] {
-            parse_manifest(
-                &format!("[bundles]\n\"./tools/notes\" = {{ kind = \"{word}\" }}\n"),
-                ManifestScope::Global,
-            )
-            .expect_err(word);
-        }
-        // Both known kinds parse, and so does a row that spells no kind at all.
-        parse_global("[bundles]\n\"./tools/notes\" = { kind = \"mcp\" }\n");
-        parse_global("[bundles]\n\"./tools/notes\" = { kind = \"skill\" }\n");
-        parse_global("[bundles]\n\"./tools/notes\" = \"*\"\n");
-        parse_global("[bundles]\n\"./tools/notes\" = { dest = [\"~/.claude/skills\"] }\n");
-        // A FILE WITH SEVERAL ROWS: the refusal names the row it is about, inline. Without the
-        // reference in the message a reader is left grepping their own file for the bad word.
-        let e = parse_manifest(
-            "[bundles]\n\
-             \"topos.sh/acme/deploy\" = \"*\"\n\
-             \"./tools/notes\" = { kind = \"knowledge\" }\n\
-             \"github.com/o/r\" = \"*\"\n\
-             \"~/dev/runbooks\" = { kind = \"playbook\" }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("`./tools/notes`"), "{e}");
-        assert_eq!(e.key.as_deref(), Some("./tools/notes"), "{e}");
-    }
-
-    // -- the stale spellings ------------------------------------------------
-
-    /// `path`, `harness` and a `[defaults.<kind>]` table are not manifest grammar: each refuses at
-    /// load as the ordinary unknown word it is, naming what the shape does take.
-    #[test]
-    fn stale_placement_spellings_refuse_as_unknown() {
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/linear\" = { harness = [\"codex\"] }\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert_eq!(
-            e.message,
-            "unknown field `harness` — a workspace bundle takes `version`, `dest`, `name`"
-        );
-        assert_eq!(e.key.as_deref(), Some("topos.sh/acme/linear"), "{e}");
-        let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { path = \"x\" }\n",
-            ManifestScope::Project,
-        )
-        .unwrap_err();
-        assert_eq!(
-            e.message,
-            "unknown field `path` — a workspace bundle takes `version`, `dest`, `name`"
-        );
-        // A whole `[defaults.<kind>]` table is an unknown TOP-LEVEL section.
-        let e = parse_manifest(
-            "[defaults.skill]\npath = \".agents/skills\"\n",
-            ManifestScope::Global,
-        )
-        .unwrap_err();
-        assert!(e.message.contains("unknown top-level `defaults`"), "{e}");
-    }
-
-    #[test]
-    fn unknown_top_level_keys_refuse() {
-        let e = parse_manifest("[skills]\n\"x\" = \"*\"\n", ManifestScope::Global).unwrap_err();
-        assert!(e.message.contains("unknown top-level `skills`"), "{e}");
-        let e = parse_manifest("exclude = []\n", ManifestScope::Global).unwrap_err();
-        assert!(e.message.contains("unknown top-level `exclude`"), "{e}");
-    }
-
-    // -- the editor ---------------------------------------------------------
-
-    #[test]
-    fn set_then_remove_restores_the_file_byte_for_byte() {
-        let d = digest();
-        let files = [
-            String::new(),
-            "# the machine's manifest\n".to_string(),
-            "[bundles]\n\"topos.sh/acme\" = \"*\"\n".to_string(),
-            "# header\n\n[bundles]\n# why this repo set matters\n\"github.com/o/r\" = \"*\"\n"
-                .to_string(),
-            "[bundles.\"topos.sh/acme\"]\ndeploy = \"*\"\n".to_string(),
-            "[bundles]\n\"topos.sh/beta\" = \"*\"\n\"topos.sh/beta/x\" = { dest = [\"~/.claude/skills\"] }\n"
-                .to_string(),
-        ];
-        let values = [
-            ("topos.sh/gamma/new-skill", EntryValue::Star),
-            ("topos.sh/acme/new-skill", EntryValue::Pin(d.clone())),
-            ("github.com/new/repo", EntryValue::Star),
+        // And on the machine file, across value shapes.
+        let input = global_reference_file();
+        for (reference, value, kind) in [
+            (
+                "topos.sh/gamma/new-skill",
+                EntryValue::Pin(digest()),
+                BundleKind::Skill,
+            ),
+            (
+                "github.com/new/repo/tool",
+                EntryValue::Star,
+                BundleKind::Skill,
+            ),
             (
                 "./tools/x",
                 EntryValue::Fields(EntryFields {
                     dest: Some(vec!["~/.claude/skills".into()]),
                     ..EntryFields::default()
                 }),
+                BundleKind::Skill,
             ),
-        ];
-        for file in &files {
-            for (reference, value) in &values {
-                let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-                assert!(
-                    ed.row(reference).is_none(),
-                    "corpus rows must not pre-exist"
-                );
-                ed.set_row(reference, value).unwrap();
-                assert!(ed.row(reference).is_some());
-                assert!(ed.remove_row(reference));
-                assert_eq!(&ed.rendered(), file, "file={file:?} ref={reference}");
-            }
+        ] {
+            let mut ed = ManifestEditor::open(&input, ManifestScope::Global).unwrap();
+            assert!(ed.row(reference).is_none(), "corpus rows must not pre-exist");
+            ed.set_row(reference, &value, kind).unwrap();
+            assert!(ed.row(reference).is_some());
+            assert!(ed.remove_row(reference));
+            assert_eq!(ed.rendered(), input, "ref={reference}");
         }
     }
 
     #[test]
-    fn remove_then_set_restores_the_file_byte_for_byte() {
-        let d = digest();
-        let cases: Vec<(String, &str, EntryValue)> = vec![
-            (
-                "[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n".to_string(),
-                "topos.sh/acme/deploy",
-                EntryValue::Star,
-            ),
-            (
-                format!(
-                    "[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"{d}\"\n"
-                ),
-                "topos.sh/acme/deploy",
-                EntryValue::Pin(d.clone()),
-            ),
-            (
-                // The preexisting section survives the remove (empty grouping is harmless), and
-                // the re-add lands the tail key back inside it.
-                "[bundles.\"topos.sh/acme\"]\ndeploy = \"*\"\n".to_string(),
-                "topos.sh/acme/deploy",
-                EntryValue::Star,
-            ),
-            (
-                "[bundles.\"topos.sh/acme\"]\n\"channels/frontend\" = \"*\"\n".to_string(),
-                "topos.sh/acme/channels/frontend",
-                EntryValue::Star,
-            ),
-        ];
-        for (file, reference, value) in &cases {
-            let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-            assert!(ed.remove_row(reference), "row pre-exists in {file:?}");
-            ed.set_row(reference, value).unwrap();
-            assert_eq!(&ed.rendered(), file, "file={file:?} ref={reference}");
-        }
-    }
-
-    #[test]
-    fn the_editor_spells_values_canonically() {
-        // The deterministic spelling the inverse property is defined against — canonical field
-        // order: version, dest, mcp_dest, name, subdir, kind.
-        let mut ed = ManifestEditor::open("", ManifestScope::Global).unwrap();
-        ed.set_row(
-            "github.com/o/r/tools",
-            &EntryValue::Fields(EntryFields {
-                version: Some("8c1f0a2".into()),
-                dest: Some(vec!["~/.claude/skills".into(), "~/.codex/skills".into()]),
-                mcp_dest: None,
-                name: Some("tooling".into()),
-                subdir: Some("skills/tools".into()),
-                kind: Some("skill".into()),
-            }),
-        )
-        .unwrap();
-        assert_eq!(
-            ed.rendered(),
-            "[bundles]\n\"github.com/o/r/tools\" = { version = \"8c1f0a2\", dest = \
-             [\"~/.claude/skills\", \"~/.codex/skills\"], name = \"tooling\", subdir = \
-             \"skills/tools\", kind = \"skill\" }\n"
-        );
-        // A channel spells BOTH arrays, in that order — `dest` for its skill members' folders,
-        // `mcp_dest` for its mcp members' config files.
-        let mut ed = ManifestEditor::open("", ManifestScope::Global).unwrap();
+    fn editor_minted_sections_prune_and_preexisting_survive() {
+        let input = "schema = 1\nworkspace = \"topos.sh/acme\"\n\n[skills]\nx = \"latest\"\n";
+        let mut ed = ManifestEditor::open(input, ManifestScope::Project).unwrap();
         ed.set_row(
             "topos.sh/acme/channels/backend",
-            &EntryValue::Fields(EntryFields {
-                dest: Some(vec!["~/.claude/skills".into()]),
-                mcp_dest: Some(vec!["~/.cursor/mcp.json".into()]),
-                ..EntryFields::default()
-            }),
+            &EntryValue::Star,
+            BundleKind::Skill,
         )
         .unwrap();
-        assert_eq!(
-            ed.rendered(),
-            "[bundles]\n\"topos.sh/acme/channels/backend\" = { dest = [\"~/.claude/skills\"], \
-             mcp_dest = [\"~/.cursor/mcp.json\"] }\n"
-        );
+        assert!(ed.rendered().contains("[channels]"));
+        assert!(ed.remove_row("topos.sh/acme/channels/backend"));
+        assert_eq!(ed.rendered(), input, "the minted [channels] pruned away");
+
+        // A hand-authored empty section survives a remove that empties it.
+        let with_empty = "workspace = \"topos.sh/acme\"\n\n[skills]\nx = \"latest\"\n";
+        let mut ed = ManifestEditor::open(with_empty, ManifestScope::Project).unwrap();
+        assert!(ed.remove_row("topos.sh/acme/x"));
+        assert!(ed.rendered().contains("[skills]"), "{}", ed.rendered());
     }
 
     #[test]
-    fn set_row_lands_in_an_existing_workspace_section() {
-        let file = "[bundles.\"topos.sh/acme\"]\ndeploy = \"*\"\n";
-        let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-        ed.set_row("topos.sh/acme/perf-review", &EntryValue::Star)
-            .unwrap();
-        ed.set_row("topos.sh/acme/channels/backend", &EntryValue::Star)
-            .unwrap();
-        // A different workspace has no section — it lands flat.
-        ed.set_row("topos.sh/beta/other", &EntryValue::Star)
-            .unwrap();
-        let text = ed.rendered();
-        // (The original file had no explicit `[bundles]` header, so the flat row makes the
-        // implicit table render its header directly above the section — minimal-edit output;
-        // `fmt` owns the cosmetics.)
-        assert_eq!(
-            text,
-            "[bundles]\n\"topos.sh/beta/other\" = \"*\"\n[bundles.\"topos.sh/acme\"]\n\
-             deploy = \"*\"\nperf-review = \"*\"\n\"channels/backend\" = \"*\"\n"
-        );
-        // And the parse reads all four rows back.
-        assert_eq!(parse_global(&text).rows.len(), 4);
-    }
-
-    #[test]
-    fn set_row_replaces_in_place_wherever_spelled() {
-        let d = digest();
-        let file = "[bundles.\"topos.sh/acme\"]\n# pinned during the incident\ndeploy = \"*\"\n";
-        let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-        ed.set_row("topos.sh/acme/deploy", &EntryValue::Pin(d.clone()))
-            .unwrap();
-        let text = ed.rendered();
-        // The row stays in its section, under its comment — only the value changed.
-        assert_eq!(
-            text,
-            format!(
-                "[bundles.\"topos.sh/acme\"]\n# pinned during the incident\ndeploy = \"{d}\"\n"
-            )
-        );
-    }
-
-    #[test]
-    fn remove_row_keeps_a_preceding_standalone_comment() {
-        let file = "[bundles]\n# keep me\n\"topos.sh/acme/deploy\" = \"*\"\n\"topos.sh/acme/stay\" = \"*\"\n";
-        let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-        assert!(ed.remove_row("topos.sh/acme/deploy"));
-        let text = ed.rendered();
-        assert!(text.contains("# keep me"), "{text}");
-        assert!(text.contains("stay"), "{text}");
-        assert!(!text.contains("deploy"), "{text}");
-        // Removing the LAST row still keeps the comment (it moves to the tail).
-        let file = "[bundles]\n\"topos.sh/acme/stay\" = \"*\"\n# keep me too\n\"topos.sh/acme/deploy\" = \"*\"\n";
-        let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-        assert!(ed.remove_row("topos.sh/acme/deploy"));
-        assert!(ed.rendered().contains("# keep me too"), "{}", ed.rendered());
-    }
-
-    #[test]
-    fn remove_row_never_deletes_a_preexisting_section_header() {
-        let file = "[bundles.\"topos.sh/acme\"]\ndeploy = \"*\"\n";
-        let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-        assert!(ed.remove_row("topos.sh/acme/deploy"));
-        assert_eq!(ed.rendered(), "[bundles.\"topos.sh/acme\"]\n");
-    }
-
-    #[test]
-    fn a_feed_row_refuses_while_its_workspace_section_stands() {
-        let file = "[bundles.\"topos.sh/acme\"]\ndeploy = \"*\"\n";
-        let mut ed = ManifestEditor::open(file, ManifestScope::Global).unwrap();
-        let e = ed.set_row("topos.sh/acme", &EntryValue::Star).unwrap_err();
-        assert!(e.message.contains("flat"), "{e}");
-        // The section is untouched.
-        assert_eq!(ed.rendered(), file);
-        // A feed for an UNGROUPED workspace lands flat, fine.
-        ed.set_row("topos.sh/beta", &EntryValue::Star).unwrap();
-        assert!(ed.rendered().contains("\"topos.sh/beta\" = \"*\""));
-    }
-
-    #[test]
-    fn the_editor_refuses_what_the_parser_would_refuse() {
+    fn editor_enforces_the_one_workspace_rule() {
+        let input = "workspace = \"topos.sh/acme\"\n[skills]\nx = \"latest\"\n";
+        let mut ed = ManifestEditor::open(input, ManifestScope::Project).unwrap();
+        let e = ed
+            .set_row("topos.sh/other/y", &EntryValue::Star, BundleKind::Skill)
+            .unwrap_err();
+        assert!(e.message.contains("one workspace"), "{e}");
+        // A project with no workspace line refuses a workspace row toward `init`.
         let mut ed = ManifestEditor::open("", ManifestScope::Project).unwrap();
-        // Feed rows and `off` are global-only — the editor holds the same line.
-        assert!(ed.set_row("topos.sh/acme", &EntryValue::Star).is_err());
-        assert!(
-            ed.set_row("topos.sh/acme/x", &EntryValue::Off)
-                .unwrap_err()
-                .message
-                .contains("global manifest")
-        );
-        // Shape/value mismatches refuse before anything lands.
-        let mut ed = ManifestEditor::open("", ManifestScope::Global).unwrap();
-        assert!(
-            ed.set_row("topos.sh/acme/x", &EntryValue::Pin("abc1234".into()))
-                .is_err()
-        );
-        assert!(
-            ed.set_row(
-                "github.com/o/r",
-                &EntryValue::Fields(EntryFields {
-                    name: Some("x".into()),
-                    ..EntryFields::default()
-                })
-            )
-            .is_err()
-        );
-        assert!(ed.set_row("not a ref", &EntryValue::Star).is_err());
-        assert_eq!(ed.rendered(), "");
+        let e = ed
+            .set_row("topos.sh/acme/x", &EntryValue::Star, BundleKind::Skill)
+            .unwrap_err();
+        assert!(e.message.contains("workspace = "), "{e}");
+        ed.set_workspace("topos.sh", "acme").unwrap();
+        ed.set_row("topos.sh/acme/x", &EntryValue::Star, BundleKind::Skill)
+            .unwrap();
+        assert!(ed.rendered().contains("x = \"latest\""));
+        let e = ed.set_workspace("topos.sh", "other").unwrap_err();
+        assert!(e.message.contains("already uses"), "{e}");
     }
 
     #[test]
-    fn open_validates_the_whole_document() {
-        assert!(ManifestEditor::open("[bundles\n", ManifestScope::Global).is_err());
+    fn editor_spells_kinds_into_their_sections() {
+        let mut ed =
+            ManifestEditor::open("workspace = \"topos.sh/acme\"\n", ManifestScope::Project)
+                .unwrap();
+        ed.set_row("topos.sh/acme/linear", &EntryValue::Star, BundleKind::Mcp)
+            .unwrap();
+        ed.set_row("topos.sh/acme/review", &EntryValue::Star, BundleKind::Skill)
+            .unwrap();
+        let text = ed.rendered();
+        let mcp_at = text.find("[mcp]").expect("mcp section");
+        assert!(text[mcp_at..].contains("linear = \"latest\""));
+        assert!(text.contains("[skills]"));
+        // And the parse reads the sections back.
+        let doc = parse_project(&text);
+        assert_eq!(doc.rows.len(), 2);
         assert!(
-            ManifestEditor::open(
-                "[bundles]\n\"topos.sh/acme/x\" = 3\n",
-                ManifestScope::Global
-            )
-            .is_err()
+            doc.rows
+                .iter()
+                .any(|r| r.section == SectionKind::Mcp && r.reference.ends_with("linear"))
         );
-        assert!(ManifestEditor::open("[stray]\nx = 1\n", ManifestScope::Global).is_err());
+    }
+
+    #[test]
+    fn editor_row_lookup_reads_any_spelling() {
+        let ed = ManifestEditor::open(&project_reference_file(), ManifestScope::Project).unwrap();
+        let row = ed.row("topos.sh/acme/code-review").unwrap();
+        assert_eq!(row.value, EntryValue::Star);
+        let row = ed.row("github.com/vercel-labs/skills/find-skills").unwrap();
+        assert!(matches!(row.shape, KeyShape::RepoSkill { .. }));
+        assert!(ed.row("topos.sh/acme/absent").is_none());
+    }
+
+    #[test]
+    fn repo_sets_have_no_spelling() {
+        let mut ed = ManifestEditor::open("", ManifestScope::Global).unwrap();
+        let e = ed
+            .set_row("github.com/o/r", &EntryValue::Star, BundleKind::Skill)
+            .unwrap_err();
+        assert!(e.message.contains("row per skill"), "{e}");
+    }
+
+    #[test]
+    fn templates_parse_clean() {
+        parse_global(&materialized_global(&[]));
+        let doc = parse_global(&materialized_global(&[(
+            "topos.sh".to_string(),
+            "acme".to_string(),
+        )]));
+        assert_eq!(doc.rows.len(), 1);
+        assert!(matches!(doc.rows[0].shape, KeyShape::Feed { .. }));
+        parse_project(&project_template(None));
+        let doc = parse_project(&project_template(Some(("topos.sh", "acme"))));
+        assert_eq!(
+            doc.workspace,
+            Some(("topos.sh".to_string(), "acme".to_string()))
+        );
     }
 
     #[test]
@@ -2130,43 +2103,40 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("topos.toml");
-        // The editor writes as a compare-and-swap against the text it was opened from, so the
-        // file it swaps has to be the file it read.
         std::fs::write(&path, "").unwrap();
 
         let mut ed = ManifestEditor::open("", ManifestScope::Global).unwrap();
-        ed.set_row("topos.sh/acme", &EntryValue::Star).unwrap();
+        ed.set_row("topos.sh/acme", &EntryValue::Star, BundleKind::Skill)
+            .unwrap();
         ed.write(&RealFs, &path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, ed.rendered());
-        // And the round trip re-opens clean.
         assert!(ManifestEditor::open(&text, ManifestScope::Global).is_ok());
-    }
-
-    // -- file birth ---------------------------------------------------------
-
-    #[test]
-    fn the_materialized_global_file_parses_clean() {
-        let text = materialized_global(&[
-            ("topos.sh".to_string(), "acme".to_string()),
-            ("topos.example.com".to_string(), "platform".to_string()),
-        ]);
-        assert!(text.starts_with("# topos.toml"), "{text}");
-        let doc = parse_global(&text);
-        assert_eq!(doc.rows.len(), 2);
-        assert!(matches!(doc.rows[0].shape, KeyShape::Feed { .. }));
-        assert_eq!(doc.rows[0].reference, "topos.sh/acme");
-        assert_eq!(doc.rows[1].reference, "topos.example.com/platform");
-        for row in &doc.rows {
-            assert_eq!(row.value, EntryValue::Star);
-        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_project_template_parses_clean_and_empty() {
-        let text = project_template();
-        let doc = parse_manifest(&text, ManifestScope::Project).unwrap();
-        assert!(doc.rows.is_empty());
-        assert!(text.starts_with("# topos.toml"), "{text}");
+    fn check_row_validates_canonical_rows() {
+        assert!(check_row("topos.sh/acme/x", ManifestScope::Project, &EntryValue::Star).is_ok());
+        assert!(
+            check_row(
+                "topos.sh/acme/x",
+                ManifestScope::Global,
+                &EntryValue::Pin(digest())
+            )
+            .is_ok()
+        );
+        assert!(
+            check_row("topos.sh/acme/x", ManifestScope::Project, &EntryValue::Off).is_err(),
+            "off is machine-only"
+        );
+        assert!(
+            check_row("topos.sh/acme", ManifestScope::Project, &EntryValue::Star).is_err(),
+            "feeds are machine-only"
+        );
+        assert!(
+            check_row("github.com/o/r", ManifestScope::Global, &EntryValue::Star).is_err(),
+            "repo sets have no v2 row"
+        );
     }
 }
