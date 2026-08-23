@@ -447,8 +447,13 @@ fn add_workspace(
             &target,
             &resolved.canonical,
             &value,
-            value
-                .declared_kind()
+            // The CATALOG's answer names the section: an MCP server's row belongs under [mcp],
+            // or the converge (which routes by section) would look for it among file skills.
+            resolved
+                .entry
+                .as_deref()
+                .map(|e| e.kind)
+                .or_else(|| value.declared_kind())
                 .unwrap_or(crate::bundle_kind::BundleKind::Skill),
         )?;
         if declined {
@@ -489,8 +494,12 @@ fn add_workspace(
         &target,
         &resolved.canonical,
         &value,
-        value
-            .declared_kind()
+        // Same rule as the global arm: the catalog's kind picks the section.
+        resolved
+            .entry
+            .as_deref()
+            .map(|e| e.kind)
+            .or_else(|| value.declared_kind())
             .unwrap_or(crate::bundle_kind::BundleKind::Skill),
     )?;
     shape_dest_receipt(
