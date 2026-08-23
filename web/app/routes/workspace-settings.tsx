@@ -2,7 +2,10 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
 import type { LastSetLine } from "@/components/policy/last-set-line";
-import { type MachineTokenView, MachineTokensPanel } from "@/components/policy/machine-tokens-panel";
+import {
+  MachineTokensPanel,
+  type MachineTokenView,
+} from "@/components/policy/machine-tokens-panel";
 import { McpGatewayPolicyPanel } from "@/components/policy/mcp-gateway-panel";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
@@ -308,7 +311,12 @@ async function mintTokenIntent(request: Request, ws: string, formData: FormData)
       userId: owner.userId,
       display: owner.display,
     });
-    return { intent: "mint-token" as const, status: "ok" as const, tokenName: name, secret: minted.secret };
+    return {
+      intent: "mint-token" as const,
+      status: "ok" as const,
+      tokenName: name,
+      secret: minted.secret,
+    };
   } catch {
     return data(
       { intent: "mint-token" as const, status: "error" as const, error: SERVER_ERROR },

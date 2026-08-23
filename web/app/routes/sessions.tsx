@@ -3,7 +3,6 @@ import { Form, Link, useActionData, useLoaderData, useNavigation } from "react-r
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime, shortDevice } from "@/components/format";
 import { SettingsTabs } from "@/components/settings-tabs";
-import { workspaceServiceSessions } from "@/lib/db/queries.tokens.server";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
@@ -17,6 +16,7 @@ import {
   type WorkspaceSessions,
   workspaceSessions,
 } from "@/lib/db/queries.sessions.server";
+import { workspaceServiceSessions } from "@/lib/db/queries.tokens.server";
 import { useWsPath } from "@/lib/ws-path";
 
 export function meta({ params }: { params: { ws?: string } }) {
@@ -767,10 +767,7 @@ function ServiceMachines({
       </summary>
       <Card className="mt-3 divide-y divide-line-soft px-4 py-1">
         {rows.map((row) => (
-          <div
-            key={row.serviceSessionId}
-            className="flex items-center justify-between gap-3 py-2"
-          >
+          <div key={row.serviceSessionId} className="flex items-center justify-between gap-3 py-2">
             <div className="min-w-0">
               <p className="truncate text-ink text-sm font-medium">{row.displayName}</p>
               <p className="text-dim text-sm">
@@ -788,4 +785,3 @@ function ServiceMachines({
     </details>
   );
 }
-

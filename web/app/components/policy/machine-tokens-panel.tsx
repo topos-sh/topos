@@ -1,5 +1,5 @@
 import { useFetcher } from "react-router";
-import { Card, SectionHeading, buttonClasses } from "@/components/ui";
+import { buttonClasses, Card, SectionHeading } from "@/components/ui";
 
 /** One token row as the settings loader serialized it (dates ride as ISO strings). */
 export interface MachineTokenView {
@@ -33,10 +33,10 @@ export function MachineTokensPanel({ tokens }: { tokens: MachineTokenView[] }) {
       </SectionHeading>
       <Card className="space-y-4 px-4 py-3">
         <p className="text-sm text-dim">
-          A machine token lets CI jobs, VMs, and sandboxes install this workspace's bundles
-          without a person's login. Tokens are read-only: they can fetch bundles and report what
-          a machine applied, never publish or change anything. Each run appears under Sessions
-          as a service machine and expires on its own.
+          A machine token lets CI jobs, VMs, and sandboxes install this workspace's bundles without
+          a person's login. Tokens are read-only: they can fetch bundles and report what a machine
+          applied, never publish or change anything. Each run appears under Sessions as a service
+          machine and expires on its own.
         </p>
         {minted?.secret !== undefined && (
           <div className="space-y-1 rounded border border-line bg-panel px-3 py-2">
@@ -77,9 +77,7 @@ export function MachineTokensPanel({ tokens }: { tokens: MachineTokenView[] }) {
             {mint.state === "idle" ? "Create token" : "Creating…"}
           </button>
         </mint.Form>
-        {mint.data?.status === "error" && (
-          <p className="text-sm text-red-600">{mint.data.error}</p>
-        )}
+        {mint.data?.status === "error" && <p className="text-sm text-red-600">{mint.data.error}</p>}
       </Card>
     </section>
   );

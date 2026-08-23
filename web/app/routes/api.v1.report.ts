@@ -2,8 +2,8 @@ import type { ActionFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { isTokenActor, requireReadActor } from "@/lib/auth/guards.server";
-import { serviceReportApplied } from "@/lib/db/queries.tokens.server";
 import { type ReportedHarnessState, reportApplied } from "@/lib/db/queries.lane.server";
+import { serviceReportApplied } from "@/lib/db/queries.tokens.server";
 
 /**
  * `PUT /api/v1/workspaces/{ws}/report` — the session's post-reconcile applied snapshot

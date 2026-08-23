@@ -43,10 +43,9 @@ describe("custody", () => {
     const t = await tokens();
     const minted = await t.mintMachineToken(ws, "github-actions", actor);
     expect(minted.secret.startsWith(t.MACHINE_TOKEN_PREFIX)).toBe(true);
-    const rows = await db.q<{ name: string }>(
-      `SELECT name FROM web.machine_token WHERE id = $1`,
-      [minted.tokenId],
-    );
+    const rows = await db.q<{ name: string }>(`SELECT name FROM web.machine_token WHERE id = $1`, [
+      minted.tokenId,
+    ]);
     expect(rows).toHaveLength(1);
     const leak = await db.q(
       `SELECT 1 FROM web.machine_token WHERE token_sha256 = convert_to($1, 'UTF8')`,
@@ -90,8 +89,11 @@ describe("resolve", () => {
     const t = await tokens();
     const minted = await t.mintMachineToken(ws, "sweeper", actor);
     const stale = await t.tokenActor(ws, minted.secret, "old-run");
-    await db.q(`UPDATE web.service_session SET last_seen_at = now() - interval '8 days'
-                WHERE id = $1`, [stale?.serviceSessionId ?? ""]);
+    await db.q(
+      `UPDATE web.service_session SET last_seen_at = now() - interval '8 days'
+                WHERE id = $1`,
+      [stale?.serviceSessionId ?? ""],
+    );
     await t.tokenActor(ws, minted.secret, "new-run");
     const names = await db.q<{ display_name: string }>(
       `SELECT display_name FROM web.service_session WHERE token_id = $1 ORDER BY display_name`,

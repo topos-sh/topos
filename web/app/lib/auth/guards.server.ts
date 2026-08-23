@@ -1,7 +1,6 @@
 import { data, redirect } from "react-router";
 import { composition } from "@/composition.server";
 import { bearerToken, machineTokenRefused, uniformNotFound } from "@/lib/api/wire.server";
-import { MACHINE_TOKEN_PREFIX, tokenActor } from "@/lib/db/queries.tokens.server";
 import {
   seatOf,
   sessionActor,
@@ -9,6 +8,7 @@ import {
   theWorkspace,
   workspaceByName,
 } from "@/lib/db/identity.server";
+import { MACHINE_TOKEN_PREFIX, tokenActor } from "@/lib/db/queries.tokens.server";
 import { personDisplay } from "@/lib/person-display";
 import { publicOrigin } from "@/lib/plane/public-base.server";
 import { getAuth } from "./server";
@@ -450,4 +450,3 @@ export async function requireReadActor(
   }
   return await requireSessionActor(request, workspaceId, opts);
 }
-
