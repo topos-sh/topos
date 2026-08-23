@@ -281,7 +281,20 @@ fn plan_install(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPla
             }
         }
         Classification::Unmanaged => {
-            EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None) // leave it
+            // The entry stays exactly as the person wrote it — but a seeded root key still has
+            // to land: without `version`, Cursor's validator rejects the WHOLE file, the
+            // hand-written hook included. Writing the seeded root preserves the unmanaged
+            // entry's value untouched.
+            if seeded {
+                match serialize(&root) {
+                    Some(bytes) => {
+                        EditPlan::Write(bytes, TriggerState::AlreadyPresentUnmanaged, None)
+                    }
+                    None => EditPlan::Leave(TriggerState::Degraded, None),
+                }
+            } else {
+                EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None) // leave it
+            }
         }
         Classification::Absent => {
             entries.push(canonical_entry(spec));
