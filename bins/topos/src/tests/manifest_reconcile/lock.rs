@@ -147,6 +147,64 @@ fn frozen_refuses_an_uncovered_row_and_writes_nothing() {
 }
 
 #[test]
+fn a_name_overridden_row_keeps_its_lock_entry_through_update() {
+    // Harvest writes the lock under the row's KEY; the closeout prune must key the same way —
+    // pruning by display name deleted the entry the very same run had just written.
+    let rig = Rig::new("lock-nameover");
+    rig.seed_session();
+    let proj = project(
+        "lock-nameover-proj",
+        &format!(
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = {{ version = \"latest\", name = \"deploy-checklist\" }}\n"
+        ),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v1);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    install(&ctx, &plane, &dir, ops::LockMode::Install).expect("fill");
+    assert!(lock_text(&proj.0).contains("[skills.deploy]"), "{}", lock_text(&proj.0));
+    install(&ctx, &plane, &dir, ops::LockMode::Update).expect("update");
+    assert!(
+        lock_text(&proj.0).contains("[skills.deploy]"),
+        "the update pruned the entry it should keep: {}",
+        lock_text(&proj.0)
+    );
+}
+
+#[test]
+fn an_mcp_row_never_resolves_to_a_file_skill_of_the_same_name() {
+    // The section is the kind: an [mcp] row whose name only a FILE skill answers is NOT
+    // AVAILABLE — installing the file skill in its place would be the wrong bundle kind.
+    let rig = Rig::new("lock-kindgate");
+    rig.seed_session();
+    let proj = project(
+        "lock-kindgate-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\ndeploy = \"latest\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v1);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Install).expect("sweep runs");
+    assert!(
+        out.warnings.iter().any(|m| {
+            m.code.as_deref() == Some("NOT_AVAILABLE") && m.text.contains("MCP server")
+        }),
+        "{:?}",
+        out.warnings
+    );
+    assert!(
+        !proj.0.join(".claude/skills/deploy").exists(),
+        "the file skill must not install in an [mcp] row's place"
+    );
+}
+
+#[test]
 fn a_lock_from_another_workspace_refuses_install_and_update_re_resolves() {
     let rig = Rig::new("lock-foreign");
     rig.seed_session();
