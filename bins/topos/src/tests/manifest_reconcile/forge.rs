@@ -109,6 +109,40 @@ fn a_floating_repo_row_advances_through_the_silent_sweep_alone() {
 }
 
 #[test]
+fn a_fresh_unpinned_repo_install_fills_the_lock_commit() {
+    // The fill contract: the FIRST install of an unpinned repo row records the commit the fetch
+    // resolved — bytes on disk with no lock entry would make the very next `--frozen` refuse
+    // the checkout this run just converged.
+    let rig = Rig::new("repo-lockfill");
+    let proj = project("repo-lockfill-proj", "[skills]\nalpha = \"github:o/r\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts {
+            forge: ops::ForgeCadence::Scheduled,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(proj.0.join("topos.lock")).unwrap_or_default();
+    assert!(text.contains("[skills.alpha]"), "{text}");
+    assert!(text.contains("commit = \""), "{text}");
+    assert!(text.contains("aaaaaaaaaaaa1"), "{text}");
+    assert!(text.contains("github:o/r"), "{text}");
+}
+
+#[test]
 fn an_unchanged_repo_is_probed_and_never_downloaded() {
     // ACCEPTANCE 2, asserted on the TRANSPORT SEAM rather than by timing: a repo that has not
     // moved costs one probe and zero archives. This is the whole reason the lane can run on a
@@ -1463,7 +1497,9 @@ fn a_second_checkout_is_never_starved_by_the_first_ones_sweeps() {
         "the second checkout's row is still owed a check"
     );
 
-    // And the moment somebody opens B, upstream really does reach it.
+    // And the moment somebody opens B, upstream really does reach it — through the lock's own
+    // door: the quiet sweep HOLDS the locked commit (a project is deterministic), and the
+    // explicit `topos update` is what takes the new one.
     git.serve(build_repo_targz(
         "o-r-bbbbbbbbbbbb2",
         &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
@@ -1471,8 +1507,23 @@ fn a_second_checkout_is_never_starved_by_the_first_ones_sweeps() {
     quiet_sweep(&bctx, &plane, &dir, &git);
     assert_eq!(
         std::fs::read_to_string(b.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
+        "# alpha v1\n",
+        "a quiet sweep never moves a locked checkout"
+    );
+    ops::manifest_update(
+        &bctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts {
+            lock: ops::LockMode::Update,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(b.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
         "# alpha v2\n",
-        "the second checkout is not starved"
+        "the second checkout is not starved: update reaches it"
     );
 }
 
