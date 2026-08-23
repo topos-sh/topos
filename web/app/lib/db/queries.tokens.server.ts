@@ -124,20 +124,28 @@ export interface TokenActorRow {
  * along — one resolve, current state.
  */
 export async function tokenActor(
-  workspaceId: string,
+  workspaceRef: string,
   credential: string,
   reportedName: string | null,
 ): Promise<TokenActorRow | null> {
   return await getDb().transaction(async (tx) => {
+    // The path's workspace ref may be the id OR the ADDRESS slug: a CI checkout knows only the
+    // address its committed topos.toml names, and the token itself is what scopes access — the
+    // ref only has to NAME the token's own workspace, either spelling. A foreign ref still
+    // resolves to nothing (the uniform 404).
     const hit = await tx.execute(sql`
       UPDATE web.machine_token mt SET last_used_at = now()
-      WHERE mt.token_sha256 = ${sha256OfText(credential)} AND mt.workspace_id = ${workspaceId}
-      RETURNING mt.id, mt.name
+      FROM web.workspace w
+      WHERE mt.token_sha256 = ${sha256OfText(credential)}
+        AND mt.workspace_id = w.id
+        AND (w.id = ${workspaceRef} OR w.name = ${workspaceRef})
+      RETURNING mt.id, mt.name, mt.workspace_id AS workspace_id
     `);
-    const token = hit.rows[0] as { id: string; name: string } | undefined;
+    const token = hit.rows[0] as { id: string; name: string; workspace_id: string } | undefined;
     if (token === undefined) {
       return null;
     }
+    const workspaceId = token.workspace_id;
     await tx.execute(sql`
       DELETE FROM web.service_session
       WHERE token_id = ${token.id}

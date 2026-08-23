@@ -442,7 +442,9 @@ export async function requireReadActor(
     }
     return {
       machine: true,
-      workspaceId,
+      // The RESOLVED id, never the path's ref — the ref may be the address slug (a CI checkout
+      // knows only its committed file's address), and every downstream query keys on the id.
+      workspaceId: row.workspaceId,
       tokenId: row.tokenId,
       tokenName: row.tokenName,
       serviceSessionId: row.serviceSessionId,

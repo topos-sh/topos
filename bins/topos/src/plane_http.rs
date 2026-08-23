@@ -62,6 +62,10 @@ const USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
 /// non-secret `skill_id → workspace_id` map (the URL-path scope each skill's reads splice), the
 /// enrolled workspaces (the delivery lane's fan-out), and one configured agent (connection-pooled,
 /// reused across requests).
+/// The machine-token credential prefix — the client-known spelling that marks a READ-ONLY
+/// service credential (`TOPOS_TOKEN`), never a person's session.
+pub(crate) const MACHINE_TOKEN_PREFIX: &str = "tpt_";
+
 pub(crate) struct UreqPlane {
     base_url: String,
     /// **SECRET** — the device's ONE Bearer credential (`None` = signed out; every read answers
@@ -75,6 +79,10 @@ pub(crate) struct UreqPlane {
     /// The enrolled workspace ids (from `user.json`) — the delivery/report lane's fan-out set.
     workspaces: Vec<String>,
     agent: ureq::Agent,
+    /// The service-machine label (`x-topos-machine`) a MACHINE-TOKEN credential sends, so a CI
+    /// runner names itself stably in the fleet view (`TOPOS_MACHINE`; the server defaults to the
+    /// token's own name when absent). `None` for every person session.
+    machine_label: Option<String>,
     /// The ACTIVITY sink (see the module header): byte progress for the bundle blobs, plus the
     /// fallback "contacting <host>" phase when the verb above named nothing better. An `Rc` because
     /// this transport is boxed as a `'static` trait object and cannot borrow the composition root's
@@ -103,13 +111,28 @@ impl UreqPlane {
         credential: Option<String>,
         skill_workspaces: HashMap<String, String>,
     ) -> Self {
+        let machine_label = credential
+            .as_deref()
+            .is_some_and(|c| c.starts_with(MACHINE_TOKEN_PREFIX))
+            .then(|| std::env::var("TOPOS_MACHINE").ok())
+            .flatten()
+            .filter(|l| !l.trim().is_empty());
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             credential,
             skill_workspaces: RefCell::new(skill_workspaces),
             workspaces: Vec::new(),
             agent: ureq::Agent::new_with_config(agent_config()),
+            machine_label,
             progress: Rc::new(progress::Silent),
+        }
+    }
+
+    /// Attach the machine label to an authenticated request, when one rides this transport.
+    fn labeled<T>(&self, req: ureq::RequestBuilder<T>) -> ureq::RequestBuilder<T> {
+        match &self.machine_label {
+            Some(l) => req.header("x-topos-machine", l),
+            None => req,
         }
     }
 
@@ -184,9 +207,11 @@ impl UreqPlane {
             &format!("contacting {}", host_label(&self.base_url)),
         );
         let resp = self
-            .agent
-            .get(url)
-            .header("authorization", format!("Bearer {credential}"))
+            .labeled(
+                self.agent
+                    .get(url)
+                    .header("authorization", format!("Bearer {credential}")),
+            )
             .call()
             // A `.call()` Err is connect-level (dial/TLS/timeout before any status): the plane itself is
             // unreachable, so the sweep's circuit breaker may trip on it.
@@ -227,10 +252,11 @@ impl PlaneSource for UreqPlane {
             &*self.progress,
             &format!("contacting {}", host_label(&self.base_url)),
         );
-        let mut req = self
-            .agent
-            .get(&url)
-            .header("authorization", format!("Bearer {credential}"));
+        let mut req = self.labeled(
+            self.agent
+                .get(&url)
+                .header("authorization", format!("Bearer {credential}")),
+        );
         if let Some(k) = known {
             // Commit-sensitive conditional GET: the quoted ETag for the generation AND the known commit id.
             req = req
@@ -482,9 +508,11 @@ impl crate::plane::DeliverySource for UreqPlane {
             &format!("contacting {}", host_label(&self.base_url)),
         );
         let resp = self
-            .agent
-            .put(&url)
-            .header("authorization", format!("Bearer {cred}"))
+            .labeled(
+                self.agent
+                    .put(&url)
+                    .header("authorization", format!("Bearer {cred}")),
+            )
             .header("content-type", "application/json")
             .send(&body[..])
             .map_err(|e| {
