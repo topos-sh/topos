@@ -165,7 +165,11 @@ fn a_name_overridden_row_keeps_its_lock_entry_through_update() {
     let ctx = rig.ctx_at(Some(&proj.0));
 
     install(&ctx, &plane, &dir, ops::LockMode::Install).expect("fill");
-    assert!(lock_text(&proj.0).contains("[skills.deploy]"), "{}", lock_text(&proj.0));
+    assert!(
+        lock_text(&proj.0).contains("[skills.deploy]"),
+        "{}",
+        lock_text(&proj.0)
+    );
     install(&ctx, &plane, &dir, ops::LockMode::Update).expect("update");
     assert!(
         lock_text(&proj.0).contains("[skills.deploy]"),
@@ -235,7 +239,10 @@ fn a_lock_from_another_workspace_refuses_install_and_update_re_resolves() {
         assert!(detail.contains(&format!("{HOST}/{WS_NAME}")), "{detail}");
         assert!(detail.contains("topos update"), "{detail}");
     }
-    assert!(!proj.0.join(".claude/skills/deploy").exists(), "nothing placed");
+    assert!(
+        !proj.0.join(".claude/skills/deploy").exists(),
+        "nothing placed"
+    );
 
     // An update treats the workspace change as a full re-resolution: stale entries are
     // discarded, the rewrite is for THIS workspace, and the change is said.
@@ -282,7 +289,10 @@ fn frozen_reads_a_wrong_shaped_entry_as_a_disagreement() {
     let detail = err.detail();
     assert!(detail.contains("deploy"), "{detail}");
     assert!(detail.contains("repo source"), "{detail}");
-    assert!(!proj.0.join(".claude/skills/deploy").exists(), "nothing placed");
+    assert!(
+        !proj.0.join(".claude/skills/deploy").exists(),
+        "nothing placed"
+    );
 }
 
 #[test]
