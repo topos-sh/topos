@@ -1,12 +1,17 @@
 //! `cursor` — the session-start auto-update hook in `<root>/hooks.json` (production root:
 //! `~/.cursor`): `{"version": 1, "hooks": {"sessionStart": [{"command": …}]}}` — a FLAT entry
 //! array per event (no matcher groups), lowercase-camel event key, and a top-level schema
-//! `version` (seeded as `1` only when the file is created from scratch; an existing file's own
-//! value is never touched).
+//! `version` seeded whenever the key is ABSENT: Cursor's validator requires a numeric `version`
+//! and refuses the WHOLE file without one — the user's own hooks included — so absence is a
+//! fault this install heals (an existing value is never touched).
 //!
-//! **Evidence level: vendor docs, unverified** — the shape is the one Cursor's published hooks
-//! documentation describes; no live build was probed. The docs describe no per-hook consent
-//! gate, so a placed entry reports `Active` carrying the docs-level note.
+//! **Evidence level: verified against a live build** (2026-08: Cursor's shipped hooks loader and
+//! validator, run directly over this adapter's exact bytes; `sessionStart` fires on a new
+//! conversation, and there is no per-hook consent gate, so a placed entry reports `Active`).
+//! Two consequences of that verification shape this spec: the missing-`version` refusal above,
+//! and the SENTINEL-LESS command — older Cursor builds deliver the hook payload as a heredoc
+//! APPENDED to the command text, and a trailing `#` comment swallows it, so ownership here keys
+//! on the exact canonical command instead of the sentinel.
 
 use std::path::{Path, PathBuf};
 
@@ -30,9 +35,10 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     handler_async: false,
     hook_dialect: None,
     root_seed: Some(("version", 1)),
+    command_sentinel: false,
     live_kind: CurrencyKind::SessionStart,
     placed_state: TriggerState::Active,
-    note: Some("vendor docs, unverified"),
+    note: None,
 };
 
 /// Production root: `~/.cursor` under the passed home (no env override in the registry table).
@@ -47,7 +53,7 @@ pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a
 #[cfg(test)]
 mod tests {
     use super::super::testutil::MemConfig;
-    use super::super::{SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter};
+    use super::super::{GUARDED_SWEEP, SENTINEL, TriggerAdapter};
     use super::*;
 
     fn a<'c>(cfg: &'c MemConfig) -> JsonHooks<'c> {
@@ -62,7 +68,7 @@ mod tests {
   \"hooks\": {
     \"sessionStart\": [
       {
-        \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency\"
+        \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true\"
       }
     ]
   },
@@ -78,7 +84,7 @@ mod tests {
         assert_eq!(report.marker_id, "topos:cursor:currency:1");
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
-        assert_eq!(report.note.as_deref(), Some("vendor docs, unverified"));
+        assert_eq!(report.note, None);
         assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
         assert_eq!(cfg.writes(), 1);
     }
@@ -94,23 +100,31 @@ mod tests {
     }
 
     #[test]
-    fn the_version_seed_lands_only_on_a_from_scratch_file() {
-        // An existing file WITHOUT a version key: install registers the hook and leaves the
-        // user's schema-key choice alone.
+    fn the_version_seed_lands_whenever_the_key_is_absent() {
+        // An existing file WITHOUT a version key: Cursor refuses the whole file (the user's own
+        // hooks included) without a numeric `version`, so the install heals the absence.
         let cfg = MemConfig::with_file(CONFIG, "{\"hooks\": {}}\n");
         a(&cfg).install();
         let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
-        assert!(
-            root.get("version").is_none(),
-            "never seeded into an existing file"
-        );
+        assert_eq!(root["version"], 1, "seeded into a version-less file");
         assert!(root["hooks"]["sessionStart"].is_array());
 
-        // And an existing version value is never touched.
+        // An existing version VALUE is never touched.
         let cfg = MemConfig::with_file(CONFIG, "{\"version\": 7}\n");
         a(&cfg).install();
         let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
         assert_eq!(root["version"], 7);
+
+        // A re-run over an already-managed, already-seeded file writes nothing.
+        let cfg = MemConfig::with_file(CONFIG, "{\"hooks\": {}}\n");
+        a(&cfg).install();
+        let writes = cfg.writes();
+        a(&cfg).install();
+        assert_eq!(
+            cfg.writes(),
+            writes,
+            "seed + hook landed in one write, then no-op"
+        );
     }
 
     #[test]
@@ -125,10 +139,10 @@ mod tests {
         let text = cfg.text(CONFIG).unwrap();
         assert_eq!(
             text.matches(SENTINEL).count(),
-            1,
-            "rewritten, never duplicated"
+            0,
+            "the legacy sentinel-ed entry is rewritten to the sentinel-less canonical"
         );
-        assert!(text.contains(SHELL_SWEEP_LINE));
+        assert_eq!(text.matches(GUARDED_SWEEP).count(), 1, "never duplicated");
         assert!(
             !text.contains("timeout"),
             "the canonical flat entry has no timeout"
@@ -167,7 +181,7 @@ mod tests {
             "{\"hooks\":{\"sessionStart\":[{\"command\":\"echo mine\"}]},\"version\":1}",
         );
         a(&cfg).install();
-        assert_eq!(cfg.text(CONFIG).unwrap().matches(SENTINEL).count(), 1);
+        assert_eq!(cfg.text(CONFIG).unwrap().matches(GUARDED_SWEEP).count(), 1);
 
         let report = a(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);

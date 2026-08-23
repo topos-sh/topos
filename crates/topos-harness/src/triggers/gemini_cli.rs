@@ -33,6 +33,7 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     handler_async: false,
     hook_dialect: None,
     root_seed: None,
+    command_sentinel: true,
     live_kind: CurrencyKind::SessionStart,
     // Gemini gates a new/changed hook behind its own confirm prompt (docs), and that store is
     // not readable evidence — so a successful write is honestly NOT yet live.
