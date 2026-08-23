@@ -93,7 +93,7 @@ mod tests {
   \"hooks\": {
     \"SessionStart\": [
       {
-        \"bash\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency\",
+        \"bash\": \"command -v topos >/dev/null 2>&1 && topos install --quiet --from github-copilot || true  # topos:currency\",
         \"timeoutSec\": 60,
         \"type\": \"command\"
       }
@@ -118,7 +118,10 @@ mod tests {
         // The command carries the sentinel — inert under `bash`, and the whole of ownership.
         let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
         let entry = &root["hooks"]["SessionStart"][0];
-        assert_eq!(entry["bash"].as_str().unwrap(), SHELL_SWEEP_LINE);
+        assert_eq!(
+            entry["bash"].as_str().unwrap(),
+            super::super::cc_hooks::sweep_command(&SPEC)
+        );
         assert!(entry.get("command").is_none(), "Copilot's key is `bash`");
         assert!(entry.get("timeout").is_none(), "…and `timeoutSec`");
     }

@@ -544,7 +544,17 @@ mod tests {
         };
         let data = status_snapshot(&ctx, ScopeView::Here).expect("status snapshot");
         assert!(data.sessions.is_empty());
-        let _ = crate::ops::probe_detected(&home.0, None, &crate::ops::INERT_TRIGGER, &fs, &fs);
+        let _ = crate::ops::probe_detected(
+            &home.0,
+            None,
+            &crate::ops::INERT_TRIGGER,
+            &fs,
+            &fs,
+            &crate::ops::EvidenceView {
+                agents: &Default::default(),
+                now_ms: 0,
+            },
+        );
         assert_eq!(
             before,
             tree_bytes(&home.0),

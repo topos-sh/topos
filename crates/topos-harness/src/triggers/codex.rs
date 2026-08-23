@@ -399,7 +399,7 @@ mod tests {
       {
         \"hooks\": [
           {
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet --from codex || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(a(&cfg).install().state, TriggerState::Inactive);
         let text = cfg.text(HOOKS).unwrap();
         assert_eq!(text.matches(SENTINEL).count(), 1, "never duplicated");
-        assert!(text.contains(SHELL_SWEEP_LINE));
+        assert!(text.contains(&super::super::cc_hooks::sweep_command(&SPEC)));
     }
 
     /// The scrub takes our entry and leaves the switch standing: `hooks = true` governs codex's

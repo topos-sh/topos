@@ -53,7 +53,7 @@ pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a
 #[cfg(test)]
 mod tests {
     use super::super::testutil::MemConfig;
-    use super::super::{GUARDED_SWEEP, SENTINEL, TriggerAdapter};
+    use super::super::{SENTINEL, TriggerAdapter};
     use super::*;
 
     fn a<'c>(cfg: &'c MemConfig) -> JsonHooks<'c> {
@@ -68,7 +68,7 @@ mod tests {
   \"hooks\": {
     \"sessionStart\": [
       {
-        \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true\"
+        \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet --from cursor || true\"
       }
     ]
   },
@@ -142,7 +142,12 @@ mod tests {
             0,
             "the legacy sentinel-ed entry is rewritten to the sentinel-less canonical"
         );
-        assert_eq!(text.matches(GUARDED_SWEEP).count(), 1, "never duplicated");
+        assert_eq!(
+            text.matches(&super::super::cc_hooks::sweep_command(&SPEC))
+                .count(),
+            1,
+            "never duplicated"
+        );
         assert!(
             !text.contains("timeout"),
             "the canonical flat entry has no timeout"
@@ -181,7 +186,13 @@ mod tests {
             "{\"hooks\":{\"sessionStart\":[{\"command\":\"echo mine\"}]},\"version\":1}",
         );
         a(&cfg).install();
-        assert_eq!(cfg.text(CONFIG).unwrap().matches(GUARDED_SWEEP).count(), 1);
+        assert_eq!(
+            cfg.text(CONFIG)
+                .unwrap()
+                .matches(&super::super::cc_hooks::sweep_command(&SPEC))
+                .count(),
+            1
+        );
 
         let report = a(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);

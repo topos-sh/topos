@@ -75,7 +75,7 @@ mod tests {
       {
         \"hooks\": [
           {
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet --from devin || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -176,7 +176,11 @@ mod tests {
         let before = "{\n  \"model\": \"devin-1\"\n}\n";
         let cfg = MemConfig::with_file(CONFIG, before);
         a(&cfg).install();
-        assert!(cfg.text(CONFIG).unwrap().contains(SHELL_SWEEP_LINE));
+        assert!(
+            cfg.text(CONFIG)
+                .unwrap()
+                .contains(&super::super::cc_hooks::sweep_command(&SPEC))
+        );
 
         let report = a(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);

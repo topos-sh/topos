@@ -392,6 +392,7 @@ pub(crate) fn probe_detected(
     active: &dyn TriggerAdapter,
     cfg: &dyn ConfigStore,
     run: &dyn CommandRunner,
+    evidence: &EvidenceView<'_>,
 ) -> Vec<topos_types::results::StatusTrigger> {
     use topos_types::results::StatusTrigger;
     let active_slug = active.slug();
@@ -401,21 +402,42 @@ pub(crate) fn probe_detected(
             out.push(StatusTrigger {
                 agent: active_slug.to_owned(),
                 armed: Some(active.present()),
-                note: None,
+                note: active.pending_step().map(str::to_owned),
+                last_run_age_ms: evidence.age_of(active_slug),
             });
         } else if let Some(adapter) = triggers::adapter_for_slug(harness.slug, home, cfg, run) {
             let (armed, note) = match adapter.offline_probe_refusal() {
                 Some(why) => (None, Some(why.to_owned())),
-                None => (Some(adapter.present()), None),
+                None => (
+                    Some(adapter.present()),
+                    adapter.pending_step().map(str::to_owned),
+                ),
             };
             out.push(StatusTrigger {
                 agent: harness.slug.to_owned(),
                 armed,
                 note,
+                last_run_age_ms: evidence.age_of(harness.slug),
             });
         }
     }
     out
+}
+
+/// The hook-run evidence a probe row joins: when each slug's hook last ran, against now. An
+/// EMPTY view (no document, or a caller with no store) answers `None` for everyone — absence of
+/// evidence is never evidence of absence here.
+pub(crate) struct EvidenceView<'e> {
+    pub agents: &'e std::collections::BTreeMap<String, i64>,
+    pub now_ms: i64,
+}
+
+impl EvidenceView<'_> {
+    fn age_of(&self, slug: &str) -> Option<i64> {
+        self.agents
+            .get(slug)
+            .map(|t| self.now_ms.saturating_sub(*t).max(0))
+    }
 }
 
 #[cfg(test)]
@@ -627,7 +649,17 @@ mod tests {
         let cfg = MemConfig::default();
         let active = claude_trigger(&home.0, &cfg);
 
-        let out = probe_detected(&home.0, None, active.as_ref(), &cfg, &NoBinary);
+        let out = probe_detected(
+            &home.0,
+            None,
+            active.as_ref(),
+            &cfg,
+            &NoBinary,
+            &EvidenceView {
+                agents: &Default::default(),
+                now_ms: 0,
+            },
+        );
         let by = |slug: &str| out.iter().find(|r| r.agent == slug);
         assert_eq!(by("claude-code").expect("active row").armed, Some(false));
         assert_eq!(by("cursor").expect("cursor row").armed, Some(false));
@@ -639,7 +671,17 @@ mod tests {
 
         // Arm cursor through the real sweep, then the probe reports it present.
         arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
-        let out = probe_detected(&home.0, None, active.as_ref(), &cfg, &NoBinary);
+        let out = probe_detected(
+            &home.0,
+            None,
+            active.as_ref(),
+            &cfg,
+            &NoBinary,
+            &EvidenceView {
+                agents: &Default::default(),
+                now_ms: 0,
+            },
+        );
         let cursor = out.iter().find(|r| r.agent == "cursor").expect("cursor");
         assert_eq!(cursor.armed, Some(true));
     }

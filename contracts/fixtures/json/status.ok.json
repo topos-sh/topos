@@ -47,7 +47,8 @@
     "triggers": [
       {
         "agent": "claude-code",
-        "armed": true
+        "armed": true,
+        "last_run_age_ms": 7200000
       },
       {
         "agent": "openclaw",

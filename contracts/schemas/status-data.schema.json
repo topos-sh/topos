@@ -267,6 +267,14 @@
             "null"
           ]
         },
+        "last_run_age_ms": {
+          "description": "How long ago this agent's hook last RAN a sweep on this machine (milliseconds), when one\nhas ever been observed — the evidence that turns \"registered\" into \"seen working\". Only\nhooks that name their caller can leave it (`--hook`/`--from`), so absence never proves a\ntrigger dead. **INFERRED** (additive-only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
         "note": {
           "description": "A short honesty note (e.g. why `armed` is unknown), when one is needed.",
           "type": [

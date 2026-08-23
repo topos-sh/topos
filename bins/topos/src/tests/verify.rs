@@ -1311,7 +1311,7 @@ impl Rig {
     fn write_manifest(&self) {
         let home = self.home.0.join(".topos");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+        std::fs::write(home.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
     }
 }
 

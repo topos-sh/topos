@@ -83,6 +83,7 @@ fn dispatch() -> ExitCode {
             quiet,
             ttl,
             hook,
+            from,
         } => Command::Update {
             targets: Vec::new(),
             global,
@@ -94,6 +95,7 @@ fn dispatch() -> ExitCode {
             quiet,
             ttl,
             hook,
+            from,
             force: false,
             install: true,
             frozen,
@@ -343,8 +345,17 @@ fn run_command(
         // receipts use, minus every write.
         let result = ops::status_snapshot(&ctx, view).map(|mut data| {
             if let Some(r) = &ctx.roots {
-                data.triggers =
-                    ops::probe_detected(&r.home, r.cwd.as_deref(), ctx.triggers.active(), &fs, &fs);
+                data.triggers = ops::probe_detected(
+                    &r.home,
+                    r.cwd.as_deref(),
+                    ctx.triggers.active(),
+                    &fs,
+                    &fs,
+                    &ops::EvidenceView {
+                        agents: &crate::hook_evidence::read(&fs, &ctx.layout).agents,
+                        now_ms: i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX),
+                    },
+                );
             }
             data
         });
@@ -1556,6 +1567,7 @@ fn run_command(
             quiet,
             ttl,
             hook,
+            from,
             force,
             install,
             frozen,
@@ -1635,6 +1647,12 @@ fn run_command(
             // sweep always runs but takes the same lock and refreshes the stamp.
             let bare_sweep = targets.is_empty();
             let now_ms = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
+            // A hook that NAMES its caller leaves evidence a status line can read — recorded
+            // BEFORE the throttle, because a throttled exit is still a hook that fired, and
+            // firing is exactly the evidence.
+            if quiet && let Some(slug) = from.as_deref().or(hook.as_deref()) {
+                crate::hook_evidence::record(&fs, &ctx.layout, slug, now_ms);
+            }
             let mut _sweep_guard = None;
             if bare_sweep {
                 if quiet {

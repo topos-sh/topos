@@ -2011,11 +2011,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     agent: "claude-code".to_owned(),
                     armed: Some(true),
                     note: None,
+                    last_run_age_ms: Some(7_200_000),
                 },
                 StatusTrigger {
                     agent: "openclaw".to_owned(),
                     armed: None,
                     note: Some("presence needs a live scheduler query".to_owned()),
+                    last_run_age_ms: None,
                 },
             ],
             scopes: vec![StatusScope {
