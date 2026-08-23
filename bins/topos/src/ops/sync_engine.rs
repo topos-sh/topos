@@ -50,29 +50,6 @@ const MAX_BACKFILL: usize = 256;
 /// sentinel, and the go-back leaves a real commit there.
 pub(crate) const APPLIED_BEHIND_CURRENT: u64 = 0;
 
-/// After a PINNED sync — a row or lock pin holding this bundle off the served current — leave
-/// the go-back's own `applied` sentinel, so the next UNPINNED run reads behind and drives to the
-/// team's version again. Unlike the go-back it sets no `held`: a pin re-asserts itself every run
-/// through its row (or the project's lock), and removing the pin is what frees the bundle.
-///
-/// # Errors
-/// The per-skill lock and the sync doc's own read/write failures.
-pub(crate) fn mark_applied_behind(
-    ctx: &Ctx<'_>,
-    skill_id: &crate::id::SkillId,
-) -> Result<(), ClientError> {
-    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
-    let sp = ctx.layout.published(skill_id);
-    let Some(mut sync) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync)? else {
-        return Ok(());
-    };
-    if sync.applied != APPLIED_BEHIND_CURRENT {
-        sync.applied = APPLIED_BEHIND_CURRENT;
-        doc::write_doc(ctx.fs, &sp.sync, &sync)?;
-    }
-    Ok(())
-}
-
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
 /// value, so the merge is unreachable from a current/behind/clean-follower state **by construction** — a
@@ -331,7 +308,12 @@ pub(crate) fn sync_one_planned(
     // The placement TARGET SET is recomputed each sync (a newly detected harness / newly true
     // coverage adds a target; a record only ever leaves through an explicit verb). The reconciled
     // map carries every recorded placement — appended targets are never-materialized until an apply.
-    let applied_eq_observed = sync.applied == sync.observed;
+    // Generations tell WHEN; versions tell WHAT. A record whose version differs from the
+    // applied base is a PIN that moved (the row's, or the project lock's) — the transition must
+    // read it as behind, or a changed pin would wait for the SERVER to move before landing.
+    let version_diverged = target
+        .is_some_and(|t| !lock.base_commit.is_empty() && t.record.version_id != lock.base_commit);
+    let applied_eq_observed = sync.applied == sync.observed && !version_diverged;
     // A CONNECTED SERVER never reaches this engine. It holds no version to fetch and no object
     // store to fetch into — its whole delivery is the document the reconcile records — so an
     // arrival here is a caller that believed a record was something its own kind marker denies.
@@ -530,6 +512,14 @@ pub(crate) fn sync_one_planned(
             // The bytes already equal the target (a crash after a prior swap, or an idempotent re-pull):
             // advance `applied` with NO swap, never a false DIVERGED — and no spurious draft snapshot.
             heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
+            // Base AND bytes were already at the target: the advance was generation BOOKKEEPING
+            // (a served current moving past an unchanged pin), not an update — a receipt that
+            // announced it again every run would count standing still as work.
+            if !first_receive && lock.base_commit == to_hex(&target_commit) {
+                let mut row = applied_row(&name, &sync, target_commit);
+                row.action = PullAction::UpToDate;
+                return Ok(row);
+            }
             let mut row = applied_row(&name, &sync, target_commit);
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)

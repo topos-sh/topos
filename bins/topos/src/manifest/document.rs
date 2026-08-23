@@ -869,6 +869,26 @@ fn parse_row(
     let shape = resolve_key(key, v, section, scope, workspace)?;
     let value = value_of(key, &shape, scope, v)?;
     check_value(&shape.canonical(), &shape, scope, &value)?;
+    // An [mcp] row takes no version pin: a connected server delivers at the workspace's
+    // resolved revision, and the LOCK records which — a 64-hex digest here would name nothing
+    // on either side of the wire, so it refuses instead of being silently ignored.
+    if section == SectionKind::Mcp {
+        let pinned = match &value {
+            EntryValue::Pin(_) => true,
+            EntryValue::Fields(f) => f.version.as_deref().is_some_and(|v| v != "*"),
+            _ => false,
+        };
+        if pinned {
+            return Err(at(
+                key,
+                format!(
+                    "`{key}` is an MCP server — an [mcp] row takes no version pin (the lock \
+                     records the delivered revision; `topos update` moves it): spell it \
+                     `{key} = \"latest\"`",
+                ),
+            ));
+        }
+    }
     Ok(BundleRow {
         reference: shape.canonical(),
         shape,
@@ -1797,6 +1817,20 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
                 ..EntryFields::default()
             })
         );
+    }
+
+    #[test]
+    fn an_mcp_row_refuses_a_version_pin_by_name() {
+        let e = parse_manifest(
+            &format!(
+                "workspace = \"topos.sh/acme\"\n[mcp]\nlinear = \"{}\"\n",
+                "ab".repeat(32)
+            ),
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("no version pin"), "{e}");
+        assert!(e.message.contains("latest"), "{e}");
     }
 
     #[test]

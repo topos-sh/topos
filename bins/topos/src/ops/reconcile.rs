@@ -491,6 +491,9 @@ struct Sweep {
     /// What the PROJECT scope resolved this run — the material `topos.lock` is written from.
     /// Only project-scope sync sites push here (`ScopeCtx::lock` is `Some`).
     lock_harvest: LockDoc,
+    /// Bundles whose harvested lock value came from a TOML PIN — the write-back lets these win
+    /// over a standing entry (the pin is intent; recording it is filling, not moving).
+    lock_pin_overrides: std::collections::BTreeSet<String>,
     /// Feed ADDRESSES whose empty serve is already disclosed. A feed may be adopted by more than
     /// one recipe; the fact is the workspace's, not a scope's, so it is said once per run.
     empty_feeds: HashSet<String>,
@@ -1623,6 +1626,8 @@ pub(crate) fn manifest_update(
         };
         if opts.lock == LockMode::Frozen {
             let mut missing: Vec<String> = Vec::new();
+            let mut disagree: Vec<String> = Vec::new();
+            let short = |v: &str| v[..v.len().min(12)].to_owned();
             for row in plan.things.iter().chain(plan.sets.iter()) {
                 let name = row.shape.leaf_name();
                 let covered = match &row.shape {
@@ -1637,12 +1642,49 @@ pub(crate) fn manifest_update(
                 };
                 if !covered {
                     missing.push(name.to_owned());
+                    continue;
+                }
+                // COVERAGE is not AGREEMENT: a toml pin the lock does not record is a
+                // disagreement frozen must refuse — installing the pin while the lock says
+                // otherwise is exactly the write frozen promises not to make.
+                if let Some(pin) = row.pin() {
+                    let recorded = doc.skills.get(name);
+                    let agrees = match &row.shape {
+                        KeyShape::WorkspaceBundle { .. } => recorded
+                            .and_then(|s| s.version.as_deref())
+                            .is_some_and(|v| v == pin),
+                        KeyShape::RepoSkill { .. } => recorded
+                            .and_then(|s| s.commit.as_deref())
+                            .is_some_and(|c| c.starts_with(&pin) || pin.starts_with(c)),
+                        _ => true,
+                    };
+                    if !agrees {
+                        let rec = recorded
+                            .and_then(|s| s.version.as_deref().or(s.commit.as_deref()))
+                            .map(&short)
+                            .unwrap_or_else(|| "nothing".to_owned());
+                        disagree.push(format!(
+                            "{name} (topos.toml pins {}, topos.lock records {rec})",
+                            short(&pin)
+                        ));
+                    }
                 }
             }
-            if !missing.is_empty() {
+            if !missing.is_empty() || !disagree.is_empty() {
+                let mut parts = Vec::new();
+                if !missing.is_empty() {
+                    parts.push(format!("topos.lock does not cover {}", missing.join(", ")));
+                }
+                if !disagree.is_empty() {
+                    parts.push(format!(
+                        "topos.lock disagrees with topos.toml on {}",
+                        disagree.join(", ")
+                    ));
+                }
                 return Err(ClientError::InvalidArgument(format!(
-                    "--frozen: topos.lock does not cover {} — run `topos update` and commit the                      lock",
-                    missing.join(", ")
+                    "--frozen: {} — run `topos install` once (or `topos update`), then commit \
+                     the lock",
+                    parts.join("; ")
                 )));
             }
         }
@@ -1835,6 +1877,7 @@ pub(crate) fn manifest_update(
                     &driven,
                     person.as_ref(),
                     project.as_ref(),
+                    lock_state.as_ref(),
                 ));
                 // Each mcp row carries its per-agent states (the fleet page's truth); file
                 // bundles ride with an empty list, byte-identical to the prior wire shape.
@@ -2078,12 +2121,14 @@ pub(crate) fn manifest_update(
         if state.mode == LockMode::Frozen {
             if !sweep.failed_bundles.is_empty() || !sweep.failed_channels.is_empty() {
                 return Err(ClientError::InvalidArgument(
-                    "--frozen: not everything the lock names could be fetched and placed — see                      the warnings above"
+                    "--frozen: not everything the lock names could be fetched and placed — see the \
+                     warnings above"
                         .into(),
                 ));
             }
         } else {
             let targeted = !opts.targets.is_empty();
+            let mut pin_lines: Vec<Message> = Vec::new();
             let mut newdoc = if state.mode == LockMode::Update && !targeted {
                 sweep.lock_harvest.clone()
             } else {
@@ -2097,7 +2142,8 @@ pub(crate) fn manifest_update(
                 };
                 d.warnings = Vec::new();
                 for (name, skill) in &sweep.lock_harvest.skills {
-                    let keep_standing = state.mode != LockMode::Update;
+                    let keep_standing =
+                        state.mode != LockMode::Update && !sweep.lock_pin_overrides.contains(name);
                     let value = if keep_standing {
                         state
                             .doc
@@ -2108,6 +2154,23 @@ pub(crate) fn manifest_update(
                     } else {
                         skill.clone()
                     };
+                    if !keep_standing
+                        && state.mode != LockMode::Update
+                        && state.doc.skills.get(name).is_some_and(|old| *old != value)
+                    {
+                        pin_lines.push(crate::message::disclosure(
+                            "LOCK_PINNED",
+                            format!(
+                                "topos.lock now records the pinned {name}@{}",
+                                value
+                                    .version
+                                    .as_deref()
+                                    .or(value.commit.as_deref())
+                                    .map(|v| &v[..v.len().min(12)])
+                                    .unwrap_or("?")
+                            ),
+                        ));
+                    }
                     d.skills.insert(name.clone(), value);
                 }
                 for (name, rev) in &sweep.lock_harvest.mcp {
@@ -2153,6 +2216,7 @@ pub(crate) fn manifest_update(
             // Born only when there is something to record; rewritten only on a real change.
             if (has_entries || old.is_some()) && old.as_deref() != Some(text.as_str()) {
                 let _ = crate::atomic::atomic_write(ctx.fs, &path, text.as_bytes());
+                sweep.disclosures.append(&mut pin_lines);
             }
         }
     }
@@ -2205,6 +2269,7 @@ fn stale_scopes(
     driven: &Driven,
     person: Option<&ScopePlan>,
     project: Option<&(PathBuf, ScopePlan)>,
+    lock: Option<&LockState>,
 ) -> Vec<topos_types::results::BehindElsewhere> {
     let names: HashMap<&str, &str> = snap
         .skills
@@ -2224,6 +2289,16 @@ fn stale_scopes(
                 Some(dir) => {
                     let (pdir, plan) = project?;
                     if pdir != dir {
+                        return None;
+                    }
+                    // A lock-governed project is HELD at its recorded versions: behind by
+                    // choice, said on the bundle's own held row — never this nag, whose advice
+                    // (update the other scope) would point someone away from the lock.
+                    if let Some(state) = lock
+                        && state.mode != LockMode::Update
+                        && (state.doc.skills.contains_key(bundle)
+                            || state.doc.mcp.contains_key(bundle))
+                    {
                         return None;
                     }
                     (plan, Some(dir.as_path()))
@@ -2505,8 +2580,15 @@ fn reconcile_thing<'a>(
                     picked: false,
                 },
             ));
-            let pin = row.pin().or_else(|| sc.lock_pin(bundle));
+            let row_pin = row.pin();
+            let pin_from_row = row_pin.is_some();
+            let pin = row_pin.or_else(|| sc.lock_pin(bundle));
             if sc.lock.is_some() {
+                // A toml PIN is intent — the lock reconciles TO it (an exact resolution is a
+                // fill, not a move), so the write-back must let this harvest value win.
+                if pin_from_row {
+                    sweep.lock_pin_overrides.insert(bundle.clone());
+                }
                 sweep.lock_harvest.skills.insert(
                     bundle.clone(),
                     LockSkill {
@@ -2518,6 +2600,7 @@ fn reconcile_thing<'a>(
             let st = SyncTarget {
                 target,
                 pin,
+                pin_from_row,
                 display: display.clone(),
                 // A skill row's dest is its frozen placement plan.
                 dest: row.fields().dest,
@@ -3176,6 +3259,7 @@ fn reconcile_set<'a>(
             let st = SyncTarget {
                 target: CatalogTarget::from_entry(entry, kind),
                 pin,
+                pin_from_row: false,
                 display,
                 dest: row.fields().dest,
                 step,
@@ -3297,6 +3381,7 @@ fn reconcile_feed<'a>(
                         review_required: ds.review_required,
                     },
                     pin: None,
+                    pin_from_row: false,
                     display: ds.name.clone(),
                     // A feed item has no row — no dest, no narrowing: the default placement.
                     dest: None,
@@ -3522,6 +3607,9 @@ struct SyncTarget {
     target: CatalogTarget,
     /// The row's version pin — it overrides the served current.
     pin: Option<String>,
+    /// Whether the pin came from the ROW itself (`topos.toml`) rather than the project lock —
+    /// the held receipt names which file holds the bundle.
+    pin_from_row: bool,
     /// The placement directory's display name (the row's `name` field, else the catalog name).
     display: String,
     /// The row's `dest` — the FROZEN destination set a skill bundle's plan becomes (one target
@@ -3857,19 +3945,19 @@ fn sync_workspace_skill<'a>(
     let mut row_index = None;
     match outcome {
         Ok(mut row) => {
-            // A pinned sync (a row pin, or the project lock) holds this bundle OFF the served
-            // current while the record rode the served generation — leave the go-back's applied
-            // sentinel so the next unpinned run reads behind and moves.
-            if pinned_behind && let Err(e) = sync_engine::mark_applied_behind(&run_ctx, &sid) {
-                note_item_failure(
-                    ctx,
-                    &mut sweep.warnings,
-                    &mut sweep.failed_bundles,
-                    &sc.label,
-                    &target.skill_id,
-                    &target.name,
-                    &e,
-                );
+            // A pinned row that is merely NOT MOVING is a HELD state, not an update — the
+            // receipt names what holds it, once, and the summary stops counting a stable pin
+            // as work. (Unpinning lands on its own: the engine reads a version that differs
+            // from the applied base as behind, whatever the generations say.)
+            if pinned_behind && row.action == PullAction::UpToDate {
+                row.action = PullAction::Held;
+                if row.note.is_none() {
+                    row.note = Some(if st.pin_from_row {
+                        "pinned by topos.toml".to_owned()
+                    } else {
+                        "held by topos.lock".to_owned()
+                    });
+                }
             }
             row.workspace_id = Some(run.session.workspace_id.clone());
             row.scope = Some(sc.label.clone());
