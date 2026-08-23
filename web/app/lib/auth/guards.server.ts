@@ -345,12 +345,14 @@ export async function requireSessionActor(
   if (credential === null) {
     throw uniformNotFound();
   }
-  if (credential.startsWith(MACHINE_TOKEN_PREFIX)) {
-    // A machine token where only a person may act — typed, so the caller debugs the right thing.
-    throw machineTokenRefused();
-  }
   const row = await sessionActor(workspaceId, credential);
   if (row === null) {
+    // A machine token where only a person may act — typed, so the caller debugs the right
+    // thing. RESOLUTION came first: a person's random credential can begin with the token
+    // prefix (1 in 64^4), and a prefix alone must never unseat a real session.
+    if (credential.startsWith(MACHINE_TOKEN_PREFIX)) {
+      throw machineTokenRefused();
+    }
     throw uniformNotFound();
   }
   if (row.sessionStatus !== "active" && opts.allowPending !== true) {
@@ -382,11 +384,12 @@ export async function requireSessionActorPreBody(request: Request): Promise<Sess
   if (credential === null) {
     throw uniformNotFound();
   }
-  if (credential.startsWith(MACHINE_TOKEN_PREFIX)) {
-    throw machineTokenRefused();
-  }
   const row = await sessionActorByCredential(credential);
   if (row === null || row.sessionStatus !== "active") {
+    // Resolution before classification — see requireSessionActor.
+    if (row === null && credential.startsWith(MACHINE_TOKEN_PREFIX)) {
+      throw machineTokenRefused();
+    }
     throw uniformNotFound();
   }
   return {
@@ -439,7 +442,21 @@ export async function requireReadActor(
   if (credential.startsWith(MACHINE_TOKEN_PREFIX)) {
     const row = await tokenActor(workspaceId, credential, request.headers.get("x-topos-machine"));
     if (row === null) {
-      throw uniformNotFound();
+      // Not a live token — but a person's random credential can carry the prefix by chance,
+      // so resolve it as a session before answering. Every miss stays the uniform 404 (a read
+      // lane accepts tokens; the typed read-only refusal would be a lie here).
+      const person = await sessionActor(workspaceId, credential);
+      if (person === null || (person.sessionStatus !== "active" && opts.allowPending !== true)) {
+        throw uniformNotFound();
+      }
+      return {
+        userId: person.userId,
+        display: person.userDisplay,
+        workspaceId,
+        sessionId: person.sessionId,
+        role: person.role,
+        sessionStatus: person.sessionStatus,
+      } as SessionActor;
     }
     return {
       machine: true,

@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { bootWorkspace, createScratchDb, type ScratchDb, seedUser } from "./helpers/scratch-db";
+import {
+  bootWorkspace,
+  createScratchDb,
+  type ScratchDb,
+  seedSession,
+  seedUser,
+} from "./helpers/scratch-db";
 
 /**
  * MACHINE TOKENS against a REAL scratch Postgres: custody (hash stored, plaintext never),
@@ -199,6 +205,22 @@ describe("the guard seam", () => {
     );
     expect(thrown).toBeInstanceOf(Response);
     expect((thrown as Response).status).toBe(404);
+  });
+
+  it("a person's credential that happens to carry the token prefix stays a person", async () => {
+    // Session credentials are random; one in 64^4 begins with the machine prefix. Resolution
+    // runs before classification, so the prefix alone never unseats a real session — at the
+    // person doors and at the read door alike.
+    const g = await guards();
+    const { seatUser } = await import("./helpers/scratch-db");
+    await seatUser(db, ws, OWNER, "owner");
+    await seedSession(db, "tpt_lucky_person", ws, OWNER);
+    const a = await g.requireSessionActor(request("tpt_lucky_person"), ws);
+    expect(a.userId).toBe(OWNER);
+    const b = await g.requireSessionActorPreBody(request("tpt_lucky_person"));
+    expect(b.workspaceId).toBe(ws);
+    const c = await g.requireReadActor(request("tpt_lucky_person"), ws);
+    expect(g.isTokenActor(c)).toBe(false);
   });
 
   it("every session-only door answers a token bearer TYPED, not 404", async () => {
