@@ -442,7 +442,6 @@ export async function requireReadActor(
       throw uniformNotFound();
     }
     return {
-      [actorBrand]: true,
       machine: true,
       // The RESOLVED id, never the path's ref — the ref may be the address slug (a CI checkout
       // knows only its committed file's address), and every downstream query keys on the id.
@@ -450,7 +449,9 @@ export async function requireReadActor(
       tokenId: row.tokenId,
       tokenName: row.tokenName,
       serviceSessionId: row.serviceSessionId,
-    };
+      // The brand is TYPE-ONLY (`declare const`): minting is this guard's cast, exactly as the
+      // session actors are minted.
+    } as TokenActor;
   }
   return await requireSessionActor(request, workspaceId, opts);
 }

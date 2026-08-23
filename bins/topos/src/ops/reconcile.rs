@@ -2504,6 +2504,7 @@ pub(crate) fn manifest_update(
 ///   the cwd. Another checkout's `topos.toml` was never opened, so its copy cannot be told apart
 ///   from a deliberate pin, and guessing would be exactly the nagging this filter exists to stop.
 /// - **Only a row that is not deliberately fixed there** (see [`deliberately_fixed`]).
+#[allow(clippy::too_many_arguments)]
 fn stale_scopes(
     ctx: &Ctx<'_>,
     splits: &[super::pull::VersionSplit],

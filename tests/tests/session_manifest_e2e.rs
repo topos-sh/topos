@@ -197,10 +197,15 @@ fn the_session_manifest_hero_loop() {
         .publish("deploy", false, None, Some("v2"), Some(&cwd))
         .expect("publish v2");
     let (pulled, warnings) = dev.update(&[], Some(&proj)).expect("the sweep");
+    // The typed update MOVED the lock, and says so — the promised old→new receipt row. That
+    // disclosure is the only line a clean sweep carries.
     assert!(
-        warnings.is_empty(),
-        "a clean sweep warns nothing: {warnings:?}"
+        warnings
+            .iter()
+            .all(|w| w.starts_with("LOCK_MOVED deploy: ") && w.contains(" → ")),
+        "a clean update carries only its lock diff: {warnings:?}"
     );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
     let row = pulled
         .skills
         .iter()
@@ -232,7 +237,13 @@ fn the_session_manifest_hero_loop() {
     let (_pulled, warnings) = dev
         .update(&[], Some(&proj))
         .expect("the post-approve sweep");
-    assert!(warnings.is_empty(), "{warnings:?}");
+    // Same shape as above: the approved proposal moved the lock, and the update says so.
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.starts_with("LOCK_MOVED deploy: ")),
+        "{warnings:?}"
+    );
     assert!(
         std::fs::read_to_string(placed.join("SKILL.md"))
             .expect("the placed doc")

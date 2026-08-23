@@ -79,7 +79,10 @@ describe("resolve", () => {
     const hit = await t.tokenActor(ws, minted.secret, null);
     expect(hit).not.toBeNull();
     const lane = await import("@/lib/db/queries.lane.server");
-    const channels = await lane.laneChannels({ workspaceId: ws, userId: null });
+    const channels = await lane.laneChannels(
+      // Tests fabricate the branded proof deliberately — production code cannot.
+      { workspaceId: ws, userId: null } as unknown as Parameters<typeof lane.laneChannels>[0],
+    );
     expect(Array.isArray(channels)).toBe(true);
     // The default channel exists in every workspace; a token sees it like anyone.
     expect(channels.some((c) => c.builtin)).toBe(true);

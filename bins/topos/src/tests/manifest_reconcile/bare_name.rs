@@ -1148,13 +1148,12 @@ fn a_stale_claim_after_a_publish_never_refuses_over_a_row_the_file_lacks() {
             ..bare_opts(true)
         },
     );
-    match out {
-        Err(e) => assert_ne!(
+    if let Err(e) = out {
+        assert_ne!(
             e.code(),
             "ALREADY_TRACKED",
             "a rowless record must not refuse as already-added: {e}"
-        ),
-        Ok(_) => {}
+        );
     }
 }
 
