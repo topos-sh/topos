@@ -71,6 +71,19 @@ function mintSecret(): string {
   return randomBytes(32).toString("base64url");
 }
 
+/** The bearer prefix every machine token carries — write lanes key their typed refusal on it. */
+export const MACHINE_TOKEN_PREFIX = "tpt_";
+export function mintMachineTokenId(): string {
+  return `mt_${randomBytes(16).toString("hex")}`;
+}
+export function mintServiceSessionId(): string {
+  return `ss_${randomBytes(16).toString("hex")}`;
+}
+/** The one machine-token plaintext, shown once: 'tpt_' + 43 base64url chars (32 random bytes). */
+export function mintMachineTokenSecret(): string {
+  return `${MACHINE_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
+}
+
 /**
  * The short human code the login flow shows ("open /verify and enter AB29-CD34"): eight
  * characters from an unambiguous alphabet (no I/O/0/1), grouped for reading aloud.

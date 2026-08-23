@@ -1,8 +1,16 @@
-import { randomBytes } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { machineToken, serviceSession } from "@/lib/db/schema.app";
+import {
+  auditInTx,
+  MACHINE_TOKEN_PREFIX,
+  mintMachineTokenId,
+  mintMachineTokenSecret,
+  mintServiceSessionId,
+} from "./identity.server";
+
+export { MACHINE_TOKEN_PREFIX };
+
 import { getDb } from "./index.server";
-import { auditInTx } from "./identity.server";
 
 /**
  * Machine tokens — the workspace's headless READ credential (CI, VMs, sandboxes), and the
@@ -12,25 +20,11 @@ import { auditInTx } from "./identity.server";
  * at mint, only the SHA-256 stored, the hash computed in Postgres.
  */
 
-/** The bearer prefix every machine token carries — the write lanes key their typed refusal on it. */
-export const MACHINE_TOKEN_PREFIX = "tpt_";
-
 /** A service session idle past this window is deleted lazily on its token's next resolve. */
 export const SERVICE_SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Same custody shape as session credentials: hash computed in Postgres, never in this tier. */
 const sha256OfText = (text: string) => sql`sha256(convert_to(${text}, 'UTF8'))`;
-
-function mintTokenId(): string {
-  return `mt_${randomBytes(16).toString("hex")}`;
-}
-function mintServiceSessionId(): string {
-  return `ss_${randomBytes(16).toString("hex")}`;
-}
-/** The one plaintext, shown once: 'tpt_' + 43 base64url chars (32 random bytes). */
-function mintTokenSecret(): string {
-  return `${MACHINE_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
-}
 
 export interface MachineTokenRow {
   tokenId: string;
@@ -67,8 +61,8 @@ export async function mintMachineToken(
   name: string,
   actor: { userId: string; display: string },
 ): Promise<{ tokenId: string; secret: string }> {
-  const secret = mintTokenSecret();
-  const tokenId = mintTokenId();
+  const secret = mintMachineTokenSecret();
+  const tokenId = mintMachineTokenId();
   await getDb().transaction(async (tx) => {
     await tx.insert(machineToken).values({
       id: tokenId,
