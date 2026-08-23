@@ -414,7 +414,7 @@ impl SessionInstall {
     ) -> Result<AddData, String> {
         self.with_ctx(cwd, |ctx| {
             if !global {
-                ops::init(ctx, false).map_err(err_str)?;
+                ops::init(ctx, false, None).map_err(err_str)?;
             }
             let connect = connect_session();
             match ops::add_reference(
@@ -443,7 +443,7 @@ impl SessionInstall {
     /// manifest first, exactly as a person would.
     pub fn adopt_dir(&self, dir: &Path, cwd: Option<&Path>) -> Result<AddData, String> {
         self.with_ctx(cwd, |ctx| {
-            ops::init(ctx, false).map_err(err_str)?;
+            ops::init(ctx, false, None).map_err(err_str)?;
             let mut data = ops::add(ctx, dir).map_err(err_str)?;
             ops::note_added_path(ctx, &mut data, dir, false).map_err(err_str)?;
             Ok(data)
@@ -529,6 +529,7 @@ impl SessionInstall {
                     // No forge lane is wired in these composed fixtures (`git` is `None` above),
                     // so the cadence never comes into play; the hand-run posture is the honest one.
                     forge: ops::ForgeCadence::Now,
+                    lock: ops::LockMode::Install,
                 },
             )
             // The lines a sweep emits, merged exactly as the `--json` envelope merges them:

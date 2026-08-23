@@ -601,6 +601,23 @@ pub(super) fn write_row(
     // folder the caller already resolved (canonical, links followed) — never overwritten here,
     // because the row's `./…` spelling means nothing away from the file that holds it.
     data.source.get_or_insert_with(|| reference.to_owned());
+    // A project file's FIRST workspace row writes the `workspace = ` line it resolves against —
+    // `init` writes it up front, but a file born before the workspace was known (or hand-made)
+    // adopts the one workspace here rather than refusing toward a hand edit.
+    if target.scope == ManifestScope::Project
+        && editor.workspace().is_none()
+        && let Ok(shape) = crate::manifest::keys::classify_key(reference)
+        && let Some(ws_key) = shape.workspace_key()
+        && let Some((host, ws)) = ws_key.split_once('/')
+    {
+        editor
+            .set_workspace(host, ws)
+            .map_err(|e| ClientError::InvalidArgument(e.message))?;
+        push_note(
+            data,
+            format!("this project now uses `workspace = \"{ws_key}\"` — its bare names resolve there"),
+        );
+    }
     let in_reach = reach_already_held(ctx, target, reference, prior.as_ref(), value)?;
     let (value, extend) = extend_dest(prior.as_ref(), value, &in_reach);
     let value = &value;

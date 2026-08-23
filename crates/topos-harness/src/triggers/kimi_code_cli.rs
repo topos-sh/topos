@@ -434,7 +434,7 @@ mod tests {
 # topos:currency
 [[hooks]]
 event = \"SessionStart\"
-command = \"command -v topos >/dev/null 2>&1 && topos update --quiet || true\"
+command = \"command -v topos >/dev/null 2>&1 && topos install --quiet || true\"
 timeout = 60
 ";
 
@@ -451,7 +451,7 @@ timeout = 60
         );
         assert_eq!(
             basic_string_value(
-                "command = \"command -v topos >/dev/null 2>&1 && topos update --quiet || true\""
+                "command = \"command -v topos >/dev/null 2>&1 && topos install --quiet || true\""
             ),
             Some(GUARDED_SWEEP),
             "the command reads back exactly as written"

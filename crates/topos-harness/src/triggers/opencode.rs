@@ -76,7 +76,7 @@ mod tests {
 // Runs the topos update sweep at plugin load and on each new session; failures are swallowed
 // (updating is best-effort, never session-breaking).
 export const ToposCurrency = async ({ $ }) => {
-  const sweep = async () => { try { await $`topos update --quiet` } catch {} }
+  const sweep = async () => { try { await $`topos install --quiet` } catch {} }
   await sweep()
   return { event: async ({ event }) => { if (event.type === "session.created") await sweep() } }
 }

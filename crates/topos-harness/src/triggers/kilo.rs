@@ -108,7 +108,7 @@ import { exec } from "node:child_process"
 const sweep = () =>
   new Promise((resolve) => {
     try {
-      exec("topos update --quiet", () => resolve())
+      exec("topos install --quiet", () => resolve())
     } catch {
       resolve()
     }

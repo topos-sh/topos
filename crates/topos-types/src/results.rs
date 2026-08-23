@@ -1774,6 +1774,10 @@ pub enum ExchangeFault {
 )]
 pub struct PublishData {
     pub skill_id: String,
+    /// The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the
+    /// version this publish just shipped — the receipt's "this project is locked" line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_locked_version: Option<String>,
     /// The skill's NAME — the handle humans speak and the TTY success line leads with
     /// (`Published <name>@…`); the opaque `skill_id` above stays the machine key.
     pub name: String,
@@ -2696,6 +2700,45 @@ pub struct StatusTrigger {
 // =================================================================================================
 // `auth status` (the per-session access panel — side-effect-free).
 // =================================================================================================
+
+/// `topos workspace list` — the workspaces this machine is signed into, and which one is the
+/// machine default (the one ambient commands act on outside a project).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct WorkspaceListData {
+    /// One row per signed-in workspace, sorted by address.
+    pub workspaces: Vec<WorkspaceListRow>,
+    /// The machine default's address (`<host>/<name>`), when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+/// One `workspace list` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct WorkspaceListRow {
+    /// The address: `<host>/<name>`.
+    pub address: String,
+    pub host: String,
+    pub name: String,
+    /// The workspace's display name, for humans.
+    pub display_name: String,
+    /// `active` / `pending` / `ended`.
+    pub status: String,
+    /// Whether this is the machine default.
+    pub default: bool,
+}
+
+/// `topos workspace use` — the machine default changed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct WorkspaceUseData {
+    /// The new default's address.
+    pub address: String,
+    /// The previous default, when one stood.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
+}
 
 /// `auth status` result — per-SESSION access health (each probed under that session's own
 /// credential), the active agent's trigger health, and the reporting posture. **INFERRED**

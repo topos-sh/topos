@@ -118,16 +118,6 @@ impl KeyShape {
         }
     }
 
-    /// The key this row takes INSIDE its workspace's `[bundles."<host>/<ws>"]` grouping — the
-    /// feed has no tail (it is the workspace itself), so it always spells flat.
-    pub(crate) fn section_tail(&self) -> Option<String> {
-        match self {
-            KeyShape::WorkspaceBundle { bundle, .. } => Some(bundle.clone()),
-            KeyShape::Channel { channel, .. } => Some(format!("channels/{channel}")),
-            _ => None,
-        }
-    }
-
     /// The shape's noun for error messages ("a channel takes no pin").
     pub(crate) fn noun(&self) -> &'static str {
         match self {
@@ -707,10 +697,6 @@ mod tests {
             assert_eq!(classify_key(spelled).unwrap().canonical(), spelled);
         }
 
-        // The section tail: what the row is keyed by inside its workspace grouping.
-        assert_eq!(bundle.section_tail().as_deref(), Some("code-review"));
-        assert_eq!(channel.section_tail().as_deref(), Some("channels/backend"));
-        assert_eq!(feed.section_tail(), None, "the feed always spells flat");
         assert_eq!(bundle.workspace_key().as_deref(), Some("topos.sh/acme"));
         assert_eq!(repo.workspace_key(), None);
     }

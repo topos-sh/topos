@@ -27,7 +27,7 @@ pub(crate) static SPEC: FileDropSpec = FileDropSpec {
 /// trailing sentinel comment is inert under bash).
 const SCRIPT: &str = "#!/usr/bin/env bash
 # topos:cline:currency:1 — Managed by topos; hand edits are overwritten. Remove with `topos uninstall`.
-command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency
+command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency
 ";
 
 /// Production root: `~/.cline` under the passed home (no env override in the registry table).

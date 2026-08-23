@@ -113,6 +113,8 @@ pub(crate) struct ScopePlan {
     /// SET rows (channels, repo sets) — expanded by the reconcile; an explicit thing of the
     /// same identity beats a set's delivery.
     pub sets: Vec<PlanRow>,
+    /// The project's `workspace = ` line (`None` in the machine plan).
+    pub workspace: Option<(String, String)>,
 }
 
 impl ScopePlan {
@@ -120,6 +122,7 @@ impl ScopePlan {
     pub(crate) fn from_doc(doc: &ManifestDoc, file: Option<PathBuf>) -> Self {
         let mut plan = ScopePlan {
             file,
+            workspace: doc.workspace.clone(),
             ..ScopePlan::default()
         };
         for row in &doc.rows {

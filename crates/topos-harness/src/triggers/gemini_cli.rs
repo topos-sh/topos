@@ -70,7 +70,7 @@ mod tests {
       {
         \"hooks\": [
           {
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos install --quiet || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(cfg.writes(), 1, "one migrating write");
         let text = cfg.text(CONFIG).unwrap();
         assert_eq!(text.matches(SENTINEL).count(), 1, "never duplicated");
-        assert!(text.contains("topos update --quiet"));
+        assert!(text.contains("topos install --quiet"));
         assert!(!text.contains("matcher"), "the stale matcher is shed");
         // Idempotent after the migration.
         a(&cfg).install();
