@@ -3278,6 +3278,9 @@ pub(crate) fn protect_describe_tty(
         "{direction} {} '{}' to `{}`",
         data.kind, data.target, data.level
     );
+    if let Some(address) = &data.workspace_address {
+        s.push_str(&format!(" in {address}"));
+    }
     if data.loosening {
         s.push_str(" (an owner act)");
     } else {
@@ -3295,7 +3298,12 @@ pub(crate) fn protect_describe_tty(
 
 /// The `protect` APPLY's TTY.
 pub(crate) fn protect_applied_tty(data: &topos_types::results::ProtectData) -> String {
-    format!("Set {} '{}' to `{}`.", data.kind, data.target, data.level)
+    let mut s = format!("Set {} '{}' to `{}`", data.kind, data.target, data.level);
+    if let Some(address) = &data.workspace_address {
+        s.push_str(&format!(" in {address}"));
+    }
+    s.push('.');
+    s
 }
 
 /// The bare `invite` read's TTY — the workspace address and the explicit no-op note.
@@ -3342,7 +3350,7 @@ pub(crate) fn invite_tty(data: &InvitationData) -> String {
     let mut out = if data.invited.is_empty() {
         "No new invitations.".to_owned()
     } else {
-        format!("Invited: {}", data.invited.join(", "))
+        format!("Invited into {}: {}", data.address, data.invited.join(", "))
     };
     // Addresses the server SKIPPED rather than re-sent (a cooldown) — named per address in the
     // server's own words, so "No new invitations." never reads as a silent failure.
@@ -3783,13 +3791,17 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
 }
 
 pub(crate) fn revert_tty(data: &RevertData) -> String {
-    format!(
-        "Reverted {} to {} as forward commit {} — nothing was deleted; move current forward \
-         again to redo.",
+    let mut s = format!(
+        "Reverted {} to {} as forward commit {}",
         data.name,
         short(&data.reverted_to),
         short(&data.new_version_id),
-    )
+    );
+    if let Some(address) = &data.workspace_address {
+        s.push_str(&format!(" in {address}"));
+    }
+    s.push_str(" — nothing was deleted; move current forward again to redo.");
+    s
 }
 
 /// The bare `revert` DESCRIBE's TTY — what the forward move would do (nothing has changed yet).
@@ -6071,6 +6083,7 @@ mod tests {
             .map(|s| (*s).to_owned())
             .collect();
         let mut data = topos_types::results::ProtectData {
+            workspace_address: Some("topos.sh/acme".to_owned()),
             target: "deploy".to_owned(),
             kind: "skill".to_owned(),
             workspace_id: "w_acme".to_owned(),
@@ -6081,7 +6094,7 @@ mod tests {
         };
         assert_eq!(
             super::protect_describe_tty(&data, &argv),
-            "Tighten skill 'deploy' to `reviewed` (reviewer or owner)\nNothing has changed yet — \
+            "Tighten skill 'deploy' to `reviewed` in topos.sh/acme (reviewer or owner)\nNothing has changed yet — \
              apply with:\n  topos protect deploy --yes"
         );
         data.level = "open".to_owned();
@@ -6089,7 +6102,7 @@ mod tests {
         data.note = Some("pending proposals survive a loosening".to_owned());
         assert_eq!(
             super::protect_describe_tty(&data, &argv),
-            "Loosen skill 'deploy' to `open` (an owner act)\nnote: pending proposals survive a \
+            "Loosen skill 'deploy' to `open` in topos.sh/acme (an owner act)\nnote: pending proposals survive a \
              loosening\nNothing has changed yet — apply with:\n  topos protect deploy --yes"
         );
     }

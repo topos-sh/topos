@@ -1553,6 +1553,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "protect".to_owned(),
         ok: true,
         data: serde_json::to_value(ProtectData {
+            workspace_address: Some("topos.sh/acme".to_owned()),
             target: "deploy".to_owned(),
             kind: "skill".to_owned(),
             workspace_id: "w_acme".to_owned(),

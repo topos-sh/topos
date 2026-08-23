@@ -46,7 +46,6 @@ pub(crate) fn protect(
     workspace: Option<&str>,
     yes: bool,
 ) -> Result<ProtectOutcome, ClientError> {
-    let _ = workspace; // the grammar's qualified path / a unique bare name already scopes the target
     let su = super::connect::session_universe(ctx, connectors.session)?;
     if su.universe.is_empty() {
         return Err(ClientError::SessionRequired {
@@ -55,7 +54,47 @@ pub(crate) fn protect(
                 .into(),
         });
     }
-    let universe = &su.universe;
+    // The ambient narrowing every write verb honors: `--workspace` (or TOPOS_WORKSPACE) names
+    // the ONE workspace this act may touch — by address name, or `<host>/<name>`. An unknown or
+    // ambiguous naming refuses with the connected list; it is never ignored.
+    let pick = workspace.map(str::to_owned).or_else(|| {
+        std::env::var("TOPOS_WORKSPACE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    });
+    let narrowed: Vec<resolve::WorkspaceNames> = match pick.as_deref() {
+        None => su.universe.clone(),
+        Some(sel) => {
+            let hits: Vec<_> = su
+                .universe
+                .iter()
+                .filter(|w| w.name == sel || format!("{}/{}", w.host, w.name) == sel)
+                .cloned()
+                .collect();
+            let spell = |ws: &[resolve::WorkspaceNames]| -> String {
+                ws.iter()
+                    .map(|w| format!("{}/{}", w.host, w.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            match hits.len() {
+                1 => hits,
+                0 => {
+                    return Err(ClientError::InvalidArgument(format!(
+                        "no connected workspace named '{sel}' — connected: {}",
+                        spell(&su.universe)
+                    )));
+                }
+                _ => {
+                    return Err(ClientError::InvalidArgument(format!(
+                        "'{sel}' names several connected workspaces — spell it                          `<host>/<name>`: {}",
+                        spell(&hits)
+                    )));
+                }
+            }
+        }
+    };
+    let universe = &narrowed;
 
     let parsed = resolve::parse_target(target)?;
     let resolution = resolve::resolve_one(universe, &parsed, resolve::KindScope::SUBSCRIBABLE)?
@@ -97,10 +136,15 @@ pub(crate) fn protect(
         _ => None,
     };
 
+    let workspace_address = universe
+        .iter()
+        .find(|w| w.workspace_id == workspace_id)
+        .map(|w| format!("{}/{}", w.host, w.name));
     let data = ProtectData {
         target: target.to_owned(),
         kind: kind.noun().to_owned(),
         workspace_id: workspace_id.clone(),
+        workspace_address,
         level: level.clone(),
         loosening,
         note,
