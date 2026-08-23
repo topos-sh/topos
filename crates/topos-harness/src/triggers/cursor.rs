@@ -115,6 +115,22 @@ mod tests {
         let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
         assert_eq!(root["version"], 7);
 
+        // A hand-rolled topos sweep is adopt-or-leave — but the seeded root STILL lands:
+        // without `version`, Cursor rejects the whole file, that hand-written hook included.
+        let cfg = MemConfig::with_file(
+            CONFIG,
+            "{\"hooks\":{\"sessionStart\":[{\"command\":\"topos update --quiet\"}]}}\n",
+        );
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
+        let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        assert_eq!(root["version"], 1, "seeded beside the unmanaged entry");
+        assert_eq!(
+            root["hooks"]["sessionStart"][0]["command"],
+            "topos update --quiet",
+            "the person's entry is left exactly as written"
+        );
+
         // A re-run over an already-managed, already-seeded file writes nothing.
         let cfg = MemConfig::with_file(CONFIG, "{\"hooks\": {}}\n");
         a(&cfg).install();
@@ -159,9 +175,11 @@ mod tests {
 
     #[test]
     fn a_hand_rolled_topos_hook_is_adopt_or_leave() {
+        // A VALID file (version present) with a hand-rolled sweep: nothing to heal, zero
+        // writes. (A version-less file is healed by the seed — the seed test covers it.)
         let cfg = MemConfig::with_file(
             CONFIG,
-            "{\"hooks\":{\"sessionStart\":[{\"command\":\"topos pull\"}]}}",
+            "{\"version\":1,\"hooks\":{\"sessionStart\":[{\"command\":\"topos pull\"}]}}",
         );
         let report = a(&cfg).install();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
