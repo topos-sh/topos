@@ -227,7 +227,19 @@ pub(crate) fn migrate_v1(
                     ManifestScope::Global => format!("{host}/{workspace}/{bundle}"),
                     ManifestScope::Project => bundle.clone(),
                 };
-                let value = migrate_ws_value(plain_value.as_deref(), &fields);
+                let mut value = migrate_ws_value(plain_value.as_deref(), &fields);
+                // An [mcp] row takes no version pin in v2 — a carried one is dropped, said.
+                if section == Section::Mcp {
+                    let pinned = value.as_str().is_some_and(|v| v != "latest" && v != "off");
+                    if pinned {
+                        notes.push(format!(
+                            "`{}` — an MCP server takes no version pin in v2; the pin was \
+                             dropped (the lock records the delivered revision)",
+                            row.reference
+                        ));
+                        value = Value::from("latest");
+                    }
+                }
                 push(section, key, value, &mut notes, &row.reference);
             }
             KeyShape::Channel {
@@ -519,6 +531,26 @@ mod tests {
                 .any(|n| n.contains("github.com/acme/bigrepo"))
         );
         assert!(m.notes.iter().any(|n| n.contains("`topos.sh/acme/pinned`")));
+    }
+
+    #[test]
+    fn a_pinned_v1_mcp_row_drops_its_pin_with_a_note() {
+        let text = format!(
+            "[bundles]\n\"topos.sh/acme/linear\" = \"{}\"\n",
+            "ab".repeat(32)
+        );
+        let m = migrate_v1(&text, ManifestScope::Global, &kinds).unwrap();
+        assert!(
+            m.text.contains("\"topos.sh/acme/linear\" = \"latest\""),
+            "{}",
+            m.text
+        );
+        assert!(
+            m.notes.iter().any(|n| n.contains("takes no version pin")),
+            "{:?}",
+            m.notes
+        );
+        parse_manifest(&m.text, ManifestScope::Global).unwrap();
     }
 
     #[test]

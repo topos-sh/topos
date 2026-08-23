@@ -9,6 +9,7 @@ use super::rig::{
     delivered, delivered_at, one_file, project, sweep,
 };
 use crate::ops;
+use topos_types::results::PullAction;
 
 fn hex(v: &super::rig::Version) -> String {
     topos_core::digest::to_hex(&v.id)
@@ -232,4 +233,151 @@ fn the_machine_scope_ignores_the_lock_and_stays_live() {
         "# v2\n",
         "what follows the person stays live"
     );
+}
+
+#[test]
+fn frozen_refuses_a_pin_the_lock_disagrees_with_and_writes_nothing() {
+    let rig = Rig::new("lock-frozen-agree");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let v2 = one_file(b"# v2\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+
+    // Install at v1 fills the lock.
+    let proj = project(
+        "lock-frozen-agree-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    let lock_before = lock_text(&proj.0);
+    assert!(lock_before.contains(&hex(&v1)));
+
+    // The toml then PINS v2 while the lock still records v1: frozen refuses on the
+    // disagreement and neither file nor bytes move.
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!(
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"{}\"\n",
+            hex(&v2)
+        ),
+    )
+    .unwrap();
+    let err = install(&ctx, &plane, &dir, ops::LockMode::Frozen).unwrap_err();
+    let detail = err.detail();
+    assert!(detail.contains("disagrees"), "{detail}");
+    assert!(detail.contains("deploy"), "{detail}");
+    assert_eq!(lock_text(&proj.0), lock_before, "frozen wrote nothing");
+    assert_eq!(
+        std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        "# v1\n",
+        "frozen moved no bytes"
+    );
+}
+
+#[test]
+fn a_toml_pin_reconciles_the_lock_on_plain_install() {
+    let rig = Rig::new("lock-pin-fill");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let v2 = one_file(b"# v2\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let proj = project(
+        "lock-pin-fill-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    assert!(lock_text(&proj.0).contains(&hex(&v1)));
+
+    // A hand-written PIN to v2 is intent: plain install reconciles the LOCK to it, places
+    // the pinned bytes, and says so.
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!(
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"{}\"\n",
+            hex(&v2)
+        ),
+    )
+    .unwrap();
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    let text = lock_text(&proj.0);
+    assert!(
+        text.contains(&hex(&v2)),
+        "lock reconciled to the pin:\n{text}"
+    );
+    assert!(!text.contains(&hex(&v1)));
+    assert_eq!(
+        std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        "# v2\n"
+    );
+    assert!(
+        out.disclosures
+            .iter()
+            .any(|m| m.code.as_deref() == Some("LOCK_PINNED")),
+        "{:?}",
+        out.disclosures
+    );
+}
+
+#[test]
+fn a_lock_held_project_reports_held_once_and_never_fast_forwards_forever() {
+    let rig = Rig::new("lock-held");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let v2 = one_file(b"# v2\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let proj = project(
+        "lock-held-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // Lock fills at v1; the team then publishes v2.
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v2)], Vec::new());
+
+    // Every later install: the row is HELD (named by the lock) — never a repeated
+    // fast-forward, and the bytes stay the lock's.
+    for _ in 0..3 {
+        let out = install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+        let row = out
+            .data
+            .skills
+            .iter()
+            .find(|s| s.skill.contains("deploy"))
+            .expect("a row");
+        assert_ne!(
+            row.action,
+            PullAction::FastForwarded,
+            "a stable pin is not work"
+        );
+        assert_eq!(row.action, PullAction::Held, "held, honestly");
+        assert_eq!(
+            std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+            "# v1\n"
+        );
+        assert!(lock_text(&proj.0).contains(&hex(&v1)), "lock never bumped");
+    }
+
+    // `update` is what moves it — and it actually moves despite the generations.
+    sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        "# v2\n",
+        "update re-resolves and lands"
+    );
+    assert!(lock_text(&proj.0).contains(&hex(&v2)));
 }
