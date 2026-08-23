@@ -1642,7 +1642,7 @@ pub(crate) fn manifest_update(
         && let Some((dir, plan)) = &project
     {
         let lock_path = dir.join(LOCK_FILE);
-        let doc = match ctx.fs.read_opt(&lock_path) {
+        let mut doc = match ctx.fs.read_opt(&lock_path) {
             Ok(Some(bytes)) => match LockDoc::parse(&String::from_utf8_lossy(&bytes)) {
                 Ok(doc) => {
                     for w in &doc.warnings {
@@ -1665,6 +1665,31 @@ pub(crate) fn manifest_update(
             // could overwrite a resolution it was supposed to keep.
             Err(e) => return Err(e.into()),
         };
+        // A lock BELONGS to the workspace its header names: entries are keyed by bare name, so
+        // a lock written for another workspace would hand this one its versions, revisions, and
+        // channel members. Install refuses toward `topos update`; an update discards the stale
+        // entries and re-resolves whole — a workspace change is a re-resolution, never a reuse.
+        if let (Some(recorded), Some((h, w))) = (doc.workspace.clone(), plan.workspace.as_ref()) {
+            let expected = format!("{h}/{w}");
+            if recorded != expected {
+                if opts.lock == LockMode::Update {
+                    sweep.warnings.push(crate::message::advisory(
+                        "LOCK_WORKSPACE_CHANGED",
+                        format!(
+                            "topos.lock was written for {recorded}, but topos.toml names \
+                             {expected} — re-resolving every entry for {expected}"
+                        ),
+                    ));
+                    doc = LockDoc::default();
+                } else {
+                    return Err(ClientError::InvalidArgument(format!(
+                        "topos.lock was written for {recorded}, but this project's topos.toml \
+                         names {expected} — run `topos update` (it re-resolves and rewrites \
+                         the lock for {expected})"
+                    )));
+                }
+            }
+        }
         if opts.lock == LockMode::Frozen {
             let mut missing: Vec<String> = Vec::new();
             let mut disagree: Vec<String> = Vec::new();
@@ -1672,8 +1697,24 @@ pub(crate) fn manifest_update(
             for row in plan.things.iter().chain(plan.sets.iter()) {
                 let name = row.shape.leaf_name();
                 let covered = match &row.shape {
+                    // Coverage is SHAPE-checked: the entry must be the kind of record this row
+                    // resolves to. A stale repo-shaped block under a now-workspace row (or an
+                    // entry in the wrong map) would otherwise pass by name alone and frozen
+                    // would install unpinned bytes behind it.
                     KeyShape::WorkspaceBundle { .. } => {
-                        doc.skills.contains_key(name) || doc.mcp.contains_key(name)
+                        if matches!(row.kind(), BundleKind::Mcp) {
+                            doc.mcp.contains_key(name)
+                        } else if let Some(entry) = doc.skills.get(name) {
+                            if entry.version.is_none() {
+                                disagree.push(format!(
+                                    "{name} (topos.toml names a workspace bundle, topos.lock \
+                                     records a repo source)"
+                                ));
+                            }
+                            true // present — mis-shape is classified above, not "missing"
+                        } else {
+                            false
+                        }
                     }
                     KeyShape::RepoSkill { .. } => {
                         doc.skills.get(name).is_some_and(|s| s.commit.is_some())
