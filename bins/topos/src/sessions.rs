@@ -302,6 +302,24 @@ pub(crate) fn set_default(
 /// Flip one session's LOCAL status (active↔pending, or the local `ended` mark), keyed by the
 /// SAME composite identity the upsert uses — (host, workspace id) — so a same-id workspace on
 /// another server is never touched. No-op when the session is unknown.
+/// Settle the machine default after a lifecycle change: a default naming no LIVE session is
+/// reassigned to the first live one (or cleared), so ambient commands keep a real default and
+/// `workspace list` never stars an ended or removed row.
+fn settle_default(all: &mut Sessions) {
+    let named_live = all.default.as_deref().is_some_and(|d| {
+        all.sessions
+            .iter()
+            .any(|s| s.status != SESSION_ENDED && format!("{}/{}", s.host, s.workspace_name) == d)
+    });
+    if !named_live {
+        all.default = all
+            .sessions
+            .iter()
+            .find(|s| s.status != SESSION_ENDED)
+            .map(|s| format!("{}/{}", s.host, s.workspace_name));
+    }
+}
+
 pub(crate) fn set_session_status(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -319,6 +337,7 @@ pub(crate) fn set_session_status(
         }
     }
     if touched {
+        settle_default(&mut all);
         write_sessions_locked(fs, layout, &all)?;
     }
     Ok(())
@@ -338,6 +357,7 @@ pub(crate) fn remove_session(
     all.sessions
         .retain(|s| !(s.host == host && s.workspace_id == workspace_id));
     if all.sessions.len() != before {
+        settle_default(&mut all);
         write_sessions_locked(fs, layout, &all)?;
     }
     Ok(())
@@ -379,6 +399,38 @@ mod tests {
             status: status.into(),
             logged_in_at: 1,
         }
+    }
+
+    #[test]
+    fn the_default_follows_the_lifecycle_of_its_session() {
+        let fs = RealFs;
+        let layout = scratch("default-lifecycle");
+        upsert_session(&fs, &layout, session("w_a", "acme", SESSION_ACTIVE)).unwrap();
+        upsert_session(&fs, &layout, session("w_b", "beta", SESSION_ACTIVE)).unwrap();
+        assert_eq!(
+            read_sessions(&fs, &layout).unwrap().default.as_deref(),
+            Some("topos.sh/acme"),
+            "the first workspace is the default"
+        );
+
+        // Ending the default's session reassigns to the surviving live one.
+        set_session_status(&fs, &layout, "topos.sh", "w_a", SESSION_ENDED).unwrap();
+        assert_eq!(
+            read_sessions(&fs, &layout).unwrap().default.as_deref(),
+            Some("topos.sh/beta"),
+            "a dead default is reassigned, never starred"
+        );
+
+        // Removing the last live session clears the default entirely.
+        remove_session(&fs, &layout, "topos.sh", "w_b").unwrap();
+        assert_eq!(read_sessions(&fs, &layout).unwrap().default, None);
+
+        // A later login becomes the default again.
+        upsert_session(&fs, &layout, session("w_c", "core", SESSION_ACTIVE)).unwrap();
+        assert_eq!(
+            read_sessions(&fs, &layout).unwrap().default.as_deref(),
+            Some("topos.sh/core")
+        );
     }
 
     #[test]
