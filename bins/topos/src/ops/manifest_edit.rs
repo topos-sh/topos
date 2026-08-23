@@ -2754,6 +2754,10 @@ fn reach_already_held(
     let row = PlanRow {
         reference: reference.to_owned(),
         shape,
+        section: match prior.declared_kind() {
+            Some(BundleKind::Mcp) => crate::manifest::document::SectionKind::Mcp,
+            _ => crate::manifest::document::SectionKind::Skills,
+        },
         value: prior.clone(),
     };
     let name = row.display_name();
@@ -2787,6 +2791,10 @@ pub(super) fn outside_default_reach(
     let row = PlanRow {
         reference: reference.to_owned(),
         shape,
+        section: match kind {
+            BundleKind::Mcp => crate::manifest::document::SectionKind::Mcp,
+            _ => crate::manifest::document::SectionKind::Skills,
+        },
         value: EntryValue::Star,
     };
     let reach = default_reach_roots(ctx, target, Some(&row), name, kind)?;
@@ -4957,6 +4965,7 @@ mod tests {
     #[test]
     fn the_undo_is_withheld_where_it_cannot_restore_the_whole_row() {
         let row = |value: EntryValue| PlanRow {
+            section: crate::manifest::document::SectionKind::Skills,
             reference: "topos.sh/acme/deploy".into(),
             shape: keys::classify_key("topos.sh/acme/deploy").unwrap(),
             value,
@@ -5062,6 +5071,7 @@ mod tests {
         use crate::manifest::document::EntryFields;
         // A repo set's commit PIN rides each member row verbatim.
         let repo_pinned = PlanRow {
+            section: crate::manifest::document::SectionKind::Skills,
             reference: "github.com/o/r".into(),
             shape: keys::classify_key("github.com/o/r").unwrap(),
             value: EntryValue::Pin("abc1234".into()),
@@ -5073,6 +5083,7 @@ mod tests {
 
         // A channel line's `dest` carries onto its workspace-bundle members.
         let channel_fields = PlanRow {
+            section: crate::manifest::document::SectionKind::Channels,
             reference: "topos.sh/acme/channels/backend".into(),
             shape: keys::classify_key("topos.sh/acme/channels/backend").unwrap(),
             value: EntryValue::Fields(EntryFields {
@@ -5092,6 +5103,7 @@ mod tests {
 
         // A bare `"*"` set stays a `"*"` member.
         let star = PlanRow {
+            section: crate::manifest::document::SectionKind::Skills,
             reference: "github.com/o/r".into(),
             shape: keys::classify_key("github.com/o/r").unwrap(),
             value: EntryValue::Star,
@@ -5106,6 +5118,7 @@ mod tests {
     fn a_mixed_channel_split_carries_each_array_to_the_kind_that_reads_it() {
         use crate::manifest::document::EntryFields;
         let channel = PlanRow {
+            section: crate::manifest::document::SectionKind::Channels,
             reference: "topos.sh/acme/channels/backend".into(),
             shape: keys::classify_key("topos.sh/acme/channels/backend").unwrap(),
             value: EntryValue::Fields(EntryFields {
@@ -5137,6 +5150,7 @@ mod tests {
         // A channel with no `mcp_dest` leaves its mcp survivors unnarrowed rather than handing
         // them the skill folders.
         let skills_only = PlanRow {
+            section: crate::manifest::document::SectionKind::Skills,
             value: EntryValue::Fields(EntryFields {
                 dest: Some(vec!["~/.claude/skills".into()]),
                 ..Default::default()
@@ -5152,6 +5166,7 @@ mod tests {
     #[test]
     fn a_token_names_a_row_by_reference_or_by_the_name_it_delivers() {
         let row = PlanRow {
+            section: crate::manifest::document::SectionKind::Skills,
             reference: "topos.sh/acme/deploy".into(),
             shape: keys::classify_key("topos.sh/acme/deploy").unwrap(),
             value: EntryValue::Star,

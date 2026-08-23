@@ -336,7 +336,7 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
 
     let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
     assert!(
-        settings.contains("topos update --quiet --hook claude-code"),
+        settings.contains("topos install --quiet --hook claude-code"),
         "the hook command was installed, carrying the dialect marker"
     );
     assert!(
@@ -1287,7 +1287,7 @@ fn the_machine_file_prints_as_itself_under_a_symlinked_home() {
     let scratch = scratch("symhome-manifest");
     let real = scratch.join("real");
     std::fs::create_dir_all(real.join(".topos")).unwrap();
-    std::fs::write(real.join(".topos").join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(real.join(".topos").join("topos.toml"), "schema = 1\n").unwrap();
     let cwd = real.join("cwd");
     std::fs::create_dir_all(&cwd).unwrap();
     let link = scratch.join("link");
@@ -1549,10 +1549,7 @@ fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(
         home.join("topos.toml"),
-        format!(
-            "[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n",
-            bundle.to_str().unwrap()
-        ),
+        format!("[mcp]\nweather = \"{}\"\n", bundle.to_str().unwrap()),
     )
     .unwrap();
 

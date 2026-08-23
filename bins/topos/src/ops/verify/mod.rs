@@ -162,9 +162,7 @@ fn local_row_server(
             let crate::manifest::keys::KeyShape::LocalPath { raw } = &row.shape else {
                 continue;
             };
-            if row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Mcp)
-                || row.display_name() != name
-            {
+            if row.kind() != crate::bundle_kind::BundleKind::Mcp || row.display_name() != name {
                 continue;
             }
             let dir = if let Some(rest) = raw.strip_prefix("~/") {

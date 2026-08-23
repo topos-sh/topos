@@ -77,9 +77,7 @@ describe("resolve", () => {
     // carries the RESOLVED id either way.
     const t = await tokens();
     const minted = await t.mintMachineToken(ws, "ci-addr", actor);
-    const name = await db.q<{ name: string }>(`SELECT name FROM web.workspace WHERE id = $1`, [
-      ws,
-    ]);
+    const name = await db.q<{ name: string }>(`SELECT name FROM web.workspace WHERE id = $1`, [ws]);
     const hit = await t.tokenActor(name[0]?.name ?? "", minted.secret, null);
     expect(hit?.workspaceId).toBe(ws);
     expect(await t.tokenActor("not-this-workspace", minted.secret, null)).toBeNull();
