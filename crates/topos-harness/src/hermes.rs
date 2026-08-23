@@ -4,7 +4,7 @@
 //!
 //! Hermes's auto-update mechanism is the pair of **session-boundary shell hooks** — `on_session_start`
 //! (a brand-new session's first turn) and `on_session_reset` (every `/new`, `/reset`, `/clear`) —
-//! each running the same `topos update --quiet` sweep. Both events are shell-executable (probed
+//! each running the same `topos install --quiet` sweep. Both events are shell-executable (probed
 //! against a real local Hermes Agent v0.17.0: both are in the build's valid-event set and fire
 //! through the same shell-hook dispatch as every other event; current upstream docs agree). The
 //! old per-turn `pre_llm_call` registration is RETIRED — skills load at session start, so a
@@ -79,7 +79,7 @@ const EVENT_RESET: &str = "on_session_reset";
 /// `command -v` guard is possible). Byte-stable across topos updates, so the `(event, command)`
 /// allowlist approval never re-prompts. `--quiet` keeps the sweep near-silent (Hermes ignores
 /// session-hook stdout entirely).
-const HOOK_COMMAND: &str = "topos update --quiet";
+const HOOK_COMMAND: &str = "topos install --quiet --from hermes-agent";
 
 /// The per-hook timeout (seconds) — explicit and small: a session-boundary hook runs
 /// synchronously before the session's first turn, and the client already bounds itself
@@ -102,17 +102,18 @@ const SENTINEL: &str = "# topos:currency";
 /// A one-line YAML FLOW mapping, so the per-hook timeout rides the same single line the sentinel
 /// marks — the line-anchored merge never has to reason about continuation lines. The trailing
 /// `# topos:currency` is a YAML comment *outside* the mapping; Hermes parses
-/// `{command: "topos update --quiet", timeout: 30}`.
-const ENTRY_LINE: &str = "- {command: topos update --quiet, timeout: 30}  # topos:currency";
+/// `{command: "topos install --quiet --from hermes-agent", timeout: 30}`.
+const ENTRY_LINE: &str =
+    "- {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency";
 
 /// The structured marker identity reported in [`TriggerReport::marker_id`]. Schema 2 = the
 /// session-boundary (start + reset) registration; schema 1 was the retired per-turn one.
 const MARKER_ID: &str = "topos:hermes:currency:2";
 
 /// The 5-line block registering the managed hooks (also the whole fresh-file config). Verified to
-/// parse: `hooks.on_session_start[0].command == "topos update --quiet"`, `[0].timeout == 30`, and
+/// parse: `hooks.on_session_start[0].command == "topos install --quiet --from hermes-agent"`, `[0].timeout == 30`, and
 /// the same under `on_session_reset`.
-const HOOK_BLOCK: &str = "hooks:\n  on_session_start:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n  on_session_reset:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n";
+const HOOK_BLOCK: &str = "hooks:\n  on_session_start:\n  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency\n  on_session_reset:\n  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency\n";
 
 /// The shipped default form of an empty hooks block — the one line the surgical install replaces
 /// (and a clean removal restores).
@@ -969,9 +970,9 @@ mod tests {
     const FRESH_INSTALL: &str = "\
 hooks:
   on_session_start:
-  - {command: topos update --quiet, timeout: 30}  # topos:currency
+  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency
   on_session_reset:
-  - {command: topos update --quiet, timeout: 30}  # topos:currency
+  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency
 ";
 
     /// The entry an EARLIER build wrote: the per-turn event, block form, no timeout.
@@ -999,16 +1000,15 @@ approvals:
   mode: manual
 hooks:
   on_session_start:
-  - {command: topos update --quiet, timeout: 30}  # topos:currency
+  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency
   on_session_reset:
-  - {command: topos update --quiet, timeout: 30}  # topos:currency
+  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency
 hooks_auto_accept: false
 personalities: {}
 ";
 
     /// The allowlist holding the PRIMARY pair's approval (Hermes's own record shape).
-    const START_APPROVAL: &str =
-        "{\"approvals\":[{\"event\":\"on_session_start\",\"command\":\"topos update --quiet\"}]}";
+    const START_APPROVAL: &str = "{\"approvals\":[{\"event\":\"on_session_start\",\"command\":\"topos install --quiet --from hermes-agent\"}]}";
 
     #[test]
     fn install_into_absent_config_writes_the_exact_fresh_block() {
@@ -1150,7 +1150,7 @@ personalities: {}
         assert_eq!(
             cfg.config_text().as_deref(),
             Some(
-                "model: gpt-9\nhooks:\n  on_session_start:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n  on_session_reset:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\npersonalities: {}\n"
+                "model: gpt-9\nhooks:\n  on_session_start:\n  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency\n  on_session_reset:\n  - {command: topos install --quiet --from hermes-agent, timeout: 30}  # topos:currency\npersonalities: {}\n"
             ),
         );
         assert_eq!(cfg.writes(), 1);
@@ -1315,7 +1315,7 @@ personalities: {}
         // event-scoped (probed), so claiming Active on it would be a fake.
         let cfg = MemConfig::default();
         cfg.set_allowlist(
-            "{\"approvals\":[{\"event\":\"pre_llm_call\",\"command\":\"topos update --quiet\"}]}",
+            "{\"approvals\":[{\"event\":\"pre_llm_call\",\"command\":\"topos install --quiet --from hermes-agent\"}]}",
         );
         let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
