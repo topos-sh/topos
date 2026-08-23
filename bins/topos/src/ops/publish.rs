@@ -1657,6 +1657,16 @@ fn map_outcome(
     // write the plane already holds. Each arm then composes exactly the lines it prints from that
     // one address, so no arm builds a line it goes on to drop.
     let address = || directory.me(&rec.workspace_id).ok().map(|m| m.address);
+    // The lane session's OWN record of the workspace address — the local fallback that keeps an
+    // applied receipt naming its workspace even when the post-write read does not answer.
+    let session_address = || {
+        crate::sessions::read_sessions(ctx.fs, &ctx.layout)
+            .ok()?
+            .sessions
+            .iter()
+            .find(|s| s.workspace_id == rec.workspace_id)
+            .map(|s| format!("{}/{}", s.host, s.workspace_name))
+    };
     match receipt.outcome() {
         TerminalOutcome::Ok => {
             // A direct publish moved `current` — advance the local state (read-your-writes).
@@ -1695,7 +1705,10 @@ fn map_outcome(
             let placement_missing =
                 (placement_outcome.as_deref() == Some("channel_not_found")).then(target_channel);
             let address = address();
-            let workspace_address = address.as_deref().and_then(workspace_handle);
+            let workspace_address = address
+                .as_deref()
+                .and_then(workspace_handle)
+                .or_else(session_address);
             let share_line = address
                 .as_deref()
                 .map(|a| format!("{a}/skills/{skill_name}"));
@@ -1760,7 +1773,10 @@ fn map_outcome(
             // it: `current` never moved, so there is no prior state to restore — the author's
             // escape is `review <handle> --withdraw`, which the renderer names.
             let address = address();
-            let workspace_address = address.as_deref().and_then(workspace_handle);
+            let workspace_address = address
+                .as_deref()
+                .and_then(workspace_handle)
+                .or_else(session_address);
             let share_line = address
                 .as_deref()
                 .map(|a| format!("{a}/skills/{skill_name}"));

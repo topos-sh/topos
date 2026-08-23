@@ -30,6 +30,13 @@
     "target": {
       "type": "string"
     },
+    "workspace_address": {
+      "description": "The workspace's ADDRESS (`<host>/<name>`) — what the receipt NAMES, so a person always\nreads which workspace this act reached. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "workspace_id": {
       "type": "string"
     }

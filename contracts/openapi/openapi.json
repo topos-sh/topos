@@ -3129,6 +3129,13 @@
           },
           "skill_id": {
             "type": "string"
+          },
+          "workspace_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The workspace's ADDRESS (`<host>/<name>`) — the receipt names where the pointer moved.\n**INFERRED** (additive-only)."
           }
         }
       },

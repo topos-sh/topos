@@ -91,6 +91,14 @@ pub(crate) fn parse_target(token: &str) -> Result<ParsedTarget, ClientError> {
                 .into(),
         ));
     }
+    // The `@ws` sugar — `@acme`, `@acme/deploy`, `@acme/channels/eng` — the CLI shorthand for a
+    // workspace-qualified target on the ambient host; it beats every other shape (an `@`-led
+    // token is never a URL, a repo, or a local copy).
+    if let Some(rest) = token.strip_prefix('@')
+        && !rest.is_empty()
+    {
+        return parse_address_path(None, rest.trim_matches('/'), token);
+    }
     // A full URL: split the scheme+host origin off, then parse the path as a qualified shape. A URL
     // with NO path (or a bare trailing slash) is an ORIGIN address — the workspace this origin
     // itself addresses (single-tenant installs).
@@ -221,6 +229,14 @@ fn parse_address_path(
             workspace: (*ws).to_owned(),
             resource: None,
         }),
+        // The CANONICAL bundle spelling — `<host>/<ws>/<name>`, the manifest grammar's own form
+        // (a channel spells its kind: `<host>/<ws>/channels/<name>`). The legacy `skills/`
+        // middle below still parses; every candidate this module emits is canonical.
+        [ws, name] if !matches!(*name, "channels" | "skills") => Ok(ParsedTarget::Address {
+            host,
+            workspace: (*ws).to_owned(),
+            resource: Some((ResourceKind::Skill, (*name).to_owned())),
+        }),
         [ws, kind, name] => {
             let kind = match *kind {
                 "channels" => ResourceKind::Channel,
@@ -268,6 +284,10 @@ pub(crate) fn is_workspace_name(s: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WorkspaceNames {
     pub workspace_id: String,
+    /// The server HOST the workspace lives on (the manifest grammar's host half) — what makes a
+    /// host-qualified target unambiguous across servers, and what every candidate spelling
+    /// carries back.
+    pub host: String,
     /// The workspace's ADDRESS name (`topos.sh/<name>` minus the origin).
     pub name: String,
     pub channels: Vec<String>,
@@ -279,12 +299,14 @@ impl WorkspaceNames {
     /// Build a universe entry from the wire reads.
     pub(crate) fn from_wire(
         workspace_id: &str,
+        host: &str,
         name: &str,
         channels: &WireChannelIndex,
         skills: &WireSkillIndex,
     ) -> Self {
         Self {
             workspace_id: workspace_id.to_owned(),
+            host: host.to_owned(),
             name: name.to_owned(),
             channels: channels.channels.iter().map(|c| c.name.clone()).collect(),
             // ONE catalog, TWO lists — a workspace's NAME universe is every bundle it shares,
@@ -363,6 +385,14 @@ impl KindScope {
     };
 }
 
+/// The manifest-grammar HOST half of a parsed address host (`https://topos.sh` → `topos.sh`) —
+/// the spelling [`WorkspaceNames::host`] carries, so the two compare exactly.
+fn host_half(url: &str) -> &str {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+}
+
 /// The ONE uniform not-found — the client-side spelling of the plane's deliberate non-answer.
 /// `target` is the user's own token, echoed verbatim.
 pub(crate) fn not_found(target: &str) -> ClientError {
@@ -371,12 +401,14 @@ pub(crate) fn not_found(target: &str) -> ClientError {
     }
 }
 
-/// The paste-ready qualified path for a candidate (`<workspace>/channels/<name>` /
-/// `<workspace>/skills/<name>`, or the bare workspace name).
-fn qualified_path(ws_name: &str, kind: Option<ResourceKind>, name: &str) -> String {
+/// The paste-ready CANONICAL spelling for a candidate — the manifest grammar's own, host
+/// included, so two same-named workspaces on different servers stay tellable apart:
+/// `<host>/<ws>/<name>`, `<host>/<ws>/channels/<name>`, or `<host>/<ws>` for a workspace.
+fn qualified_path(ws: &WorkspaceNames, kind: Option<ResourceKind>, name: &str) -> String {
     match kind {
-        Some(k) => format!("{ws_name}/{}/{name}", k.segment()),
-        None => ws_name.to_owned(),
+        Some(ResourceKind::Channel) => format!("{}/{}/channels/{name}", ws.host, ws.name),
+        Some(ResourceKind::Skill) => format!("{}/{}/{name}", ws.host, ws.name),
+        None => format!("{}/{}", ws.host, ws.name),
     }
 }
 
@@ -405,10 +437,17 @@ pub(crate) fn resolve_one(
              belongs to `topos add` / `topos remove`, not a workspace resource"
         ))),
         ParsedTarget::Address {
+            host,
             workspace,
             resource,
-            ..
         } => {
+            // A HOST the token spelled is honored, never discarded: a same-named workspace on
+            // another server is a different workspace, and matching it would act on the wrong
+            // one. The filtered view feeds every arm below.
+            let hosted: Vec<&WorkspaceNames> = match host.as_deref() {
+                Some(h) => universe.iter().filter(|w| w.host == host_half(h)).collect(),
+                None => universe.iter().collect(),
+            };
             // An ORIGIN address (empty slug) names "the workspace this origin addresses". On an
             // enrolled install that is the SOLE membership (v0 is one plane per install); several
             // memberships make it ambiguous (name the slug); none returns `Ok(None)` so the verb's
@@ -418,7 +457,7 @@ pub(crate) fn resolve_one(
                 if !scope.workspaces {
                     return Ok(None);
                 }
-                return match universe {
+                return match hosted.as_slice() {
                     [] => Ok(None),
                     [only] => Ok(Some(Resolution::Workspace {
                         workspace_id: only.workspace_id.clone(),
@@ -427,7 +466,7 @@ pub(crate) fn resolve_one(
                     _ => Err(ClientError::AmbiguousTarget {
                         name: "this origin".to_owned(),
                         // A workspace name stands on its own — no set line delivers it.
-                        candidates: universe
+                        candidates: hosted
                             .iter()
                             .map(|w| TargetCandidate::plain(w.name.clone()))
                             .collect(),
@@ -441,7 +480,7 @@ pub(crate) fn resolve_one(
             }
             // A NAMED workspace must be enrolled to resolve here (the verb's enroll flow owns the
             // un-enrolled address BEFORE calling the resolver).
-            let Some(ws) = universe.iter().find(|w| w.name == *workspace) else {
+            let Some(ws) = hosted.iter().find(|w| w.name == *workspace) else {
                 return Ok(None);
             };
             match resource {
@@ -520,7 +559,7 @@ fn resolve_bare(
                     workspace_id: ws.workspace_id.clone(),
                     workspace_name: ws.name.clone(),
                 },
-                qualified_path(&ws.name, None, name),
+                qualified_path(ws, None, name),
             ));
         }
         if ws.channels.iter().any(|c| c == name) {
@@ -533,7 +572,7 @@ fn resolve_bare(
                         name: name.to_owned(),
                         skill_id: None,
                     },
-                    qualified_path(&ws.name, Some(ResourceKind::Channel), name),
+                    qualified_path(ws, Some(ResourceKind::Channel), name),
                 ));
             } else {
                 out_of_scope = Some(ResourceKind::Channel);
@@ -549,7 +588,7 @@ fn resolve_bare(
                         name: name.to_owned(),
                         skill_id: Some(id.clone()),
                     },
-                    qualified_path(&ws.name, Some(ResourceKind::Skill), name),
+                    qualified_path(ws, Some(ResourceKind::Skill), name),
                 ));
             } else {
                 out_of_scope = Some(ResourceKind::Skill);
@@ -584,6 +623,7 @@ mod tests {
         vec![
             WorkspaceNames {
                 workspace_id: "w_acme".into(),
+                host: "topos.sh".into(),
                 name: "acme".into(),
                 channels: vec!["everyone".into(), "eng".into(), "release".into()],
                 skills: vec![
@@ -595,6 +635,7 @@ mod tests {
             },
             WorkspaceNames {
                 workspace_id: "w_beta".into(),
+                host: "topos.sh".into(),
                 name: "beta".into(),
                 channels: vec!["everyone".into(), "design".into()],
                 skills: vec![("deploy".into(), "s_deploy_beta".into())],
@@ -820,8 +861,8 @@ mod tests {
         assert_eq!(
             candidates.iter().map(|c| c.spelling()).collect::<Vec<_>>(),
             vec![
-                "acme/skills/deploy".to_owned(),
-                "beta/skills/deploy".to_owned()
+                "topos.sh/acme/deploy".to_owned(),
+                "topos.sh/beta/deploy".to_owned()
             ]
         );
         assert!(
@@ -841,6 +882,52 @@ mod tests {
     }
 
     #[test]
+    fn the_canonical_manifest_spelling_parses_and_resolves() {
+        let u = universe();
+        // `<host>/<ws>/<name>` — the manifest grammar's own bundle form.
+        let parsed = parse_target("topos.sh/acme/deploy").unwrap();
+        let r = resolve_one(&u, &parsed, KindScope::ALL).unwrap().unwrap();
+        assert!(matches!(
+            r,
+            Resolution::Resource { ref workspace_id, kind: ResourceKind::Skill, .. }
+                if workspace_id == "w_acme"
+        ));
+        // `<host>/<ws>/channels/<name>` — the canonical channel form.
+        let parsed = parse_target("topos.sh/acme/channels/eng").unwrap();
+        let r = resolve_one(&u, &parsed, KindScope::ALL).unwrap().unwrap();
+        assert!(matches!(
+            r,
+            Resolution::Resource {
+                kind: ResourceKind::Channel,
+                ..
+            }
+        ));
+        // The `@ws` sugar rides the same shapes.
+        let parsed = parse_target("@beta/deploy").unwrap();
+        let r = resolve_one(&u, &parsed, KindScope::ALL).unwrap().unwrap();
+        assert!(matches!(
+            r,
+            Resolution::Resource { ref workspace_id, .. } if workspace_id == "w_beta"
+        ));
+    }
+
+    #[test]
+    fn a_spelled_host_is_honored_never_discarded() {
+        // The same workspace SLUG on two servers: the host picks; a foreign host matches nothing.
+        let mut u = universe();
+        u[1].name = "acme".into();
+        u[1].host = "topos.example.com".into();
+        let parsed = parse_target("topos.example.com/acme/deploy").unwrap();
+        let r = resolve_one(&u, &parsed, KindScope::ALL).unwrap().unwrap();
+        assert!(matches!(
+            r,
+            Resolution::Resource { ref workspace_id, .. } if workspace_id == "w_beta"
+        ));
+        let parsed = parse_target("nowhere.example/acme/deploy").unwrap();
+        assert_eq!(resolve_one(&u, &parsed, KindScope::ALL).unwrap(), None);
+    }
+
+    #[test]
     fn kind_collision_inside_one_workspace_is_ambiguous_across_kinds() {
         let u = universe();
         // "release" is a channel AND a skill in acme → two candidates, both paths spelled.
@@ -852,8 +939,8 @@ mod tests {
         assert_eq!(
             candidates.iter().map(|c| c.spelling()).collect::<Vec<_>>(),
             vec![
-                "acme/channels/release".to_owned(),
-                "acme/skills/release".to_owned()
+                "topos.sh/acme/channels/release".to_owned(),
+                "topos.sh/acme/release".to_owned()
             ]
         );
         // A kind-forced scope disambiguates the same name.

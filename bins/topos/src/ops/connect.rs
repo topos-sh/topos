@@ -30,7 +30,7 @@ pub(crate) fn build_universe_sessions(
             continue;
         }
         let transports = connect(s);
-        match universe_for(&*transports.directory, &s.workspace_id) {
+        match universe_for(&*transports.directory, &s.workspace_id, &s.host) {
             Ok(names) => universe.push(names),
             Err(ClientError::TargetNotFound { .. }) => continue,
             Err(e) => return Err(e),
@@ -74,7 +74,7 @@ pub(crate) fn session_universe(
             continue;
         }
         let transports = connect(s);
-        match universe_for(&*transports.directory, &s.workspace_id) {
+        match universe_for(&*transports.directory, &s.workspace_id, &s.host) {
             Ok(names) => {
                 universe.push(names);
                 lanes.insert(s.workspace_id.clone(), transports);
@@ -90,12 +90,14 @@ pub(crate) fn session_universe(
 pub(crate) fn universe_for(
     directory: &dyn DirectorySource,
     workspace_id: &str,
+    host: &str,
 ) -> Result<resolve::WorkspaceNames, ClientError> {
     let me = directory.me(workspace_id)?;
     let channels = directory.channels_index(workspace_id)?;
     let skills = directory.skills_index(workspace_id)?;
     Ok(resolve::WorkspaceNames::from_wire(
         workspace_id,
+        host,
         &me.name,
         &channels,
         &skills,

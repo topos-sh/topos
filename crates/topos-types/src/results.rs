@@ -2021,6 +2021,10 @@ pub struct ProposeData {
 )]
 pub struct RevertData {
     pub skill_id: String,
+    /// The workspace's ADDRESS (`<host>/<name>`) — the receipt names where the pointer moved.
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
     /// The skill's NAME — the handle humans speak and the TTY success line leads with
     /// (`Reverted <name> …`); the opaque `skill_id` above stays the machine key.
     pub name: String,
@@ -2215,6 +2219,10 @@ pub struct ProtectData {
     /// `skill` or `channel`.
     pub kind: String,
     pub workspace_id: String,
+    /// The workspace's ADDRESS (`<host>/<name>`) — what the receipt NAMES, so a person always
+    /// reads which workspace this act reached. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
     /// The level being set (`reviewed` / `curated` / `open`).
     pub level: String,
     /// `true` when the level LOOSENS protection (`open`) — the owner-gated direction.
