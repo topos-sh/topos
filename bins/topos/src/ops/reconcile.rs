@@ -1408,7 +1408,7 @@ pub(crate) fn manifest_update(
             .or_else(|| project.as_ref().and_then(|(_, p)| p.workspace_scheme))
             .unwrap_or("https://");
         all_sessions.sessions.push(Session {
-            base_url: format!("{scheme}{t_host}"),
+            base_url: machine_token_base_url(scheme, &t_host),
             workspace_id: t_ws.clone(),
             workspace_name: t_ws,
             host: t_host,
@@ -7871,9 +7871,31 @@ pub(crate) fn lay_baseline_with_plan(
     Ok(())
 }
 
+/// The API base a machine-token session dials: scheme + host + `/api` — the same base the
+/// server's protocol card declares (`api_base_url`) and a login stores. The `/api` segment is
+/// load-bearing: the session lane is mounted under it, and a base without it 404s every
+/// catalog, object, and report request.
+fn machine_token_base_url(scheme: &str, host: &str) -> String {
+    format!("{scheme}{host}/api")
+}
+
 #[cfg(test)]
 mod tests {
     use super::Step;
+
+    /// A machine-token session dials the card-declared API base — scheme + host + `/api`. A bare
+    /// origin would 404 every request (the session lane is mounted under `/api`).
+    #[test]
+    fn a_machine_token_session_dials_the_api_base() {
+        assert_eq!(
+            super::machine_token_base_url("https://", "topos.example"),
+            "https://topos.example/api"
+        );
+        assert_eq!(
+            super::machine_token_base_url("http://", "127.0.0.1:3100"),
+            "http://127.0.0.1:3100/api"
+        );
+    }
 
     /// An MCP row's DEFAULT-REACH token narrows nothing: the answer is the same one an absent
     /// `dest` gets (every MCP-capable agent), and the entries beside it are already inside that
