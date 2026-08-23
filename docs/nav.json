@@ -2,6 +2,6 @@
   { "group": "Start here", "pages": ["index", "quickstart", "install"] },
   { "group": "Guides", "pages": ["add", "publish", "mcp", "review", "team"] },
   { "group": "Agents", "pages": ["agents", "harnesses"] },
-  { "group": "Self-hosting", "pages": ["self-host"] },
+  { "group": "Self-hosting", "pages": ["self-host", "ci"] },
   { "group": "Reference", "pages": ["topos-toml", "cli"] }
 ]

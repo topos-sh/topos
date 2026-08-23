@@ -34,7 +34,8 @@ export const DOCS_NAV: readonly DocsNavGroup[] = [
   {
     "group": "Self-hosting",
     "pages": [
-      "self-host"
+      "self-host",
+      "ci"
     ]
   },
   {
@@ -59,6 +60,7 @@ export const DOCS_ORDER: readonly string[] = [
   "agents",
   "harnesses",
   "self-host",
+  "ci",
   "topos-toml",
   "cli"
 ];
@@ -637,6 +639,36 @@ export const DOCS_PAGES: Readonly<Record<string, DocsPage>> = {
         "depth": 2,
         "id": "known-rough-edges",
         "text": "Known rough edges"
+      }
+    ]
+  },
+  "ci": {
+    "id": "ci",
+    "title": "Topos in CI",
+    "description": "Machine tokens give pipelines, VMs, and sandboxes read-only access — no login ceremony.",
+    "sidebarLabel": "CI and headless",
+    "html": "<p>A machine needs no person at the keyboard to install what a project declares. A <strong>machine\ntoken</strong> is the workspace's headless credential: an owner mints it on the web, a pipeline\npresents it in an environment variable, and every run appears under Sessions as a service\nmachine — listed apart from people's machines, expiring on its own after a week idle.</p>\n<p>Tokens are <strong>read-only</strong>. A run holding one can fetch the workspace catalog and bundle bytes\nand report what it applied — it can never publish, invite, protect, revert, or review. Anything\nthat changes the workspace needs a person's session.</p>\n<aside class=\"docs-aside docs-aside--note\"><p class=\"docs-aside__label\">Note</p><div class=\"docs-aside__body\"><p>The CLI-side surface described here (<code>TOPOS_TOKEN</code> and <code>topos install --frozen</code>) arrives in\nthis release train — mint tokens and wire your pipeline now, and the commands light up with\nthe CLI update.</p></div></aside>\n<h2 id=\"mint-a-token\">Mint a token<a class=\"docs-anchor\" href=\"#mint-a-token\" aria-label=\"Link to “Mint a token”\">#</a></h2>\n<p>Workspace <strong>Settings → Machine tokens</strong> (owners only): name it after what runs it —\n<code>github-actions</code>, <code>staging-vm</code>. The token is shown <strong>once</strong>, at mint. Store it in your CI\nprovider's secret store, revoke it from the same panel when it should stop working.</p>\n<h2 id=\"the-three-line-workflow\">The three-line workflow<a class=\"docs-anchor\" href=\"#the-three-line-workflow\" aria-label=\"Link to “The three-line workflow”\">#</a></h2>\n<figure class=\"docs-code\"><figcaption class=\"docs-code__title\">A GitHub Actions step</figcaption><div class=\"docs-codeblock\"><pre class=\"shiki shiki-themes github-light github-dark\" tabindex=\"0\"><code><span class=\"line\"><span style=\"color:#24292E;--shiki-dark:#E1E4E8\">- </span><span style=\"color:#22863A;--shiki-dark:#85E89D\">run</span><span style=\"color:#24292E;--shiki-dark:#E1E4E8\">: </span><span style=\"color:#032F62;--shiki-dark:#9ECBFF\">curl -fsSL https://topos.sh/install | sh</span></span>\n<span class=\"line\"><span style=\"color:#24292E;--shiki-dark:#E1E4E8\">- </span><span style=\"color:#22863A;--shiki-dark:#85E89D\">run</span><span style=\"color:#24292E;--shiki-dark:#E1E4E8\">: </span><span style=\"color:#032F62;--shiki-dark:#9ECBFF\">topos install --frozen</span></span>\n<span class=\"line\"><span style=\"color:#22863A;--shiki-dark:#85E89D\">  env</span><span style=\"color:#24292E;--shiki-dark:#E1E4E8\">:</span></span>\n<span class=\"line\"><span style=\"color:#22863A;--shiki-dark:#85E89D\">    TOPOS_TOKEN</span><span style=\"color:#24292E;--shiki-dark:#E1E4E8\">: </span><span style=\"color:#032F62;--shiki-dark:#9ECBFF\">${{ secrets.TOPOS_TOKEN }}</span></span></code></pre><button type=\"button\" class=\"docs-copy\" data-copy=\"\" aria-label=\"Copy to clipboard\"><svg class=\"docs-copy__icon docs-copy__icon--copy\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect width=\"14\" height=\"14\" x=\"8\" y=\"8\" rx=\"2\" ry=\"2\"></rect><path d=\"M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2\"></path></svg><svg class=\"docs-copy__icon docs-copy__icon--check\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M20 6 9 17l-5-5\"></path></svg></button></div></figure>\n<p><code>TOPOS_TOKEN</code> authenticates the run — no <code>topos login</code>, no browser. <code>--frozen</code> is the CI\nposture: install exactly what the project's committed files name, verify every byte against\nthe recorded hashes, and fail loudly on any disagreement or anything unreachable — nothing is\nwritten or resolved on the fly.</p>\n<h2 id=\"what-a-run-can-see\">What a run can see<a class=\"docs-anchor\" href=\"#what-a-run-can-see\" aria-label=\"Link to “What a run can see”\">#</a></h2>\n<ul>\n<li>The workspace catalog and the exact bundle versions a project pins — enough to converge a\ncheckout.</li>\n<li>Nothing person-scoped: a token has no feed, no notices, no identity beyond the token's name.</li>\n</ul>\n<p>MCP servers whose configuration references per-machine secrets resolve them from the run's own\nenvironment — export those values in the pipeline alongside <code>TOPOS_TOKEN</code>.</p>\n<h2 id=\"housekeeping\">Housekeeping<a class=\"docs-anchor\" href=\"#housekeeping\" aria-label=\"Link to “Housekeeping”\">#</a></h2>\n<p>Each distinct run name shows as one service machine (set <code>x-topos-machine</code> if your runner wants\na stable label; the token's name is the default). Idle service machines are cleaned up\nautomatically; revoking a token removes its machines with it. Both acts land in the audit\ntrail.</p>",
+    "markdown": "# Topos in CI\n\nMachine tokens give pipelines, VMs, and sandboxes read-only access — no login ceremony.\n\nA machine needs no person at the keyboard to install what a project declares. A **machine\ntoken** is the workspace's headless credential: an owner mints it on the web, a pipeline\npresents it in an environment variable, and every run appears under Sessions as a service\nmachine — listed apart from people's machines, expiring on its own after a week idle.\n\nTokens are **read-only**. A run holding one can fetch the workspace catalog and bundle bytes\nand report what it applied — it can never publish, invite, protect, revert, or review. Anything\nthat changes the workspace needs a person's session.\n\n**Note**\n\nThe CLI-side surface described here (`TOPOS_TOKEN` and `topos install --frozen`) arrives in\nthis release train — mint tokens and wire your pipeline now, and the commands light up with\nthe CLI update.\n\n## Mint a token\n\nWorkspace **Settings → Machine tokens** (owners only): name it after what runs it —\n`github-actions`, `staging-vm`. The token is shown **once**, at mint. Store it in your CI\nprovider's secret store, revoke it from the same panel when it should stop working.\n\n## The three-line workflow\n\n```yaml title=\"A GitHub Actions step\"\n- run: curl -fsSL https://topos.sh/install | sh\n- run: topos install --frozen\n  env:\n    TOPOS_TOKEN: ${{ secrets.TOPOS_TOKEN }}\n```\n\n`TOPOS_TOKEN` authenticates the run — no `topos login`, no browser. `--frozen` is the CI\nposture: install exactly what the project's committed files name, verify every byte against\nthe recorded hashes, and fail loudly on any disagreement or anything unreachable — nothing is\nwritten or resolved on the fly.\n\n## What a run can see\n\n- The workspace catalog and the exact bundle versions a project pins — enough to converge a\n  checkout.\n- Nothing person-scoped: a token has no feed, no notices, no identity beyond the token's name.\n\nMCP servers whose configuration references per-machine secrets resolve them from the run's own\nenvironment — export those values in the pipeline alongside `TOPOS_TOKEN`.\n\n## Housekeeping\n\nEach distinct run name shows as one service machine (set `x-topos-machine` if your runner wants\na stable label; the token's name is the default). Idle service machines are cleaned up\nautomatically; revoking a token removes its machines with it. Both acts land in the audit\ntrail.\n",
+    "headings": [
+      {
+        "depth": 2,
+        "id": "mint-a-token",
+        "text": "Mint a token"
+      },
+      {
+        "depth": 2,
+        "id": "the-three-line-workflow",
+        "text": "The three-line workflow"
+      },
+      {
+        "depth": 2,
+        "id": "what-a-run-can-see",
+        "text": "What a run can see"
+      },
+      {
+        "depth": 2,
+        "id": "housekeeping",
+        "text": "Housekeeping"
       }
     ]
   },
