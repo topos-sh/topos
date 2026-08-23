@@ -478,7 +478,15 @@ fn ambiguous_source_message(
     {
         return block;
     }
-    format!("{name} is ambiguous, pick one:")
+    // The MIXED listing (references beside folders): every candidate prints as the runnable
+    // command that picks it — a "pick one:" with nothing under it asks a person to choose
+    // between lines that were never shown.
+    let mut s = format!("{name} is ambiguous, pick one:");
+    let g = if global { "-g " } else { "" };
+    for c in candidates {
+        s.push_str(&format!("\n  topos {verb} {g}{}", c.spelling()));
+    }
+    s
 }
 
 /// The [`ClientError::ClaimTaken`] sentence: a folder another record already manages. Two shapes,
