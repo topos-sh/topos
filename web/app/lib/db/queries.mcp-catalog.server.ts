@@ -1503,6 +1503,10 @@ export interface McpServerFace {
   /** The connection follows ONE revision rather than the server's current. */
   pinnedRevisionId: string | null;
   currentRevisionId: string | null;
+  /** The owner's routing mandate for this connection — null is Auto, the ordinary state. */
+  gatewayPolicy: "direct" | "required" | null;
+  /** THIS viewer chose direct for their own machines (meaningful only under Auto). */
+  gatewayOptedOut: boolean;
   /** What this workspace's machines receive — null when the server has nothing current. */
   resolved: {
     revisionId: string;
@@ -1565,7 +1569,12 @@ export async function mcpServerFace(
   bundleId: string,
 ): Promise<McpServerFace | null> {
   const rows = await getDb().execute(sql`
-    SELECT bm.bundle_id, bm.server_id, bm.pinned_revision_id,
+    SELECT bm.bundle_id, bm.server_id, bm.pinned_revision_id, bm.gateway_policy,
+           EXISTS (
+             SELECT 1 FROM web.mcp_gateway_optout go
+             WHERE go.workspace_id = bm.workspace_id AND go.server_id = bm.server_id
+               AND go.user_id = ${actor.userId}
+           ) AS gateway_optout,
            ms.workspace_id, ms.name, ms.display_name, ms.description, ms.website_url,
            ms.icon, ms.auth_mode, ms.auth_note, ms.current_revision_id,
            curr.seq AS current_seq,
@@ -1606,6 +1615,8 @@ export async function mcpServerFace(
     authNote: (row.auth_note as string | null) ?? null,
     pinnedRevisionId: (row.pinned_revision_id as string | null) ?? null,
     currentRevisionId,
+    gatewayPolicy: (row.gateway_policy as "direct" | "required" | null) ?? null,
+    gatewayOptedOut: row.gateway_optout === true,
     resolved:
       row.revision_id === null || row.revision_id === undefined
         ? null

@@ -54,6 +54,7 @@ describe("workspacePolicyOf (the reads)", () => {
       registration: "invite_only",
       sessionApproval: "off",
       sessionMaxAgeMs: null,
+      mcpGateway: "on",
     });
   });
 });
@@ -100,6 +101,23 @@ describe("setRegistration (the open-sign-up knob)", () => {
     expect(await auditRows("policy_registration")).toEqual([
       { subject: "open", outcome: "ok" },
       { subject: "invite_only", outcome: "ok" },
+    ]);
+  });
+});
+
+describe("setMcpGateway (the workspace-wide gateway switch)", () => {
+  it("sets 'off' and back to 'on', audited; refuses any other value", async () => {
+    const queries = await q();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    expect(await queries.setMcpGateway(owner, "off")).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).mcpGateway).toBe("off");
+    expect(await queries.setMcpGateway(owner, "on")).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).mcpGateway).toBe("on");
+
+    expect(await queries.setMcpGateway(owner, "maybe")).toBe("bad_value");
+    expect(await auditRows("policy_mcp_gateway")).toEqual([
+      { subject: "off", outcome: "ok" },
+      { subject: "on", outcome: "ok" },
     ]);
   });
 });

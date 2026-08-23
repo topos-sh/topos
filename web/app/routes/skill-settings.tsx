@@ -23,11 +23,13 @@ import {
 } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
+import { setMcpGatewayPolicy } from "@/lib/db/queries.gateway.server";
 import {
   archiveBundle,
   renameBundle,
   setBundleProtection,
 } from "@/lib/db/queries.lifecycle.server";
+import { mcpServerFace } from "@/lib/db/queries.mcp-catalog.server";
 import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import { bundleById, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
@@ -79,13 +81,21 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     name: skill,
     tail: "/settings",
   });
-  const [bundleRow, policy, upstream] = await Promise.all([
+  const [bundleRow, policy, upstream, serverFace] = await Promise.all([
     bundleById(owner, row.skillId),
     workspacePolicyOf(owner),
     upstreamOf(workspace.id, row.skillId),
+    row.kind === "mcp" ? mcpServerFace(owner, row.skillId) : Promise.resolve(null),
   ]);
   const pinned = bundleRow?.protection ?? null;
+  // The Gateway setting exists only where there is an address to route: a package-only server
+  // runs on the machine itself and the control would be a switch nothing reads.
+  const gateway =
+    serverFace === null || serverFace.resolved === null || serverFace.resolved.url === null
+      ? null
+      : { policy: serverFace.gatewayPolicy ?? ("auto" as const) };
   return {
+    gateway,
     wsName: workspace.name,
     skillId: row.skillId,
     upstream:
@@ -111,7 +121,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
 /** One typed inline error per ceremony — a landed rename/archive redirects away. */
 interface SettingsFormError {
-  form: "rename" | "archive" | "protection";
+  form: "rename" | "archive" | "protection" | "gateway";
   message: string;
 }
 
@@ -144,6 +154,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "set-protection") {
     return protectionIntent(request, ws, skill, formData);
+  }
+  if (intent === "set-gateway-policy") {
+    return gatewayPolicyIntent(request, ws, skill, formData);
   }
   if (intent === "check-upstream") {
     return checkUpstreamIntent(request, ws, String(formData.get("skill_id") ?? ""));
@@ -277,6 +290,38 @@ async function protectionIntent(request: Request, ws: string, skill: string, for
   return data<SettingsFormError>({ form: "protection", message: "This skill no longer exists." });
 }
 
+/** The connection's routing mandate. Re-guards as owner, resolves the CONNECTION from the
+ * bundle name (never a server id from the browser), and refuses an unknown value or a bundle
+ * that is not a connected server before any write. */
+async function gatewayPolicyIntent(
+  request: Request,
+  ws: string,
+  skill: string,
+  formData: FormData,
+) {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const value = String(formData.get("gateway_policy") ?? "");
+  if (value !== "auto" && value !== "direct" && value !== "required") {
+    return data<SettingsFormError>(
+      { form: "gateway", message: "Unknown setting." },
+      { status: 400 },
+    );
+  }
+  const row = await skillIndexRow(owner, skill);
+  const face = row === undefined ? null : await mcpServerFace(owner, row.skillId);
+  if (face === null) {
+    notFound();
+  }
+  const outcome = await setMcpGatewayPolicy(owner, face.serverId, value);
+  if (outcome === "not_connected") {
+    return data<SettingsFormError>(
+      { form: "gateway", message: "This workspace is no longer connected to that server." },
+      { status: 400 },
+    );
+  }
+  return data({ form: "gateway" as const, saved: true });
+}
+
 /** The on-demand upstream check — reviewer-grade is unnecessary (it can only OPEN a proposal,
  * never move current); the member floor already ran. Answers the checker's typed outcome.
  * BELTED per acting user (route actions bypass the /api belt) and CLAIMED through the SAME
@@ -333,10 +378,82 @@ export default function SkillSettings() {
           protectionDefault={protectionDefault}
         />
       )}
+      <GatewayCeremony />
       <UpstreamPanel />
       <RenameCeremony skill={skill} />
       <ArchiveCeremony skill={skill} />
     </div>
+  );
+}
+
+/** The three routing choices, with the line each states — the control's whole vocabulary. */
+const GATEWAY_CHOICES = [
+  { value: "auto", label: "Auto", line: "Gateway when possible." },
+  { value: "direct", label: "Direct", line: "Direct for everyone." },
+  { value: "required", label: "Required", line: "Gateway for everyone." },
+] as const;
+
+type GatewayChoice = (typeof GATEWAY_CHOICES)[number]["value"];
+
+/**
+ * The GATEWAY setting — the owner's routing mandate for this connection. Renders only for a
+ * connected server with an address (a package-only server runs on the machine itself and has
+ * nothing to route). Auto is the NULL column: the ordinary state, in which delivery routes
+ * through a deployed gateway once a sign-in stands and each member may choose direct for their
+ * own machines.
+ */
+function GatewayCeremony() {
+  const { gateway } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<SettingsFormError | { form: "gateway"; saved: true }>();
+  const [staged, setStaged] = useState<GatewayChoice | null>(null);
+  if (gateway === null) {
+    return null;
+  }
+  const current = gateway.policy as GatewayChoice;
+  const chosen = staged ?? current;
+  const pending = fetcher.state !== "idle";
+  const dirty = chosen !== current;
+  const error =
+    fetcher.data !== undefined && "message" in fetcher.data && fetcher.data.form === "gateway"
+      ? fetcher.data.message
+      : undefined;
+  return (
+    <section aria-labelledby="gateway-heading" className="space-y-3">
+      <SectionHeading>
+        <span id="gateway-heading">Gateway</span>
+      </SectionHeading>
+      <Card className="px-4 py-3">
+        <fetcher.Form method="post" className="space-y-3">
+          <input type="hidden" name="intent" value="set-gateway-policy" />
+          <fieldset className="space-y-2">
+            <legend className="sr-only">Gateway</legend>
+            {GATEWAY_CHOICES.map((choice) => (
+              <label key={choice.value} className="flex items-center gap-2 text-ink text-sm">
+                <input
+                  type="radio"
+                  name="gateway_policy"
+                  value={choice.value}
+                  checked={chosen === choice.value}
+                  disabled={pending}
+                  onChange={() => setStaged(choice.value)}
+                  className="accent-accent"
+                />
+                <span className="font-medium">{choice.label}</span>
+                <span className="text-dim">{choice.line}</span>
+              </label>
+            ))}
+          </fieldset>
+          {dirty && (
+            <SaveControls
+              saveLabel="Save"
+              pending={pending}
+              error={error}
+              onCancel={() => setStaged(null)}
+            />
+          )}
+        </fetcher.Form>
+      </Card>
+    </section>
   );
 }
 

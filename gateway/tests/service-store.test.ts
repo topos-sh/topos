@@ -107,6 +107,32 @@ describe("connectedServer", () => {
     expect(await store.connectedServer("ws1", "msrv_never")).toBeNull();
   });
 
+  it("a connection the owner set 'direct' resolves to nothing — the mandate is enforced here", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "dirm", { authMode: "oauth" });
+    await db.q("UPDATE web.bundle_mcp SET gateway_policy = 'direct' WHERE server_id = $1", [
+      seeded.serverId,
+    ]);
+    expect(await store.connectedServer("ws1", seeded.serverId)).toBeNull();
+  });
+
+  it("a 'required' connection resolves like an unmandated one", async () => {
+    const seeded = await seedConnectedServer(db, "ws1", "reqm", { authMode: "oauth" });
+    await db.q("UPDATE web.bundle_mcp SET gateway_policy = 'required' WHERE server_id = $1", [
+      seeded.serverId,
+    ]);
+    expect(await store.connectedServer("ws1", seeded.serverId)).not.toBeNull();
+  });
+
+  it("a workspace whose gateway switch is off resolves nothing at all", async () => {
+    await seedIdentity(db, "wsoff", "u1");
+    const seeded = await seedConnectedServer(db, "wsoff", "swoff", { authMode: "oauth" });
+    await db.q("UPDATE web.workspace SET mcp_gateway = 'off' WHERE id = 'wsoff'");
+    expect(await store.connectedServer("wsoff", seeded.serverId)).toBeNull();
+    // The switch back on is the whole re-enable — nothing was deleted.
+    await db.q("UPDATE web.workspace SET mcp_gateway = 'on' WHERE id = 'wsoff'");
+    expect(await store.connectedServer("wsoff", seeded.serverId)).not.toBeNull();
+  });
+
   it("surfaces the document's declared secret-header slot", async () => {
     const url = "https://mcp.example.com/hdr";
     const seeded = await seedConnectedServer(db, "ws1", "hdr", {

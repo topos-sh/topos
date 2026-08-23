@@ -289,6 +289,31 @@ package bundle is untouched: a program the agent runs here has no address to red
 An install with no gateway keeps everything above exactly as described — the entry names the
 server's own address, and signing in stays the agent's own business.
 
+### Choosing the route
+
+Whether a given server actually goes through the gateway is decided in three places, each on the
+web:
+
+- **The workspace switch** (Settings → MCP gateway, owner-only): off means every server in the
+  workspace connects directly, whatever the settings below say. On is the default.
+- **The server's Gateway setting** (the server's Settings, owner-only; shown only for servers
+  with an address): **Auto** — gateway when possible · **Direct** — direct for everyone ·
+  **Required** — gateway for everyone.
+- **Each member's own toggle** (the server's page): under Auto, **Use gateway** on or off, for
+  that member's machines alone. The server stays managed either way — same entry, same updates —
+  only the road changes. Under Required or Direct there is no toggle.
+
+Auto is the state every connection starts in, and "when possible" is deliberate: a server that
+needs a sign-in keeps its own address on your machines until a sign-in stands at the gateway —
+yours or the workspace's — so turning the gateway on never breaks a server that was already
+working. The moment one stands, the next update reroutes; disconnect it and the next update routes
+direct again.
+
+Required is the one setting that refuses rather than falls back: a machine that cannot use the
+gateway — a `topos` too old to place gateway entries, or an install running none — receives no
+entry for that server at all. Direct and the workspace switch are enforced by the gateway itself:
+a server routed direct is refused there even if something still dials the old address.
+
 ## Checking that a server actually works
 
 ```bash

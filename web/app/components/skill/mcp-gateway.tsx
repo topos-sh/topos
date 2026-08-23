@@ -66,6 +66,55 @@ function useArmRefusal(intent: string): string | null {
   return answer.message ?? "That didn't go through. Try again.";
 }
 
+/** The member's route control, as the loader resolves it: a toggle where the choice is theirs
+ *  (no mandate), the one mandate line where it is not. */
+export type McpGatewayRoute = { kind: "toggle"; usingGateway: boolean } | { kind: "required" };
+
+/**
+ * THE VIEWER'S OWN ROUTE for this server — gateway (the default) or direct, for their machines
+ * alone. Rendered only where the choice or the mandate can matter (an addressable server, gateway
+ * delivery on, the workspace switch on — the loader's ruling). Changing it changes which document
+ * their machines are delivered on the next update, and nothing anyone else receives.
+ */
+export function McpGatewayRouteCard({ route }: { route: McpGatewayRoute }) {
+  const pending = useSubmittingIntent() === "gateway-route";
+  const refusal = useArmRefusal("gateway-route");
+  return (
+    <section aria-labelledby="gateway-route-heading" className="space-y-3">
+      <SectionHeading>
+        <span id="gateway-route-heading">Use gateway</span>
+      </SectionHeading>
+      <Card className="space-y-2 px-4 py-3">
+        {route.kind === "required" ? (
+          <p className="text-ink text-sm">Required by workspace.</p>
+        ) : (
+          <Form method="post" className="flex flex-wrap items-center gap-3">
+            <BusyFields busy={pending}>
+              <input type="hidden" name="intent" value="gateway-route" />
+              <input
+                type="hidden"
+                name="use_gateway"
+                value={route.usingGateway ? "false" : "true"}
+              />
+              <p className="text-ink text-sm">
+                <span className="font-medium">{route.usingGateway ? "On" : "Off"}</span>
+              </p>
+              <button type="submit" className={buttonClasses("quiet")} disabled={pending}>
+                {route.usingGateway ? "Turn off" : "Turn on"}
+              </button>
+            </BusyFields>
+          </Form>
+        )}
+        {refusal !== null && (
+          <p role="alert" data-testid="mcp-route-refusal" className="text-red-700 text-sm">
+            {refusal}
+          </p>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 /** The state line: which sign-in a call from this person's agents would carry. */
 function signInLine(view: McpGatewayView): string {
   if (view.signedIn === "mine") {

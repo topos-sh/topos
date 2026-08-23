@@ -35,6 +35,7 @@ import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody
 import {
   gatewayDeliveryDocument,
   gatewayPublicBase,
+  hasStreamableRemote,
   sanitizeReservedMeta,
 } from "@/lib/gateway/delivery.server";
 
@@ -104,9 +105,11 @@ export interface DeliveryMcpServer {
   revision_id: string;
   /**
    * The `server.json`, in the official registry format — the resolved revision's document verbatim,
-   * EXCEPT where a gateway is deployed: an addressable server is then handed one remote at this
-   * deployment's gateway, marked in `_meta` (app/lib/gateway/delivery.server.ts). Package-only
-   * documents and every gateway-less deployment carry the stored bytes unchanged.
+   * EXCEPT where routing resolves to the gateway: the server is then handed one remote at this
+   * deployment's gateway, marked in `_meta` (app/lib/gateway/delivery.server.ts). Routing is
+   * per row — the workspace switch, the connection's `gateway_policy`, the member's own choice
+   * and the standing sign-in all weigh in (see `deliveryFor`); package-only documents and every
+   * gateway-less deployment carry the stored bytes unchanged.
    */
   document: Record<string, unknown>;
   /** This connection follows ONE revision rather than the server's `current`. OMITTED when it
@@ -208,6 +211,24 @@ export async function deliveryFor(
   placesGatewayEntries = false,
 ): Promise<DeliveryBody> {
   const ws = actor.workspaceId;
+  // THE GATEWAY, resolved once per delivery rather than per row: an address can be handed out
+  // only where a gateway is deployed AND the caller is a session (a page's own feed read has no
+  // machine to address) AND that machine's renderer can attach its credential to a gateway
+  // address. Per-ROW routing is decided below, from this plus the workspace switch, the
+  // connection's own policy, the member's choice, and whether a sign-in stands.
+  const gatewayBase =
+    actor.sessionId === undefined || !placesGatewayEntries ? null : gatewayPublicBase();
+  // WHETHER A SIGN-IN STANDS at the gateway for each connected server — the member's own or the
+  // workspace's. Asked only where a gateway is deployed: on an install with none the `gateway`
+  // schema does not exist, and the constant false keeps the query off it entirely.
+  const credentialSql =
+    gatewayBase === null
+      ? sql`false`
+      : sql`EXISTS (
+               SELECT 1 FROM gateway.credential gc
+               WHERE gc.workspace_id = ${ws} AND gc.server_id = bm.server_id
+                 AND (gc.user_id = ${actor.userId} OR gc.user_id IS NULL)
+             )`;
   return await getDb().transaction(
     async (tx) => {
       const rows = await tx.execute(sql`
@@ -220,6 +241,17 @@ export async function deliveryFor(
                r.id AS revision_id, r.document AS document, bm.server_id AS server_id,
                (bm.pinned_revision_id IS NOT NULL) AS pinned,
                (extract(epoch from r.published_at) * 1000)::bigint AS revision_at,
+               -- The routing facts: the workspace switch, the connection's mandate, whether
+               -- THIS member routed the server direct, and whether a sign-in stands.
+               w.mcp_gateway AS ws_gateway,
+               bm.gateway_policy AS gateway_policy,
+               EXISTS (
+                 SELECT 1 FROM web.mcp_gateway_optout go
+                 WHERE go.workspace_id = ${ws} AND go.server_id = bm.server_id
+                   AND go.user_id = ${actor.userId}
+               ) AS gateway_optout,
+               ${credentialSql} AS gateway_credential,
+               ms.auth_mode AS auth_mode,
                COALESCE((
                  SELECT array_agg(DISTINCT ch.name ORDER BY ch.name)
                  FROM web.channel_bundle cb
@@ -280,14 +312,6 @@ export async function deliveryFor(
         ...(r.assigned_by === null ? {} : { assigned_by: r.assigned_by as string }),
         ...(r.picked === true ? { picked: true as const } : {}),
       });
-      // THE GATEWAY FLIP, resolved once per delivery rather than per row: where a gateway is
-      // deployed AND the caller is a session (a page's own feed read has no machine to address)
-      // AND that machine's renderer can attach its credential to a gateway address, every
-      // connected server with an address is handed the gateway's instead of its own. A machine
-      // too old to attach one keeps the document's own address — turning the gateway on never
-      // breaks a fleet mid-update.
-      const gatewayBase =
-        actor.sessionId === undefined || !placesGatewayEntries ? null : gatewayPublicBase();
       const skills: DeliverySkill[] = [];
       const mcpServers: DeliveryMcpServer[] = [];
       for (const r of rows.rows as Record<string, unknown>[]) {
@@ -303,18 +327,39 @@ export async function deliveryFor(
           // only after. So a machine never receives a gateway flag the delivery side did not put
           // there, gateway deployed or not.
           const document = sanitizeReservedMeta(r.document as Record<string, unknown>);
+          // HOW THIS ROW IS ROUTED, first answer wins: the workspace switch off = direct ·
+          // the connection's 'direct' mandate = direct · its 'required' mandate = the gateway
+          // for every machine, or NO ROW AT ALL for a machine that cannot be handed a gateway
+          // address (too old, or a deployment running none) — a mandate that quietly fell back
+          // to direct would not be one · no mandate = the gateway where one is deployed AND the
+          // member has not chosen direct AND either the server needs no sign-in or one already
+          // stands at the gateway (theirs or the workspace's). Until a sign-in stands the
+          // machine keeps the server's own address, so turning the gateway on never breaks a
+          // working server — the route follows the sign-in, in both directions.
+          const wsGatewayOn = r.ws_gateway === "on";
+          const policy = (r.gateway_policy as string | null) ?? null;
+          const mandated = wsGatewayOn && policy === "required" && hasStreamableRemote(document);
+          if (mandated && gatewayBase === null && actor.sessionId !== undefined) {
+            continue;
+          }
+          const routed =
+            gatewayBase !== null &&
+            wsGatewayOn &&
+            (mandated ||
+              (policy === null &&
+                r.gateway_optout !== true &&
+                (r.auth_mode === "none" || r.gateway_credential === true)));
           mcpServers.push({
             ...common,
             revision_id: r.revision_id as string,
-            document:
-              gatewayBase === null
-                ? document
-                : gatewayDeliveryDocument(document, {
-                    base: gatewayBase,
-                    // Non-null by construction: gatewayBase is null unless the actor is a session.
-                    sessionId: actor.sessionId as string,
-                    serverId: r.server_id as string,
-                  }),
+            document: !routed
+              ? document
+              : gatewayDeliveryDocument(document, {
+                  base: gatewayBase as string,
+                  // Non-null by construction: gatewayBase is null unless the actor is a session.
+                  sessionId: actor.sessionId as string,
+                  serverId: r.server_id as string,
+                }),
             ...(r.pinned === true ? { pinned: true as const } : {}),
             updated_at: Number(r.revision_at),
             via: via(r),

@@ -91,6 +91,12 @@ export const workspace = webSchema.table(
      * credential's lifetime is revocation, like a gh CLI login).
      */
     sessionMaxAgeMs: bigint("session_max_age_ms", { mode: "number" }),
+    /**
+     * The workspace-wide gateway switch: 'off' means no MCP server in this workspace routes
+     * through the gateway, overriding every per-server setting and member choice. On by
+     * default — routing is then each connection's own `gateway_policy`.
+     */
+    mcpGateway: text("mcp_gateway").default("on").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
@@ -112,6 +118,7 @@ export const workspace = webSchema.table(
     ),
     check("workspace_registration_check", sql`${table.registration} in ('invite_only', 'open')`),
     check("workspace_session_approval_check", sql`${table.sessionApproval} in ('off', 'on')`),
+    check("workspace_mcp_gateway_check", sql`${table.mcpGateway} in ('off', 'on')`),
     check(
       "workspace_session_max_age_check",
       sql`${table.sessionMaxAgeMs} is null or ${table.sessionMaxAgeMs} > 0`,
@@ -703,11 +710,22 @@ export const bundleMcp = webSchema.table(
       .notNull()
       .references(() => mcpServer.id),
     pinnedRevisionId: text("pinned_revision_id"),
+    /**
+     * The owner's routing mandate for this connection: 'direct' = never the gateway, for
+     * anyone; 'required' = always the gateway, for everyone, no member choice. NULL is the
+     * ordinary case — route through the gateway where one is deployed and a sign-in stands,
+     * directly otherwise, with each member free to choose direct for their own machines.
+     */
+    gatewayPolicy: text("gateway_policy"),
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
     unique("bundle_mcp_workspace_server_unique").on(table.workspaceId, table.serverId),
+    check(
+      "bundle_mcp_gateway_policy_check",
+      sql`${table.gatewayPolicy} is null or ${table.gatewayPolicy} in ('direct', 'required')`,
+    ),
     index("bundle_mcp_server_idx").on(table.serverId),
     foreignKey({
       name: "bundle_mcp_bundle_fk",
@@ -784,6 +802,37 @@ export const mcpToolSelection = webSchema.table(
       name: "mcp_tool_selection_policy_fk",
       columns: [table.workspaceId, table.serverId],
       foreignColumns: [mcpToolPolicy.workspaceId, mcpToolPolicy.serverId],
+    }).onDelete("cascade"),
+  ],
+);
+
+/**
+ * ONE MEMBER'S CHOICE TO ROUTE A SERVER DIRECTLY — a row IS the opt-out, exactly as a decline
+ * row is a stance. It exists only where the choice is theirs to make (the connection's
+ * `gateway_policy` is NULL — a mandate in either direction overrides it), changes the ROUTE
+ * their machines are delivered and nothing else, and it anchors to the SEAT like every standing
+ * stance: removing the member cascades it away (a re-invite starts clean), and disconnecting
+ * the server takes it along too. Deleting the row is switching the gateway back on.
+ */
+export const mcpGatewayOptout = webSchema.table(
+  "mcp_gateway_optout",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    serverId: text("server_id").notNull(),
+    userId: text("user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.serverId, table.userId] }),
+    foreignKey({
+      name: "mcp_gateway_optout_seat_fk",
+      columns: [table.workspaceId, table.userId],
+      foreignColumns: [seat.workspaceId, seat.userId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "mcp_gateway_optout_connection_fk",
+      columns: [table.workspaceId, table.serverId],
+      foreignColumns: [bundleMcp.workspaceId, bundleMcp.serverId],
     }).onDelete("cascade"),
   ],
 );
