@@ -1462,6 +1462,20 @@ impl ManifestEditor {
         }
 
         let header = spelling.section.header();
+        // A NEW row landing on a key another row already holds would silently overwrite it —
+        // two folders can share a basename, but two rows cannot share a name.
+        if let Some(Item::Table(t)) = self.doc.get(header)
+            && t.get(&spelling.key).is_some_and(Item::is_value)
+        {
+            return Err(at(
+                &spelling.key,
+                format!(
+                    "`{}` already names another row in `[{header}]` — give this one its own \
+                     name: `<name> = {{ … name = \"…\" }}` (the key is the name)",
+                    spelling.key
+                ),
+            ));
+        }
         if self.doc.get(header).is_none() {
             let mut t = Table::new();
             t.set_implicit(false);
@@ -2071,6 +2085,29 @@ weather-server = { path = "~/dev/weather-server", kind = "mcp" }
         let row = ed.row("github.com/vercel-labs/skills/find-skills").unwrap();
         assert!(matches!(row.shape, KeyShape::RepoSkill { .. }));
         assert!(ed.row("topos.sh/acme/absent").is_none());
+    }
+
+    #[test]
+    fn a_new_row_never_overwrites_a_same_named_one() {
+        let mut ed = ManifestEditor::open("", ManifestScope::Global).unwrap();
+        ed.set_row("~/one/linear", &EntryValue::Star, BundleKind::Skill)
+            .unwrap();
+        let e = ed
+            .set_row("~/two/linear", &EntryValue::Star, BundleKind::Skill)
+            .unwrap_err();
+        assert!(e.message.contains("already names another row"), "{e}");
+        assert!(ed.row("~/one/linear").is_some(), "the standing row survives");
+        // A distinct `name` field resolves the collision.
+        ed.set_row(
+            "~/two/linear",
+            &EntryValue::Fields(EntryFields {
+                name: Some("linear-two".into()),
+                ..EntryFields::default()
+            }),
+            BundleKind::Skill,
+        )
+        .unwrap();
+        assert!(ed.row("~/two/linear").is_some());
     }
 
     #[test]

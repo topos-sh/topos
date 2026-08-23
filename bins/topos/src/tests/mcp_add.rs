@@ -335,7 +335,7 @@ fn connect<'a>(
 #[test]
 fn a_folder_refuses_and_spells_the_line_a_machine_local_server_is() {
     let rig = Rig::new("folder");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.work.0.join("weather");
     write_server_folder(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -356,11 +356,14 @@ fn a_folder_refuses_and_spells_the_line_a_machine_local_server_is() {
     assert!(detail.contains("is a folder on this machine"), "{detail}");
     // The LINE, spelled with the person's own folder in it, and how to make it take effect.
     assert!(
-        detail.contains(&format!("`\"{}\" = {{ kind = \"mcp\" }}`", dir.display())),
+        detail.contains(&format!(
+            "`<name> = {{ path = \"{}\", kind = \"mcp\" }}`",
+            dir.display()
+        )),
         "{detail}"
     );
-    assert!(detail.contains("under [bundles]"), "{detail}");
-    assert!(detail.contains("'topos update'"), "{detail}");
+    assert!(detail.contains("under `[mcp]`"), "{detail}");
+    assert!(detail.contains("'topos install'"), "{detail}");
     // …and the other half: what sharing this server with the team actually takes.
     assert!(
         detail.contains("topos add --kind mcp <its registry name or the https link"),
@@ -368,7 +371,7 @@ fn a_folder_refuses_and_spells_the_line_a_machine_local_server_is() {
     );
     // Nothing was asked of the workspace, and nothing was written.
     assert!(lane.requests().is_empty(), "{:?}", lane.requests());
-    assert_eq!(rig.global_text(), "[bundles]\n");
+    assert_eq!(rig.global_text(), "schema = 1\n");
 }
 
 /// `--kind mcp` never re-labels a governed reference: a workspace already records what each bundle
@@ -376,7 +379,7 @@ fn a_folder_refuses_and_spells_the_line_a_machine_local_server_is() {
 #[test]
 fn a_workspace_reference_refuses_toward_the_plain_add() {
     let rig = Rig::new("wsref");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let lane = ShareLane::default();
     let publishes = RecordingPublish::default();
@@ -409,7 +412,7 @@ fn a_workspace_reference_refuses_toward_the_plain_add() {
 #[test]
 fn a_source_this_door_cannot_read_names_the_two_it_can() {
     let rig = Rig::new("unreadable");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let lane = ShareLane::default();
     let publishes = RecordingPublish::default();
@@ -427,7 +430,7 @@ fn a_source_this_door_cannot_read_names_the_two_it_can() {
     assert!(detail.contains("io.github.acme/weather"), "{detail}");
     assert!(detail.contains("https link to a server.json"), "{detail}");
     assert!(lane.requests().is_empty(), "nothing was shared");
-    assert_eq!(rig.global_text(), "[bundles]\n");
+    assert_eq!(rig.global_text(), "schema = 1\n");
 }
 
 // =================================================================================================
@@ -442,7 +445,7 @@ fn a_source_this_door_cannot_read_names_the_two_it_can() {
 fn the_two_shared_spellings_reach_the_workspace_verbatim() {
     let rig = Rig::new("spellings");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let publishes = RecordingPublish::default();
 
@@ -496,7 +499,7 @@ fn the_two_shared_spellings_reach_the_workspace_verbatim() {
 fn the_workspace_names_the_bundle_and_the_row_and_the_entries_follow() {
     let rig = Rig::new("shared");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     // One MCP-capable agent set up in the fake home, so the inline converge has a surface.
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -522,7 +525,7 @@ fn the_workspace_names_the_bundle_and_the_row_and_the_entries_follow() {
 
     let text = rig.global_text();
     assert!(
-        text.contains(&format!("\"{HOST}/{WS_NAME}/weather\" = \"*\"")),
+        text.contains(&format!("\"{HOST}/{WS_NAME}/weather\" = \"latest\"")),
         "the row is the workspace reference, under the name the workspace gave: {text}"
     );
     let cursor = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json"))
@@ -562,7 +565,7 @@ fn a_manual_sign_in_says_what_the_person_has_to_do() {
                          complete it";
     let rig = Rig::new("manual-auth");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let publishes = RecordingPublish::default();
@@ -601,7 +604,7 @@ fn a_manual_sign_in_says_what_the_person_has_to_do() {
     // An OAUTH server is unchanged: the clause, and no second line — nobody has to do anything.
     let rig = Rig::new("oauth-auth");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let lane = ShareLane::sharing(
@@ -633,7 +636,7 @@ fn a_manual_sign_in_says_what_the_person_has_to_do() {
 fn a_kind_word_contradicting_the_catalog_refuses_at_the_workspace_door() {
     let rig = Rig::new("kind-contradict");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let lane = ShareLane::sharing("s_weather", "weather", &good_server());
@@ -663,7 +666,7 @@ fn a_kind_word_contradicting_the_catalog_refuses_at_the_workspace_door() {
     );
     assert_eq!(
         rig.global_text(),
-        "[bundles]\n",
+        "schema = 1\n",
         "nothing was written: {msg}"
     );
 
@@ -688,7 +691,7 @@ fn the_workspaces_refusal_arrives_in_its_own_words() {
                         cannot be shared — publish it with the value left empty";
     let rig = Rig::new("refused");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let lane = ShareLane::refusing(SAID);
     let publishes = RecordingPublish::default();
@@ -705,7 +708,7 @@ fn the_workspaces_refusal_arrives_in_its_own_words() {
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert_eq!(err.detail(), SAID);
     assert_eq!(crate::render::safe_message(&err), SAID);
-    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+    assert_eq!(rig.global_text(), "schema = 1\n", "nothing was recorded");
 }
 
 /// **A SHARE IS NEVER AIMED BY GUESS.** The server reaches everybody in the workspace it lands in,
@@ -714,7 +717,7 @@ fn the_workspaces_refusal_arrives_in_its_own_words() {
 #[test]
 fn the_workspace_a_share_lands_in_is_named_never_guessed() {
     let rig = Rig::new("which-ws");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let publishes = RecordingPublish::default();
 
@@ -796,7 +799,7 @@ fn the_workspace_a_share_lands_in_is_named_never_guessed() {
 fn a_selection_narrows_a_shared_server_by_config_file() {
     let rig = Rig::new("mcp-dest");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     // Two MCP-capable agents set up in the fake home.
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
@@ -903,7 +906,7 @@ fn a_hand_written_local_row_converges_its_entries_on_update() {
     let dir = rig.home.0.join("weather");
     write_server_folder(&dir, &good_server());
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n",
+        "[mcp]\nweather = {{ path = \"{}\", kind = \"mcp\" }}\n",
         dir.display()
     ));
     let ctx = rig.ctx_at(None);
@@ -955,8 +958,10 @@ fn a_tilde_spelled_local_row_takes_its_entries_out_with_the_row() {
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     let dir = rig.home.0.join("weather");
     write_server_folder(&dir, &good_server());
-    let before = "[bundles]\n# a comment that must survive\n\"topos.sh/eng/deploy\" = \"*\"\n";
-    rig.write_global(&format!("{before}\"~/weather\" = {{ kind = \"mcp\" }}\n"));
+    let before = "[skills]\n# a comment that must survive\n\"topos.sh/eng/deploy\" = \"latest\"\n";
+    rig.write_global(&format!(
+        "{before}weather = {{ path = \"~/weather\", kind = \"mcp\" }}\n"
+    ));
     let ctx = rig.ctx_at(None);
     let lane = ShareLane::default();
     let publishes = RecordingPublish::default();
@@ -1023,7 +1028,7 @@ fn a_tilde_spelled_local_row_takes_its_entries_out_with_the_row() {
 #[test]
 fn the_file_verbs_refuse_over_a_connected_server() {
     let rig = Rig::new("fileverbs");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     record_connected(&ctx, "s_weather", "weather", &good_server());
 
@@ -1094,7 +1099,7 @@ fn pull_keep_mine(ctx: &Ctx<'_>, name: &str) -> Result<ops::PullOutcome, ClientE
 #[test]
 fn the_version_verbs_refuse_over_a_connected_server() {
     let rig = Rig::new("versionverbs");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let sid = record_connected(&ctx, "s_weather", "weather", &good_server());
     // `revert` acts on a FOLLOWED bundle only, so the follow state has to claim this record before
@@ -1169,7 +1174,7 @@ impl crate::plane::FollowSource for FollowedHere {
 #[test]
 fn the_same_verbs_still_serve_a_skill() {
     let rig = Rig::new("verbs-skill");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let src = rig.work.0.join("notes");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("SKILL.md"), b"# notes\n").unwrap();
@@ -1227,7 +1232,7 @@ fn the_same_verbs_still_serve_a_skill() {
 fn a_server_folder_at_a_skill_door_refuses_toward_the_kind_it_is() {
     let rig = Rig::new("miskind");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.work.0.join("weather");
     write_server_folder(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1282,7 +1287,7 @@ fn a_server_folder_at_a_skill_door_refuses_toward_the_kind_it_is() {
 #[test]
 fn an_explicit_skill_word_adopts_a_server_folder_as_a_skill() {
     let rig = Rig::new("explicit-skill");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.work.0.join("weather");
     write_server_folder(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1317,7 +1322,7 @@ fn an_explicit_skill_word_adopts_a_server_folder_as_a_skill() {
 #[test]
 fn a_folder_holding_both_markers_refuses_and_names_both_answers() {
     let rig = Rig::new("both-markers");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.work.0.join("weather");
     write_server_folder(&dir, &good_server());
     std::fs::write(dir.join("SKILL.md"), b"# weather\n").unwrap();
@@ -1332,7 +1337,7 @@ fn a_folder_holding_both_markers_refuses_and_names_both_answers() {
     );
     assert!(detail.contains("topos add --kind skill"), "{detail}");
     assert!(detail.contains(r#"= { kind = "mcp" }"#), "{detail}");
-    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+    assert_eq!(rig.global_text(), "schema = 1\n", "nothing was recorded");
 
     // The declared word still wins — silence was the only thing being guarded.
     let scope = ops::add_scope(&ctx, true).unwrap();
@@ -1348,7 +1353,7 @@ fn a_folder_holding_both_markers_refuses_and_names_both_answers() {
 #[test]
 fn a_server_record_cannot_be_re_linked_as_a_skill() {
     let rig = Rig::new("relink");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.work.0.join("weather");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), b"# weather\n").unwrap();
@@ -1368,7 +1373,7 @@ fn a_server_record_cannot_be_re_linked_as_a_skill() {
     );
     assert!(detail.contains("skill bundle"), "{detail}");
     assert!(detail.contains("topos remove weather"), "{detail}");
-    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+    assert_eq!(rig.global_text(), "schema = 1\n", "nothing was recorded");
     // And the marker still says what the record IS — never overwritten, never left to disagree.
     assert_eq!(
         crate::bundle_kind::kind_marker(&rig.fs, &rig.layout(), &sid).as_deref(),
@@ -1419,7 +1424,7 @@ fn the_teardown_retires_its_own_mcp_entries_and_leaves_a_hand_edited_one() {
     let dir = rig.home.0.join("weather");
     write_server_folder(&dir, &good_server());
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n",
+        "[mcp]\nweather = {{ path = \"{}\", kind = \"mcp\" }}\n",
         dir.display()
     ));
     let ctx = rig.ctx_at(None);
@@ -1634,7 +1639,7 @@ fn publish_through(
 fn a_connected_servers_publish_refuses_by_kind_and_sends_nothing() {
     let rig = Rig::new("pub-kind");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.work.0.join("weather");
     write_server_folder(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1680,7 +1685,7 @@ fn mark_as_server(ctx: &Ctx<'_>, skill_id: &str) {
 fn an_ordinary_skill_publish_carries_no_kind() {
     let rig = Rig::new("pub-skill");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.work.0.join("deploy");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), b"# deploy\n").unwrap();
