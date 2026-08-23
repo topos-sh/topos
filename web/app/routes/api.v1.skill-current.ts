@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { requireReadActor } from "@/lib/auth/guards.server";
 import { publishTargetOf } from "@/lib/db/queries.custody.server";
 import { custodyCurrent } from "@/lib/plane/reads.server";
 
@@ -16,7 +16,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (gated !== null) {
     return gated;
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
+  const actor = await requireReadActor(request, params.ws ?? "");
   const skillId = params.skill ?? "";
   const target = await publishTargetOf(actor, skillId);
   if (target === undefined || target.status === "deleted") {

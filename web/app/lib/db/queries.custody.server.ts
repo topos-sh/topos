@@ -91,7 +91,8 @@ export interface PublishTarget {
 /** The publish/revert gate's read: the bundle row + the resolved protection cascade. A
  * MemberActor suffices (a SessionActor IS one structurally) — the review pages share it. */
 export async function publishTargetOf(
-  actor: MemberActor,
+  // Only the workspace scope is read — structural, so member, session, and token actors all pass.
+  actor: { readonly workspaceId: string },
   bundleId: string,
 ): Promise<PublishTarget | undefined> {
   const rows = await getDb()

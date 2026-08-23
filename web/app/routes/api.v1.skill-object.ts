@@ -2,7 +2,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { HEX_64 } from "@/lib/api/candidate.server";
 import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, internalError, uniformNotFound } from "@/lib/api/wire.server";
-import { requireSessionActor } from "@/lib/auth/guards.server";
+import { requireReadActor } from "@/lib/auth/guards.server";
 import { publishTargetOf } from "@/lib/db/queries.custody.server";
 import { custodyObjectStream } from "@/lib/plane/reads.server";
 
@@ -22,7 +22,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (!HEX_64.test(objectId)) {
     return badRequest("malformed object id");
   }
-  const actor = await requireSessionActor(request, params.ws ?? "");
+  const actor = await requireReadActor(request, params.ws ?? "");
   const target = await publishTargetOf(actor, params.skill ?? "");
   if (target === undefined || target.status === "deleted") {
     return uniformNotFound();

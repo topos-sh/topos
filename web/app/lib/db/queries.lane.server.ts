@@ -950,7 +950,10 @@ export interface LaneMcpIndexEntry {
 
 /** The workspace catalog — every FILE bundle holding a `current`, ordered by id. A connected
  *  server holds no pointer and is served by `laneMcpServersIndex` below. */
-export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillIndexEntry[]> {
+export async function laneSkillsIndex(
+  // Only the workspace scope is read — session and token actors both pass.
+  actor: { readonly workspaceId: string },
+): Promise<LaneSkillIndexEntry[]> {
   const ws = actor.workspaceId;
   const rows = await getDb()
     .select({
@@ -1029,7 +1032,9 @@ export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillInd
  * references a server nobody in the room follows still has to render its config, and there is no
  * second lane to fetch bytes from.
  */
-export async function laneMcpServersIndex(actor: SessionActor): Promise<LaneMcpIndexEntry[]> {
+export async function laneMcpServersIndex(
+  actor: { readonly workspaceId: string },
+): Promise<LaneMcpIndexEntry[]> {
   const ws = actor.workspaceId;
   const rows = await getDb().execute(sql`
     SELECT b.id AS skill_id, b.name, b.kind, b.status, b.display_name,
