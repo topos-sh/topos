@@ -91,10 +91,10 @@ test.describe("the public landing page", () => {
     // The Free card promises only what the hosted free plan enforces, in plain words.
     await expect(pricing).toContainText("Up to 3 people, unlimited agents and machines");
     await expect(pricing).toContainText("30 days of version history");
+    await expect(pricing).toContainText("Review and approval workflow");
     // The Team card's lines say only what is true today.
     await expect(pricing).toContainText("Unlimited people");
     await expect(pricing).toContainText("Unlimited version history");
-    await expect(pricing).toContainText("Review and approval workflow");
     // Self-hosting is the one line under the card row, not a tier.
     await expect(pricing.getByText("Self-hosted")).toHaveCount(0);
     await expect(pricing).toContainText("Topos is Apache-2.0, and self-hosting is free");

@@ -35,6 +35,7 @@ const TIERS: Tier[] = [
       "20 shared bundles, 250 MB of storage",
       "30 days of version history",
       "Automatic updates and contribute-back",
+      "Review and approval workflow",
     ],
     surface: "ground",
   },
@@ -43,12 +44,7 @@ const TIERS: Tier[] = [
     price: "$20",
     per: "/ seat / month",
     desc: "Hosted by us. Nothing to run, nothing to keep patched.",
-    feats: [
-      "Unlimited people",
-      "Unlimited bundles",
-      "Unlimited version history",
-      "Review and approval workflow",
-    ],
+    feats: ["Unlimited people", "Unlimited bundles", "Unlimited version history"],
     surface: "lead",
   },
   {
