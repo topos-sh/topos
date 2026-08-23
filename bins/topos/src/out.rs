@@ -71,6 +71,29 @@ pub(crate) fn stdout_line(args: Arguments<'_>) {
     STDOUT.write_line(&mut io::stdout().lock(), args);
 }
 
+/// One stdout PROTOCOL line — the relay's channel ([`crate::ops::relay`]): written and FLUSHED in
+/// one lock, because a protocol peer blocks on the reply and a piped stdout is block-buffered —
+/// an unflushed line would sit in the buffer exactly as long as the peer waits for it. The flush
+/// meets the same latch discipline as the write: a broken pipe latches the stream, anything else
+/// panics as the `std` macros would.
+pub(crate) fn stdout_protocol_line(args: Arguments<'_>) {
+    if STDOUT.closed() {
+        return;
+    }
+    let mut w = io::stdout().lock();
+    STDOUT.write_line(&mut w, args);
+    if STDOUT.closed() {
+        return;
+    }
+    match w.flush() {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+            STDOUT.closed.store(true, Ordering::Relaxed);
+        }
+        Err(e) => panic!("failed printing to {}: {e}", STDOUT.name),
+    }
+}
+
 /// One stderr line — the diagnostics channel (warnings, refusals, the version nag).
 pub(crate) fn stderr_line(args: Arguments<'_>) {
     STDERR.write_line(&mut io::stderr().lock(), args);

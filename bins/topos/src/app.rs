@@ -103,6 +103,9 @@ fn version_check_applies(command: &Command) -> bool {
             | Command::Update { quiet: true, .. }
             // `status` promises "offline, nothing dialed" — the passive probe would break it.
             | Command::Status { .. }
+            // `relay` streams protocol until the harness closes it — a nag line at that point
+            // would land in an agent's stderr log, hours after anyone typed anything.
+            | Command::Relay { .. }
     )
 }
 
@@ -202,6 +205,11 @@ fn run_command(
     let ids = RealIds;
     let clock = RealClock;
     let layout = Layout::new(&resolve_home());
+    // The relay serves a PROTOCOL STREAM on stdout — no envelope, no receipt, no renderer. It
+    // dispatches ahead of everything below that could put a non-protocol byte on that stream.
+    if let Command::Relay { url } = &command {
+        return ops::relay::run(&resolve_home(), url);
+    }
     // `--workspace` accepts the ADDRESS name as well as the opaque id — canonicalized ONCE here
     // (name → joined id, best-effort), so every downstream consumer keeps id semantics.
     let workspace = crate::sessions::canonicalize_workspace_flag(&fs, &layout, workspace);
@@ -451,6 +459,8 @@ fn run_command(
     match command {
         // Dispatched BEFORE state recovery above — the read-only promise admits no sweep write.
         Command::Status { .. } => unreachable!("status dispatches before state recovery"),
+        // Dispatched at the top of this function — a protocol stream starts before any of this.
+        Command::Relay { .. } => unreachable!("relay dispatches before every other surface"),
         // `init` — create this folder's `topos.toml`, or (with `-g`) materialize the global
         // manifest (idempotent; a no-op receipt when the file exists).
         Command::Init { global } => finish(

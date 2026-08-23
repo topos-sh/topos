@@ -122,7 +122,8 @@ never learns which machinery served which harness.
   plus the server it points at (`canonical_address`: scheme+host lowercased, default port dropped,
   bare root path equal to none, query and fragment significant — and `local_address` for an entry
   that RUNS something: its command line after the Windows wrapper is stripped, or, when that
-  command line is only a bridge, the URL it bridges, so bridging a server and dialing it are one
+  command line is only a bridge or topos's own relay (`topos relay <url>`, any binary path), the
+  URL behind it, so bridging a server, relaying it, and dialing it are one
   address), optionally at a `.`-separated
   `selector` whose `*` spans a level (`projects.*.mcpServers`). An entry whose shape is not read
   keeps its name and claims no address; an unreadable surface answers `None`, which is never an

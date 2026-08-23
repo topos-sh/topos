@@ -196,12 +196,27 @@ pub(crate) struct ScopeIo<'a> {
     /// the seam because "not placed: needs node" must be a TESTED outcome and not a property of
     /// the machine running the suite.
     pub runtimes: &'a dyn crate::mcp_render::RuntimeProbe,
+    /// The program a gateway-routed entry runs (`<this binary> relay <url>`) — resolved by the
+    /// caller ([`relay_program`] in production) and on the seam so a rendered command is a TESTED
+    /// byte sequence, not the path of whichever binary ran the suite.
+    pub relay_program: String,
     /// The scope's store layout — where `state/config_custody.json` and the per-bundle records live.
     pub layout: &'a Layout,
     /// The machine home (user surfaces resolve under it).
     pub home: PathBuf,
     /// `Some` = the PROJECT scope: surfaces are the project-relative ones, containment-proven.
     pub project_root: Option<PathBuf>,
+}
+
+/// The program a relay entry names in production: THIS binary, by its absolute path — the entry
+/// is spawned by a harness whose `PATH` nobody here controls. The bare name is the honest
+/// second-best when the path cannot be read or spelled (it resolves on the harness's own `PATH`,
+/// where every install script puts the binary anyway).
+pub(crate) fn relay_program() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "topos".to_owned())
 }
 
 /// One bundle's per-agent outcome this converge — answered by the IDENTITY the demand was filed
@@ -552,6 +567,7 @@ pub(crate) fn converge(
                 doc,
                 caps,
                 topos_harness::registry::mcp_bridge(),
+                Some(&io.relay_program),
                 io.runtimes,
                 machine,
                 gateway,

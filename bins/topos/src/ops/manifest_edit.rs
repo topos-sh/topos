@@ -4384,6 +4384,7 @@ fn converge_removed_mcp(
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
         runtimes: &crate::mcp_render::PathRuntimes,
+        relay_program: crate::mcp_engine::relay_program(),
         layout: &layout,
         home: roots.home.clone(),
         project_root: project_root.clone(),

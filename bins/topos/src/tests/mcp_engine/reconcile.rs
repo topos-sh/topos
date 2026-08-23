@@ -1445,12 +1445,13 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     );
 }
 
-/// **The whole flip, end to end.** A workspace that reaches a server on the agent's behalf delivers
-/// a document saying so; the sweep carries the session that delivery ran under into the demand, and
-/// the entry lands dialed with THIS machine's credential for that workspace. The document is
-/// recorded exactly as it arrived — the credential is never in it, and never comes down the wire.
+/// **The whole flip, end to end.** A workspace that reaches a server on the agent's behalf
+/// delivers a document saying so; the sweep carries the session that delivery ran under into the
+/// demand, and the entry lands as THIS binary relaying that address — the document recorded
+/// exactly as it arrived, the credential never in it, never on the wire, and never in the
+/// rendered config either: the relay reads it from the session store at call time.
 #[test]
-fn a_delivered_gateway_server_is_placed_with_this_machines_own_session_credential() {
+fn a_delivered_gateway_server_is_placed_as_this_binarys_own_relay() {
     let rig = Rig::new("gateway-sweep");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
@@ -1473,7 +1474,10 @@ fn a_delivered_gateway_server_is_placed_with_this_machines_own_session_credentia
         "{stored}"
     );
 
-    // Both hermetic configs dial the workspace's address, signed with this machine's own session.
+    // Both hermetic configs run the relay at the workspace's address — this test binary's own
+    // path, since the sweep names the program that is running it — and carry no credential.
+    let this_binary = std::env::current_exe().expect("this test binary has a path");
+    let this_binary = this_binary.to_str().expect("a UTF-8 path");
     for path in [
         rig.home.0.join(".cursor/mcp.json"),
         rig.home.0.join(".openclaw/openclaw.json"),
@@ -1483,7 +1487,14 @@ fn a_delivered_gateway_server_is_placed_with_this_machines_own_session_credentia
             text.contains("https://gw.example/sn_1/srv_linear"),
             "{path:?}: {text}"
         );
-        assert!(text.contains("Bearer cred-1"), "{path:?}: {text}");
+        assert!(
+            text.contains("relay") && text.contains(this_binary),
+            "the entry runs this binary's relay: {path:?}: {text}"
+        );
+        assert!(
+            !text.contains("cred-1"),
+            "no rendered byte carries the session credential: {path:?}: {text}"
+        );
         assert!(
             !text.contains("\"auth\""),
             "the document's own word was `oauth`, and OpenClaw spells that key — an entry the \
