@@ -927,6 +927,11 @@ export interface components {
              *     (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
              */
             placement_withheld?: string | null;
+            /**
+             * @description The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the
+             *     version this publish just shipped — the receipt's "this project is locked" line.
+             */
+            project_locked_version?: string | null;
             /** @description The canonical workspace reference the manifest now stores. **INFERRED** (additive-only). */
             reference?: string | null;
             /**
@@ -1059,6 +1064,11 @@ export interface components {
             /** @description The good version named by `--to` (the bytes being restored). */
             reverted_to: string;
             skill_id: string;
+            /**
+             * @description The workspace's ADDRESS (`<host>/<name>`) — the receipt names where the pointer moved.
+             *     **INFERRED** (additive-only).
+             */
+            workspace_address?: string | null;
         };
         /**
          * @description `POST /v1/reverts` body — a **forward** revert: the server constructs a new 1-parent commit carrying the

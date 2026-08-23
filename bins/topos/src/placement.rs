@@ -1863,7 +1863,9 @@ fn row_dest_for(
         let member = format!("{}/{}", origin.origin.source, lock.name);
         for row in &doc.rows {
             if row.shape.canonical() == member {
-                if row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Skill) {
+                if row.section == crate::manifest::document::SectionKind::Mcp
+                    || row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Skill)
+                {
                     return None;
                 }
                 return value_dest(&row.value);
@@ -1881,7 +1883,9 @@ fn row_dest_for(
         let KeyShape::LocalPath { raw } = &row.shape else {
             continue;
         };
-        if row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Skill) {
+        if row.section == crate::manifest::document::SectionKind::Mcp
+            || row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Skill)
+        {
             continue;
         }
         let base = match ctx.layout.project_root() {

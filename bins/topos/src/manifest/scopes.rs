@@ -55,6 +55,9 @@ pub(crate) struct PlanRow {
     pub reference: String,
     pub shape: KeyShape,
     pub value: EntryValue,
+    /// The section the row was spelled in — the v2 grammar's kind carrier: a `[mcp]` row IS an
+    /// MCP row, path value or not; a `kind` field remains the value-level override.
+    pub section: crate::manifest::document::SectionKind,
 }
 
 impl PlanRow {
@@ -63,6 +66,21 @@ impl PlanRow {
             reference: row.reference.clone(),
             shape: row.shape.clone(),
             value: row.value.clone(),
+            section: row.section,
+        }
+    }
+
+    /// The row's BUNDLE KIND — the section first (the v2 grammar's carrier), the value's `kind`
+    /// field as the override, skill as the default the grammar itself defaults to.
+    pub(crate) fn kind(&self) -> crate::bundle_kind::BundleKind {
+        if let Some(k) = self.value.declared_kind()
+            && k == crate::bundle_kind::BundleKind::Mcp
+        {
+            return k;
+        }
+        match self.section {
+            crate::manifest::document::SectionKind::Mcp => crate::bundle_kind::BundleKind::Mcp,
+            _ => crate::bundle_kind::BundleKind::Skill,
         }
     }
 
@@ -78,7 +96,7 @@ impl PlanRow {
     /// on either side of the wire. It reads as ABSENT, silently — a warning about it would be a
     /// line with no act behind it, and the row does exactly what an unpinned one does.
     pub(crate) fn pin(&self) -> Option<String> {
-        if self.value.declared_kind() == Some(crate::bundle_kind::BundleKind::Mcp) {
+        if self.kind() == crate::bundle_kind::BundleKind::Mcp {
             return None;
         }
         match &self.value {
