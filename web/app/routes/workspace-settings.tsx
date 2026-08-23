@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
 import type { LastSetLine } from "@/components/policy/last-set-line";
+import { McpGatewayPolicyPanel } from "@/components/policy/mcp-gateway-panel";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
 import { SessionApprovalPanel } from "@/components/policy/session-approval-panel";
@@ -13,6 +14,7 @@ import { composition } from "@/composition.server";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
+  setMcpGateway,
   setRegistration,
   setSessionApproval,
   setSessionMaxAge,
@@ -46,17 +48,25 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
-  const [policy, lastReview, lastStaleness, lastRegistration, lastSessionApproval, lastMaxAge] =
-    await Promise.all([
-      workspacePolicyOf(actor),
-      lastAuditEventOfKind(actor, "policy_review_default"),
-      lastAuditEventOfKind(actor, "policy_staleness"),
-      registrationGoverns
-        ? lastAuditEventOfKind(actor, "policy_registration")
-        : Promise.resolve(undefined),
-      lastAuditEventOfKind(actor, "policy_session_approval"),
-      lastAuditEventOfKind(actor, "policy_session_max_age"),
-    ]);
+  const [
+    policy,
+    lastReview,
+    lastStaleness,
+    lastRegistration,
+    lastSessionApproval,
+    lastMaxAge,
+    lastMcpGateway,
+  ] = await Promise.all([
+    workspacePolicyOf(actor),
+    lastAuditEventOfKind(actor, "policy_review_default"),
+    lastAuditEventOfKind(actor, "policy_staleness"),
+    registrationGoverns
+      ? lastAuditEventOfKind(actor, "policy_registration")
+      : Promise.resolve(undefined),
+    lastAuditEventOfKind(actor, "policy_session_approval"),
+    lastAuditEventOfKind(actor, "policy_session_max_age"),
+    lastAuditEventOfKind(actor, "policy_mcp_gateway"),
+  ]);
   return {
     isOwner,
     registrationGoverns,
@@ -67,12 +77,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     registration: policy.registration,
     sessionApproval: policy.sessionApproval,
     sessionMaxAgeMs: policy.sessionMaxAgeMs,
+    mcpGateway: policy.mcpGateway,
     lastSet: {
       review: lastSetOf(lastReview),
       staleness: lastSetOf(lastStaleness),
       registration: lastSetOf(lastRegistration),
       sessionApproval: lastSetOf(lastSessionApproval),
       sessionMaxAge: lastSetOf(lastMaxAge),
+      mcpGateway: lastSetOf(lastMcpGateway),
     },
   };
 }
@@ -111,6 +123,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "set-session-max-age") {
     return sessionMaxAgeIntent(request, ws, formData);
+  }
+  if (intent === "set-mcp-gateway") {
+    return mcpGatewayIntent(request, ws, formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -224,6 +239,18 @@ async function sessionMaxAgeIntent(request: Request, ws: string, formData: FormD
   return { intent: "set-session-max-age" as const, ...result };
 }
 
+/** The workspace-wide gateway switch — `off` routes every MCP server directly; default on. */
+async function mcpGatewayIntent(request: Request, ws: string, formData: FormData) {
+  const value = String(formData.get("mcp_gateway") ?? "");
+  const result = await knobIntent(request, ws, {
+    auditKind: "policy_mcp_gateway",
+    detail: value,
+    run: (owner) => setMcpGateway(owner, value),
+    deniedError: () => "Choose on or off.",
+  });
+  return { intent: "set-mcp-gateway" as const, ...result };
+}
+
 /** The session-approval knob — `on` bears non-owner logins pending; default off. */
 async function sessionApprovalIntent(request: Request, ws: string, formData: FormData) {
   const value = String(formData.get("session_approval") ?? "");
@@ -247,6 +274,7 @@ export default function WorkspaceSettings() {
     registration,
     sessionApproval,
     sessionMaxAgeMs,
+    mcpGateway,
     lastSet,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
@@ -284,6 +312,11 @@ export default function WorkspaceSettings() {
         isOwner={isOwner}
         sessionMaxAgeMs={sessionMaxAgeMs}
         lastSet={lastSet.sessionMaxAge}
+      />
+      <McpGatewayPolicyPanel
+        isOwner={isOwner}
+        mcpGateway={mcpGateway}
+        lastSet={lastSet.mcpGateway}
       />
       {registrationGoverns && (
         <RegistrationPanel

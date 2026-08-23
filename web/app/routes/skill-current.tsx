@@ -11,7 +11,7 @@ import {
 import { VersionFiles } from "@/components/browse/version-files";
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime } from "@/components/format";
-import { McpGatewayPanel } from "@/components/skill/mcp-gateway";
+import { McpGatewayPanel, McpGatewayRouteCard } from "@/components/skill/mcp-gateway";
 import { McpServerPanel, type McpServerView } from "@/components/skill/mcp-server";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillInviteAffordance } from "@/components/skill/skill-invite";
@@ -41,14 +41,20 @@ import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { channelsCarrying } from "@/lib/db/queries.channels.server";
 import { assignBundle, assignedToEveryone, unassign } from "@/lib/db/queries.feed.server";
-import { mcpCredentialIdFor, setMcpToolPolicy } from "@/lib/db/queries.gateway.server";
+import {
+  mcpCredentialIdFor,
+  setMcpGatewayRoute,
+  setMcpToolPolicy,
+} from "@/lib/db/queries.gateway.server";
 import { editPrivateMcpServer, mcpServerFace } from "@/lib/db/queries.mcp-catalog.server";
+import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import { createInvitations, foldInviteEmail } from "@/lib/db/queries.roster.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { type AppliedOnSession, yourSessionsApplying } from "@/lib/db/queries.sessions.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { gatewayLane } from "@/lib/gateway/client.server";
 import { beginAuthorize, deleteCredential } from "@/lib/gateway/credentials.server";
+import { gatewayPublicBase } from "@/lib/gateway/delivery.server";
 import { mcpGatewayView } from "@/lib/gateway/panel.server";
 import { refreshObservedTools } from "@/lib/gateway/tools.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
@@ -128,7 +134,33 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
           authMode: server.authMode,
         });
 
+  // THE VIEWER'S OWN ROUTE for this server — rendered only where the choice (or the mandate that
+  // took it) can matter: an addressable server, a deployment whose delivery hands out gateway
+  // addresses, the workspace switch on. `toggle` = the choice is theirs (no mandate stands);
+  // `required` = the one line saying it is not.
+  const route =
+    server === null || server.resolved === null || server.resolved.url === null
+      ? null
+      : await (async () => {
+          if (gatewayPublicBase() === null) {
+            return null;
+          }
+          const policy = await workspacePolicyOf(memberActor);
+          if (policy.mcpGateway !== "on") {
+            return null;
+          }
+          if (server.gatewayPolicy === "required") {
+            return { kind: "required" as const };
+          }
+          if (server.gatewayPolicy === null) {
+            return { kind: "toggle" as const, usingGateway: !server.gatewayOptedOut };
+          }
+          return null;
+        })();
+
   return {
+    /** The member's route control: a toggle under Auto, the mandate line under Required. */
+    route,
     face: "page" as const,
     wsName: workspace.name,
     skill,
@@ -226,7 +258,50 @@ export async function action({ request, params }: ActionFunctionArgs) {
   ) {
     return gatewayIntent(request, workspace, actor, bundleNameOf(params), intent, formData);
   }
+  if (intent === "gateway-route") {
+    return gatewayRouteIntent(actor, bundleNameOf(params), formData);
+  }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
+}
+
+/**
+ * THE MEMBER'S OWN ROUTE — gateway or direct, for their machines alone. Gated the way the
+ * control renders: no gateway delivery on this install = the path does not exist, and a mandate
+ * (either direction) owns the route, so a post against one is refused rather than written as an
+ * inert row.
+ */
+async function gatewayRouteIntent(actor: MemberActor, bundleName: string, formData: FormData) {
+  if (gatewayPublicBase() === null) {
+    notFound();
+  }
+  const row = await skillIndexRow(actor, bundleName);
+  const server = row === undefined ? null : await mcpServerFace(actor, row.skillId);
+  if (server === null) {
+    notFound();
+  }
+  if (server.gatewayPolicy !== null) {
+    return data(
+      {
+        intent: "gateway-route" as const,
+        status: "error" as const,
+        message: "The workspace sets the route for this server.",
+      },
+      { status: 400 },
+    );
+  }
+  const useGateway = String(formData.get("use_gateway") ?? "") === "true";
+  const outcome = await setMcpGatewayRoute(actor, server.serverId, useGateway);
+  if (outcome === "saved") {
+    return data({ intent: "gateway-route" as const, status: "ok" as const });
+  }
+  return data(
+    {
+      intent: "gateway-route" as const,
+      status: "error" as const,
+      message: "This workspace is no longer connected to that server.",
+    },
+    { status: 400 },
+  );
 }
 
 /** The reply every gateway arm answers with when it did not land — one honest sentence, scoped to
@@ -572,6 +647,7 @@ function SkillCurrentContent({
   everyoneAssigned,
   server,
   gateway,
+  route,
   mailArmed,
   isOwner,
 }: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
@@ -607,6 +683,7 @@ function SkillCurrentContent({
           </p>
         </Card>
       )}
+      {route !== null && <McpGatewayRouteCard route={route} />}
       {gateway !== null && <McpGatewayPanel view={gateway} />}
       <DeliverySection
         skillId={skillId}

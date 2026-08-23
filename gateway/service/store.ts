@@ -163,7 +163,15 @@ export class PgStore implements GatewayStore {
          LEFT JOIN web.mcp_server_revision r
            ON r.id = COALESCE(bm.pinned_revision_id, ms.current_revision_id)
           AND r.server_id = ms.id
-        WHERE bm.workspace_id = $1 AND bm.server_id = $2 AND b.status = 'active'`,
+        WHERE bm.workspace_id = $1 AND bm.server_id = $2 AND b.status = 'active'
+          -- ROUTING MANDATES ARE ENFORCED HERE, not just rendered into configs: a workspace
+          -- whose gateway switch is off, or a connection an owner set 'direct', is refused the
+          -- same way a server that was never connected is — delivery stops advertising the
+          -- address, and this row is what stops the address itself from working. A member's own
+          -- opt-out is deliberately NOT here: with no mandate both routes are legitimate, and a
+          -- machine still holding a gateway entry mid-sweep must keep working.
+          AND w.mcp_gateway = 'on'
+          AND (bm.gateway_policy IS NULL OR bm.gateway_policy <> 'direct')`,
       [workspaceId, serverId],
     );
     const row = result.rows[0];

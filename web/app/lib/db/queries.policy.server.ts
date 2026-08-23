@@ -22,6 +22,8 @@ export interface WorkspacePolicy {
   sessionApproval: "off" | "on";
   /** The owner-set session expiry (ms), or null — the default — when sessions never expire. */
   sessionMaxAgeMs: number | null;
+  /** The workspace-wide gateway switch: 'off' = no MCP server here routes through the gateway. */
+  mcpGateway: "off" | "on";
 }
 
 /** The workspace's policy knobs, one read. */
@@ -33,6 +35,7 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
       registration: workspace.registration,
       sessionApproval: workspace.sessionApproval,
       sessionMaxAgeMs: workspace.sessionMaxAgeMs,
+      mcpGateway: workspace.mcpGateway,
     })
     .from(workspace)
     .where(eq(workspace.id, actor.workspaceId))
@@ -47,6 +50,7 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
     registration: row.registration as WorkspacePolicy["registration"],
     sessionApproval: row.sessionApproval as WorkspacePolicy["sessionApproval"],
     sessionMaxAgeMs: row.sessionMaxAgeMs,
+    mcpGateway: row.mcpGateway as WorkspacePolicy["mcpGateway"],
   };
 }
 
@@ -152,5 +156,19 @@ export async function setSessionApproval(
     return "bad_value";
   }
   await setKnob(actor, { sessionApproval: value }, "policy_session_approval", value);
+  return "set";
+}
+
+export type McpGatewayKnobOutcome = "set" | "bad_value";
+
+/** The workspace-wide gateway switch — 'off' routes every MCP server directly; default on. */
+export async function setMcpGateway(
+  actor: OwnerActor,
+  value: string,
+): Promise<McpGatewayKnobOutcome> {
+  if (value !== "off" && value !== "on") {
+    return "bad_value";
+  }
+  await setKnob(actor, { mcpGateway: value }, "policy_mcp_gateway", value);
   return "set";
 }

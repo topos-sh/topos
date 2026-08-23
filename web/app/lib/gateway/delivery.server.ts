@@ -2,23 +2,29 @@ import { serverEnv } from "@/env.server";
 import { DELIVERED_AUTH_KEY } from "@/lib/db/queries.mcp-catalog.server";
 
 /**
- * THE DELIVERY FLIP. Where a gateway is deployed, a machine no longer dials the upstream MCP
- * server: it dials this deployment's gateway, at an address that names the CALLING session and the
- * server it wants, and the gateway attaches the workspace's sign-in on the far side.
+ * THE GATEWAY REWRITE. Where routing resolves to the gateway, a machine no longer dials the
+ * upstream MCP server: it dials this deployment's gateway, at an address that names the CALLING
+ * session and the server it wants, and the gateway attaches the workspace's sign-in on the far
+ * side.
  *
  * So delivery rewrites the document it hands over — the same document, with its remotes replaced by
  * the one gateway address and a `_meta` flag saying so. The flag is what a renderer branches on: it
  * attaches the machine's OWN standing credential to that address (the server never delivers a
  * secret), and stops teaching a per-machine sign-in that no longer happens.
  *
- * Three things this deliberately does NOT do:
+ * WHETHER a given row is rewritten is the delivery query's ruling (queries.lane.server.ts): the
+ * workspace switch, the connection's `gateway_policy`, the member's own choice — and, where no
+ * mandate stands, whether a sign-in ALREADY EXISTS at the gateway. That last part is a deliberate
+ * reversal of this module's original stance that delivery never reads sign-in state: an address
+ * whose first call can only answer "sign in first" breaks a server that was working directly, so
+ * the un-mandated route follows the credential, in both directions.
+ *
+ * Two things this still deliberately does NOT do:
  *  - it does not touch a PACKAGE-ONLY document. A server a machine installs and runs over its own
  *    pipes has no address to redirect, and putting one there would be inventing a capability.
- *  - it does not rewrite when `GATEWAY_PUBLIC_URL` is unset. That is the whole rollback: clear the
- *    variable and the next delivery carries the direct shape again.
- *  - it does not decide policy or sign-in state. Those are read at CALL time by the gateway, from
- *    rows; a delivered document that says "go through the gateway" is not a claim that a sign-in
- *    exists.
+ *  - it does not rewrite when `GATEWAY_PUBLIC_URL` is unset. Clearing the variable is still the
+ *    deployment-wide rollback: the next delivery carries the direct shape again (and a `required`
+ *    connection is then withheld rather than quietly delivered direct).
  */
 
 /** The `_meta` key a renderer reads to know an entry is proxied. */

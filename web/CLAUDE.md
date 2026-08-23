@@ -34,9 +34,18 @@ caller.
   preserved) and the write answers `empty_selection`. Three env vars, all optional and none
   defaulted: `GATEWAY_INTERNAL_URL` +
   `GATEWAY_INTERNAL_TOKEN` (paired — half a lane refuses at parse time) arm the lane and the
-  server-page sections; `GATEWAY_PUBLIC_URL` arms the DELIVERY FLIP
-  (`app/lib/gateway/delivery.server.ts`), where an addressable server's delivered document gets ONE
-  remote at the gateway plus `_meta["sh.topos/gateway"]`. Unset, every one of those surfaces is
+  server-page sections; `GATEWAY_PUBLIC_URL` arms GATEWAY DELIVERY: where set, each MCP row is
+  ROUTED per delivery (`deliveryFor` in `queries.lane.server.ts`; the rewrite itself is
+  `app/lib/gateway/delivery.server.ts` — one remote at the gateway plus
+  `_meta["sh.topos/gateway"]`). Routing is three layers, first answer wins: the workspace switch
+  (`workspace.mcp_gateway`, off = direct for everything) · the connection's owner mandate
+  (`bundle_mcp.gateway_policy`: 'direct' = direct for everyone, 'required' = gateway for
+  everyone — a machine that cannot place gateway entries gets NO row, never a quiet direct
+  fallback; both mandates are ALSO enforced in the gateway's own resolver) · NULL = Auto, where
+  the member's own opt-out row (`web.mcp_gateway_optout`) and the standing sign-in decide — a
+  sign-in server keeps its own address until a credential stands at the gateway (read via the
+  metadata mirror; a DELIBERATE reversal of the old "delivery never reads sign-in state" stance),
+  and an `auth_mode = 'none'` server routes at once. Unset, every one of those surfaces is
   simply absent and delivery carries the stored document — the whole rollback is clearing a
   variable.
 - **One identity.** A person is a `user.id` (Better Auth); email is a mutable login attribute —

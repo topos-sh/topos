@@ -1,8 +1,8 @@
 import { and, asc, eq, sql } from "drizzle-orm";
-import type { MemberActor } from "@/lib/auth/guards.server";
+import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
-import { mcpToolPolicy, mcpToolSelection } from "@/lib/db/schema.app";
+import { bundleMcp, mcpGatewayOptout, mcpToolPolicy, mcpToolSelection } from "@/lib/db/schema.app";
 import { gatewayCredential, gatewayObservedTool } from "@/lib/db/schema.gateway";
 
 /**
@@ -10,9 +10,11 @@ import { gatewayCredential, gatewayObservedTool } from "@/lib/db/schema.gateway"
  * (SELECT-only, grant-enforced) and ONE write over this tier's policy tables.
  *
  * Callers must have established that a gateway is deployed (`gatewayLane() !== null`) BEFORE
- * calling anything here: on an install with no gateway the `gateway` schema does not exist, and
- * these reads would be an error rather than an empty answer. That check belongs at the top of the
- * loader, where it also decides whether the sections render at all.
+ * calling anything here that reads the `gateway` schema: on an install with no gateway that
+ * schema does not exist, and these reads would be an error rather than an empty answer. That
+ * check belongs at the top of the loader, where it also decides whether the sections render at
+ * all. The ROUTING writes further down are the named exception — web rows only, deployment
+ * independent.
  *
  * Every function takes the branded MemberActor and scopes to `actor.workspaceId`, so a server id
  * from another workspace reads as nothing — the same answer an id naming no server gets. Reading a
@@ -247,6 +249,98 @@ export async function setMcpToolPolicy(
       outcome: "ok",
       // Counts, never the names: the trail says how far a policy narrowed, and the rows say which.
       details: { mode: next.mode, selected: wanted.length },
+    });
+    return "saved";
+  });
+}
+
+// ── Routing — the connection's mandate and the member's own choice ──────────────────────────
+//
+// These two write WEB rows only (the connection's `gateway_policy` and the member's opt-out) and
+// are deliberately deployment-independent: routing is durable configuration, meaningful before a
+// gateway exists and after one is removed, so neither asks `gatewayLane()` first. Delivery reads
+// both; the gateway's resolver enforces the mandate half.
+
+export type GatewayPolicyOutcome = "saved" | "not_connected";
+
+/**
+ * THE OWNER'S ROUTING MANDATE for one connection: 'auto' (the NULL column — route where a
+ * gateway is deployed and a sign-in stands, member's choice honored), 'direct' (never the
+ * gateway, for anyone), 'required' (always the gateway, for everyone — a machine that cannot be
+ * handed a gateway address receives no entry at all). One transaction: the column, then the
+ * audit row.
+ */
+export async function setMcpGatewayPolicy(
+  actor: OwnerActor,
+  serverId: string,
+  value: "auto" | "direct" | "required",
+): Promise<GatewayPolicyOutcome> {
+  return await getDb().transaction(async (tx) => {
+    const updated = await tx
+      .update(bundleMcp)
+      .set({ gatewayPolicy: value === "auto" ? null : value })
+      .where(and(eq(bundleMcp.workspaceId, actor.workspaceId), eq(bundleMcp.serverId, serverId)))
+      .returning({ serverId: bundleMcp.serverId });
+    if (updated.length === 0) {
+      return "not_connected";
+    }
+    await auditInTx(tx, {
+      workspaceId: actor.workspaceId,
+      actor: { userId: actor.userId, display: actor.display },
+      kind: "mcp_gateway_policy",
+      subject: serverId,
+      outcome: "ok",
+      details: { policy: value },
+    });
+    return "saved";
+  });
+}
+
+export type GatewayRouteOutcome = "saved" | "not_connected";
+
+/**
+ * THE MEMBER'S OWN ROUTE for one connection — gateway (the default: no row) or direct (a row).
+ * Self-scoped by construction: the row it writes or deletes is the actor's own, and it changes
+ * which document THEIR machines are delivered, nothing anyone else receives. Setting the state
+ * it already has is a no-op that still answers "saved" — the answer is the state, not the write.
+ */
+export async function setMcpGatewayRoute(
+  actor: MemberActor,
+  serverId: string,
+  useGateway: boolean,
+): Promise<GatewayRouteOutcome> {
+  return await getDb().transaction(async (tx) => {
+    const connected = await tx.execute(sql`
+      SELECT 1 FROM web.bundle_mcp
+      WHERE workspace_id = ${actor.workspaceId} AND server_id = ${serverId}
+      LIMIT 1
+    `);
+    if (connected.rows.length === 0) {
+      return "not_connected";
+    }
+    if (useGateway) {
+      await tx
+        .delete(mcpGatewayOptout)
+        .where(
+          and(
+            eq(mcpGatewayOptout.workspaceId, actor.workspaceId),
+            eq(mcpGatewayOptout.serverId, serverId),
+            eq(mcpGatewayOptout.userId, actor.userId),
+          ),
+        );
+    } else {
+      await tx
+        .insert(mcpGatewayOptout)
+        .values({ workspaceId: actor.workspaceId, serverId, userId: actor.userId })
+        .onConflictDoNothing();
+    }
+    await auditInTx(tx, {
+      workspaceId: actor.workspaceId,
+      actor: { userId: actor.userId, display: actor.display },
+      kind: "mcp_gateway_route",
+      subject: serverId,
+      outcome: "ok",
+      details: { use_gateway: useGateway },
     });
     return "saved";
   });
