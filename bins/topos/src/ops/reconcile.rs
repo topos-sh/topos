@@ -1052,12 +1052,33 @@ impl ScopeCtx<'_> {
     }
 
     /// The lock's commit for a repo-skill row (install semantics only).
-    fn lock_commit(&self, name: &str) -> Option<String> {
+    fn lock_commit(&self, name: &str, source: &str) -> Option<String> {
         let lock = self.lock?;
         if lock.mode == LockMode::Update {
             return None;
         }
-        lock.doc.skills.get(name).and_then(|s| s.commit.clone())
+        let entry = lock.doc.skills.get(name)?;
+        // The commit BINDS to its source: a row re-pointed at another repository must never
+        // fetch repository B at repository A's recorded commit — the stale entry reads as
+        // absent, install re-resolves the row as a fill, and frozen's agreement check refuses.
+        if entry.source.as_deref() != Some(source) {
+            return None;
+        }
+        entry.commit.clone()
+    }
+
+    /// The lock's revision for an `[mcp]` entry (install semantics only).
+    fn locked_revision(&self, name: &str) -> Option<String> {
+        let lock = self.lock?;
+        if lock.mode == LockMode::Update {
+            return None;
+        }
+        lock.doc.mcp.get(name).cloned()
+    }
+
+    /// Whether this run is `--frozen`.
+    fn frozen(&self) -> bool {
+        self.lock.is_some_and(|l| l.mode == LockMode::Frozen)
     }
 
     /// The frozen member list for a channel, when the lock holds one (install semantics only).
@@ -1639,7 +1660,10 @@ pub(crate) fn manifest_update(
                     )));
                 }
             },
-            Ok(None) | Err(_) => LockDoc::default(),
+            Ok(None) => LockDoc::default(),
+            // Unreadability is NOT absence: placing bytes against a lock this run never read
+            // could overwrite a resolution it was supposed to keep.
+            Err(e) => return Err(e.into()),
         };
         if opts.lock == LockMode::Frozen {
             let mut missing: Vec<String> = Vec::new();
@@ -1660,6 +1684,44 @@ pub(crate) fn manifest_update(
                 if !covered {
                     missing.push(name.to_owned());
                     continue;
+                }
+                // A COVERED channel still owes its members their own entries: a member with
+                // no [skills]/[mcp] entry would install at the catalog's current — exactly the
+                // unpinned write frozen refuses.
+                if let KeyShape::Channel { .. } = &row.shape
+                    && let Some(members) = doc.channels.get(name)
+                {
+                    for m in members {
+                        if !doc.skills.contains_key(m) && !doc.mcp.contains_key(m) {
+                            missing.push(format!("{m} (a member of channel {name})"));
+                        }
+                    }
+                }
+                // A repo row's commit BINDS to its source: a row re-pointed at another
+                // repository with a stale entry is a disagreement, not coverage.
+                if let KeyShape::RepoSkill {
+                    host, owner, repo, ..
+                } = &row.shape
+                {
+                    let spelled = format!(
+                        "{}:{owner}/{repo}",
+                        if host == "bitbucket.org" {
+                            "bitbucket"
+                        } else {
+                            "github"
+                        }
+                    );
+                    if doc
+                        .skills
+                        .get(name)
+                        .and_then(|s| s.source.as_deref())
+                        .is_some_and(|rec| rec != spelled)
+                    {
+                        disagree.push(format!(
+                            "{name} (topos.toml names {spelled}, topos.lock records another \
+                             source)"
+                        ));
+                    }
                 }
                 // COVERAGE is not AGREEMENT: a toml pin the lock does not record is a
                 // disagreement frozen must refuse — installing the pin while the lock says
@@ -1702,6 +1764,79 @@ pub(crate) fn manifest_update(
                     "--frozen: {} — run `topos install` once (or `topos update`), then commit \
                      the lock",
                     parts.join("; ")
+                )));
+            }
+            // The PREFLIGHT: every locked workspace version this run will place is fetched into
+            // the scope's store and digest-verified BEFORE the first placement, so a failing
+            // input refuses the run with the checkout untouched — never a half-installed
+            // recipe behind a green-looking start. (Repo-skill tarballs still fetch inside
+            // their own arm; their failures refuse at the tail — a residual of the forge
+            // lane's download-then-place shape.)
+            let mut demanded: HashSet<&str> = plan
+                .things
+                .iter()
+                .chain(plan.sets.iter())
+                .map(|r| r.shape.leaf_name())
+                .collect();
+            for row in plan.sets.iter() {
+                if let KeyShape::Channel { .. } = &row.shape
+                    && let Some(members) = doc.channels.get(row.shape.leaf_name())
+                {
+                    demanded.extend(members.iter().map(String::as_str));
+                }
+            }
+            let mut unstageable: Vec<String> = Vec::new();
+            match sidecar::ensure_project_store(ctx.fs, dir) {
+                Err(e) => return Err(e),
+                Ok(store_layout) => {
+                    for (name, entry) in &doc.skills {
+                        if !demanded.contains(name.as_str()) {
+                            continue;
+                        }
+                        let Some(version) = entry.version.as_deref() else {
+                            continue; // repo entries stage in their own arm
+                        };
+                        let found = runs.iter().find_map(|r| {
+                            let catalog = r.catalog(&mut sweep.warnings)?;
+                            let id = catalog
+                                .skills
+                                .iter()
+                                .find(|e| &e.name == name)
+                                .map(|e| e.skill_id.clone())
+                                .or_else(|| {
+                                    catalog
+                                        .mcp_servers
+                                        .iter()
+                                        .find(|e| &e.name == name)
+                                        .map(|e| e.skill_id.clone())
+                                })?;
+                            Some((r, id))
+                        });
+                        let Some((run, skill_id)) = found else {
+                            unstageable.push(format!("{name} (no connected catalog serves it)"));
+                            continue;
+                        };
+                        let Ok(sid) = SkillId::parse(&skill_id) else {
+                            unstageable.push(format!("{name} (malformed id)"));
+                            continue;
+                        };
+                        let run_ctx = super::pull::ctx_with_store(
+                            ctx,
+                            &store_layout,
+                            run.transports.plane.as_plane(),
+                            &follow,
+                        );
+                        if let Err(e) = sync_engine::prefetch_version(&run_ctx, &sid, version) {
+                            unstageable
+                                .push(format!("{name} ({})", crate::render::safe_message(&e)));
+                        }
+                    }
+                }
+            }
+            if !unstageable.is_empty() {
+                return Err(ClientError::InvalidArgument(format!(
+                    "--frozen: could not stage {} — nothing was placed",
+                    unstageable.join(", ")
                 )));
             }
         }
@@ -2146,85 +2281,112 @@ pub(crate) fn manifest_update(
         } else {
             let targeted = !opts.targets.is_empty();
             let mut pin_lines: Vec<Message> = Vec::new();
-            let mut newdoc = if state.mode == LockMode::Update && !targeted {
-                sweep.lock_harvest.clone()
-            } else {
-                // Install (and every targeted run): standing entries win — except a targeted
-                // UPDATE, whose visited entries take their re-resolved values; harvest fills
-                // gaps; a full install drops entries whose rows are gone.
-                let mut d = if targeted {
-                    state.doc.clone()
-                } else {
-                    LockDoc::default()
-                };
-                d.warnings = Vec::new();
-                for (name, skill) in &sweep.lock_harvest.skills {
-                    let keep_standing =
-                        state.mode != LockMode::Update && !sweep.lock_pin_overrides.contains(name);
-                    let value = if keep_standing {
-                        state
-                            .doc
-                            .skills
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_else(|| skill.clone())
-                    } else {
-                        skill.clone()
-                    };
-                    if !keep_standing
-                        && state.mode != LockMode::Update
-                        && state.doc.skills.get(name).is_some_and(|old| *old != value)
-                    {
+            // THE MERGE, by one rule: the lock is NEVER truncated by a failure. Every write
+            // starts from the STANDING document; the harvest overlays what this run actually
+            // re-decided — an update's re-resolutions, an install's fills and toml-pin
+            // reconciliations — and only a FULL run prunes, only entries the manifest provably
+            // no longer demands. A row whose resolution FAILED this run has no harvest and
+            // therefore keeps its standing entry, said out loud.
+            let mut newdoc = state.doc.clone();
+            newdoc.warnings = Vec::new();
+            let update = state.mode == LockMode::Update;
+            for (name, skill) in &sweep.lock_harvest.skills {
+                let take = update
+                    || !newdoc.skills.contains_key(name)
+                    || sweep.lock_pin_overrides.contains(name);
+                if take {
+                    if !update && state.doc.skills.get(name).is_some_and(|old| old != skill) {
                         pin_lines.push(crate::message::disclosure(
                             "LOCK_PINNED",
                             format!(
                                 "topos.lock now records the pinned {name}@{}",
-                                value
+                                skill
                                     .version
                                     .as_deref()
-                                    .or(value.commit.as_deref())
+                                    .or(skill.commit.as_deref())
                                     .map(|v| &v[..v.len().min(12)])
                                     .unwrap_or("?")
                             ),
                         ));
                     }
-                    d.skills.insert(name.clone(), value);
+                    newdoc.skills.insert(name.clone(), skill.clone());
                 }
-                for (name, rev) in &sweep.lock_harvest.mcp {
-                    let value = if state.mode != LockMode::Update {
-                        state
-                            .doc
-                            .mcp
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_else(|| rev.clone())
-                    } else {
-                        rev.clone()
-                    };
-                    d.mcp.insert(name.clone(), value);
+            }
+            for (name, rev) in &sweep.lock_harvest.mcp {
+                if update
+                    || !newdoc.mcp.contains_key(name)
+                    || sweep.lock_pin_overrides.contains(name)
+                {
+                    newdoc.mcp.insert(name.clone(), rev.clone());
                 }
-                for (name, members) in &sweep.lock_harvest.channels {
-                    let value = if state.mode != LockMode::Update {
-                        state
-                            .doc
-                            .channels
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_else(|| members.clone())
-                    } else {
-                        members.clone()
-                    };
-                    d.channels.insert(name.clone(), value);
+            }
+            for (name, members) in &sweep.lock_harvest.channels {
+                if update || !newdoc.channels.contains_key(name) {
+                    newdoc.channels.insert(name.clone(), members.clone());
                 }
-                d
-            };
-            newdoc.workspace = plan.workspace.as_ref().map(|(h, w)| format!("{h}/{w}"));
-            newdoc.warnings = Vec::new();
-            // `update`'s PROMISED receipt: the old → new rows, from the one place both stand —
-            // the lock being replaced and the lock about to be written. Version moves say both
-            // ends; a channel says its member changes. Install runs say nothing here (their
-            // lock never moves an entry).
-            if state.mode == LockMode::Update {
+            }
+            // The PRUNE, full runs only: an entry is dropped only when the manifest provably
+            // no longer demands its name — not because a lookup failed to harvest it.
+            if !targeted {
+                let mut demanded: HashSet<String> = plan
+                    .things
+                    .iter()
+                    .chain(plan.sets.iter())
+                    .map(|r| r.display_name())
+                    .collect();
+                for members in newdoc.channels.values() {
+                    for m in members {
+                        demanded.insert(m.clone());
+                    }
+                }
+                let channel_rows: HashSet<String> = plan
+                    .sets
+                    .iter()
+                    .filter(|r| matches!(r.shape, KeyShape::Channel { .. }))
+                    .map(|r| r.display_name())
+                    .collect();
+                newdoc
+                    .channels
+                    .retain(|name, _| channel_rows.contains(name));
+                // Recompute after the channel prune — a dropped channel takes its members'
+                // demand with it (unless another row still names them).
+                let mut demanded_after: HashSet<String> = plan
+                    .things
+                    .iter()
+                    .chain(plan.sets.iter())
+                    .map(|r| r.display_name())
+                    .collect();
+                for members in newdoc.channels.values() {
+                    for m in members {
+                        demanded_after.insert(m.clone());
+                    }
+                }
+                let _ = demanded;
+                newdoc
+                    .skills
+                    .retain(|name, _| demanded_after.contains(name));
+                newdoc.mcp.retain(|name, _| demanded_after.contains(name));
+                // An update that could not re-resolve a still-demanded entry KEEPS it — say so.
+                if update {
+                    for (name, kept) in &newdoc.skills {
+                        if !sweep.lock_harvest.skills.contains_key(name) {
+                            pin_lines.push(crate::message::disclosure(
+                                "LOCK_KEPT",
+                                format!(
+                                    "{name}: could not re-resolve — the lock keeps {}",
+                                    kept.version
+                                        .as_deref()
+                                        .or(kept.commit.as_deref())
+                                        .map(|v| &v[..v.len().min(12)])
+                                        .unwrap_or("?")
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            // `update`'s PROMISED receipt: the old → new rows, from the one place both stand.
+            if update {
                 let short = |v: &str| v[..v.len().min(12)].to_owned();
                 for (name, new_skill) in &newdoc.skills {
                     let old_v = state
@@ -2239,6 +2401,16 @@ pub(crate) fn manifest_update(
                         pin_lines.push(crate::message::disclosure(
                             "LOCK_MOVED",
                             format!("{name}: {} → {}", short(o), short(n)),
+                        ));
+                    }
+                }
+                for (name, rev) in &newdoc.mcp {
+                    if let Some(old_rev) = state.doc.mcp.get(name)
+                        && old_rev != rev
+                    {
+                        pin_lines.push(crate::message::disclosure(
+                            "LOCK_MOVED",
+                            format!("{name}: {} → {}", short(old_rev), short(rev)),
                         ));
                     }
                 }
@@ -2272,19 +2444,21 @@ pub(crate) fn manifest_update(
                     }
                 }
             }
+            newdoc.workspace = plan.workspace.as_ref().map(|(h, w)| format!("{h}/{w}"));
             let has_entries =
                 !(newdoc.skills.is_empty() && newdoc.mcp.is_empty() && newdoc.channels.is_empty());
             let path = dir.join(LOCK_FILE);
+            // I/O on the lock PROPAGATES — placing bytes and then reporting success over a lock
+            // that could not be read or written is the reproducibility lie this file exists to
+            // prevent.
             let old = ctx
                 .fs
-                .read_opt(&path)
-                .ok()
-                .flatten()
+                .read_opt(&path)?
                 .map(|b| String::from_utf8_lossy(&b).into_owned());
             let text = newdoc.serialize();
             // Born only when there is something to record; rewritten only on a real change.
             if (has_entries || old.is_some()) && old.as_deref() != Some(text.as_str()) {
-                let _ = crate::atomic::atomic_write(ctx.fs, &path, text.as_bytes());
+                crate::atomic::atomic_write(ctx.fs, &path, text.as_bytes())?;
                 sweep.disclosures.append(&mut pin_lines);
             }
         }
@@ -2552,6 +2726,74 @@ fn reconcile_thing<'a>(
             // made of different things. A connected server is looked for first and, when it is
             // the one this row names, takes its own path whole.
             if let Some(entry) = catalog.mcp_servers.iter().find(|e| &e.name == bundle) {
+                match locked_mcp_decision(env.ctx, sc, bundle, &entry.skill_id, &entry.revision_id)
+                {
+                    LockedMcp::Held => {
+                        let locked = sc.locked_revision(bundle).expect("held implies locked");
+                        sweep.lock_harvest.mcp.insert(bundle.clone(), locked);
+                        sweep.explicit.insert(entry.skill_id.clone());
+                        sweep.disclosures.push(crate::message::disclosure(
+                            "MCP_HELD",
+                            format!(
+                                "{bundle}: held at the locked revision; `topos update` takes \
+                                 the served one"
+                            ),
+                        ));
+                        // The demand runs from the STANDING record (`delivered: None`), so the
+                        // placed entries stay exactly as the lock says.
+                        sync_workspace_server(
+                            env,
+                            sc,
+                            run,
+                            &ServerTarget {
+                                skill_id: &entry.skill_id,
+                                name: &entry.name,
+                                delivered: None,
+                                reach: mcp_filter(
+                                    sc,
+                                    row.fields().dest,
+                                    &display,
+                                    &DestVoice::Row,
+                                    &mut sweep.mcp_warned_dests,
+                                    &mut sweep.advisories,
+                                    &mut sweep.warnings,
+                                )
+                                .filter,
+                                unreachable: None,
+                                step: None,
+                            },
+                            sweep,
+                        );
+                        return;
+                    }
+                    LockedMcp::RefuseFresh => {
+                        sweep.warnings.push(crate::message::failure(
+                            "LOCK_REVISION_UNAVAILABLE",
+                            format!(
+                                "\"{}\" ({}): topos.lock records a revision this checkout has \
+                                 never held, and no by-revision fetch exists — run \
+                                 `topos install` once without --frozen (the lock then records \
+                                 the served revision), or `topos update`.",
+                                row.reference, sc.label
+                            ),
+                        ));
+                        sweep
+                            .failed_bundles
+                            .insert((sc.label.clone(), entry.skill_id.clone()));
+                        return;
+                    }
+                    LockedMcp::FillServed => {
+                        sweep.lock_pin_overrides.insert(bundle.clone());
+                        sweep.disclosures.push(crate::message::disclosure(
+                            "MCP_FILLED",
+                            format!(
+                                "{bundle}: the lock takes the served revision (no by-revision \
+                                 fetch exists to honor the old one on a fresh checkout)"
+                            ),
+                        ));
+                    }
+                    LockedMcp::Ordinary => {}
+                }
                 if sc.lock.is_some() {
                     sweep
                         .lock_harvest
@@ -2706,7 +2948,7 @@ fn reconcile_thing<'a>(
                 // A `kind = "mcp"` path row: the dir IS the bundle (`server.json` at its root) —
                 // adopted-path custody as ever, no skill placement; the demand feeds the scope's
                 // MCP converge with `workspace_slug: None`.
-                if row.value.declared_kind() == Some(BundleKind::Mcp) {
+                if row.kind() == BundleKind::Mcp {
                     local_mcp_demand(env, sc, row, &dir, &display, row_index, sweep);
                 } else if let Some(dest) = row.fields().dest.filter(|d| !d.is_empty()) {
                     // A SKILL path row with `dest = [...]`: the adopted folder stays the
@@ -2763,7 +3005,7 @@ fn reconcile_thing<'a>(
                     topos_types::ActionCode::from("REMOVE_MISSING_ROW".to_owned()),
                     argv,
                 ));
-                if row.value.declared_kind() == Some(BundleKind::Mcp) {
+                if row.kind() == BundleKind::Mcp {
                     // The bundle cannot be read this run: hold its config entries in place.
                     sweep
                         .mcp_hold
@@ -3155,12 +3397,76 @@ fn reconcile_set<'a>(
             sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
             return;
         };
-        let members: Vec<String> = ch.skills.iter().map(|s| s.skill_id.clone()).collect();
-        // The LOCK's member list freezes a project channel's resolution: a member the server
-        // added since the lock was written is not taken (it arrives as a `topos update`
-        // diff), and a locked member the server no longer serves earns its own line.
+        // The LOCK's member list freezes a project channel's resolution: install seeds the
+        // batch from EXACTLY the locked names — a member the server dropped from the live
+        // channel still installs while the catalog serves it, one the server added arrives as
+        // a `topos update` diff, and a locked member the catalog lost earns its own failure
+        // instead of a silent omission. Update (and an unlocked channel) resolves the server's
+        // current membership.
         let locked_members: Option<Vec<String>> =
             sc.locked_members(channel).map(<[String]>::to_vec);
+        let member_entries: Vec<Result<ChannelMember<'_>, String>> = match &locked_members {
+            Some(locked) => locked
+                .iter()
+                .map(|name| {
+                    catalog
+                        .skills
+                        .iter()
+                        .find(|e| &e.name == name)
+                        .map(ChannelMember::Skill)
+                        .or_else(|| {
+                            catalog
+                                .mcp_servers
+                                .iter()
+                                .find(|e| &e.name == name)
+                                .map(ChannelMember::Server)
+                        })
+                        .ok_or_else(|| name.clone())
+                })
+                .collect(),
+            None => ch
+                .skills
+                .iter()
+                .filter_map(|s| {
+                    catalog
+                        .skills
+                        .iter()
+                        .find(|e| e.skill_id == s.skill_id)
+                        .map(ChannelMember::Skill)
+                        .or_else(|| {
+                            catalog
+                                .mcp_servers
+                                .iter()
+                                .find(|e| e.skill_id == s.skill_id)
+                                .map(ChannelMember::Server)
+                        })
+                        .map(Ok)
+                })
+                .collect(),
+        };
+        // The FULL resolved member list is what the lock records — never the target-filtered
+        // batch below, whose narrowing would otherwise overlay a partial list onto the lock. A
+        // member the catalog lost STAYS recorded (a failure preserves the standing entry).
+        let full_names: Vec<String> = member_entries
+            .iter()
+            .map(|m| match m {
+                Ok(found) => found.name().to_owned(),
+                Err(name) => name.clone(),
+            })
+            .collect();
+        for m in &member_entries {
+            if let Err(name) = m {
+                sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
+                sweep.warnings.push(crate::message::failure(
+                    "NOT_AVAILABLE",
+                    format!(
+                        "\"{}\" ({}): the locked member '{name}' is not in {}'s catalog — its \
+                         placed copy stays; `topos update` re-resolves the channel.",
+                        row.reference, sc.label, run.session.workspace_name
+                    ),
+                ));
+            }
+        }
         // The batch this channel converges — its members the catalog still serves, minus the
         // ones an explicit row of the SAME scope owns (its version and fields win, and the set
         // adds nothing), minus what `--target` narrowing skips and what an earlier source in
@@ -3174,30 +3480,11 @@ fn reconcile_set<'a>(
         let mut picked: HashSet<&str> = HashSet::new();
         // ONE channel, members of BOTH kinds — matched against the catalog's two lists, in
         // the order the batch will visit them, so the activity line counts one set.
-        let batch: Vec<ChannelMember<'_>> = members
-            .iter()
+        let batch: Vec<ChannelMember<'_>> = member_entries
+            .into_iter()
             .filter_map(|member| {
-                let found = catalog
-                    .skills
-                    .iter()
-                    .find(|e| &e.skill_id == member)
-                    .map(ChannelMember::Skill)
-                    .or_else(|| {
-                        catalog
-                            .mcp_servers
-                            .iter()
-                            .find(|e| &e.skill_id == member)
-                            .map(ChannelMember::Server)
-                    })?;
-                // Archived / no current members simply are not in the catalog — nothing to
-                // deliver, and nothing to count.
+                let found = member.ok()?;
                 if sc.plan.explicit_claims(host, workspace, found.name()) {
-                    return None;
-                }
-                // A frozen channel takes exactly its locked members.
-                if let Some(locked) = &locked_members
-                    && !locked.iter().any(|m| m == found.name())
-                {
                     return None;
                 }
                 if !set_selected && !targets.hit(&[found.name()]) {
@@ -3217,10 +3504,10 @@ fn reconcile_set<'a>(
             })
             .collect();
         if sc.lock.is_some() {
-            sweep.lock_harvest.channels.insert(
-                channel.clone(),
-                batch.iter().map(|m| m.name().to_owned()).collect(),
-            );
+            sweep
+                .lock_harvest
+                .channels
+                .insert(channel.clone(), full_names);
         }
         let total = batch.len();
         for (position, member) in batch.into_iter().enumerate() {
@@ -3253,6 +3540,82 @@ fn reconcile_set<'a>(
                 // folders, and `mcp_dest` — and only `mcp_dest` — narrows the mcp members to
                 // config files. A channel with no `mcp_dest` does not narrow them at all.
                 ChannelMember::Server(server) => {
+                    match locked_mcp_decision(
+                        env.ctx,
+                        sc,
+                        &server.name,
+                        &server.skill_id,
+                        &server.revision_id,
+                    ) {
+                        LockedMcp::Held => {
+                            let locked = sc
+                                .locked_revision(&server.name)
+                                .expect("held implies locked");
+                            sweep.lock_harvest.mcp.insert(server.name.clone(), locked);
+                            sweep.disclosures.push(crate::message::disclosure(
+                                "MCP_HELD",
+                                format!(
+                                    "{}: held at the locked revision; `topos update` takes \
+                                     the served one",
+                                    server.name
+                                ),
+                            ));
+                            sync_workspace_server(
+                                env,
+                                sc,
+                                run,
+                                &ServerTarget {
+                                    skill_id: &server.skill_id,
+                                    name: &server.name,
+                                    delivered: None,
+                                    reach: mcp_filter(
+                                        sc,
+                                        row.fields().mcp_dest,
+                                        &server.name,
+                                        &DestVoice::Channel {
+                                            channel,
+                                            identity: server.skill_id.as_str(),
+                                        },
+                                        &mut sweep.mcp_warned_dests,
+                                        &mut sweep.advisories,
+                                        &mut sweep.warnings,
+                                    )
+                                    .filter,
+                                    unreachable: None,
+                                    step,
+                                },
+                                sweep,
+                            );
+                            continue;
+                        }
+                        LockedMcp::RefuseFresh => {
+                            sweep.warnings.push(crate::message::failure(
+                                "LOCK_REVISION_UNAVAILABLE",
+                                format!(
+                                    "{} ({}): topos.lock records a revision this checkout has \
+                                     never held, and no by-revision fetch exists — run \
+                                     `topos install` once without --frozen, or `topos update`.",
+                                    server.name, sc.label
+                                ),
+                            ));
+                            sweep
+                                .failed_bundles
+                                .insert((sc.label.clone(), server.skill_id.clone()));
+                            continue;
+                        }
+                        LockedMcp::FillServed => {
+                            sweep.lock_pin_overrides.insert(server.name.clone());
+                            sweep.disclosures.push(crate::message::disclosure(
+                                "MCP_FILLED",
+                                format!(
+                                    "{}: the lock takes the served revision (no by-revision \
+                                     fetch exists to honor the old one on a fresh checkout)",
+                                    server.name
+                                ),
+                            ));
+                        }
+                        LockedMcp::Ordinary => {}
+                    }
                     if sc.lock.is_some() {
                         sweep
                             .lock_harvest
@@ -4102,6 +4465,59 @@ fn sync_workspace_skill<'a>(
 /// The receipt row rests at `up to date`. What this run DID to the machine is entirely what the
 /// converge does with the entries, and [`run_mcp_converge`] is where that is known: it turns this
 /// row into the install or the repair it was.
+/// The revision the SCOPE's standing record holds for `skill_id`, when one does — read without
+/// creating a store: a fresh checkout has none, and that absence IS the answer the locked-MCP
+/// decision needs.
+fn scope_recorded_revision(ctx: &Ctx<'_>, sc: &ScopeCtx<'_>, skill_id: &str) -> Option<String> {
+    let sid = SkillId::parse(skill_id).ok()?;
+    let layout = match &sc.scope {
+        ResolvedScope::Project { dir } => crate::sidecar::existing_project_store(ctx.fs, dir)?,
+        ResolvedScope::Person => ctx.layout.clone(),
+    };
+    crate::doc::read_doc::<topos_types::persisted::McpServerRecord>(
+        ctx.fs,
+        &layout.published(&sid).server,
+    )
+    .ok()
+    .flatten()
+    .map(|r| r.revision_id)
+}
+
+/// The three honest moves for a LOCKED `[mcp]` revision meeting a different served one — there
+/// is no fetch-by-revision lane, so the lock can only ever record what the config HOLDS:
+/// - a standing record AT the locked revision is held (the served one arrives as `topos
+///   update`), and the demand runs from the record;
+/// - a fresh checkout under `--frozen` refuses (a mismatch it cannot honor);
+/// - a fresh checkout on plain install takes the SERVED revision, and the lock records that,
+///   said out loud.
+enum LockedMcp {
+    Held,
+    RefuseFresh,
+    FillServed,
+    /// No locked revision, or it matches the served one — the ordinary flow.
+    Ordinary,
+}
+
+fn locked_mcp_decision(
+    ctx: &Ctx<'_>,
+    sc: &ScopeCtx<'_>,
+    name: &str,
+    skill_id: &str,
+    served_revision: &str,
+) -> LockedMcp {
+    let Some(locked) = sc.locked_revision(name) else {
+        return LockedMcp::Ordinary;
+    };
+    if locked == served_revision {
+        return LockedMcp::Ordinary;
+    }
+    match scope_recorded_revision(ctx, sc, skill_id) {
+        Some(rec) if rec == locked => LockedMcp::Held,
+        _ if sc.frozen() => LockedMcp::RefuseFresh,
+        _ => LockedMcp::FillServed,
+    }
+}
+
 fn sync_workspace_server(
     env: &Env<'_>,
     sc: &ScopeCtx<'_>,
@@ -4860,7 +5276,17 @@ fn reconcile_repo_skill(
     let global = matches!(sc.scope, ResolvedScope::Person);
     let slots = dest_slots(&sctx, roots.as_ref(), global, &row_dest, &members, skill);
     let tracked = slots.first().and_then(|s| s.import);
-    let pin = row.pin().or_else(|| sc.lock_commit(skill));
+    let source_spelling = format!(
+        "{}:{owner}/{repo}",
+        if host == "bitbucket.org" {
+            "bitbucket"
+        } else {
+            "github"
+        }
+    );
+    let pin = row
+        .pin()
+        .or_else(|| sc.lock_commit(skill, &source_spelling));
     if sc.lock.is_some() {
         let commit = pin
             .clone()

@@ -72,7 +72,10 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
     out.push_str(&header);
     out.push_str("schema = 1\n");
     if let Some((host, ws)) = &parsed.workspace {
-        out.push_str(&format!("workspace = \"{host}/{ws}\"\n"));
+        // An explicit scheme (a self-hosted `http://`) SURVIVES the normal form — dropping it
+        // would silently re-point the machine-token dial at https.
+        let scheme = parsed.workspace_scheme.unwrap_or("");
+        out.push_str(&format!("workspace = \"{scheme}{host}/{ws}\"\n"));
     }
     for section in [
         SectionKind::Skills,

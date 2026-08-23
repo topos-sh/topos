@@ -206,8 +206,10 @@ fn is_host_shaped(segment: &str) -> bool {
         }
         None => segment,
     };
+    // `localhost` is a host with no dot — the one name a self-hosted dev loop actually types,
+    // and the one the emitted candidates must round-trip.
     !host.is_empty()
-        && host.contains('.')
+        && (host.contains('.') || host == "localhost")
         && host
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
@@ -480,8 +482,30 @@ pub(crate) fn resolve_one(
             }
             // A NAMED workspace must be enrolled to resolve here (the verb's enroll flow owns the
             // un-enrolled address BEFORE calling the resolver).
-            let Some(ws) = hosted.iter().find(|w| w.name == *workspace) else {
-                return Ok(None);
+            // Several hosts can hold one workspace SLUG. A token that spelled its host was
+            // filtered above; a hostless spelling (`@acme/…`, `acme/skills/…`) matching more
+            // than one is an ambiguity to answer with host-qualified spellings — never a
+            // first-match guess acting on the wrong server.
+            let matches: Vec<&&WorkspaceNames> =
+                hosted.iter().filter(|w| w.name == *workspace).collect();
+            let ws = match matches.as_slice() {
+                [] => return Ok(None),
+                [one] => **one,
+                several => {
+                    return Err(ClientError::AmbiguousTarget {
+                        name: workspace.clone(),
+                        candidates: several
+                            .iter()
+                            .map(|w| {
+                                TargetCandidate::plain(match resource {
+                                    Some((kind, name)) => qualified_path(w, Some(*kind), name),
+                                    None => format!("{}/{}", w.host, w.name),
+                                })
+                            })
+                            .collect(),
+                        global: false,
+                    });
+                }
             };
             match resource {
                 None => {

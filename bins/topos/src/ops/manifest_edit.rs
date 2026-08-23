@@ -403,7 +403,7 @@ pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened
             ),
         ),
         ManifestScope::Project => (
-            project_template(None),
+            project_template(None, None),
             format!("created {}", target.path.display()),
         ),
     };

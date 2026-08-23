@@ -46,17 +46,25 @@ pub(crate) fn init(
     }
     // The project file's one workspace: the flag when given (validated), else the machine
     // default (`topos workspace use` moves it), else the template's commented line teaches.
-    let ws_line: Option<(String, String)> = match workspace {
-        Some(addr) => Some(
-            crate::manifest::document::parse_workspace_line(addr)
-                .map_err(|e| ClientError::InvalidArgument(e.message))?,
+    let (ws_line, ws_scheme): (Option<(String, String)>, Option<&'static str>) = match workspace {
+        Some(addr) => (
+            Some(
+                crate::manifest::document::parse_workspace_line(addr)
+                    .map_err(|e| ClientError::InvalidArgument(e.message))?,
+            ),
+            // A spelled scheme (self-hosted `http://`) survives into the written line — the
+            // machine-token dial reads it back from there.
+            crate::manifest::document::workspace_line_scheme(addr),
         ),
-        None => crate::sessions::read_sessions(ctx.fs, &ctx.layout)
-            .ok()
-            .and_then(|all| {
-                all.default_session()
-                    .map(|s| (s.host.clone(), s.workspace_name.clone()))
-            }),
+        None => (
+            crate::sessions::read_sessions(ctx.fs, &ctx.layout)
+                .ok()
+                .and_then(|all| {
+                    all.default_session()
+                        .map(|s| (s.host.clone(), s.workspace_name.clone()))
+                }),
+            None,
+        ),
     };
     let cwd = ctx
         .roots
@@ -91,7 +99,11 @@ pub(crate) fn init(
     let created = match crate::atomic::atomic_write_new(
         ctx.fs,
         &path,
-        project_template(ws_line.as_ref().map(|(h, w)| (h.as_str(), w.as_str()))).as_bytes(),
+        project_template(
+            ws_line.as_ref().map(|(h, w)| (h.as_str(), w.as_str())),
+            ws_scheme,
+        )
+        .as_bytes(),
     )? {
         crate::atomic::NewOutcome::Written => true,
         crate::atomic::NewOutcome::Exists => false,

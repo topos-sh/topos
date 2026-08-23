@@ -645,7 +645,9 @@ impl Command {
             Command::Logout { .. } => "logout",
             Command::Init { .. } => "init",
             Command::Fmt { .. } => "fmt",
-            // `pull` is a hidden alias of `update` — the envelope always reads "update".
+            // `pull` is a hidden alias of `update` — the envelope always reads "update". A
+            // normalized `install` keeps ITS name: the envelope says the verb the user typed.
+            Command::Update { install: true, .. } => "install",
             Command::Update { .. } => "update",
             Command::Install { .. } => "install",
             Command::Workspace { .. } => "workspace",

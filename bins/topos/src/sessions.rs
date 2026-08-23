@@ -232,6 +232,18 @@ pub(crate) fn upsert_session(
     let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
     let mut all = read_sessions(fs, layout)?;
     all.schema_version = PERSISTED_SCHEMA_VERSION;
+    // A server-side RENAME arrives as the same (host, workspace id) under a new address: the
+    // machine default follows the workspace it pointed at, or ambient commands would lose
+    // their default the moment a second session exists.
+    if let Some(replaced) = all
+        .sessions
+        .iter()
+        .find(|s| s.host == session.host && s.workspace_id == session.workspace_id)
+        && all.default.as_deref()
+            == Some(format!("{}/{}", replaced.host, replaced.workspace_name).as_str())
+    {
+        all.default = Some(format!("{}/{}", session.host, session.workspace_name));
+    }
     all.sessions
         .retain(|s| !(s.host == session.host && s.workspace_id == session.workspace_id));
     all.sessions.push(session);

@@ -1572,6 +1572,33 @@ pub(crate) fn snapshot_draft(
 /// parent walk below, so a present parent contributes exactly its own set (no-op fsyncs when already
 /// durable) without recursing into its own ancestors — the recursion frontier stops at the first
 /// present generation.
+/// PREFETCH one version's bytes into the scope's store and verify them — the frozen
+/// preflight's unit: everything a later apply will need is made local and digest-checked
+/// BEFORE any checkout byte moves, so a failing input refuses the run with zero placements.
+/// Store writes are cache population, not checkout mutation (`npm ci` fills its cache the
+/// same way).
+pub(crate) fn prefetch_version(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+    version_hex: &str,
+) -> Result<(), ClientError> {
+    let sp = ctx.layout.published(skill_id);
+    // Open the standing store, or birth one — the fresh-checkout case is exactly what a
+    // preflight meets first.
+    let store = match Store::open(&sp.store) {
+        Ok(store) => store,
+        Err(_) => Store::init(&sp.store)?,
+    };
+    let commit = super::parse_hex32(version_hex)?;
+    let mut written = WriteBatch::default();
+    let digest = ensure_local(ctx, &store, skill_id.as_str(), commit, 0, &mut written)?
+        .unwrap_or_else(|| unreachable!("depth-0 ensure_local errors instead of shallow-stopping"));
+    fsync_batch(ctx, &written)?;
+    // The verify half: the rendered bytes must reproduce their own digest.
+    let _ = store.render_verified(commit, digest)?;
+    Ok(())
+}
+
 fn ensure_local(
     ctx: &Ctx<'_>,
     store: &Store,
