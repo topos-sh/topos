@@ -143,13 +143,16 @@ pub(crate) enum Command {
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<u64>,
         /// Which agent's trigger is calling (machinery for registered triggers, not a human
-        /// verb). It selects the stdout shape a changed `--quiet` sweep may emit: an agent that
-        /// understands the reload extension declares itself here; everyone else — including an
-        /// unrecognized name — gets the conservative document every agent's schema accepts.
+        /// verb) — hidden from --help on purpose: the product writes it into hook lines itself,
+        /// and offering it to a person invites a wrong dialect claim. It selects the stdout
+        /// shape a changed `--quiet` sweep may emit: an agent that understands the reload
+        /// extension declares itself here; everyone else — including an unrecognized name —
+        /// gets the conservative document every agent's schema accepts.
         #[arg(long, value_name = "HARNESS", hide = true)]
         hook: Option<String>,
-        /// Which agent's trigger is calling, for the EVIDENCE alone (machinery): records "this
-        /// agent's hook ran" for `status`, changing nothing about the sweep's output.
+        /// Which agent's trigger is calling, for the EVIDENCE alone (machinery, hidden like
+        /// `--hook` and for the same reason): records "this agent's hook ran" for `status`,
+        /// changing nothing about the sweep's output.
         #[arg(long, value_name = "HARNESS", hide = true)]
         from: Option<String>,
         /// Re-create managed skill folders that exist but are damaged — topos normally protects a

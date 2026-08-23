@@ -71,6 +71,20 @@ describe("resolve", () => {
     expect(await t.tokenActor(ws, `${t.MACHINE_TOKEN_PREFIX}nope`, null)).toBeNull();
   });
 
+  it("reads the channels lane: names and members answer, membership reads everyone-only", async () => {
+    // A CI checkout with [channels] rows resolves member lists over the token — the one read
+    // the guard seam previously kept session-only.
+    const t = await tokens();
+    const minted = await t.mintMachineToken(ws, "ci-ch", actor);
+    const hit = await t.tokenActor(ws, minted.secret, null);
+    expect(hit).not.toBeNull();
+    const lane = await import("@/lib/db/queries.lane.server");
+    const channels = await lane.laneChannels({ workspaceId: ws, userId: null });
+    expect(Array.isArray(channels)).toBe(true);
+    // The default channel exists in every workspace; a token sees it like anyone.
+    expect(channels.some((c) => c.builtin)).toBe(true);
+  });
+
   it("accepts the workspace ADDRESS as the path ref and resolves to the id", async () => {
     // A CI checkout knows only the address its committed topos.toml names; the token itself is
     // what scopes access, so either spelling of its OWN workspace resolves — and the actor

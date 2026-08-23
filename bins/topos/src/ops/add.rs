@@ -2374,18 +2374,20 @@ fn scope_holds_row(ctx: &Ctx<'_>, global: bool, origin: Option<&RecordOrigin>) -
         // its old meaning for it (added, with no `source:` line).
         return true;
     };
-    let plan = if global {
-        crate::manifest::scopes::person_plan(ctx.fs, &ctx.layout).ok()
+    let (plan, base) = if global {
+        match crate::manifest::scopes::person_plan(ctx.fs, &ctx.layout).ok() {
+            Some(p) => (p, None),
+            None => return true,
+        }
     } else {
-        ctx.roots.as_ref().and_then(|r| {
+        match ctx.roots.as_ref().and_then(|r| {
             crate::manifest::scopes::nearest_project_plan(ctx.fs, r.cwd.as_deref()?, Some(&r.home))
                 .ok()
                 .flatten()
-                .map(|(_, p)| p)
-        })
-    };
-    let Some(plan) = plan else {
-        return true;
+        }) {
+            Some((dir, p)) => (p, Some(dir)),
+            None => return true,
+        }
     };
     plan.things
         .iter()
@@ -2395,15 +2397,20 @@ fn scope_holds_row(ctx: &Ctx<'_>, global: bool, origin: Option<&RecordOrigin>) -
             RecordOrigin::Reference(reference) => row.reference == *reference,
             RecordOrigin::Folder(dir) => match &row.shape {
                 crate::manifest::keys::KeyShape::LocalPath { raw } => {
-                    // The row spells the portable `~/` form where it can; the record's folder
-                    // is absolute — expand before comparing, or every home-relative row would
-                    // read as claimless.
-                    let raw_path = match (
+                    // The row spells the PORTABLE form where it can — `~/` at machine scope,
+                    // checkout-relative in a project — while the record's folder is absolute:
+                    // expand before comparing, or every portable row would read as claimless.
+                    let raw_path = if let (Some(rest), Some(home)) = (
                         raw.strip_prefix("~/"),
                         ctx.roots.as_ref().map(|r| r.home.as_path()),
                     ) {
-                        (Some(rest), Some(home)) => home.join(rest),
-                        _ => std::path::PathBuf::from(raw),
+                        home.join(rest)
+                    } else if std::path::Path::new(raw).is_absolute() {
+                        std::path::PathBuf::from(raw)
+                    } else if let Some(base) = &base {
+                        base.join(raw.trim_start_matches("./"))
+                    } else {
+                        std::path::PathBuf::from(raw)
                     };
                     raw_path == *dir
                 }

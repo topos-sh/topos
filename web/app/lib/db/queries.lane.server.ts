@@ -586,7 +586,10 @@ export interface LaneChannel {
 }
 
 /** The workspace channels index (`GET /channels`) — name-sorted, the default included. */
-export async function laneChannels(actor: FeedActor): Promise<LaneChannel[]> {
+export async function laneChannels(actor: {
+  workspaceId: string;
+  userId: string | null;
+}): Promise<LaneChannel[]> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {

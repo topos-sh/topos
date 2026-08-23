@@ -1189,14 +1189,22 @@ fn the_mixed_ambiguity_lists_every_candidate_as_a_runnable_line() {
         },
     )
     .unwrap_err();
-    let text = err.to_string();
-    assert!(text.contains("pick one:"), "{text}");
+    // The statement is the display's; the candidates ride the TYPED error, which the TTY
+    // renders as one runnable line each (`the_chooser_prints_its_statement_then_one_runnable_
+    // line_per_candidate` pins that surface) — so the DATA must carry both.
+    let crate::error::ClientError::AmbiguousSource { candidates, .. } = &err else {
+        panic!("expected the chooser: {err}");
+    };
     assert!(
-        text.contains(&format!("{HOST}/{WS_NAME}/deploy")),
-        "the workspace candidate prints: {text}"
+        candidates
+            .iter()
+            .any(|c| c.reference == format!("{HOST}/{WS_NAME}/deploy")),
+        "{candidates:?}"
     );
     assert!(
-        text.contains("skills/deploy"),
-        "the folder candidate prints: {text}"
+        candidates
+            .iter()
+            .any(|c| c.reference.contains("skills/deploy")),
+        "{candidates:?}"
     );
 }
