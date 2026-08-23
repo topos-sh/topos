@@ -38,7 +38,7 @@ const session = () =>
     role: "member",
     display: "Mo",
     sessionStatus: "active",
-  }) as unknown as Parameters<Awaited<ReturnType<typeof lane>>["laneSkillsIndex"]>[0];
+  }) as unknown as Parameters<Awaited<ReturnType<typeof lane>>["emptyDeliveryFor"]>[0];
 
 function document(name: string, version: string): Record<string, unknown> {
   return {
