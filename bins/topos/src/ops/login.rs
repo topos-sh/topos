@@ -735,11 +735,11 @@ fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> (bool, Option<
         let _ = crate::connected::record(ctx.fs, &ctx.layout, host, workspace);
         return (false, None);
     }
-    if let Err(e) = editor.set_row(&reference, &EntryValue::Star) {
+    if let Err(e) = editor.set_row(&reference, &EntryValue::Star, crate::bundle_kind::BundleKind::Skill) {
         return (
             false,
             Some(format!(
-                "{} was left untouched ({e}) — add `\"{reference}\" = \"*\"` there to take \
+                "{} was left untouched ({e}) — add `\"{reference}\" = \"latest\"` under `[workspaces]` there to take \
                  {workspace}'s whole feed",
                 target.path.display()
             )),

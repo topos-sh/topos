@@ -179,7 +179,7 @@ fn add_feed(
     // now takes whatever the workspace gives it (`render::add_tty`, off the reference SHAPE). A
     // note repeating it printed the same fact twice, one line apart. The no-op arm above keeps
     // its note — "already adopting …" is a fact that sentence does not carry.
-    medit::write_row(ctx, &mut data, &target, &reference, &EntryValue::Star)?;
+    medit::write_row(ctx, &mut data, &target, &reference, &EntryValue::Star, crate::bundle_kind::BundleKind::Skill)?;
     Ok(AddRefOutcome::applied(data))
 }
 
@@ -434,7 +434,7 @@ fn add_workspace(
                 && i.workspace == resolved.session.workspace_name
                 && i.name == resolved.name
         });
-        medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value)?;
+        medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))?;
         if declined {
             medit::push_note(
                 &mut data,
@@ -467,7 +467,7 @@ fn add_workspace(
     let Some(target) = medit::project_target(ctx)? else {
         return Err(ClientError::NoManifest);
     };
-    medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value)?;
+    medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))?;
     shape_dest_receipt(
         ctx,
         &mut data,
@@ -1493,7 +1493,7 @@ fn add_forge(
     // update (or a re-run of this add) finishes the landing — instead of installed members no
     // manifest row asks for.
     let mut row_receipt = set_data(members.first().map_or(&repo, |m| m));
-    medit::write_row(ctx, &mut row_receipt, &target, &reference, &value)?;
+    medit::write_row(ctx, &mut row_receipt, &target, &reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))?;
     // A project install writes through the project's own self-ignoring `.topos/` store; mint its
     // shell before the first member lands.
     if target.scope == ManifestScope::Project {
@@ -2205,7 +2205,13 @@ pub(crate) fn rewrite_to_governed(
         editor.remove_row(&from);
         if !already_governed {
             editor
-                .set_row(&canonical, &carried_value(&row))
+                .set_row(
+                    &canonical,
+                    &carried_value(&row),
+                    row.value
+                        .declared_kind()
+                        .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+                )
                 .map_err(|e| ClientError::InvalidArgument(e.message))?;
         }
         match editor.write(ctx.fs, &path) {

@@ -718,6 +718,7 @@ fn write_dest(
             dest: Some(vec![entry.clone()]),
             ..Default::default()
         }),
+        crate::bundle_kind::BundleKind::Skill,
     )?;
     // ONE ANSWER PER SURFACE. The row write computes its own destination-subtraction undo, but a
     // claim's inverse is not that write — it is the DETACH, which drops the placement AND takes
