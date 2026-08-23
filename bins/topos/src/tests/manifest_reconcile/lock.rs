@@ -147,6 +147,87 @@ fn frozen_refuses_an_uncovered_row_and_writes_nothing() {
 }
 
 #[test]
+fn a_lock_from_another_workspace_refuses_install_and_update_re_resolves() {
+    let rig = Rig::new("lock-foreign");
+    rig.seed_session();
+    let proj = project(
+        "lock-foreign-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v1);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    std::fs::write(
+        proj.0.join("topos.lock"),
+        format!(
+            "schema = 1\nworkspace = \"other.example/elsewhere\"\n\n[skills.deploy]\nversion = \"{}\"\n",
+            hex(&v1)
+        ),
+    )
+    .unwrap();
+
+    // Install and frozen both refuse: entries are keyed by bare name, so another workspace's
+    // lock would hand this one its resolutions.
+    for mode in [ops::LockMode::Install, ops::LockMode::Frozen] {
+        let err = install(&ctx, &plane, &dir, mode).expect_err("foreign lock");
+        let detail = err.detail();
+        assert!(detail.contains("other.example/elsewhere"), "{detail}");
+        assert!(detail.contains(&format!("{HOST}/{WS_NAME}")), "{detail}");
+        assert!(detail.contains("topos update"), "{detail}");
+    }
+    assert!(!proj.0.join(".claude/skills/deploy").exists(), "nothing placed");
+
+    // An update treats the workspace change as a full re-resolution: stale entries are
+    // discarded, the rewrite is for THIS workspace, and the change is said.
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Update).expect("update re-resolves");
+    assert!(
+        out.warnings
+            .iter()
+            .any(|m| m.code.as_deref() == Some("LOCK_WORKSPACE_CHANGED")),
+        "{:?}",
+        out.warnings
+    );
+    let text = lock_text(&proj.0);
+    assert!(
+        text.contains(&format!("workspace = \"{HOST}/{WS_NAME}\"")),
+        "{text}"
+    );
+    assert!(text.contains(&hex(&v1)), "{text}");
+}
+
+#[test]
+fn frozen_reads_a_wrong_shaped_entry_as_a_disagreement() {
+    let rig = Rig::new("lock-shape");
+    rig.seed_session();
+    let proj = project(
+        "lock-shape-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v1);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    // A stale REPO-shaped block under a workspace row: coverage by name alone would pass it
+    // and frozen would install whatever the catalog serves — unpinned.
+    std::fs::write(
+        proj.0.join("topos.lock"),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[skills.deploy]\nsource = \"github:acme/tools\"\ncommit = \"9d0e8c17aa34bb56cc78\"\n"
+        ),
+    )
+    .unwrap();
+
+    let err = install(&ctx, &plane, &dir, ops::LockMode::Frozen).expect_err("wrong shape");
+    let detail = err.detail();
+    assert!(detail.contains("deploy"), "{detail}");
+    assert!(detail.contains("repo source"), "{detail}");
+    assert!(!proj.0.join(".claude/skills/deploy").exists(), "nothing placed");
+}
+
+#[test]
 fn a_channel_freezes_to_its_locked_member_list() {
     let rig = Rig::new("lock-chan");
     rig.seed_session();
