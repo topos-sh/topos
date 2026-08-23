@@ -32,6 +32,7 @@ fn a_surface_symlinked_out_between_plan_and_write_is_refused_with_zero_writes() 
     let io = ScopeIo {
         fs: &fs,
         runtimes: &EVERY_RUNTIME,
+        relay_program: "/opt/topos/topos".to_owned(),
         layout: &layout,
         home: project.0.clone(),
         project_root: Some(project.0.clone()),
@@ -1116,6 +1117,7 @@ fn a_missing_runtime_is_said_in_plain_words_and_nothing_is_written() {
     let io = ScopeIo {
         fs: &fs,
         runtimes: &NO_RUNTIME,
+        relay_program: "/opt/topos/topos".to_owned(),
         layout: &layout,
         home: home.0.clone(),
         project_root: None,
@@ -2049,6 +2051,7 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
         let io = ScopeIo {
             fs: &fs,
             runtimes: &EVERY_RUNTIME,
+            relay_program: "/opt/topos/topos".to_owned(),
             layout: &layout,
             home: home_path.clone(),
             project_root: None,
@@ -2587,6 +2590,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
         let io = ScopeIo {
             fs: &fault,
             runtimes: &EVERY_RUNTIME,
+            relay_program: "/opt/topos/topos".to_owned(),
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -2619,6 +2623,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
             let io = ScopeIo {
                 fs: &fault,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2654,6 +2659,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
             let io = ScopeIo {
                 fs: &fs,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2730,6 +2736,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
         let io = ScopeIo {
             fs: &fault,
             runtimes: &EVERY_RUNTIME,
+            relay_program: "/opt/topos/topos".to_owned(),
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -2769,6 +2776,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
             let io = ScopeIo {
                 fs: &fs,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2822,6 +2830,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
             let io = ScopeIo {
                 fs: &fault,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2840,6 +2849,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
             let io = ScopeIo {
                 fs: &fs,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -2877,6 +2887,7 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
     let io = ScopeIo {
         fs: &fs,
         runtimes: &EVERY_RUNTIME,
+        relay_program: "/opt/topos/topos".to_owned(),
         layout: &layout,
         home: home.0.clone(),
         project_root: None,
@@ -2926,6 +2937,7 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
         let faulted = ScopeIo {
             fs: &fault,
             runtimes: &EVERY_RUNTIME,
+            relay_program: "/opt/topos/topos".to_owned(),
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -3014,6 +3026,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
         let io = ScopeIo {
             fs: &fault,
             runtimes: &EVERY_RUNTIME,
+            relay_program: "/opt/topos/topos".to_owned(),
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -3054,6 +3067,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
             let io = ScopeIo {
                 fs: &fault,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -3090,6 +3104,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
             let io = ScopeIo {
                 fs: &fs,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -3133,6 +3148,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         let io = ScopeIo {
             fs: &fault,
             runtimes: &EVERY_RUNTIME,
+            relay_program: "/opt/topos/topos".to_owned(),
             layout: &layout,
             home: home.0.clone(),
             project_root: None,
@@ -3170,6 +3186,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             let io = ScopeIo {
                 fs: &fault,
                 runtimes: &EVERY_RUNTIME,
+                relay_program: "/opt/topos/topos".to_owned(),
                 layout: &layout,
                 home: home.0.clone(),
                 project_root: None,
@@ -3223,14 +3240,15 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
 // A server the WORKSPACE reaches on the agent's behalf.
 // =================================================================================================
 
-/// **The delivered credential lands in the entry, and only there.** A document that says the
-/// workspace reaches the server is placed with this machine's own session credential for that
-/// workspace as its `Authorization` header — byte-identical to what the pure driver renders for
-/// that entry, with no sign-in hint of any kind, because there is nothing left to sign into. The
-/// rendering is a function of the document and the credential, so a second converge finds every
-/// surface `current` and writes nothing.
+/// **The delivered gateway server lands as the relay, and the credential lands NOWHERE.** A
+/// document that says the workspace reaches the server is placed as `topos relay <address>` —
+/// byte-identical to what the pure driver renders for that entry, with no sign-in hint of any
+/// kind (nothing is left to sign into) and not one rendered byte carrying the session
+/// credential: the relay reads it from the session store at call time. The rendering is a
+/// function of the document alone, so a second converge finds every surface `current` and
+/// writes nothing.
 #[test]
-fn a_delivered_gateway_document_places_the_workspace_credential_in_every_dialect() {
+fn a_delivered_gateway_document_places_the_relay_in_every_dialect() {
     let home = Scratch::new("gateway-place");
     let fs = RealFs;
     let layout = Layout::new(&home.0.join(".topos"));
@@ -3253,14 +3271,16 @@ fn a_delivered_gateway_document_places_the_workspace_credential_in_every_dialect
     assert!(warning_lines(&out).is_empty(), "{:?}", out.warnings);
     assert!(standing_lines(&out).is_empty(), "{:?}", out.advisories);
 
-    // The entry a driver would render for this document: the workspace's address, dialed with the
-    // machine's own credential, and NO auth hint — `oauth` was the upstream server's word, and the
-    // workspace is what answers it now.
+    // The entry a driver would render for this document: this binary, the workspace's address as
+    // its argument in the open, and NO auth hint — `oauth` was the upstream server's word, and
+    // the workspace is what answers it now.
     let entry = McpEntry {
         key: "topos-eng-linear".into(),
-        target: mcp::McpTarget::Remote {
-            url: "https://gw.example/sn_1/srv_1".into(),
-            headers: vec![("Authorization".into(), "Bearer sc-secret".into())],
+        target: mcp::McpTarget::Local {
+            command: "/opt/topos/topos".into(),
+            args: vec!["relay".into(), "https://gw.example/sn_1/srv_1".into()],
+            env: Vec::new(),
+            env_ref: topos_harness::mcp::descriptor::EnvRef::default(),
         },
         auth: AuthHint::None,
     };
@@ -3282,17 +3302,25 @@ fn a_delivered_gateway_document_places_the_workspace_credential_in_every_dialect
             other => panic!("{dialect:?}: {other:?}"),
         };
         assert_eq!(got, expect, "{suffix} differs from the driver's rendering");
+        let text = String::from_utf8_lossy(&got);
         assert!(
-            String::from_utf8_lossy(&got).contains("Bearer sc-secret"),
-            "{suffix} carries the header the workspace reads"
+            text.contains("relay") && text.contains("https://gw.example/sn_1/srv_1"),
+            "{suffix} names the relay and the address in the open"
+        );
+        assert!(
+            !text.contains("sc-secret"),
+            "{suffix} must not carry the session credential"
         );
     }
-    // …and the dialects that spell an address their own way carry it too.
+    // …and the dialect that spells a program its own way runs the same relay, credential-free.
     let codex = std::fs::read_to_string(home.0.join(".codex/config.toml")).unwrap();
     assert!(
-        codex.contains(r#"http_headers = { Authorization = "Bearer sc-secret" }"#),
+        codex.contains(r#"command = "/opt/topos/topos""#)
+            && codex.contains("relay")
+            && codex.contains("https://gw.example/sn_1/srv_1"),
         "{codex}"
     );
+    assert!(!codex.contains("sc-secret"), "{codex}");
 
     // Idempotent: the same document and the same session render the same bytes, so nothing is
     // rewritten and every fingerprint still matches the file.
@@ -3393,11 +3421,11 @@ fn a_gateway_document_from_a_local_folder_is_refused_and_places_nothing() {
     }
 }
 
-/// The bridge carries it too. An agent that dials no address reaches the workspace's own through
-/// `mcp-remote`, and the credential takes the same environment hop every bridged header value takes
-/// — the argument carries no space, so nothing mangles it on the way to the program.
+/// An agent that dials no address reaches the workspace's own through the RELAY — never the
+/// bridge, whose environment hop would spell the credential into the entry. The rendered bytes
+/// name the binary and the address, and nothing else.
 #[test]
-fn a_bridged_agent_reaches_the_workspace_address_with_the_credential_in_its_environment() {
+fn an_agent_that_dials_nothing_reaches_the_workspace_address_through_the_relay() {
     static BRIDGED: &[KnownHarness] = &[registry::home_rooted_mcp_row_with_caps(
         "cursor",
         "Cursor",
@@ -3426,15 +3454,15 @@ fn a_bridged_agent_reaches_the_workspace_address_with_the_credential_in_its_envi
 
     let written = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).expect("cursor");
     assert!(
-        written.contains("\"https://gw.example/sn_1/srv_1\""),
+        written.contains("\"command\": \"/opt/topos/topos\""),
         "{written}"
     );
     assert!(
-        written.contains("\"Authorization:${TOPOS_HEADER_AUTHORIZATION}\""),
-        "the header argument carries no space: {written}"
+        written.contains("\"relay\"") && written.contains("\"https://gw.example/sn_1/srv_1\""),
+        "the relay names the address in the open: {written}"
     );
     assert!(
-        written.contains("\"TOPOS_HEADER_AUTHORIZATION\": \"Bearer sc-secret\""),
-        "…and the credential travels in the environment: {written}"
+        !written.contains("sc-secret") && !written.contains("Authorization"),
+        "no rendered byte carries the credential: {written}"
     );
 }

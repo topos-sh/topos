@@ -517,6 +517,17 @@ pub(crate) enum Command {
         yes: bool,
     },
 
+    /// Serve one gateway-routed MCP server over stdio. This is the command a delivered MCP
+    /// entry runs — an agent starts it, and it forwards the conversation to the workspace's
+    /// gateway at the given address, signed in as this machine's session. The credential stays
+    /// in topos's own session store; the config entry carries only this command line. Not a
+    /// command a person needs to run by hand.
+    Relay {
+        /// The gateway address the entry names (`https://<gateway>/<session>/<server>`).
+        #[arg(value_name = "URL")]
+        url: String,
+    },
+
     // ---- Maintenance ----
     /// Update the `topos` binary itself to the latest release. The download's checksum and
     /// signature are always verified, and the swap is atomic. Your skills are untouched — they
@@ -582,6 +593,7 @@ impl Command {
             Command::Revert { .. } => "revert",
             Command::Protect { .. } => "protect",
             Command::Invite { .. } => "invite",
+            Command::Relay { .. } => "relay",
             Command::SelfUpdate { .. } => "self-update",
             Command::Auth { .. } => "auth",
             Command::Uninstall { .. } => "uninstall",

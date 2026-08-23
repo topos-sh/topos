@@ -281,10 +281,18 @@ changes is where the sign-in lives.
   next call.
 
 What a machine receives changes in one visible way: the delivered document points at the gateway
-rather than the server's own address, and carries `"sh.topos/gateway": true` in its `_meta`. Seeing
-that key, `topos` attaches the machine's own Topos credential to the entry — the server never sends
-a secret to a machine — and skips the sign-in hints, because the sign-in has already happened. A
-package bundle is untouched: a program the agent runs here has no address to redirect.
+rather than the server's own address, and carries `"sh.topos/gateway": true` in its `_meta`.
+Seeing that key, `topos` writes the entry as a command — `topos relay <address>` — instead of an
+address. The agent runs it like any local MCP server; the relay forwards the conversation to that
+one address, signed in as the machine's own Topos session, read from `topos`'s session store at
+call time. So the config file names the gateway address in the open and **carries no credential
+at all** — the server never sends a secret to a machine, and `topos` never writes one into an
+agent's config. Sign-in hints are skipped, because the sign-in has already happened. Signing out
+answers the next call with one plain sentence saying to run `topos login`; signing back in makes
+the same entry work again, no rewrite anywhere. (The one exception is an agent that dials
+addresses but cannot run a program — it gets the address with the session credential as a
+header, the one config shape that still carries it.) A package bundle is untouched: a program
+the agent runs here has no address to redirect.
 
 An install with no gateway keeps everything above exactly as described — the entry names the
 server's own address, and signing in stays the agent's own business.

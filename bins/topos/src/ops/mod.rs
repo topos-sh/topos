@@ -47,6 +47,7 @@ mod pull;
 mod quiet_gate;
 mod reconcile;
 mod reference;
+pub(crate) mod relay;
 mod remove;
 mod revert;
 mod review;

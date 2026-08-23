@@ -217,8 +217,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   of the document left client-side. It is read once (`ServerDoc`: its identity, the address it
   offers, the packages it pins, the auth word — the shapes a placed entry must never carry fail
   CLOSED here), then `select` crosses it with the
-  harness's capability columns and this machine's runtimes, in ONE fixed order: the address where
-  the agent dials one · the address through the table-pinned bridge (`npx -y mcp-remote@<v> <url>`,
+  harness's capability columns and this machine's runtimes, in ONE fixed order: a GATEWAY document
+  (`_meta["sh.topos/gateway"]`) becomes the relay (`topos relay <url>` — the binary's own absolute
+  path, the address in the open, no credential in any config byte) wherever the agent runs
+  programs, else the address with the machine's session credential as its `Authorization` header
+  (the one shape that still writes it, for the agent that dials and runs nothing — and for
+  `verify`, which passes `relay: None` because it dials the conversation itself) · then the
+  address where the agent dials one · the address through the table-pinned bridge
+  (`npx -y mcp-remote@<v> <url>`,
   headers as `Name:${VAR}` with the value in the environment — the spelling that survives Windows
   and Cursor) where it does not · else the first package this build can set up, npm before pypi
   (`npx -y <id>@<v>` / `uvx <id>@<v>`, always the pinned version). A missing runtime NEVER falls
@@ -227,6 +233,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   render as references in the harness's own syntax, so a name travels and a value never does. The
   runtime probe is a seam (`RuntimeProbe` on `ScopeIo`), because "needs node" has to be a tested
   outcome and not a property of the machine running the suite.
+- `ops/relay` — the stdio half of a gateway entry: a per-conversation process the AGENT spawns,
+  forwarding each JSON-RPC line as one POST to the entry's own URL with the session credential
+  read LIVE from the store (the `sn_…` URL segment names which session; sign-out refuses the next
+  call in plain words, sign-in answers it, no config rewrite either way). Transport only — SSE
+  replies unwrap as they arrive, a minted `mcp-session-id` is echoed, and the FIRST message
+  completes alone (stdin-ordered gate) so a pipelined burst cannot race past the reply that
+  establishes the conversation. Errors are id-matched JSON-RPC answers, never exits; stdout is
+  protocol alone (`out::stdout_protocol_line`, written and flushed under one lock).
 - `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half. A connected server
   is NOT bytes: its document arrives inline with the delivery and is written to
   `skills/<id>/server.json` (`McpServerRecord`: the document, the catalog revision it came from,

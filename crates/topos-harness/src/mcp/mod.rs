@@ -304,6 +304,12 @@ pub fn canonical_address(raw: &str) -> Option<String> {
 /// server through any version of it, or through none at all.
 pub const BRIDGE_PACKAGE: &str = "mcp-remote";
 
+/// The verb of topos's own relay entry (`topos relay <url>`) — the gateway shape a program-capable
+/// harness gets: the config carries the address in the open and no credential at all, and the
+/// spawned relay attaches this machine's session credential from its own store. One constant so
+/// the CLI that WRITES the argv and the recognition that READS one back cannot drift.
+pub const RELAY_VERB: &str = "relay";
+
 /// The commands that are BATCH FILES on Windows (`npx.cmd`, `node.exe`'s shims, …) and therefore
 /// cannot be spawned directly: Windows needs `cmd /c` in front of them. It is the list Claude
 /// Code's own doctor asks for.
@@ -483,6 +489,8 @@ fn unwrapped(command: &str, args: &[String]) -> (String, Vec<String>) {
 /// - a BRIDGED remote (`npx -y mcp-remote@x https://…`) answers with the URL it bridges,
 ///   canonicalized, because the server it reaches is the server that URL names — an entry that
 ///   bridges it and an entry that dials it are the same server twice;
+/// - a RELAYED remote (`topos relay https://…`) answers with the URL it relays, canonicalized,
+///   for the same reason;
 /// - anything else answers with the command and its arguments, after the Windows `cmd /c` wrapper
 ///   is stripped, rendered as one JSON array so no argument can be confused with a boundary.
 ///
@@ -496,6 +504,9 @@ pub fn local_address(command: &str, args: &[String]) -> Option<String> {
         return None;
     }
     if let Some(url) = bridged_url(command, &args) {
+        return canonical_address(&url);
+    }
+    if let Some(url) = relayed_url(command, &args) {
         return canonical_address(&url);
     }
     let mut parts: Vec<&str> = Vec::with_capacity(args.len() + 1);
@@ -534,6 +545,30 @@ fn bridged_url(command: &str, args: &[String]) -> Option<String> {
         .iter()
         .find(|a| a.contains("://"))
         .map(ToString::to_string)
+}
+
+/// The URL a relay invocation carries, if this argv IS one: the `topos` binary (any path, any
+/// extension — matched on its file STEM as the Windows-wrapped commands are, so `topos`,
+/// `topos.exe`, and `/usr/local/bin/topos` all name the one program), then EXACTLY
+/// [`RELAY_VERB`] and one URL. The verb takes one argument and nothing else, so an argv with
+/// anything more could not run — reading a server out of it would let a broken or hand-mangled
+/// entry stand in for a working one at collision time. The binary's PATH is the loose half
+/// (another machine's install lives elsewhere); the argv shape is the strict one.
+fn relayed_url(command: &str, args: &[String]) -> Option<String> {
+    let program = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .split('.')
+        .next()
+        .unwrap_or(command);
+    if !program.eq_ignore_ascii_case("topos") {
+        return None;
+    }
+    match args {
+        [verb, url] if verb == RELAY_VERB && url.contains("://") => Some(url.clone()),
+        _ => None,
+    }
 }
 
 /// **Every entry a surface holds, foreign ones included** — the observation the ownership ledger
@@ -1880,6 +1915,44 @@ mod tests {
         // A package that merely LOOKS like the bridge is not one.
         assert!(
             local_address("npx", &argv(&["-y", "mcp-remote-proxy", "https://x/y"]))
+                .is_some_and(|a| a.starts_with("run:"))
+        );
+
+        // A RELAY answers with the address it relays — whatever path or spelling names the
+        // binary — so a relayed server and a dialed one are one server, not two.
+        assert_eq!(
+            local_address("topos", &argv(&["relay", "https://mcp.example/x"])),
+            dialed
+        );
+        assert_eq!(
+            local_address(
+                "/usr/local/bin/topos",
+                &argv(&["relay", "https://mcp.example/x"])
+            ),
+            dialed
+        );
+        assert_eq!(
+            local_address(
+                r"C:\tools\Topos.exe",
+                &argv(&["relay", "HTTPS://MCP.Example/x"])
+            ),
+            dialed
+        );
+        // Any other topos verb — and any other binary running a `relay` argument — is just a
+        // command line.
+        assert!(
+            local_address("topos", &argv(&["update", "https://mcp.example/x"]))
+                .is_some_and(|a| a.starts_with("run:"))
+        );
+        assert!(
+            local_address("not-topos", &argv(&["relay", "https://mcp.example/x"]))
+                .is_some_and(|a| a.starts_with("run:"))
+        );
+        // …and so are the shapes the verb could not actually run: no URL, or anything beyond
+        // the one argument it takes — a mangled entry must not stand in for a working one.
+        assert!(local_address("topos", &argv(&["relay"])).is_some_and(|a| a.starts_with("run:")));
+        assert!(
+            local_address("topos", &argv(&["relay", "junk", "https://mcp.example/x"]))
                 .is_some_and(|a| a.starts_with("run:"))
         );
         // The entry model answers the same question for either target.

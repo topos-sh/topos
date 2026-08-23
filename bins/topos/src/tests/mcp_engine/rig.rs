@@ -674,6 +674,7 @@ pub(super) fn person_io<'a>(fs: &'a RealFs, layout: &'a Layout, home: &Path) -> 
     ScopeIo {
         fs,
         runtimes: &EVERY_RUNTIME,
+        relay_program: "/opt/topos/topos".to_owned(),
         layout,
         home: home.to_path_buf(),
         project_root: None,

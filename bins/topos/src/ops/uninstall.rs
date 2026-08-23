@@ -256,6 +256,7 @@ fn mcp_io<'a>(ctx: &'a Ctx<'a>) -> Option<crate::mcp_engine::ScopeIo<'a>> {
     Some(crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
         runtimes: &crate::mcp_render::PathRuntimes,
+        relay_program: crate::mcp_engine::relay_program(),
         layout: &ctx.layout,
         home: roots.home.clone(),
         project_root: None,

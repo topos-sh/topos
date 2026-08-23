@@ -228,9 +228,12 @@ fn check(
         windows: cfg!(windows),
         wsl_dest: false,
     };
-    // No bridge: with `remote` true the address is dialed directly, so the bridge arm — which
-    // exists for agents that cannot dial one — is never the shape under test.
-    match mcp_render::select(doc, caps, None, &PathRuntimes, machine, gateway) {
+    // No bridge and no relay: with `remote` true the address is dialed directly, so the two arms
+    // that exist for agents that cannot dial one — and the relay, which exists to keep the
+    // credential out of config files a HARNESS reads — are never the shape under test. This
+    // process holds the credential itself, and for a gateway document the selection answers with
+    // the address plus that credential: the conversation verified is the one the gateway serves.
+    match mcp_render::select(doc, caps, None, None, &PathRuntimes, machine, gateway) {
         Ok(McpTarget::Remote { url, headers }) => {
             let verdict = remote::probe(&remote::agent(), &url, &headers);
             Ok(Checked {

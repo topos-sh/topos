@@ -8,6 +8,12 @@
 //!
 //! ## The selection order (fixed — read it as a list of rules, in this order)
 //!
+//! 0. the document says the workspace reaches the server for the agent (`_meta` gateway claim,
+//!    below) AND it offers an address → **the relay** (`topos relay <url>`) where the harness runs
+//!    programs and the caller placed one, else **the address with this machine's session
+//!    credential attached** where the harness dials addresses itself. The relay is the default
+//!    shape on purpose: the config file carries the workspace's address in the open and no
+//!    credential at all — the spawned relay reads the session store at call time;
 //! 1. the document offers an address AND the harness dials addresses itself → **the address**;
 //! 2. the document offers an address AND the harness does NOT dial one, but runs programs and
 //!    this build pins a bridge → **the bridge** (`npx -y mcp-remote@<pinned> <url>`), because the
@@ -40,21 +46,20 @@
 //! ## The one credential this machine attaches ITSELF
 //!
 //! A workspace can share a server it reaches on the agent's behalf: the delivered document then
-//! says so (`_meta["sh.topos/gateway"]`) and its address is the workspace's own. Such an entry
-//! carries an `Authorization: Bearer` header holding **this machine's standing session credential
-//! for the workspace that delivered it** — read from this machine's own session store
-//! ([`crate::sessions`]) and attached HERE, after the document was parsed. The server never sends
-//! it, and it never appears in a bundle's bytes.
+//! says so (`_meta["sh.topos/gateway"]`) and its address is the workspace's own. The DEFAULT
+//! rendering of such a document keeps the credential out of config files entirely: the entry is a
+//! program — `topos relay <address>` — and the relay attaches **this machine's standing session
+//! credential for the workspace that delivered it** at call time, read live from this machine's
+//! own session store ([`crate::sessions`], the one `0600` file it ever lives in). Only a harness
+//! that dials addresses and cannot run a program gets the address itself, with the credential as
+//! its `Authorization: Bearer` header — the one rendering that writes the secret into a config
+//! file, kept for exactly that capability shape.
 //!
-//! Two consequences, both deliberate:
-//!
-//! - the header is part of the rendered entry, so it lands in the agent's config file (and in the
-//!   fingerprint taken over that rendering) exactly like every other rendered byte — the file the
-//!   agent already keeps its own sign-in state in, whose permissions are that agent's to set;
-//! - the attach happens ONLY for a document a workspace delivered, and only with that session's
-//!   own credential ([`select`]). A folder on this machine can spell the same `_meta` key; it is
-//!   handed nothing, and nothing is placed for it ([`Gap::NoSession`]) — a document must never
-//!   be able to name an address of its choosing and be given the machine's credential for it.
+//! Either way the attach happens ONLY for a document a workspace delivered, and only with that
+//! session's own credential ([`select`]). A folder on this machine can spell the same `_meta`
+//! key; it is handed nothing, and nothing is placed for it ([`Gap::NoSession`]) — a document must
+//! never be able to name an address of its choosing and be reached with the machine's credential
+//! for it.
 
 use std::path::{Path, PathBuf};
 
@@ -729,13 +734,19 @@ const UVX: &str = "uvx";
 /// **The one selection** — see the module doc for the order, which this function is the whole
 /// implementation of.
 ///
+/// `relay` is **the program a gateway-routed entry runs** — the absolute path of the topos binary
+/// itself, resolved by the caller that writes config entries ([`crate::mcp_engine`]). `None` says
+/// this caller places no relay commands: `verify`, which dials the server itself and wants the
+/// address conversation, passes `None` exactly as it passes no bridge.
+///
 /// `gateway` is **this machine's own session credential for the workspace that delivered this
 /// document**, and the caller passes it ONLY when both halves hold: the demand came from a
 /// workspace, and the credential is that workspace's session ([`crate::mcp_engine`] is where the
 /// two are joined). It is consulted only where the document itself claims the workspace reaches
 /// the server ([`ServerDoc::gateway`]) — a document that claims nothing is rendered exactly as
 /// before, credential or no credential — and a document that claims it without one is refused
-/// ([`Gap::NoSession`]) rather than dialed bare.
+/// ([`Gap::NoSession`]) rather than reached bare. For the relay shape the credential's VALUE stays
+/// in the session store; its presence here is the delivery provenance that authorizes the entry.
 ///
 /// # Errors
 /// One [`Gap`] naming, in plain words, why this agent gets nothing for this bundle.
@@ -743,16 +754,63 @@ pub(crate) fn select(
     doc: &ServerDoc,
     caps: HarnessCaps,
     bridge: Option<&McpBridge>,
+    relay: Option<&str>,
     runtimes: &dyn RuntimeProbe,
     machine: Machine,
     gateway: Option<&GatewayBearer>,
 ) -> Result<McpTarget, Gap> {
+    // 0. The workspace's own address, reached with this machine's session credential — the relay
+    //    where the harness runs programs (the credential never enters the config file), the
+    //    header shape where it can only dial. Handled whole, ahead of the general arms: a gateway
+    //    document must never fall through to a rendering that reaches the address bare.
+    if doc.gateway
+        && let Some(remote) = &doc.remote
+    {
+        let Some(bearer) = gateway else {
+            return Err(Gap::NoSession);
+        };
+        if caps.stdio
+            && let Some(relay) = relay
+        {
+            // A config file inside a WSL distribution is read by a Linux harness this Windows
+            // process's own path means nothing to — the bare name resolves on that machine's
+            // PATH, the same optimism the runtime probe already grants that surface.
+            let command = if machine.wsl_dest {
+                "topos".to_owned()
+            } else {
+                relay.to_owned()
+            };
+            return Ok(McpTarget::Local {
+                command,
+                args: vec![
+                    topos_harness::mcp::RELAY_VERB.to_owned(),
+                    remote.url.clone(),
+                ],
+                env: Vec::new(),
+                env_ref: caps.env_ref,
+            });
+        }
+        if caps.remote {
+            // The one rendering that writes the credential into a config file, kept for the
+            // harness shape that dials addresses and runs nothing. The document's own headers
+            // ride beside it, minus any `Authorization` of its own: an entry carries one, and
+            // the one this machine attaches is the one the workspace reads.
+            let mut headers: Vec<(String, String)> = remote
+                .headers
+                .iter()
+                .filter(|(name, _)| !name.eq_ignore_ascii_case(AUTHORIZATION))
+                .cloned()
+                .collect();
+            headers.push((AUTHORIZATION.to_owned(), bearer.header_value()));
+            return Ok(McpTarget::Remote {
+                url: remote.url.clone(),
+                headers,
+            });
+        }
+        return Err(Gap::Unsupported { program: false });
+    }
     // 1. The address, where the agent dials one itself.
     if let Some(remote) = &doc.remote {
-        // The header this machine attaches itself, for a document that says the workspace reaches
-        // the server. Resolved ONCE, before the two address arms, so the address a bridge carries
-        // and the address a harness dials are the same address dialed the same way.
-        let remote = authorized(doc, remote, gateway)?;
         if caps.remote {
             return Ok(McpTarget::Remote {
                 url: remote.url.clone(),
@@ -763,7 +821,7 @@ pub(crate) fn select(
         if caps.stdio
             && let Some(bridge) = bridge
         {
-            return bridged(&remote, bridge, caps.env_ref, runtimes, machine);
+            return bridged(remote, bridge, caps.env_ref, runtimes, machine);
         }
     }
     // 3. The first package this build can set up — npm, then pypi.
@@ -781,42 +839,6 @@ pub(crate) fn select(
     Err(Gap::Unsupported {
         program: doc.remote.is_none(),
     })
-}
-
-/// **The address as it is actually dialed** — the document's own, unless the document says the
-/// workspace reaches the server, in which case the entry carries this machine's session credential
-/// for that workspace as its `Authorization` header.
-///
-/// The document's own headers are kept beside it, minus any `Authorization` of its own: an entry
-/// may only carry one, and the one this machine attached is the one the workspace reads. (The
-/// parse already refused a secret / templated / value-less header, so anything dropped here was a
-/// plain literal the workspace's own header supersedes.)
-///
-/// # Errors
-/// [`Gap::NoSession`] when the document makes the claim and no credential answers it — the address
-/// is never dialed bare on the strength of the document's word alone.
-fn authorized<'a>(
-    doc: &'a ServerDoc,
-    remote: &'a RemoteEndpoint,
-    gateway: Option<&GatewayBearer>,
-) -> Result<std::borrow::Cow<'a, RemoteEndpoint>, Gap> {
-    if !doc.gateway {
-        return Ok(std::borrow::Cow::Borrowed(remote));
-    }
-    let Some(bearer) = gateway else {
-        return Err(Gap::NoSession);
-    };
-    let mut headers: Vec<(String, String)> = remote
-        .headers
-        .iter()
-        .filter(|(name, _)| !name.eq_ignore_ascii_case(AUTHORIZATION))
-        .cloned()
-        .collect();
-    headers.push((AUTHORIZATION.to_owned(), bearer.header_value()));
-    Ok(std::borrow::Cow::Owned(RemoteEndpoint {
-        url: remote.url.clone(),
-        headers,
-    }))
 }
 
 /// Why THIS package could not be set up, in the order a person would ask it: a registry with no
@@ -1120,6 +1142,7 @@ mod tests {
             &both,
             caps(true, true),
             Some(&BRIDGE),
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1133,6 +1156,7 @@ mod tests {
             &both,
             caps(false, true),
             Some(&BRIDGE),
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1149,6 +1173,7 @@ mod tests {
             &packaged,
             caps(true, true),
             Some(&BRIDGE),
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1164,6 +1189,7 @@ mod tests {
                 &packaged,
                 caps(true, false),
                 Some(&BRIDGE),
+                None,
                 &EVERYTHING,
                 Machine::default(),
                 None
@@ -1176,6 +1202,7 @@ mod tests {
                 &doc(REMOTE_ONLY),
                 caps(false, false),
                 Some(&BRIDGE),
+                None,
                 &EVERYTHING,
                 Machine::default(),
                 None
@@ -1187,6 +1214,7 @@ mod tests {
             select(
                 &doc(REMOTE_ONLY),
                 caps(false, true),
+                None,
                 None,
                 &EVERYTHING,
                 Machine::default(),
@@ -1217,6 +1245,7 @@ mod tests {
             &with_args,
             caps(false, true),
             None,
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1245,6 +1274,7 @@ mod tests {
             &select(
                 &both,
                 caps(false, true),
+                None,
                 None,
                 &EVERYTHING,
                 Machine::default(),
@@ -1280,6 +1310,7 @@ mod tests {
             &http,
             caps(false, true),
             Some(&BRIDGE),
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1310,6 +1341,7 @@ mod tests {
                 &sse,
                 caps(false, true),
                 None,
+                None,
                 &EVERYTHING,
                 Machine::default(),
                 None
@@ -1333,6 +1365,7 @@ mod tests {
             &select(
                 &mixed,
                 caps(false, true),
+                None,
                 None,
                 &EVERYTHING,
                 Machine::default(),
@@ -1358,6 +1391,7 @@ mod tests {
                 &neither,
                 caps(false, true),
                 None,
+                None,
                 &EVERYTHING,
                 Machine::default(),
                 None
@@ -1381,6 +1415,7 @@ mod tests {
                     stdio: true,
                     env_ref,
                 },
+                None,
                 None,
                 &EVERYTHING,
                 Machine::default(),
@@ -1420,6 +1455,7 @@ mod tests {
             &with_headers,
             caps(false, true),
             Some(&BRIDGE),
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1462,6 +1498,7 @@ mod tests {
             &oauth,
             caps(false, true),
             Some(&BRIDGE),
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1495,6 +1532,7 @@ mod tests {
                     &colliding,
                     caps(false, true),
                     Some(&BRIDGE),
+                    None,
                     &EVERYTHING,
                     Machine::default(),
                     None,
@@ -1553,6 +1591,7 @@ mod tests {
                 &packaged,
                 caps(false, true),
                 None,
+                None,
                 &NOTHING,
                 on_windows,
                 None
@@ -1565,6 +1604,7 @@ mod tests {
             &select(
                 &packaged,
                 caps(false, true),
+                None,
                 None,
                 &NOTHING,
                 inside_wsl,
@@ -1582,6 +1622,7 @@ mod tests {
                 &doc(REMOTE_ONLY),
                 caps(false, true),
                 Some(&BRIDGE),
+                None,
                 &NOTHING,
                 on_windows,
                 None
@@ -1593,6 +1634,7 @@ mod tests {
                 &doc(REMOTE_ONLY),
                 caps(false, true),
                 Some(&BRIDGE),
+                None,
                 &NOTHING,
                 inside_wsl,
                 None
@@ -1604,6 +1646,7 @@ mod tests {
             select(
                 &packaged,
                 caps(false, true),
+                None,
                 None,
                 &EVERYTHING,
                 on_windows,
@@ -1663,6 +1706,7 @@ mod tests {
             &packaged,
             caps(false, true),
             None,
+            None,
             &NOTHING,
             Machine::default(),
             None,
@@ -1679,6 +1723,7 @@ mod tests {
                 &doc(REMOTE_ONLY),
                 caps(false, true),
                 Some(&BRIDGE),
+                None,
                 &NOTHING,
                 Machine::default(),
                 None
@@ -1695,6 +1740,7 @@ mod tests {
             select(
                 &pypi,
                 caps(false, true),
+                None,
                 None,
                 &NOTHING,
                 Machine::default(),
@@ -1713,6 +1759,7 @@ mod tests {
         let gap = select(
             &oci,
             caps(false, true),
+            None,
             None,
             &EVERYTHING,
             Machine::default(),
@@ -1735,6 +1782,7 @@ mod tests {
             &templated,
             caps(false, true),
             None,
+            None,
             &EVERYTHING,
             Machine::default(),
             None,
@@ -1750,6 +1798,7 @@ mod tests {
             select(
                 &packaged,
                 caps(true, false),
+                None,
                 None,
                 &EVERYTHING,
                 Machine::default(),
@@ -1770,6 +1819,7 @@ mod tests {
             let target = select(
                 &packaged,
                 caps(false, true),
+                None,
                 None,
                 &EVERYTHING,
                 machine,
@@ -1943,6 +1993,7 @@ mod tests {
             &gateway,
             caps(true, true),
             Some(&BRIDGE),
+            None,
             &EVERYTHING,
             Machine::default(),
             Some(&bearer()),
@@ -1973,6 +2024,7 @@ mod tests {
                 &plain,
                 caps(true, true),
                 Some(&BRIDGE),
+                None,
                 &EVERYTHING,
                 Machine::default(),
                 Some(&bearer()),
@@ -1996,6 +2048,7 @@ mod tests {
             &select(
                 &claiming,
                 caps(true, true),
+                None,
                 None,
                 &EVERYTHING,
                 Machine::default(),
@@ -2022,6 +2075,7 @@ mod tests {
                     &gateway,
                     caps,
                     Some(&BRIDGE),
+                    None,
                     &EVERYTHING,
                     Machine::default(),
                     None
@@ -2041,6 +2095,7 @@ mod tests {
             select(
                 &with_package,
                 caps(false, true),
+                None,
                 None,
                 &EVERYTHING,
                 Machine::default(),
@@ -2066,44 +2121,91 @@ mod tests {
         );
     }
 
-    /// An agent that dials nothing still reaches the workspace's address — through the bridge, with
-    /// the credential taking the same environment hop every header value takes there (the value has
-    /// a space in it, which is the whole reason that hop exists).
+    /// **The default gateway rendering: the relay, and the credential goes NOWHERE.** The entry
+    /// names this binary and the workspace's address in the open; the session credential stays in
+    /// the session store, read at call time — no rendered byte carries it, which is the shape's
+    /// whole point.
     #[test]
-    fn a_bridged_agent_carries_the_workspace_credential_through_the_environment() {
+    fn a_gateway_document_renders_as_the_relay_for_a_program_running_agent() {
         let target = select(
             &doc(GATEWAY),
             caps(false, true),
             Some(&BRIDGE),
+            Some("/opt/topos/topos"),
             &EVERYTHING,
             Machine::default(),
             Some(&bearer()),
         )
         .expect("placed");
         let (command, args, env) = local(&target);
-        assert_eq!(command, NPX);
+        assert_eq!(command, "/opt/topos/topos");
+        assert_eq!(args, ["relay", "https://gw.example/sn_1/srv_1"]);
+        assert_eq!(env, [], "no rendered byte carries the credential");
         assert_eq!(
-            args,
-            [
-                "-y",
-                "mcp-remote@0.1.38",
-                "https://gw.example/sn_1/srv_1",
-                "--header",
-                "X-Team:${TOPOS_HEADER_X_TEAM}",
-                "--header",
-                "Authorization:${TOPOS_HEADER_AUTHORIZATION}",
-            ]
+            doc(GATEWAY).entry_auth(Some(&bearer())),
+            AuthHint::None,
+            "nothing is left for the harness to sign into"
         );
-        assert_eq!(
-            env,
-            [
-                ("TOPOS_HEADER_X_TEAM".to_owned(), "eng".to_owned()),
-                (
-                    "TOPOS_HEADER_AUTHORIZATION".to_owned(),
-                    "Bearer sc-secret".to_owned()
-                ),
-            ]
-        );
+    }
+
+    /// **The relay outranks the dialed address.** An agent that could dial the gateway itself
+    /// still runs the relay wherever it runs programs at all — dialing would put the credential
+    /// in its config file, and the relay exists so no file has to carry it.
+    #[test]
+    fn the_relay_outranks_the_dialed_address_wherever_programs_run() {
+        let target = select(
+            &doc(GATEWAY),
+            caps(true, true),
+            Some(&BRIDGE),
+            Some("/opt/topos/topos"),
+            &EVERYTHING,
+            Machine::default(),
+            Some(&bearer()),
+        )
+        .expect("placed");
+        assert!(matches!(target, McpTarget::Local { .. }));
+    }
+
+    /// A WSL-bound config names the BARE binary: this process's own path is a Windows spelling
+    /// the Linux harness reading that file cannot run, and the bare name resolves on that
+    /// machine's own `PATH` — the same optimism the runtime probe grants the surface.
+    #[test]
+    fn a_wsl_destination_names_the_bare_binary() {
+        let target = select(
+            &doc(GATEWAY),
+            caps(false, true),
+            None,
+            Some(r"C:\tools\topos.exe"),
+            &EVERYTHING,
+            Machine {
+                windows: true,
+                wsl_dest: true,
+            },
+            Some(&bearer()),
+        )
+        .expect("placed");
+        let (command, args, _) = local(&target);
+        assert_eq!(command, "topos");
+        assert_eq!(args[0], "relay");
+    }
+
+    /// A caller that places no relay commands (`verify`'s shape) meeting an agent that dials
+    /// nothing: the gateway document is withheld in plain words. The bridge is deliberately not
+    /// the answer — it would spell the credential into the entry's environment, the exact byte
+    /// placement the relay shape retired.
+    #[test]
+    fn a_gateway_document_with_no_relay_and_no_dialing_agent_is_withheld() {
+        let gap = select(
+            &doc(GATEWAY),
+            caps(false, true),
+            Some(&BRIDGE),
+            None,
+            &EVERYTHING,
+            Machine::default(),
+            Some(&bearer()),
+        )
+        .expect_err("withheld");
+        assert_eq!(gap, Gap::Unsupported { program: false });
     }
 
     /// The credential prints as nothing, wherever a `{:?}` reaches one.
