@@ -152,7 +152,10 @@ impl LockDoc {
                     let t = section_table(item, "channels")?;
                     for (name, entry) in t.iter() {
                         let e = entry_table(entry, "channels", name)?;
-                        let Some(arr) = e.get("members").and_then(Item::as_value).and_then(Value::as_array)
+                        let Some(arr) = e
+                            .get("members")
+                            .and_then(Item::as_value)
+                            .and_then(Value::as_array)
                         else {
                             return Err(err(format!(
                                 "topos.lock: [channels.{name}] records no `members` array — \
@@ -239,11 +242,18 @@ fn quoted(name: &str) -> String {
 }
 
 fn section_table<'a>(item: &'a Item, section: &str) -> Result<&'a toml_edit::Table, LockError> {
-    item.as_table()
-        .ok_or_else(|| err(format!("topos.lock: `[{section}]` holds one block per entry")))
+    item.as_table().ok_or_else(|| {
+        err(format!(
+            "topos.lock: `[{section}]` holds one block per entry"
+        ))
+    })
 }
 
-fn entry_table<'a>(item: &'a Item, section: &str, name: &str) -> Result<&'a toml_edit::Table, LockError> {
+fn entry_table<'a>(
+    item: &'a Item,
+    section: &str,
+    name: &str,
+) -> Result<&'a toml_edit::Table, LockError> {
     item.as_table().ok_or_else(|| {
         err(format!(
             "topos.lock: `[{section}.{name}]` is a block of fields, one per line",
@@ -314,11 +324,14 @@ mod tests {
 
     #[test]
     fn unknown_sections_warn_and_a_newer_schema_refuses() {
-        let doc =
-            LockDoc::parse("schema = 1\n\n[memories.ctx]\nversion = \"abc\"\n").unwrap();
+        let doc = LockDoc::parse("schema = 1\n\n[memories.ctx]\nversion = \"abc\"\n").unwrap();
         assert!(doc.skills.is_empty());
         assert_eq!(doc.warnings.len(), 1);
-        assert!(doc.warnings[0].contains("[memories]"), "{}", doc.warnings[0]);
+        assert!(
+            doc.warnings[0].contains("[memories]"),
+            "{}",
+            doc.warnings[0]
+        );
         let e = LockDoc::parse("schema = 2\n").unwrap_err();
         assert!(e.message.contains("self-update"), "{e}");
     }

@@ -615,7 +615,9 @@ pub(super) fn write_row(
             .map_err(|e| ClientError::InvalidArgument(e.message))?;
         push_note(
             data,
-            format!("this project now uses `workspace = \"{ws_key}\"` — its bare names resolve there"),
+            format!(
+                "this project now uses `workspace = \"{ws_key}\"` — its bare names resolve there"
+            ),
         );
     }
     let in_reach = reach_already_held(ctx, target, reference, prior.as_ref(), value)?;
@@ -888,7 +890,16 @@ pub(crate) fn note_added_in(
         Some(p) => EntryValue::Pin(p.to_owned()),
         None => EntryValue::Star,
     };
-    write_row(ctx, data, target, reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))
+    write_row(
+        ctx,
+        data,
+        target,
+        reference,
+        &value,
+        value
+            .declared_kind()
+            .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+    )
 }
 
 /// Record a PATH-adopted bundle in `target`: the dir-relative `./` spelling when the source sits
@@ -1001,7 +1012,16 @@ fn note_added_path_row_in(
             ..crate::manifest::document::EntryFields::default()
         }),
     };
-    write_row(ctx, data, target, &reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))
+    write_row(
+        ctx,
+        data,
+        target,
+        &reference,
+        &value,
+        value
+            .declared_kind()
+            .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+    )
 }
 
 /// [`note_added_path_in`] resolving the target from the scope flag — the BACKSTOP for a caller
@@ -1192,7 +1212,16 @@ pub(crate) fn note_added_remote(
         dest: Some(dest.to_vec()),
         ..Default::default()
     });
-    write_row(ctx, data, target, &reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))
+    write_row(
+        ctx,
+        data,
+        target,
+        &reference,
+        &value,
+        value
+            .declared_kind()
+            .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+    )
 }
 
 /// The `dest` spellings a `-a` selection records for its slugs — the scope-correct skills-root
@@ -3708,7 +3737,11 @@ fn apply_arms(
             Arm::OffWrite { reference, .. } => {
                 edited = true;
                 editor
-                    .set_row(reference, &EntryValue::Off, crate::bundle_kind::BundleKind::Skill)
+                    .set_row(
+                        reference,
+                        &EntryValue::Off,
+                        crate::bundle_kind::BundleKind::Skill,
+                    )
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
             Arm::DestNarrow {
@@ -3719,7 +3752,9 @@ fn apply_arms(
                     .set_row(
                         reference,
                         value,
-                        value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill),
+                        value
+                            .declared_kind()
+                            .unwrap_or(crate::bundle_kind::BundleKind::Skill),
                     )
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
@@ -3735,7 +3770,9 @@ fn apply_arms(
                     .set_row(
                         reference,
                         value,
-                        value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill),
+                        value
+                            .declared_kind()
+                            .unwrap_or(crate::bundle_kind::BundleKind::Skill),
                     )
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }

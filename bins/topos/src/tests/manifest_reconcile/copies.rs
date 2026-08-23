@@ -30,7 +30,7 @@ use super::rig::*;
 fn an_offline_whole_row_remove_still_deletes_every_copy() {
     let (rig, plane, dir, _v) = add_rig("whole-offline");
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
          \"~/.codex/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -86,7 +86,7 @@ fn an_offline_whole_row_remove_still_deletes_every_copy() {
 fn an_offline_whole_row_remove_keeps_the_edited_copy_in_place() {
     let (rig, plane, dir, _v) = add_rig("whole-offline-edit");
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
          \"~/.codex/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -129,7 +129,7 @@ fn an_offline_whole_row_remove_keeps_the_edited_copy_in_place() {
 fn an_offline_whole_row_remove_cleans_a_free_form_dest_folder() {
     let (rig, plane, dir, _v) = add_rig("whole-offline-folder");
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/team-skills\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/team-skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
@@ -163,7 +163,7 @@ fn an_offline_whole_row_remove_cleans_a_free_form_dest_folder() {
 #[test]
 fn a_local_path_whole_row_remove_deletes_managed_copies_and_spares_the_source() {
     let (rig, plane, dir, _v) = add_rig("whole-local");
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let src = rig.work.0.join("my-skill");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("SKILL.md"), b"# mine\n").unwrap();
@@ -224,7 +224,7 @@ fn a_whole_row_remove_of_an_mcp_row_takes_its_config_entries_out() {
         "https://mcp.example/linear",
     ));
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
@@ -276,7 +276,7 @@ fn a_whole_row_remove_spares_another_workspaces_same_named_record() {
         vec![catalog_entry("s_ops_deploy", "deploy", &v)],
         Vec::new(),
     );
-    rig.write_global("[bundles]\n\"beta.test/ops/deploy\" = { dest = [\"~/.codex/skills\"] }\n");
+    rig.write_global("[skills]\n\"beta.test/ops/deploy\" = { dest = [\"~/.codex/skills\"] }\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     let placed = rig.home.0.join(".codex/skills/deploy/SKILL.md");
@@ -286,7 +286,9 @@ fn a_whole_row_remove_spares_another_workspaces_same_named_record() {
     // no record of its own here. The plane is dark, so only the verb's own rail could move
     // anything at all.
     rig.seed_session();
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     plane.serve_unreachable();
     let data = match ops::remove_global(
         &ctx,
@@ -333,8 +335,9 @@ fn removing_a_row_a_channel_line_still_delivers_names_no_feed() {
     // The login's feed line (which assigns this person nothing), a channel line, and an explicit
     // row for the same bundle — explicit beats set while the row stands.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
-         \"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\
+         \"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n\n[channels]\n\
+         \"{HOST}/{WS_NAME}/backend\" = \"latest\"\n"
     ));
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -376,7 +379,7 @@ fn removing_a_row_a_channel_line_still_delivers_names_no_feed() {
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(!text.contains("/deploy\""), "the row left: {text}");
     assert!(
-        text.contains("channels/backend"),
+        text.contains(&format!("[channels]\n\"{HOST}/{WS_NAME}/backend\"")),
         "the set line stands: {text}"
     );
     assert!(
@@ -411,7 +414,8 @@ fn removing_a_row_names_the_feed_that_actually_delivers_it() {
     seed_second_session(&rig);
     // This workspace's feed line + its explicit row; the feed itself assigns nothing.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\
+         \"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
     ));
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -448,8 +452,8 @@ fn removing_a_row_names_the_feed_that_actually_delivers_it() {
     )
     .unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n\
-         \"beta.test/ops\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\"beta.test/ops\" = \"latest\"\n\n\
+         [skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
     ));
     // Dark, so the frozen sweep moves nothing and the cached provenance stands.
     plane.serve_unreachable();
@@ -588,7 +592,7 @@ fn re_adding_the_feed_line_reinstalls_with_a_receipt_line() {
     assert!(placed.join("SKILL.md").exists());
 
     // The feed line is removed: the next update retires the copies.
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let retired = sweep(&ctx, &plane, &dir);
     assert!(
         !placed.exists(),
@@ -1227,7 +1231,7 @@ fn a_served_kind_this_build_cannot_deliver_is_skipped_and_named() {
 fn adding_a_kind_this_build_cannot_deliver_refuses_with_the_same_teaching() {
     let rig = Rig::new("alien-kind-add");
     rig.seed_session();
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# not a skill\n");
     let plane = FakePlane::new(log).with_version("s_alien", &v);

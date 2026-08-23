@@ -54,10 +54,10 @@ mod review;
 mod self_update;
 mod status;
 pub(crate) mod sync_engine;
-pub(crate) mod workspace;
 mod uninstall;
 mod verify;
 mod version_check;
+pub(crate) mod workspace;
 
 pub(crate) use add::{
     AddRemoteOpts, BareAdd, BareAddPlan, KeepAsYoursOutcome, KindDeclared, OriginDoc, add,
@@ -115,11 +115,11 @@ pub(crate) use pull::{
     PendingDecision, PullOutcome, PullScope, ResetOutcome, StaleReason, TargetMode,
     ctx_with_layout, pull, quiet_hook_lines, quiet_soft_failure, reset,
 };
-pub(crate) use workspace::{list as workspace_list, switch as workspace_switch};
 pub(crate) use reconcile::{
-    CacheFollow, ForgeCadence, LockMode, ManifestUpdateOpts, SessionRoutedPlane,
-    SessionTransports, UpdateScope, forge_imports, manifest_update, moved_bytes,
+    CacheFollow, ForgeCadence, LockMode, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports,
+    UpdateScope, forge_imports, manifest_update, moved_bytes,
 };
+pub(crate) use workspace::{list as workspace_list, switch as workspace_switch};
 // The one-time orphan resolution's fact composer — re-exported so the receipt-copy tests pin its
 // exact shapes.
 #[cfg(test)]

@@ -30,14 +30,16 @@ fn a_dropped_feed_row_uninstalls_clean_copies_and_keeps_edited_ones() {
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     sweep(&ctx, &plane, &dir);
     let placed = rig.skills().join("deploy");
     assert!(placed.join("SKILL.md").exists());
 
     // A CLEAN copy: dropping the feed row uninstalls it now, and the receipt row speaks in
     // destinations — the removed dir, the qualified name — never an agent.
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let out = sweep(&ctx, &plane, &dir);
     let row = out
         .data
@@ -60,12 +62,14 @@ fn a_dropped_feed_row_uninstalls_clean_copies_and_keeps_edited_ones() {
 
     // An EDITED copy: re-adopt, edit, drop again — the edit is the person's own work, so the
     // copy STAYS IN PLACE (disclosed on the row), with a snapshot in the store behind it.
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     sweep(&ctx, &plane, &dir);
     assert!(placed.join("SKILL.md").exists());
     let before = store_versions(&rig.layout(), "s_deploy");
     std::fs::write(placed.join("SKILL.md"), b"# my edit\n").unwrap();
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let out = sweep(&ctx, &plane, &dir);
     let row = out
         .data
@@ -117,7 +121,7 @@ fn a_new_off_row_cleans_its_bundles_placements_and_keeps_the_bytes() {
     assert!(placed.exists());
 
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
     ));
     let out = sweep(&ctx, &plane, &dir);
     assert!(!placed.exists(), "the switch retires the copy");
@@ -135,7 +139,7 @@ fn a_dropped_project_row_cleans_inside_the_checkout() {
     rig.seed_session();
     let proj = project(
         "proj-drop",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -146,7 +150,7 @@ fn a_dropped_project_row_cleans_inside_the_checkout() {
     let placed = proj.0.join(".claude/skills/deploy");
     assert!(placed.exists());
 
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "").unwrap();
     let out = sweep(&ctx, &plane, &dir);
     assert!(
         !placed.exists(),
@@ -165,7 +169,7 @@ fn an_offline_sweep_freezes_and_never_cleans() {
     rig.seed_session();
     let proj = project(
         "proj-off",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\nbackend = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -780,7 +784,7 @@ fn a_targeted_update_narrows_the_sweep_and_names_a_miss() {
 #[test]
 fn a_repo_row_converges_in_place_inside_the_forge_interval() {
     let rig = Rig::new("repo-postgate");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -789,7 +793,7 @@ fn a_repo_row_converges_in_place_inside_the_forge_interval() {
         "o-r-aaaaaaaaaaaa1",
         &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
     ));
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r/alpha");
     assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
     // An `add` is not a lane round — it schedules nothing. The first sweep after it therefore
     // still checks; this one is what starts the clock.
@@ -829,8 +833,8 @@ fn project_checkouts_keep_their_own_forge_stores() {
     // TWO checkouts of one repo row: each gets its OWN tracked import + placement, and a move
     // taken in one (a pin move / a new commit) never reaches into the other's placements.
     let rig = Rig::new("repo-two-proj");
-    let proj_a = project("proj-fa", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
-    let proj_b = project("proj-fb", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let proj_a = project("proj-fa", "");
+    let proj_b = project("proj-fb", "");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -845,7 +849,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
         &ctx_a,
         &connect(&plane, &dir),
         Some(&git as &dyn crate::git_source::GitTarballSource),
-        "github.com/o/r",
+        "github.com/o/r/alpha",
         false,
         true,
         &Default::default(),
@@ -868,7 +872,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
         &ctx_b,
         &connect(&plane, &dir),
         Some(&git as &dyn crate::git_source::GitTarballSource),
-        "github.com/o/r",
+        "github.com/o/r/alpha",
         false,
         true,
         &Default::default(),
@@ -916,85 +920,9 @@ fn project_checkouts_keep_their_own_forge_stores() {
 }
 
 #[test]
-fn a_member_gone_from_the_archive_is_cleaned_snapshot_first() {
-    let rig = Rig::new("repo-minus");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[
-            ("skills/alpha/SKILL.md", b"# alpha v1\n"),
-            ("skills/beta/SKILL.md", b"# beta v1\n"),
-        ],
-    ));
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
-    let beta = rig.home.0.join(".claude/skills/beta");
-    assert!(beta.join("SKILL.md").exists());
-    // An edit rides on the leaving member — it must be absorbed before the dir goes.
-    std::fs::write(beta.join("SKILL.md"), b"# my beta edit\n").unwrap();
-    let beta_sid = {
-        // The tracked import's id, for the snapshot-first witness below.
-        let mut hit = None;
-        for entry in rig.fs.read_dir(&rig.layout().skills_dir()).unwrap() {
-            let id = entry.file_name().unwrap().to_str().unwrap().to_owned();
-            let sid = crate::id::SkillId::parse(&id).unwrap();
-            let lock: topos_types::persisted::Lock =
-                crate::doc::read_doc(&rig.fs, &rig.layout().published(&sid).lock)
-                    .unwrap()
-                    .unwrap();
-            if lock.name == "beta" {
-                hit = Some(id);
-            }
-        }
-        hit.expect("beta tracked")
-    };
-    let before = store_versions(&rig.layout(), &beta_sid);
-
-    // The new archive no longer holds beta: the explicit update renders `-beta` AND retires the
-    // copy, snapshot-first; the sidecar bytes stay.
-    git.serve(build_repo_targz(
-        "o-r-bbbbbbbbbbbb2",
-        &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
-    ));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let line = crate::message::legacy_lines(&out.disclosures)
-        .into_iter()
-        .find(|w| w.starts_with("GIT_UPDATED"))
-        .expect("the moved-source line");
-    assert!(line.contains("-beta"), "{line}");
-    assert!(!beta.exists(), "the absent member's copy is retired");
-    assert!(
-        out.data
-            .skills
-            .iter()
-            .any(|s| s.skill == "beta" && s.action == PullAction::Withdrawn),
-        "{:?}",
-        out.data.skills
-    );
-    assert!(
-        store_versions(&rig.layout(), &beta_sid) > before,
-        "the edit was snapshotted into the store first"
-    );
-    let sid = crate::id::SkillId::parse(&beta_sid).unwrap();
-    assert!(
-        rig.layout().skill_dir(&sid).exists(),
-        "the sidecar bytes stay"
-    );
-}
-
-#[test]
 fn a_dropped_repo_row_cleans_its_members_like_any_undemanded_item() {
     let rig = Rig::new("repo-drop");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    rig.write_global("");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1003,13 +931,13 @@ fn a_dropped_repo_row_cleans_its_members_like_any_undemanded_item() {
         "o-r-aaaaaaaaaaaa1",
         &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
     ));
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r/alpha");
     let alpha = rig.home.0.join(".claude/skills/alpha");
     assert!(alpha.exists());
 
     // The row goes; the next BARE sweep (no forge lane needed) retires the members' placements
     // and keeps every sidecar byte.
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let out = sweep(&ctx, &plane, &dir);
     assert!(
         !alpha.exists(),
@@ -1057,7 +985,7 @@ fn a_project_mention_never_shields_a_person_scope_clean() {
 
     // A project whose manifest mentions an UNRELATED thing of the same NAME (a local folder
     // called `deploy`).
-    let proj = project("proj-mention", "[bundles]\n\"./deploy\" = \"*\"\n");
+    let proj = project("proj-mention", "[skills]\ndeploy = \"./deploy\"\n");
     std::fs::create_dir_all(proj.0.join("deploy")).unwrap();
     std::fs::write(proj.0.join("deploy/SKILL.md"), b"# local deploy\n").unwrap();
     let ctx = rig.ctx_at(Some(&proj.0));
@@ -1090,7 +1018,7 @@ fn the_report_covers_project_manifest_deliveries() {
     rig.seed_session();
     let proj = project(
         "proj-report",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -1123,9 +1051,9 @@ fn the_report_carries_another_checkouts_holdings() {
     rig.seed_session();
     let proj_a = project(
         "proj-cross-a",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
-    let proj_b = project("proj-cross-b", "[bundles]\n");
+    let proj_b = project("proj-cross-b", "");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log.clone()).with_version("s_deploy", &v);
@@ -1188,7 +1116,7 @@ fn the_report_covers_a_declined_but_locally_added_bundle() {
     });
     let dir = FakeDirectory::new(vec![catalog_entry("s_noisy", "noisy", &v)], Vec::new());
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/noisy\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\"{HOST}/{WS_NAME}/noisy\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -1216,7 +1144,7 @@ fn the_report_covers_a_declined_but_locally_added_bundle() {
 #[test]
 fn a_failed_member_install_leaves_the_row_and_the_next_update_converges() {
     let rig = Rig::new("add-partial");
-    let proj = project("proj-partial", "[bundles]\n");
+    let proj = project("proj-partial", "");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
@@ -1233,11 +1161,23 @@ fn a_failed_member_install_leaves_the_row_and_the_next_update_converges() {
     std::fs::create_dir_all(&beta_dest).unwrap();
     std::fs::write(beta_dest.join("notes.txt"), b"mine\n").unwrap();
 
+    // alpha's own row lands its copy; beta's is the one whose install refuses.
+    ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        "github.com/o/r/alpha",
+        false,
+        true,
+        &Default::default(),
+        None,
+    )
+    .unwrap();
     let data = match ops::add_reference(
         &ctx,
         &connect(&plane, &dir),
         Some(&git as &dyn crate::git_source::GitTarballSource),
-        "github.com/o/r",
+        "github.com/o/r/beta",
         false,
         true,
         &Default::default(),
@@ -1250,7 +1190,7 @@ fn a_failed_member_install_leaves_the_row_and_the_next_update_converges() {
     };
     // The DEMAND landed first — the row is in the manifest even though beta did not land.
     let manifest = std::fs::read_to_string(proj.0.join(crate::manifest::MANIFEST_FILE)).unwrap();
-    assert!(manifest.contains("github.com/o/r"), "{manifest}");
+    assert!(manifest.contains("github:o/r"), "{manifest}");
     assert!(proj.0.join(".claude/skills/alpha/SKILL.md").exists());
     let note = data.note.clone().unwrap_or_default();
     assert!(note.contains("did not land: beta"), "{note}");
@@ -1298,7 +1238,7 @@ fn a_sweep_revives_a_retired_record_a_row_still_claims() {
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let src = rig.home.0.join("tools/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1362,7 +1302,7 @@ fn a_sweep_leaves_a_retired_record_no_row_claims_exactly_as_it_is() {
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let src = rig.home.0.join("tools/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1370,7 +1310,7 @@ fn a_sweep_leaves_a_retired_record_no_row_claims_exactly_as_it_is() {
     let record = sid(added.skill_id.as_deref().expect("an adopt records its id"));
 
     // The row is dropped by hand, and the record retires on the next sweep — its ONE statement.
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     let marker = rig.layout().published(&record).retired;
     assert!(marker.exists(), "the one-time resolution ran");

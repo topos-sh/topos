@@ -12,7 +12,7 @@ use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter, OpenClaw, registry, triggers};
 use topos_types::HarnessId;
 
-use crate::cli::{AuthCmd, WorkspaceCmd, Cli, Command};
+use crate::cli::{AuthCmd, Cli, Command, WorkspaceCmd};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};

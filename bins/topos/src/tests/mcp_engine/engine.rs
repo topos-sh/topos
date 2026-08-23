@@ -92,7 +92,7 @@ fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() 
     std::fs::create_dir_all(proj.0.join(".cursor")).unwrap();
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"./.cursor/mcp.json\"] }}\n"),
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = {{ dest = [\"./.cursor/mcp.json\"] }}\n"),
     )
     .unwrap();
     let s = served_at("https://mcp.example/linear");
@@ -173,7 +173,7 @@ fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() 
 fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     let rig = Rig::new("dest-move");
     seed_harness_dirs(&rig.home.0);
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let dir = rig.home.0.join("demo");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -187,9 +187,9 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     let fdir = FakeDirectory::default();
     // A server only this machine runs is a LINE, not something a workspace shares: no record, no
     // delivery cache row — the shape whose receipt used to print a store id at a person.
-    let row = format!("\"{}\"", dir.display());
     rig.write_global(&format!(
-        "[bundles]\n{row} = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n"
+        "[mcp]\ndemo = {{ path = \"{}\", kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n",
+        dir.display()
     ));
     sweep(&ctx, &plane, &fdir);
     let cursor = rig.home.0.join(".cursor/mcp.json");
@@ -198,7 +198,7 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     // The row's destination MOVES. The old surface loses the entry, and the file topos created
     // there goes with it.
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ kind = \"mcp\", dest = [\"~/.openclaw/openclaw.json\"] }}\n",
+        "[mcp]\ndemo = {{ path = \"{}\", kind = \"mcp\", dest = [\"~/.openclaw/openclaw.json\"] }}\n",
         dir.display()
     ));
     let out = sweep(&ctx, &plane, &fdir);

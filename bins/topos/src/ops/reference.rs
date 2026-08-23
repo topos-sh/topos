@@ -179,7 +179,14 @@ fn add_feed(
     // now takes whatever the workspace gives it (`render::add_tty`, off the reference SHAPE). A
     // note repeating it printed the same fact twice, one line apart. The no-op arm above keeps
     // its note — "already adopting …" is a fact that sentence does not carry.
-    medit::write_row(ctx, &mut data, &target, &reference, &EntryValue::Star, crate::bundle_kind::BundleKind::Skill)?;
+    medit::write_row(
+        ctx,
+        &mut data,
+        &target,
+        &reference,
+        &EntryValue::Star,
+        crate::bundle_kind::BundleKind::Skill,
+    )?;
     Ok(AddRefOutcome::applied(data))
 }
 
@@ -434,7 +441,16 @@ fn add_workspace(
                 && i.workspace == resolved.session.workspace_name
                 && i.name == resolved.name
         });
-        medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))?;
+        medit::write_row(
+            ctx,
+            &mut data,
+            &target,
+            &resolved.canonical,
+            &value,
+            value
+                .declared_kind()
+                .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+        )?;
         if declined {
             medit::push_note(
                 &mut data,
@@ -467,7 +483,16 @@ fn add_workspace(
     let Some(target) = medit::project_target(ctx)? else {
         return Err(ClientError::NoManifest);
     };
-    medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))?;
+    medit::write_row(
+        ctx,
+        &mut data,
+        &target,
+        &resolved.canonical,
+        &value,
+        value
+            .declared_kind()
+            .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+    )?;
     shape_dest_receipt(
         ctx,
         &mut data,
@@ -1291,6 +1316,11 @@ fn set_data(name: &str) -> AddData {
 // The GIT-FORGE arm — `add owner/repo[/skill]`
 // ---------------------------------------------------------------------------------------------
 
+/// Classify a reference, `None` on the shapes this flow never builds.
+fn shape_of(reference: &str) -> Option<KeyShape> {
+    crate::manifest::keys::classify_key(reference).ok()
+}
+
 fn add_forge(
     ctx: &Ctx<'_>,
     git: Option<&dyn GitTarballSource>,
@@ -1400,6 +1430,16 @@ fn add_forge(
         },
         (None, None) => (source_label.clone(), discovered.clone()),
     };
+    // THE ROWS THIS ADD WRITES: one per skill, always — a whole-repo add expands to its
+    // discovered skills (a repo set has no row of its own; the key is the skill's name).
+    let row_refs: Vec<String> = if matches!(shape_of(&reference), Some(KeyShape::RepoSet { .. })) {
+        members
+            .iter()
+            .map(|m| format!("{source_label}/{m}"))
+            .collect()
+    } else {
+        vec![reference.clone()]
+    };
 
     // The row's VALUE: `"*"` tracks the default branch; a hex ref pins straight through; a NAMED
     // ref is a deliberate freeze, so the RESOLVED commit is what the row records. A `-a`/`--dest`
@@ -1416,7 +1456,7 @@ fn add_forge(
         (None, Some(_)) => extracted.commit.clone().filter(|c| medit::is_commit(c)),
         (None, None) => None,
     };
-    let shape = crate::manifest::keys::classify_key(&reference)
+    let shape = crate::manifest::keys::classify_key(row_refs.first().unwrap_or(&reference))
         .map_err(|e| ClientError::InvalidArgument(e.message))?;
     let version_legal = crate::manifest::document::legal_fields(&shape).contains(&"version");
     let dest_withheld = !dest_entries.is_empty() && pin.is_some() && !version_legal;
@@ -1436,10 +1476,12 @@ fn add_forge(
         (Some(p), None, None) => EntryValue::Pin(p.clone()),
         (None, None, None) => EntryValue::Star,
     };
-    // PROVE THE ROW BEFORE ANYTHING LANDS: a value the file would refuse is caught here, while
-    // nothing has happened yet.
-    crate::manifest::document::check_row(&reference, target.scope, &value)
-        .map_err(|e| ClientError::InvalidArgument(e.message))?;
+    // PROVE EVERY ROW BEFORE ANYTHING LANDS: a value the file would refuse is caught here,
+    // while nothing has happened yet.
+    for row_ref in &row_refs {
+        crate::manifest::document::check_row(row_ref, target.scope, &value)
+            .map_err(|e| ClientError::InvalidArgument(e.message))?;
+    }
 
     // DESCRIBE FIRST, unconditionally: an interactive add of a git source says what the source
     // holds and where it would land, and installs only under `--yes`. Re-adding a source already
@@ -1455,19 +1497,47 @@ fn add_forge(
         // The row may ALREADY be recorded (a cloned manifest; a prior add whose installs all
         // failed) — said out loud, with what the consent covers: the row is standing demand,
         // and applying is what fetches and installs the bytes it names.
-        let row_exists = medit::read_text(ctx, &target.path)
+        let standing: Vec<&str> = medit::read_text(ctx, &target.path)
             .ok()
             .flatten()
             .and_then(|text| {
                 crate::manifest::document::ManifestEditor::open(&text, target.scope).ok()
             })
-            .is_some_and(|editor| editor.row(&reference).is_some());
-        let note = row_exists.then(|| {
-            format!(
-                "{} already records this row — it is demand, not consent; applying is what \
-                 fetches and installs the skills it names",
-                target.path.display()
-            )
+            .map(|editor| {
+                row_refs
+                    .iter()
+                    .filter(|r| editor.row(r).is_some())
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|r| r.rsplit('/').next().unwrap_or(r))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let standing: Vec<String> = standing.into_iter().map(str::to_owned).collect();
+        let note = (!standing.is_empty()).then(|| {
+            if standing.len() == row_refs.len() {
+                if row_refs.len() == 1 {
+                    format!(
+                        "{} already records this row — it is demand, not consent; applying is \
+                         what fetches and installs the skills it names",
+                        target.path.display()
+                    )
+                } else {
+                    format!(
+                        "{} already records these rows — they are demand, not consent; applying \
+                         is what fetches and installs the skills they name",
+                        target.path.display()
+                    )
+                }
+            } else {
+                format!(
+                    "{} already records {} — a standing row is demand, not consent; applying \
+                     records the rest and fetches and installs everything named",
+                    target.path.display(),
+                    standing.join(", ")
+                )
+            }
         });
         return Ok(AddRefOutcome::Described {
             data: Box::new(AddDescribeData {
@@ -1493,7 +1563,27 @@ fn add_forge(
     // update (or a re-run of this add) finishes the landing — instead of installed members no
     // manifest row asks for.
     let mut row_receipt = set_data(members.first().map_or(&repo, |m| m));
-    medit::write_row(ctx, &mut row_receipt, &target, &reference, &value, value.declared_kind().unwrap_or(crate::bundle_kind::BundleKind::Skill))?;
+    for row_ref in &row_refs {
+        medit::write_row(
+            ctx,
+            &mut row_receipt,
+            &target,
+            row_ref,
+            &value,
+            value
+                .declared_kind()
+                .unwrap_or(crate::bundle_kind::BundleKind::Skill),
+        )?;
+    }
+    if row_refs.len() > 1 {
+        // Several rows landed: the receipt speaks for the set of them — the reference reads as
+        // the source, and the undo is one `remove` per row (each verifiably restores its line).
+        row_receipt.reference = Some(source_label.clone());
+        row_receipt.undo = row_refs
+            .iter()
+            .map(|r| format!("topos remove {r}{}", if global { " -g" } else { "" }))
+            .collect();
+    }
     // A project install writes through the project's own self-ignoring `.topos/` store; mint its
     // shell before the first member lands.
     if target.scope == ManifestScope::Project {
@@ -2204,6 +2294,18 @@ pub(crate) fn rewrite_to_governed(
         let already_governed = editor.row(&canonical).is_some();
         editor.remove_row(&from);
         if !already_governed {
+            // The same first-workspace-row adoption `write_row` runs: a governance transfer into
+            // a project file with no `workspace = ` line writes the line rather than failing.
+            if scope == ManifestScope::Project
+                && editor.workspace().is_none()
+                && let Ok(shape) = crate::manifest::keys::classify_key(&canonical)
+                && let Some(ws_key) = shape.workspace_key()
+                && let Some((host, ws)) = ws_key.split_once('/')
+            {
+                editor
+                    .set_workspace(host, ws)
+                    .map_err(|e| ClientError::InvalidArgument(e.message))?;
+            }
             editor
                 .set_row(
                     &canonical,

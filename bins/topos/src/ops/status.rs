@@ -200,7 +200,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(
             repo.join(crate::manifest::MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/api-only\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\napi-only = \"latest\"\n",
         )
         .unwrap();
         home.session(
@@ -216,7 +216,7 @@ mod tests {
             vec![assigned("deploy", Some("Dana"))],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let d = snapshot(&home, &repo, ScopeView::Here);
         assert_eq!(d.scopes.len(), 1, "{:?}", d.scopes);
@@ -256,7 +256,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(
             repo.join(crate::manifest::MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/api-only\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\napi-only = \"latest\"\n",
         )
         .unwrap();
         home.session(
@@ -272,7 +272,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let d = snapshot(&home, &repo, ScopeView::Machine);
         assert_eq!(d.scopes.len(), 1);
@@ -295,7 +295,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(
             repo.join(crate::manifest::MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/api-only\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\napi-only = \"latest\"\n",
         )
         .unwrap();
         home.session(
@@ -331,7 +331,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let d = snapshot(&home, &cwd, ScopeView::Here);
         assert_eq!(d.scopes.len(), 1);
@@ -363,7 +363,7 @@ mod tests {
             vec![assigned("deploy", None), assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         // deploy: applied at an OLDER version than served — behind.
         home.store_applied(
             "topos_dddddddddddddddddddddddddddddddd",
@@ -403,7 +403,7 @@ mod tests {
         let home = TempHome::new();
         let repo = home.0.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        std::fs::write(repo.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+        std::fs::write(repo.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
         home.session(
             "topos.sh",
             "w_acme",
@@ -417,7 +417,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         let placed = home.0.join("placed-notes");
         std::fs::create_dir_all(&placed).unwrap();
         std::fs::write(placed.join("SKILL.md"), b"# edited\n").unwrap();

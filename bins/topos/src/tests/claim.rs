@@ -379,7 +379,7 @@ fn a_folder_the_project_store_records_refuses_naming_that_file() {
     let rig = Rig::new("cross");
     let project = rig.work.0.join("repo");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(project.join("topos.toml"), "schema = 1\n").unwrap();
     let inside = project.join("skills/deploy");
     std::fs::create_dir_all(&inside).unwrap();
     std::fs::write(inside.join("SKILL.md"), "# deploy\n").unwrap();
@@ -421,7 +421,7 @@ fn a_folder_the_other_scope_records_refuses_naming_its_file() {
     let rig = Rig::new("cross-out");
     let project = rig.work.0.join("repo");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(project.join("topos.toml"), "schema = 1\n").unwrap();
     let outside = rig.folder("shared/deploy", "# deploy\n");
 
     let pctx = Ctx {
@@ -456,7 +456,7 @@ fn a_folder_outside_the_project_refuses_toward_the_machine_file() {
     let rig = Rig::new("outside");
     let project = rig.work.0.join("repo");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(project.join("topos.toml"), "schema = 1\n").unwrap();
     let inside = project.join("skills/deploy");
     std::fs::create_dir_all(&inside).unwrap();
     std::fs::write(inside.join("SKILL.md"), "# deploy\n").unwrap();
@@ -989,7 +989,7 @@ fn a_name_the_other_scope_adopted_from_a_folder_is_never_adopted_twice() {
 
     let project = rig.work.0.join("repo");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(project.join("topos.toml"), "schema = 1\n").unwrap();
     let pctx = Ctx {
         roots: Some(AgentRoots {
             home: rig.work.0.clone(),
@@ -1319,7 +1319,7 @@ fn a_project_invoked_answer_never_offers_a_home_folder() {
     std::fs::create_dir_all(rig.work.0.join(".cursor")).unwrap();
     let project = rig.work.0.join("repo");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(project.join("topos.toml"), "schema = 1\n").unwrap();
     let source = project.join(".claude/skills/pr-describe");
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), "# pr\n").unwrap();
@@ -1482,7 +1482,7 @@ fn a_claimed_folder_in_a_project_is_planned_for_a_delivered_bundle() {
     let rig = Rig::new("planned-project");
     let project = rig.work.0.join("repo");
     std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
-    std::fs::write(project.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(project.join("topos.toml"), "schema = 1\n").unwrap();
     let source = project.join("skills/pr-describe");
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), "# pr\n").unwrap();
@@ -1627,67 +1627,6 @@ fn a_record_only_detach_never_writes_the_manifest() {
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), before);
 }
 
-#[test]
-fn a_claim_on_a_set_delivered_bundle_detaches_record_side() {
-    // A SET line (here a whole repo) delivers the bundle and no row of its own spells it, so the
-    // removal resolves to a SPLIT — whose per-agent narrowing refusal would leave the documented
-    // `remove <bundle> --dest <folder>` inverse with no command behind it. The claim was
-    // record-only, so its inverse is too: the set line is not touched at all.
-    let rig = Rig::new("set-delivered");
-    let source = rig.folder("pr-describe", "# pr\n");
-    let added = rig.adopt(&source);
-    let id = added.skill_id.clone().unwrap();
-    // The record is a forge IMPORT, and the file spells only the repo line that delivers it.
-    let ctx = rig.ctx();
-    doc::write_doc(
-        ctx.fs,
-        &ctx.layout.published(&sid(&id)).origin,
-        &ops::OriginDoc {
-            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
-            origin: topos_types::results::SkillOrigin {
-                source: "github.com/acme/tools".to_owned(),
-                git_ref: None,
-                commit: None,
-                subdir: None,
-                license: None,
-            },
-            imported_at: 0,
-            members: vec!["pr-describe".to_owned()],
-        },
-    )
-    .unwrap();
-    let manifest = rig.home.0.join("topos.toml");
-    std::fs::write(&manifest, "[bundles]\n\"github.com/acme/tools\" = \"*\"\n").unwrap();
-
-    let copy = rig.folder("agents/pr-describe", "# pr\n");
-    ops::claim(&ctx, &rig.scope(&ctx), &copy, "pr-describe").unwrap();
-    let before = std::fs::read_to_string(&manifest).unwrap();
-
-    let out = ops::remove_global(
-        &ctx,
-        &no_sessions,
-        &["pr-describe".to_owned()],
-        None,
-        true,
-        &ops::Selection::new(&[], &["~/agents".to_owned()]),
-    )
-    .unwrap();
-    let ops::RemoveOutcome::Applied(applied) = out else {
-        panic!("a detach loses nothing and applies immediately");
-    };
-    assert_eq!(applied.items[0].kind, RemoveKind::ClaimDetached);
-    assert_eq!(
-        std::fs::read_to_string(&manifest).unwrap(),
-        before,
-        "the set line is untouched"
-    );
-    assert!(copy.join("SKILL.md").exists(), "the bytes stay");
-    assert!(
-        !rig.map(&id).placements.iter().any(|p| Path::new(p) == copy),
-        "the record forgets the folder"
-    );
-}
-
 // ---------------------------------------------------------------------------------------------
 // The re-run: verify-and-repair, and an answer read off the record
 // ---------------------------------------------------------------------------------------------
@@ -1758,8 +1697,8 @@ fn an_ancestor_project_that_records_the_folder_refuses_a_nested_claim() {
     let outer = rig.work.0.join("outer");
     let inner = outer.join("inner");
     std::fs::create_dir_all(&inner).unwrap();
-    std::fs::write(outer.join("topos.toml"), "[bundles]\n").unwrap();
-    std::fs::write(inner.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(outer.join("topos.toml"), "schema = 1\n").unwrap();
+    std::fs::write(inner.join("topos.toml"), "schema = 1\n").unwrap();
     // The contested folder sits INSIDE the nested checkout — so the scope rail passes it (it IS
     // the inner project's business by location) and only the ancestor probe can catch that the
     // outer project's own row already names it.
@@ -1809,7 +1748,7 @@ fn an_ancestor_project_that_records_the_folder_refuses_a_nested_claim() {
 /// A project checkout with its own manifest, and a ctx standing in it.
 fn project_at<'a>(rig: &'a Rig, dir: &Path) -> (Ctx<'a>, ops::AddScope) {
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("topos.toml"), "[bundles]\n").unwrap();
+    std::fs::write(dir.join("topos.toml"), "schema = 1\n").unwrap();
     let ctx = Ctx {
         roots: Some(AgentRoots {
             home: rig.work.0.clone(),

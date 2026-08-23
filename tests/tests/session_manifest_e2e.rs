@@ -112,9 +112,18 @@ fn the_session_manifest_hero_loop() {
         "the receipt names the manifest"
     );
     let manifest_bytes = std::fs::read_to_string(&manifest_path).expect("read the manifest");
+    // The governed row spells v2: the workspace line names the project's one workspace, and the
+    // bare key resolves against it — together they ARE the canonical reference.
+    let ws = canonical
+        .strip_suffix("/deploy")
+        .expect("a host-qualified reference");
     assert!(
-        manifest_bytes.contains(&canonical),
-        "the manifest line is the canonical reference now: {manifest_bytes}"
+        manifest_bytes.contains(&format!("workspace = \"{ws}\"")),
+        "the workspace line stands: {manifest_bytes}"
+    );
+    assert!(
+        manifest_bytes.contains("deploy = \"latest\""),
+        "the bare name resolves against the workspace line: {manifest_bytes}"
     );
     assert!(
         !manifest_bytes.contains("\"./deploy\""),
@@ -271,7 +280,7 @@ fn the_session_manifest_hero_loop() {
     let file = std::fs::read_to_string(&global_manifest).expect("the global manifest");
     assert!(file.contains("= \"off\""), "the off row is spelled: {file}");
     assert!(
-        file.contains("/acme\" = \"*\""),
+        file.contains("/acme\" = \"latest\""),
         "the login's first connection recorded the feed line: {file}"
     );
     // The next sweep cleans the person-scope placement; the checkout's copy is that scope's

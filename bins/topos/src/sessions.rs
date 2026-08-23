@@ -140,7 +140,9 @@ impl Sessions {
     /// [`ClientError::Enrollment`] with the login hint when there are none;
     /// [`ClientError::WorkspaceSelection`] naming the joined workspaces when there are several.
     pub(crate) fn resolve_target(&self, explicit: Option<&str>) -> Result<&Session, ClientError> {
-        let env = std::env::var("TOPOS_WORKSPACE").ok().filter(|s| !s.is_empty());
+        let env = std::env::var("TOPOS_WORKSPACE")
+            .ok()
+            .filter(|s| !s.is_empty());
         let explicit = explicit.map(str::to_owned).or(env);
         if let Some(ws) = explicit.as_deref() {
             let found = self.find(ws)?.ok_or_else(|| {
@@ -401,7 +403,15 @@ mod tests {
 
         upsert_session(&fs, &layout, session("w_b", "beta", SESSION_ACTIVE)).unwrap();
         let all = read_sessions(&fs, &layout).unwrap();
-        assert!(all.resolve_target(None).is_err());
+        // The first workspace this machine joined is its STARRED default — a second live session
+        // does not make the ambient act ambiguous.
+        assert_eq!(all.resolve_target(None).unwrap().workspace_id, "w_a");
+        // With no star, several live sessions refuse rather than guess.
+        let unstarred = Sessions {
+            default: None,
+            ..all.clone()
+        };
+        assert!(unstarred.resolve_target(None).is_err());
         assert_eq!(
             all.resolve_target(Some("beta")).unwrap().workspace_id,
             "w_b"

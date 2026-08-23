@@ -14,6 +14,7 @@ mod demand;
 mod dest;
 mod forge;
 mod import;
+mod lock;
 mod publish_scope;
 mod rig;
 mod scope;

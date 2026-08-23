@@ -38,7 +38,7 @@ fn the_claude_plugin_dirs_file_spelling_is_taught_and_delivers() {
     plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = \
          {{ dest = [\"~/.claude/skills/topos-mcp/.mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -85,7 +85,7 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     // The explicit row delivers; its `dest` names the hermetic config files.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -205,7 +205,7 @@ fn a_second_delivery_of_the_same_revision_writes_nothing_and_reads_up_to_date() 
     plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -270,7 +270,7 @@ fn a_moved_revision_rewrites_the_record_and_every_agents_entry() {
     plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &v1)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &v1)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -323,7 +323,9 @@ fn an_offline_sweep_heals_the_entries_from_the_record_alone() {
     // An EMPTY catalog throughout: the feed row is the only thing that ever delivers this server,
     // so nothing below can have come from a lane.
     let dir = FakeDirectory::default();
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
     let cursor = rig.home.0.join(".cursor/mcp.json");
@@ -365,7 +367,7 @@ fn a_withdrawn_revision_is_disclosed_once_and_still_placed() {
     entry.revoked = Some(true);
     let dir = FakeDirectory::of_servers(vec![entry]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -419,7 +421,9 @@ fn the_applied_report_carries_a_revision_for_a_server_and_a_commit_for_a_skill()
     plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
     plane.serves(vec![delivered_skill("s_dep", "deploy", &v)]);
     let dir = FakeDirectory::default();
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
@@ -454,7 +458,9 @@ fn a_served_document_that_cannot_be_read_fails_the_bundle() {
     // The FEED delivers it (the catalog knows nothing), so the bytes this machine tries to record
     // are the ones the delivery carried.
     let dir = FakeDirectory::default();
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
 
@@ -513,12 +519,12 @@ fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
     std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
     std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
     std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
     let s = served_at("https://mcp.example/linear");
     let plane = FakePlane::new();
     plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&proj.0));
 
     let outcome = ops::add_reference(
@@ -562,7 +568,7 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
     plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -609,7 +615,7 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
     // TWO hermetic config files: only one of them is deleted below, so the receipt has something
     // to be wrong about.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let tty = |out: &ops::PullOutcome| {
@@ -691,7 +697,7 @@ fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
     )
     .unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ kind = \"mcp\", {SAFE} }}\n",
+        "[mcp]\nweather = {{ path = \"{}\", kind = \"mcp\", {SAFE} }}\n",
         src.display()
     ));
     let plane = FakePlane::new();
@@ -772,7 +778,7 @@ fn a_channel_drop_removes_the_entries_everywhere() {
         ..FakeDirectory::default()
     };
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = {{ {SAFE_CHANNEL} }}\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/tools\" = {{ {SAFE_CHANNEL} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -840,7 +846,7 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
     std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \"*\"\n"),
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = \"latest\"\n"),
     )
     .unwrap();
     let s = served_at("https://mcp.example/linear");
@@ -902,7 +908,7 @@ fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
     std::os::unix::fs::symlink(&outside.0, proj.0.join(".cursor")).unwrap();
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ version = \"*\", dest = [\".cursor/mcp.json\"] }}\n"),
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = {{ dest = [\".cursor/mcp.json\"] }}\n"),
     )
     .unwrap();
     let s = served_at("https://mcp.example/linear");
@@ -946,7 +952,7 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     // BOTH hermetic agents are detected; the row's dest names cursor's file alone, plus a file
     // no harness claims.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", dest = [\"~/.cursor/mcp.json\", \"~/.notepad/mcp.json\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.notepad/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -1032,7 +1038,7 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
     let plane = FakePlane::new();
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", dest = [\"~/.codex/config.yaml\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.codex/config.yaml\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -1149,7 +1155,7 @@ fn a_drifted_entry_keeps_list_from_claiming_the_bundle_reaches_no_agent() {
     let plane = FakePlane::new();
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -1164,7 +1170,7 @@ fn a_drifted_entry_keeps_list_from_claiming_the_bundle_reaches_no_agent() {
     // …and then the row's dest is changed to a file topos cannot edit. The sweep warns, and leaves
     // the hand edit exactly where it is.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.codex/config.yaml\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.codex/config.yaml\"] }}\n"
     ));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
@@ -1224,7 +1230,7 @@ fn one_bundles_dest_advisory_never_swallows_anothers_reaches_no_agent() {
         mcp_catalog_entry("s_b", "beta", &sb),
     ]);
     rig.write_global(&format!(
-        "[bundles]\n\
+        "[mcp]\n\
          \"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.typo/mcp.json\"] }}\n\
          \"{HOST}/{WS_NAME}/beta\" = {{ dest = [\"~/.typo/mcp.json\"] }}\n"
     ));
@@ -1282,9 +1288,10 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
         }],
         ..FakeDirectory::default()
     };
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let manifest = proj.0.join(crate::manifest::MANIFEST_FILE);
-    let channel_row = format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/everyone\" = \"*\"\n");
+    let channel_row =
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\neveryone = \"latest\"\n");
     std::fs::write(&manifest, &channel_row).unwrap();
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep(&ctx, &plane, &dir);
@@ -1401,15 +1408,15 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     let plane = FakePlane::new();
     plane.serves_servers(vec![delivered_mcp("s_sentry", "sentry", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_sentry", "sentry", &s)]);
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let row = |body: &str| {
         std::fs::write(
             proj.0.join(crate::manifest::MANIFEST_FILE),
-            format!("[bundles]\n\"{HOST}/{WS_NAME}/sentry\" = {body}\n"),
+            format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nsentry = {body}\n"),
         )
         .unwrap();
     };
-    row("\"*\"");
+    row("\"latest\"");
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep(&ctx, &plane, &dir);
     assert!(proj.0.join(".mcp.json").exists());
@@ -1460,7 +1467,7 @@ fn a_delivered_gateway_server_is_placed_as_this_binarys_own_relay() {
     plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);

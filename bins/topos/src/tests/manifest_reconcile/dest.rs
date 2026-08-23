@@ -35,7 +35,7 @@ fn a_dest_row_freezes_placement_and_grows_and_shrinks_on_the_next_update() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -61,7 +61,7 @@ fn a_dest_row_freezes_placement_and_grows_and_shrinks_on_the_next_update() {
 
     // GROW: a hand-added entry installs there on the next update, said as an install.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
     ));
     let out = sweep(&ctx, &plane, &dir);
     let b = rig.home.0.join("dest-b/deploy");
@@ -82,7 +82,7 @@ fn a_dest_row_freezes_placement_and_grows_and_shrinks_on_the_next_update() {
 
     // SHRINK: the dropped entry's copy retires (park-then-verify); the kept entry stands.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
     ));
     let out = sweep(&ctx, &plane, &dir);
     assert!(!a.exists(), "the un-named copy left: {:?}", out.data.skills);
@@ -115,7 +115,7 @@ fn the_default_reach_token_places_beside_the_named_entry_and_keeps_answering_det
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let starred =
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\", \"~/dest-a\"] }}\n");
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\", \"~/dest-a\"] }}\n");
     rig.write_global(&starred);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -138,7 +138,7 @@ fn the_default_reach_token_places_beside_the_named_entry_and_keeps_answering_det
 
     // Dropping the token narrows the row to what it names — the ordinary dest shrink.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\"] }}\n"
     ));
     sweep(&ctx, &plane, &dir);
     assert!(named.join("SKILL.md").exists());
@@ -158,7 +158,7 @@ fn a_dest_shrink_keeps_an_edited_copy_in_place() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -169,7 +169,7 @@ fn a_dest_shrink_keeps_an_edited_copy_in_place() {
     // The person edits the copy the shrink is about to drop.
     std::fs::write(a.join("SKILL.md"), b"# my edit\n").unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
     ));
     let out = sweep(&ctx, &plane, &dir);
     assert_eq!(
@@ -201,7 +201,7 @@ fn a_hand_narrowed_skill_row_leads_the_receipt_with_the_copies_it_retired() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -209,7 +209,7 @@ fn a_hand_narrowed_skill_row_leads_the_receipt_with_the_copies_it_retired() {
     assert!(rig.home.0.join("dest-b/deploy/SKILL.md").exists());
 
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
     ));
     let out = sweep(&ctx, &plane, &dir);
     let receipt = crate::render::pull_tty(
@@ -252,9 +252,11 @@ fn a_project_dest_row_places_inside_the_checkout_at_the_named_folder() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let proj = project(
         "dest-proj-co",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"tools/ai\"] }}\n"),
+        &format!(
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = {{ dest = [\"tools/ai\"] }}\n"
+        ),
     );
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
@@ -269,65 +271,6 @@ fn a_project_dest_row_places_inside_the_checkout_at_the_named_folder() {
     );
 }
 
-/// A REPO-SET row's dest aims every member's converge slot at the named folder — the dest-keyed
-/// generalization of the old per-slug slots.
-#[test]
-fn a_repo_set_rows_dest_aims_its_members_at_the_named_folder() {
-    let rig = Rig::new("dest-set");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[
-            ("skills/alpha/SKILL.md", b"# alpha\n"),
-            ("skills/beta/SKILL.md", b"# beta\n"),
-        ],
-    ));
-    // The row is written by hand (demand is the row); the sweep converges it.
-    match ops::add_reference(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        "o/r",
-        true,
-        true,
-        &Default::default(),
-        None,
-    )
-    .unwrap()
-    {
-        ops::AddRefOutcome::Applied { .. } => {}
-        ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
-    }
-    // Re-aim the whole set: the row's dest replaces the default dir for every member.
-    rig.write_global("[bundles]\n\"github.com/o/r\" = { dest = [\"~/team-skills\"] }\n");
-    git.serve(build_repo_targz(
-        "o-r-bbbbbbbbbbbb2",
-        &[
-            ("skills/alpha/SKILL.md", b"# alpha v2\n"),
-            ("skills/beta/SKILL.md", b"# beta v2\n"),
-        ],
-    ));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    for name in ["alpha", "beta"] {
-        assert_eq!(
-            std::fs::read(rig.home.0.join("team-skills").join(name).join("SKILL.md")).unwrap(),
-            format!("# {name} v2\n").into_bytes(),
-            "{name}: {:?} / {:?}",
-            out.data.skills,
-            out.warnings
-        );
-    }
-}
-
 // =================================================================================================
 // `-a <agent>` / `--dest <folder>` — destinations on add and remove (the dest selectors).
 // =================================================================================================
@@ -338,7 +281,7 @@ fn a_repo_set_rows_dest_aims_its_members_at_the_named_folder() {
 fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
     let (rig, plane, dir, v) = add_rig("dest-add");
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let data = match ops::add_reference(
         &ctx,
@@ -390,7 +333,7 @@ fn an_agent_selected_add_whose_delivery_fails_does_not_claim_installed() {
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
     plane.serve_unreachable();
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let data = match ops::add_reference(
         &ctx,
@@ -443,7 +386,7 @@ fn a_same_named_local_rows_report_does_not_prove_the_workspace_add() {
     let local = rig.home.0.join("src/deploy");
     std::fs::create_dir_all(&local).unwrap();
     std::fs::write(local.join("SKILL.md"), b"# mine\n").unwrap();
-    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", local.display()));
+    rig.write_global(&format!("[skills]\ndeploy = \"{}\"\n", local.display()));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let data = match ops::add_reference(
         &ctx,
@@ -582,7 +525,7 @@ fn a_channel_add_whose_expansion_fails_does_not_borrow_the_feeds_proof() {
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(
-        text.contains(r#""acme.test/eng/channels/backend" = { dest = ["~/.codex/skills"] }"#),
+        text.contains(r#""acme.test/eng/backend" = { dest = ["~/.codex/skills"] }"#),
         "{text}"
     );
     // The channel expansion failed — nothing of ITS proved, whatever the feed reconciled.
@@ -610,7 +553,7 @@ fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() 
         .with_version("s_deploy", &v2);
     plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
     let dir1 = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let data = match ops::add_reference(
         &ctx,
@@ -678,7 +621,7 @@ fn an_agent_selected_add_whose_reconcile_conflicts_names_the_standing_state() {
         .with_version("s_deploy", &v2);
     plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
     let dir1 = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     match ops::add_reference(
         &ctx,
@@ -740,7 +683,7 @@ fn a_narrowed_remove_subtracts_one_destination_and_prints_the_final_receipt() {
     let (rig, plane, dir, v) = add_rig("dest-narrow");
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
          \"~/.codex/skills\", \"~/.cursor/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -803,7 +746,7 @@ fn an_offline_narrow_does_not_claim_the_copy_left() {
     plane.serve_unreachable();
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
          \"~/.codex/skills\", \"~/.cursor/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -846,7 +789,9 @@ fn an_offline_narrow_does_not_claim_the_copy_left() {
 #[test]
 fn narrowing_a_row_with_no_recorded_copies_refuses_with_the_zero_state() {
     let (rig, plane, dir, _v) = add_rig("dest-narrow-zero");
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let err = ops::remove_global(
         &ctx,
@@ -912,7 +857,7 @@ fn removing_the_last_destination_removes_the_row_entirely() {
     let (rig, plane, dir, v) = add_rig("dest-last");
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
@@ -948,7 +893,7 @@ fn a_whole_row_remove_uninstalls_eagerly_and_reconstructs_the_undo() {
     let (rig, plane, dir, v) = add_rig("dest-whole");
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
          \"~/.codex/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -997,7 +942,9 @@ fn narrowing_a_no_dest_row_freezes_the_remainder() {
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     // codex DETECTED (its home dir exists) so the default plan includes its native folder.
     std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     assert!(rig.home.0.join(".codex/skills/deploy/SKILL.md").exists());
@@ -1053,9 +1000,11 @@ fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_an
         }],
     );
     // The CHANNEL line delivers it; the explicit row beside it is what the `-a` add extends.
-    let channel = format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/everyone\" = \"*\"\n");
+    let channel = format!("[channels]\n\"{HOST}/{WS_NAME}/everyone\" = \"latest\"\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    rig.write_global(&format!("{channel}\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "{channel}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
 
@@ -1104,7 +1053,7 @@ fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_an
 
     // WITHOUT the set line, the same round trip lands the same way: the row is the only demand
     // there is, and a subtraction is not what ends a demand.
-    let alone = format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    let alone = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
     rig.write_global(&alone);
     let added = applied_dest_add(
         &ctx,
@@ -1176,8 +1125,8 @@ fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_by
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let feed = format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n");
-    let both = format!("{feed}\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    let feed = format!("[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n");
+    let both = format!("{feed}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     rig.write_global(&both);
@@ -1234,7 +1183,7 @@ fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_by
 fn an_add_naming_a_destination_the_default_reach_already_holds_changes_nothing() {
     let (rig, plane, dir, v) = add_rig("dest-in-reach");
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
-    let row = format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    let row = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
     rig.write_global(&row);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
@@ -1292,7 +1241,7 @@ fn an_add_whose_converge_placed_folders_says_installed_and_never_nothing_changed
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     // The row stands for its default reach and has been delivered once — the active agent's folder
     // holds the copy.
-    let row = format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n");
+    let row = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
     rig.write_global(&row);
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1355,7 +1304,7 @@ fn channel_delivered_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory, Version) 
         }],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/everyone\" = \"*\"\n"
+        "[channels]\n\"{HOST}/{WS_NAME}/everyone\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
@@ -1455,7 +1404,7 @@ fn a_set_delivered_add_naming_a_folder_no_agent_owns_births_the_row_carrying_the
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         format!(
-            "{channel_only}\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\", \
+            "{channel_only}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\", \
              \"~/prompts/skills\"] }}\n"
         )
     );
@@ -1608,7 +1557,7 @@ fn removing_a_row_the_feed_still_delivers_says_the_copies_stay() {
     rig.seed_session();
     // BOTH the feed line and an explicit row for the same bundle.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
     ));
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
@@ -1663,7 +1612,7 @@ fn removing_a_row_the_feed_still_delivers_says_the_copies_stay() {
 #[test]
 fn an_unknown_agent_refuses_with_the_registry_list_and_nothing_changed() {
     let (rig, plane, dir, _v) = add_rig("dest-unknown");
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let err = ops::add_reference(
         &ctx,
@@ -1692,7 +1641,7 @@ fn an_unknown_agent_refuses_with_the_registry_list_and_nothing_changed() {
     // Nothing was written.
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
-    assert_eq!(text, "[bundles]\n");
+    assert_eq!(text, "[skills]\n");
 }
 
 /// A selection over a whole FEED refuses (a feed reaches every agent by nature), teaching the
@@ -1726,7 +1675,7 @@ fn a_selection_over_a_feed_refuses_whole() {
 #[test]
 fn a_feed_add_states_what_this_machine_now_takes_exactly_once() {
     let (rig, plane, dir, _v) = add_rig("feed-once");
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let add = || match ops::add_reference(
         &ctx,
@@ -1796,7 +1745,7 @@ fn a_shared_only_copy_refuses_per_agent_removal_with_both_ways_out() {
     std::fs::create_dir_all(rig.home.0.join(".config/amp")).unwrap();
     std::fs::create_dir_all(rig.home.0.join(".cline")).unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/coolify-deploy\" = \"*\"\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/coolify-deploy\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
@@ -1845,7 +1794,7 @@ fn a_shared_only_copy_refuses_per_agent_removal_with_both_ways_out() {
 #[test]
 fn a_forge_import_unions_agent_and_dest_selectors() {
     let (rig, plane, dir, _v) = add_rig("dest-forge-union");
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let git = FakeGit::new(build_repo_targz(
         "o-r-aaaaaaaaaaaa1",
@@ -1894,7 +1843,7 @@ fn a_forge_import_unions_agent_and_dest_selectors() {
 #[test]
 fn a_local_adopt_with_dest_places_a_copy_at_the_selected_folder() {
     let (rig, plane, dir, _v) = add_rig("dest-local-adopt");
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let src = rig.work.0.join("my-skill");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("SKILL.md"), b"# mine\n").unwrap();
@@ -1968,7 +1917,7 @@ fn a_dest_re_add_revives_the_retired_record_so_the_next_remove_uninstalls_its_co
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let src = rig.home.0.join("tools/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -2033,7 +1982,7 @@ fn a_remove_uninstalls_the_copies_of_a_rowed_record_that_still_carries_the_marke
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("[skills]\n");
     let src = rig.home.0.join("tools/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));

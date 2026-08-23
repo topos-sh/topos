@@ -1423,9 +1423,11 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(
             repo.join(crate::manifest::MANIFEST_FILE),
-            "[bundles]\n\
-             \"topos.sh/acme/deploy\" = \"*\"\n\
-             \"./tools/repo-helper\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\
+             \n\
+             [skills]\n\
+             deploy = \"latest\"\n\
+             repo-helper = \"./tools/repo-helper\"\n",
         )
         .unwrap();
         let tool = repo.join("tools/repo-helper");
@@ -1570,7 +1572,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         let id = skill_id_of("deploy");
         assert_ne!(id, "deploy", "the identity is never the name");
         // The MACHINE's copy, edited: its folder holds bytes no recorded sha explains.
@@ -1634,7 +1636,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         home.store_applied(&skill_id_of("deploy"), "deploy", &"d".repeat(64), &[]);
         // A project record of the same NAME under another identity — a different bundle.
         lay_record(
@@ -1672,7 +1674,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let manifest = repo.join(crate::manifest::MANIFEST_FILE);
         // A checkout that demands NOTHING …
-        std::fs::write(&manifest, "[bundles]\n").unwrap();
+        std::fs::write(&manifest, "schema = 1\n").unwrap();
         home.session(
             "topos.sh",
             "w_acme",
@@ -1686,7 +1688,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         let id = skill_id_of("deploy");
         home.store_applied(&id, "deploy", &"d".repeat(64), &[]);
         // … whose STORE holds a copy of the machine's bundle anyway.
@@ -1719,7 +1721,11 @@ mod tests {
         );
         // THE CONTROL: the same store, now with the row that makes `topos list deploy` answer for
         // it — and the line is true again.
-        std::fs::write(&manifest, "[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n").unwrap();
+        std::fs::write(
+            &manifest,
+            "workspace = \"topos.sh/acme\"\n\n[skills]\ndeploy = \"latest\"\n",
+        )
+        .unwrap();
         let twin = dive().twin.expect("the checkout's copy");
         assert!(!twin.machine, "{twin:?}");
     }
@@ -1899,7 +1905,7 @@ mod tests {
             vec![assigned("notes", None), assigned("triage", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         // One machine row BEHIND: applied at an older version than served.
         home.store_applied(&skill_id_of("notes"), "notes", &"c".repeat(64), &[]);
 
@@ -1962,7 +1968,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let out = run(&home, &cwd, &request()).unwrap();
         assert_eq!(out.data.scopes.len(), 1);
@@ -1996,8 +2002,10 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("SKILL.md"), b"# linear\n").unwrap();
         }
+        // Two rows for ONE bundle name: the key is only the row's spelling, the path in the value
+        // is what each row IS — so both resolve to the bundle named `linear`.
         home.global(&format!(
-            "[bundles]\n\"{}\" = \"*\"\n\"{}\" = \"*\"\n",
+            "[skills]\nlinear-one = \"{}\"\nlinear-two = \"{}\"\n",
             one.display(),
             two.display()
         ));
@@ -2365,7 +2373,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         let placed = home.0.join(".claude/skills/notes");
         lay_copy(&placed, "# my version\n");
         // The post-conflict shape: the lock (and the map) name THEIRS, the folder holds mine.
@@ -2501,7 +2509,7 @@ mod tests {
             vec![assigned("notes", None), assigned("deploy", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         for name in ["notes", "deploy"] {
             let placed = home.0.join(".claude/skills").join(name);
             lay_copy(&placed, "# my version\n");
@@ -2574,7 +2582,7 @@ mod tests {
                 vec![assigned("notes", None)],
                 Vec::new(),
             );
-            home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+            home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
             let placed = home.0.join(".claude/skills/notes");
             lay_copy(&placed, "# my version\n");
             home.store_applied(
@@ -2691,7 +2699,7 @@ mod tests {
             Vec::new(),
         );
         home.global(
-            "[bundles]\n\"topos.sh/acme/notes\" = \"*\"\n\"topos.sh/globex/notes\" = \"*\"\n",
+            "[skills]\n\"topos.sh/acme/notes\" = \"latest\"\n\"topos.sh/globex/notes\" = \"latest\"\n",
         );
 
         // Both merges stopped. The workbench folders differ — the second bundle to stop took the
@@ -2813,7 +2821,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         let placed = home.0.join(".claude/skills/notes");
         lay_copy(&placed, "# my version\n");
         home.store_applied(
@@ -2886,7 +2894,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         let placed = home.0.join(".claude/skills/notes");
         lay_copy(&placed, "# edited by hand\n");
         home.store_applied(
@@ -2924,7 +2932,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let out = run(
             &home,
@@ -3095,7 +3103,7 @@ mod tests {
             vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n\n[skills]\n\"topos.sh/acme/deploy\" = \"latest\"\n");
         // deploy applied with a placement — the detail names where the bytes are.
         let placed = home.0.join("placed-deploy");
         home.store_applied(
@@ -3144,7 +3152,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::write(
             cwd.join(crate::manifest::MANIFEST_FILE),
-            "[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n[skills]\ndeploy = \"latest\"\n",
         )
         .unwrap();
         home.session(
@@ -3170,7 +3178,7 @@ mod tests {
         let stray = probe_home.0.join(".claude/skills/stray-helper");
         std::fs::create_dir_all(&stray).unwrap();
         std::fs::write(stray.join("SKILL.md"), b"# stray\n").unwrap();
-        home.global("[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        home.global("[skills]\n\"topos.sh/acme/deploy\" = \"latest\"\n");
         home.store_applied(
             &skill_id_of("deploy"),
             "deploy",
@@ -3331,7 +3339,7 @@ mod tests {
         );
         // The machine manifest exists but no longer carries the row (the remove dropped it); the
         // cache still lists the delivery un-withdrawn, and the store record stands.
-        home.global("[bundles]\n");
+        home.global("schema = 1\n");
         let id = skill_id_of("lingery");
         home.store_applied(&id, "lingery", &"c".repeat(64), &[]);
         home.cache(
@@ -3612,7 +3620,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
 
         let deep = |name: &str, view: ScopeView| {
             run(
@@ -3680,7 +3688,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        home.global("[workspaces]\n\"topos.sh/acme\" = \"latest\"\n");
         // One CLAIMED machine record (the feed delivers notes) + the built-in + an UNCLAIMED
         // leftover the count must NOT include.
         home.store_applied(&skill_id_of("notes"), "notes", &"d".repeat(64), &[]);
@@ -3817,9 +3825,11 @@ mod tests {
         // machine adopts `notes` explicitly and is BEHIND the catalog current; the project (the
         // here-scope) adopts `deploy` (never applied → adopted-here, no update claim).
         home.global(
-            "[bundles]\n\
-             \"topos.sh/acme/notes\" = \"*\"\n\
-             \"topos.sh/acme/channels/backend\" = \"*\"\n",
+            "[skills]\n\
+             \"topos.sh/acme/notes\" = \"latest\"\n\
+             \n\
+             [channels]\n\
+             \"topos.sh/acme/backend\" = \"latest\"\n",
         );
         home.store_applied(&skill_id_of("notes"), "notes", &"c".repeat(64), &[]);
 
@@ -3928,7 +3938,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        home.global("[bundles]\n\"topos.sh/acme/notes\" = \"*\"\n");
+        home.global("[skills]\n\"topos.sh/acme/notes\" = \"latest\"\n");
         // Applied AT the catalog current — adopted-on-machine, not update-available.
         home.store_applied(&skill_id_of("notes"), "notes", &"d".repeat(64), &[]);
 
@@ -4080,7 +4090,7 @@ mod tests {
         let home = TempHome::new();
         let cwd = home.0.join("repo");
         std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::write(cwd.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+        std::fs::write(cwd.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
         // Three folders in the agent's own skills dir — more than the page allows.
         let probe_home = TempHome::new();
         for name in ["alpha", "beta", "gamma"] {

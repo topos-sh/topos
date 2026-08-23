@@ -145,7 +145,9 @@ mod tests {
         let manifest = repo.join(MANIFEST_FILE);
         std::fs::write(
             &manifest,
-            "[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n\"github.com/o/r\" = \"*\"\n",
+            "workspace = \"topos.sh/acme\"\n\n\
+             [channels]\nbackend = \"latest\"\n\n\
+             [skills]\nzeta = \"latest\"\ndeploy = \"latest\"\nr = \"github:o/r\"\n",
         )
         .unwrap();
         with_ctx(&home, Some(&repo), |ctx| {
@@ -153,7 +155,18 @@ mod tests {
             assert!(first.changed, "the scrambled file moves");
             assert_eq!(first.manifest, manifest.display().to_string());
             let text = std::fs::read_to_string(&manifest).unwrap();
-            assert!(text.contains("[bundles.\"topos.sh/acme\"]"), "{text}");
+            assert!(
+                text.starts_with("schema = 1\nworkspace = \"topos.sh/acme\"\n"),
+                "{text}"
+            );
+            assert!(
+                text.find("[skills]") < text.find("[channels]"),
+                "sections land in the fixed order: {text}"
+            );
+            assert!(
+                text.contains("deploy = \"latest\"\nr = \"github:o/r\"\nzeta = \"latest\""),
+                "keys sort inside their section: {text}"
+            );
             // Idempotent — a normal file is an honest no-op.
             let second = fmt_manifest(ctx, false).unwrap();
             assert!(!second.changed);
@@ -178,13 +191,17 @@ mod tests {
         let home = scratch("bad");
         let repo = home.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        std::fs::write(repo.join(MANIFEST_FILE), "[stray]\nx = 1\n").unwrap();
+        std::fs::write(
+            repo.join(MANIFEST_FILE),
+            "workspace = \"topos.sh/acme\"\n[skills]\nx = 1\n",
+        )
+        .unwrap();
         with_ctx(&home, Some(&repo), |ctx| {
             let err = fmt_manifest(ctx, false).unwrap_err();
             assert_eq!(err.code(), "MANIFEST_INVALID");
-            assert!(err.to_string().contains("unknown top-level"), "{err}");
+            assert!(err.to_string().contains("not an entry value"), "{err}");
             assert!(
-                crate::render::safe_message(&err).contains("unknown top-level"),
+                crate::render::safe_message(&err).contains("not an entry value"),
                 "the teaching reaches the user surfaces verbatim: {err}"
             );
         });
@@ -194,13 +211,13 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(
             repo.join(MANIFEST_FILE),
-            "[bundles]\n\"./tools/x\" = { path = \".claude/skills\" }\n",
+            "workspace = \"topos.sh/acme\"\n[skills]\nx = { dir = \".claude/skills\" }\n",
         )
         .unwrap();
         with_ctx(&home, Some(&repo), |ctx| {
             let err = fmt_manifest(ctx, false).unwrap_err();
             assert_eq!(err.code(), "MANIFEST_INVALID");
-            assert!(err.to_string().contains("unknown field `path`"), "{err}");
+            assert!(err.to_string().contains("unknown field `dir`"), "{err}");
         });
     }
 
@@ -210,7 +227,11 @@ mod tests {
         with_ctx(&home, None, |ctx| {
             std::fs::create_dir_all(ctx.layout.home()).unwrap();
             let path = ctx.layout.home().join(MANIFEST_FILE);
-            std::fs::write(&path, "[bundles]\n\"topos.sh/acme\" = \"*\"\n").unwrap();
+            std::fs::write(
+                &path,
+                "schema = 1\n\n[workspaces]\n\"topos.sh/acme\" = \"latest\"\n",
+            )
+            .unwrap();
             let out = fmt_manifest(ctx, true).unwrap();
             assert_eq!(out.manifest, path.display().to_string());
             assert!(!out.changed, "already normal");

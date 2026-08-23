@@ -18,7 +18,7 @@ fn deliver_linear(rig: &Rig, s: &ServedServer) -> (FakePlane, FakeDirectory) {
     plane.serves_servers(vec![delivered_mcp("s_linear", "linear", s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
     ));
     (plane, dir)
 }
@@ -264,7 +264,7 @@ fn a_targeted_update_never_reaches_a_narrowing_excluded_harness() {
     plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -355,10 +355,10 @@ fn a_scoped_out_skill_with_an_empty_map_is_not_reported_held() {
     // project file, so that scope is FROZEN. The run drives the MACHINE scope (driving the
     // frozen project would refuse the run whole now), which syncs nothing: the delivered skill
     // has NO placement map anywhere, and the report must not claim it held.
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     std::fs::write(
         rig.work.0.join("topos.toml"),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"),
+        format!("[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"),
     )
     .unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -436,8 +436,8 @@ fn an_offline_sweep_keeps_a_dest_narrowed_bundle_narrow() {
     plane.serves_servers(vec![delivered_mcp("s_a", "alpha", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\
-         \"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n\
+         [mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -477,12 +477,12 @@ fn a_workspace_mcp_add_leaves_the_marker_behind_before_it_returns() {
     seed_harness_dirs(&rig.home.0);
     let proj = Scratch::new("add-marker-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
     let s = served_at("https://mcp.example/linear");
     let plane = FakePlane::new();
     plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&proj.0));
 
     ops::add_reference(
@@ -531,7 +531,7 @@ fn an_mcp_row_never_stands_without_its_marker_even_when_the_feed_is_dark() {
     // The FEED is unreachable for the whole invocation.
     plane.serve_unreachable();
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     ops::add_reference(
         &ctx,
@@ -595,7 +595,9 @@ fn a_qualified_row_resolves_its_own_record_when_the_name_is_shared() {
     let plane = FakePlane::new();
     plane.serves_servers(vec![delivered_mcp("s_mcp", "linear", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_mcp", "linear", &s)]);
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = \"latest\"\n"
+    ));
     sweep(&ctx, &plane, &dir);
     assert!(
         rig.home.0.join(".cursor/mcp.json").exists(),
@@ -730,7 +732,7 @@ fn two_same_named_bundles_from_two_workspaces_both_failing_count_as_two() {
         ),
     ];
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n\
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n\
          \"beta.test/ops/linear\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -790,8 +792,7 @@ fn a_failed_bundle_stands_down_its_own_row_and_the_healthy_twin_keeps_its_row() 
     )
     .unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n\
-         \"{}\" = {{ kind = \"mcp\", {SAFE} }}\n",
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\nlinear-local = {{ path = \"{}\", kind = \"mcp\", {SAFE} }}\n",
         local.display()
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));

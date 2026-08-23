@@ -2925,6 +2925,7 @@ mod tests {
     #[test]
     fn publish_data_carries_the_move_and_omits_an_absent_added_note() {
         let done = PublishData {
+            project_locked_version: None,
             manifest: None,
             reference: None,
             converted_from: None,

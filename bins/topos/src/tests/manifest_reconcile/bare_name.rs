@@ -366,7 +366,7 @@ fn a_name_this_scope_already_records_answers_already_added_not_ambiguous() {
     // "already added (~/.topos/topos.toml)" a true sentence about a file; a bundle the feed line
     // delivers with no row of its own gets the set's own answer instead (the test below).
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/alpha\" = \"*\"\n"
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\n[skills]\n\"{HOST}/{WS_NAME}/alpha\" = \"latest\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let roots = ops::DiscoveryRoots {
@@ -456,7 +456,7 @@ fn a_name_the_other_scope_records_is_added_here_from_that_source() {
     let (rig, plane, dir) = standing_rig("standing-other");
     // A project covering the cwd: nothing stands in ITS scope, so the name means what the machine
     // already means by it — recorded HERE, with no question asked.
-    let proj = project("standing-other-proj", "[bundles]\n");
+    let proj = project("standing-other-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
     let roots = ops::DiscoveryRoots {
         home: rig.home.0.clone(),
@@ -572,7 +572,7 @@ fn a_standing_name_with_a_destination_extends_its_row_instead_of_answering_alrea
     // PROJECT scope: nothing stands in the project, so the name still resolves through the other
     // scope — an ordinary add of that reference, carrying the flags exactly as a spelled-out
     // reference would.
-    let proj = project("standing-extend-proj", "[bundles]\n");
+    let proj = project("standing-extend-proj", "");
     match plan_dest_add(&rig, &plane, &dir, &proj.0, "alpha", false).unwrap() {
         ops::BareAddPlan::Reference { reference, .. } => {
             assert_eq!(reference, format!("{HOST}/{WS_NAME}/alpha"));
@@ -672,7 +672,7 @@ fn a_member_pick_asks_about_a_repo_so_the_standing_rungs_stay_out_of_it() {
     // one, and letting it answer turned `add <name> -s <member>` into a re-add of something else
     // entirely — the selector silently dropped.
     let (rig, plane, dir) = standing_rig("standing-selector");
-    let proj = project("standing-selector-proj", "[bundles]\n");
+    let proj = project("standing-selector-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
     let roots = ops::DiscoveryRoots {
         home: rig.home.0.clone(),
@@ -927,7 +927,7 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
         Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
         Ok(_) => panic!("no topos.toml covers this folder — the subscribe must refuse"),
     }
-    ops::init(&ctx, false).expect("the folder's manifest");
+    ops::init(&ctx, false, None).expect("the folder's manifest");
 
     // The composition root's own hand-off: the resolved reference goes through the ORDINARY
     // reference arm, so the row, the delivery, and the receipt shape are the spelled-out ones.
@@ -954,7 +954,13 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
     assert_eq!(data.manifest.as_deref(), Some(manifest.to_str().unwrap()));
     assert_eq!(data.reference.as_deref(), Some(reference.as_str()));
     let text = std::fs::read_to_string(&manifest).unwrap();
-    assert!(text.contains(&format!("\"{reference}\"")), "{text}");
+    // The project file spells the reference the v2 way: its one `workspace = ` line plus the
+    // BARE key under `[skills]` — together exactly the canonical reference the receipt names.
+    assert!(
+        text.contains(&format!("workspace = \"{HOST}/{WS_NAME}\"")),
+        "{text}"
+    );
+    assert!(text.contains(&format!("{BARE} = \"latest\"")), "{text}");
     assert_eq!(
         data.undo,
         vec!["topos".to_owned(), "remove".to_owned(), reference.clone()],

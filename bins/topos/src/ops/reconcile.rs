@@ -1508,13 +1508,17 @@ pub(crate) fn manifest_update(
     // before anything is dialed on its behalf. `update` loads it too (the write-back preserves
     // explicit pins), but takes no pins from it. ----
     let mut lock_state: Option<LockState> = None;
-    if driven.project && let Some((dir, plan)) = &project {
+    if driven.project
+        && let Some((dir, plan)) = &project
+    {
         let lock_path = dir.join(LOCK_FILE);
         let doc = match ctx.fs.read_opt(&lock_path) {
             Ok(Some(bytes)) => match LockDoc::parse(&String::from_utf8_lossy(&bytes)) {
                 Ok(doc) => {
                     for w in &doc.warnings {
-                        sweep.warnings.push(crate::message::advisory("LOCK_NEWER", w.clone()));
+                        sweep
+                            .warnings
+                            .push(crate::message::advisory("LOCK_NEWER", w.clone()));
                     }
                     doc
                 }
@@ -1536,10 +1540,9 @@ pub(crate) fn manifest_update(
                     KeyShape::WorkspaceBundle { .. } => {
                         doc.skills.contains_key(name) || doc.mcp.contains_key(name)
                     }
-                    KeyShape::RepoSkill { .. } => doc
-                        .skills
-                        .get(name)
-                        .is_some_and(|s| s.commit.is_some()),
+                    KeyShape::RepoSkill { .. } => {
+                        doc.skills.get(name).is_some_and(|s| s.commit.is_some())
+                    }
                     KeyShape::Channel { .. } => doc.channels.contains_key(name),
                     _ => true,
                 };
@@ -2007,7 +2010,12 @@ pub(crate) fn manifest_update(
                 for (name, skill) in &sweep.lock_harvest.skills {
                     let keep_standing = state.mode != LockMode::Update;
                     let value = if keep_standing {
-                        state.doc.skills.get(name).cloned().unwrap_or_else(|| skill.clone())
+                        state
+                            .doc
+                            .skills
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| skill.clone())
                     } else {
                         skill.clone()
                     };
@@ -2015,7 +2023,12 @@ pub(crate) fn manifest_update(
                 }
                 for (name, rev) in &sweep.lock_harvest.mcp {
                     let value = if state.mode != LockMode::Update {
-                        state.doc.mcp.get(name).cloned().unwrap_or_else(|| rev.clone())
+                        state
+                            .doc
+                            .mcp
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| rev.clone())
                     } else {
                         rev.clone()
                     };
@@ -2023,7 +2036,12 @@ pub(crate) fn manifest_update(
                 }
                 for (name, members) in &sweep.lock_harvest.channels {
                     let value = if state.mode != LockMode::Update {
-                        state.doc.channels.get(name).cloned().unwrap_or_else(|| members.clone())
+                        state
+                            .doc
+                            .channels
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| members.clone())
                     } else {
                         members.clone()
                     };
@@ -2033,9 +2051,8 @@ pub(crate) fn manifest_update(
             };
             newdoc.workspace = plan.workspace.as_ref().map(|(h, w)| format!("{h}/{w}"));
             newdoc.warnings = Vec::new();
-            let has_entries = !(newdoc.skills.is_empty()
-                && newdoc.mcp.is_empty()
-                && newdoc.channels.is_empty());
+            let has_entries =
+                !(newdoc.skills.is_empty() && newdoc.mcp.is_empty() && newdoc.channels.is_empty());
             let path = dir.join(LOCK_FILE);
             let old = ctx
                 .fs
@@ -2899,7 +2916,8 @@ fn reconcile_set<'a>(
             // The LOCK's member list freezes a project channel's resolution: a member the server
             // added since the lock was written is not taken (it arrives as a `topos update`
             // diff), and a locked member the server no longer serves earns its own line.
-            let locked_members: Option<Vec<String>> = sc.locked_members(channel).map(<[String]>::to_vec);
+            let locked_members: Option<Vec<String>> =
+                sc.locked_members(channel).map(<[String]>::to_vec);
             // The batch this channel converges — its members the catalog still serves, minus the
             // ones an explicit row of the SAME scope owns (its version and fields win, and the set
             // adds nothing), minus what `--target` narrowing skips and what an earlier source in
@@ -3572,6 +3590,9 @@ fn sync_workspace_skill<'a>(
         .as_deref()
         .filter(|p| *p != target.version_id)
         .map_or_else(|| target.version_id.clone(), str::to_owned);
+    // Whether this sync is deliberately HELD OFF the served current — the record below rides the
+    // served generation either way, so a pinned apply must leave the applied sentinel after it.
+    let pinned_behind = version_id != target.version_id;
     let record = WireCurrentRecord {
         schema_version: WIRE_SCHEMA_VERSION,
         scope: PointerScope {
@@ -3751,6 +3772,20 @@ fn sync_workspace_skill<'a>(
     let mut row_index = None;
     match outcome {
         Ok(mut row) => {
+            // A pinned sync (a row pin, or the project lock) holds this bundle OFF the served
+            // current while the record rode the served generation — leave the go-back's applied
+            // sentinel so the next unpinned run reads behind and moves.
+            if pinned_behind && let Err(e) = sync_engine::mark_applied_behind(&run_ctx, &sid) {
+                note_item_failure(
+                    ctx,
+                    &mut sweep.warnings,
+                    &mut sweep.failed_bundles,
+                    &sc.label,
+                    &target.skill_id,
+                    &target.name,
+                    &e,
+                );
+            }
             row.workspace_id = Some(run.session.workspace_id.clone());
             row.scope = Some(sc.label.clone());
             // An installed row leads with the workspace-QUALIFIED name — where the bundle came
@@ -4902,6 +4937,17 @@ fn reconcile_repo_set(
 /// The ORIGIN must already be granted in the machine's trust registry (the add gate's ceremony
 /// covered the source); a new member of a trusted origin then flows on explicit update.
 #[allow(clippy::too_many_arguments)]
+/// Whether an import's placed bytes still stand on disk — the commit alone is a record, and a
+/// record over a wiped agent directory must converge, never read as current (the same proof the
+/// set arm's `tracked_at` runs).
+fn placement_bytes_stand(sctx: &Ctx<'_>, import: &ForgeImport) -> bool {
+    doc::read_map(sctx.fs, &sctx.layout.published(&import.sid).map)
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.placements.iter().any(|pl| sctx.fs.exists(Path::new(pl))))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn reconcile_repo_skill(
     env: &Env<'_>,
     sc: &ScopeCtx<'_>,
@@ -4926,16 +4972,20 @@ fn reconcile_repo_skill(
     let tracked = slots.first().and_then(|s| s.import);
     let pin = row.pin().or_else(|| sc.lock_commit(skill));
     if sc.lock.is_some() {
-        let commit = pin.clone().or_else(|| {
-            tracked.and_then(|i| i.origin.commit.clone())
-        });
+        let commit = pin
+            .clone()
+            .or_else(|| tracked.and_then(|i| i.origin.commit.clone()));
         if let Some(commit) = commit {
             sweep.lock_harvest.skills.insert(
                 skill.to_owned(),
                 LockSkill {
                     source: Some(format!(
                         "{}:{owner}/{repo}",
-                        if host == "bitbucket.org" { "bitbucket" } else { "github" }
+                        if host == "bitbucket.org" {
+                            "bitbucket"
+                        } else {
+                            "github"
+                        }
                     )),
                     commit: Some(commit),
                     ..LockSkill::default()
@@ -5020,6 +5070,7 @@ fn reconcile_repo_skill(
             && slots.iter().all(|s| {
                 s.import.is_some_and(|i| {
                     commit_matches(i.origin.commit.as_deref().unwrap_or_default(), &head.commit)
+                        && placement_bytes_stand(&sctx, i)
                 })
             });
         if settled && let Some(import) = &tracked {
@@ -5082,6 +5133,7 @@ fn reconcile_repo_skill(
             && slots.iter().all(|s| {
                 s.import.is_some_and(|i| {
                     commit_matches(i.origin.commit.as_deref().unwrap_or_default(), &resolved)
+                        && placement_bytes_stand(&sctx, i)
                 })
             });
         if all_at_resolved {

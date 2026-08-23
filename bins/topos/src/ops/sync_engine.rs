@@ -50,6 +50,29 @@ const MAX_BACKFILL: usize = 256;
 /// sentinel, and the go-back leaves a real commit there.
 pub(crate) const APPLIED_BEHIND_CURRENT: u64 = 0;
 
+/// After a PINNED sync — a row or lock pin holding this bundle off the served current — leave
+/// the go-back's own `applied` sentinel, so the next UNPINNED run reads behind and drives to the
+/// team's version again. Unlike the go-back it sets no `held`: a pin re-asserts itself every run
+/// through its row (or the project's lock), and removing the pin is what frees the bundle.
+///
+/// # Errors
+/// The per-skill lock and the sync doc's own read/write failures.
+pub(crate) fn mark_applied_behind(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+) -> Result<(), ClientError> {
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
+    let sp = ctx.layout.published(skill_id);
+    let Some(mut sync) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync)? else {
+        return Ok(());
+    };
+    if sync.applied != APPLIED_BEHIND_CURRENT {
+        sync.applied = APPLIED_BEHIND_CURRENT;
+        doc::write_doc(ctx.fs, &sp.sync, &sync)?;
+    }
+    Ok(())
+}
+
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
 /// value, so the merge is unreachable from a current/behind/clean-follower state **by construction** — a

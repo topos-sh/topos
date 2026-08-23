@@ -33,7 +33,7 @@ fn scope_ways_out(command: &str, argv: &[&str], err: &ClientError) -> Vec<(Strin
 #[test]
 fn a_bare_edit_never_writes_the_machine_file_and_a_g_edit_never_a_project_one() {
     let rig = Rig::new("zq-scope-property");
-    let proj = project("zq-scope-property-proj", "[bundles]\n");
+    let proj = project("zq-scope-property-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
     let global_path = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     let project_path = proj.0.join(crate::manifest::MANIFEST_FILE);
@@ -285,7 +285,7 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
 #[test]
 fn a_project_add_keeps_its_history_in_the_checkouts_own_store() {
     let rig = Rig::new("zq-custody");
-    let proj = project("zq-custody-proj", "[bundles]\n");
+    let proj = project("zq-custody-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
 
     let src = proj.0.join("zq-custody-src");
@@ -319,7 +319,7 @@ fn a_project_add_keeps_its_history_in_the_checkouts_own_store() {
 #[test]
 fn an_out_of_tree_source_records_absolutely_in_the_folders_own_file() {
     let rig = Rig::new("zq-outoftree");
-    let proj = project("zq-outoftree-proj", "[bundles]\n");
+    let proj = project("zq-outoftree-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
 
     // The source sits OUTSIDE the checkout: the reference cannot travel with the repo, so it is
@@ -348,7 +348,7 @@ fn a_dropped_rows_record_is_re_linked_while_a_standing_row_still_refuses() {
     // asked for it. Re-adding that folder has nothing to refuse — it re-links to the record:
     // the same id, the same lock, no second store dir, nothing minted.
     let rig = Rig::new("zq-relink");
-    let proj = project("zq-relink-proj", "[bundles]\n");
+    let proj = project("zq-relink-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
@@ -416,8 +416,10 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
-    let proj = project("zq-crossscope-proj", "[bundles]\n");
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
+    let proj = project("zq-crossscope-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
     let session_connect = connect(&plane, &dir);
 
@@ -439,7 +441,7 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
         std::fs::read_to_string(proj.0.join(crate::manifest::MANIFEST_FILE))
             .unwrap()
             .trim()
-            .ends_with("[bundles]"),
+            .is_empty(),
         "the refusal wrote nothing"
     );
 
@@ -453,7 +455,7 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let proj = project("zq-crossscope-feed-proj", "[bundles]\n");
+    let proj = project("zq-crossscope-feed-proj", "");
     // The feed has actually DELIVERED here (the machine sweep records it) — the delivered set is
     // what makes the name the feed row's claim; a workspace merely publishing a name is not a
     // demand, and would fall through to the classic not-found instead.
@@ -645,7 +647,7 @@ fn both_scopes_hold_deploy(
 ) -> Scratch {
     let proj = project(
         tag,
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let out = sweep_both(&rig.ctx_at(Some(&proj.0)), plane, dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
@@ -778,7 +780,7 @@ fn a_project_copys_log_names_the_workspace_whose_last_exchange_failed() {
     // store, while the freshness cache the fault rides is the machine's.
     let proj = project(
         "logfault-repo",
-        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
     let out = sweep(&rig.ctx_at(Some(&proj.0)), &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
@@ -1001,7 +1003,7 @@ fn a_g_targeted_run_misses_a_project_only_name() {
 #[test]
 fn a_reset_of_an_adopted_path_restores_the_source_dir() {
     let rig = Rig::new("zq-adopt-reset");
-    let proj = project("zq-adopt-reset-proj", "[bundles]\n");
+    let proj = project("zq-adopt-reset-proj", "");
     let ctx = rig.ctx_at(Some(&proj.0));
 
     let src = proj.0.join("tools/zq-adopted");
@@ -1086,7 +1088,7 @@ fn an_adopted_in_place_source_dir_survives_the_project_retire() {
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let proj = project("zq-adoptkeep-proj", "[bundles]\n");
+    let proj = project("zq-adoptkeep-proj", "");
     let src = proj.0.join("skills/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     std::fs::write(src.join("notes.txt"), b"the user's own extra file\n").unwrap();
@@ -1104,7 +1106,7 @@ fn an_adopted_in_place_source_dir_survives_the_project_retire() {
 
     // The row is orphaned by hand (the same file state a row-drop `remove` leaves): the sweep
     // retires nothing of the adopted source.
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "").unwrap();
     sweep(&ctx, &plane, &dir);
     assert!(src.is_dir(), "the adopted source dir survives the retire");
     assert_eq!(dir_bytes(&src), baseline, "…byte-identical");
@@ -1129,7 +1131,7 @@ fn remove_then_update_never_touches_an_adopted_source_dir() {
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let proj = project("zq-adoptrm-proj", "[bundles]\n");
+    let proj = project("zq-adoptrm-proj", "");
     let src = proj.0.join("skills/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     let ctx = rig.ctx_at(Some(&proj.0));
@@ -1169,7 +1171,7 @@ fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let src = rig.home.0.join("tools/quaggamap");
     skill_source(&src, b"# quaggamap\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1196,7 +1198,7 @@ fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
     );
 
     // The row dropped, then the machine sweep: the source survives byte-identical.
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     assert!(src.is_dir(), "the machine retire spared the adopted source");
     assert_eq!(dir_bytes(&src), baseline, "…byte-identical");
@@ -1215,7 +1217,9 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     let sid = crate::id::SkillId::parse("s_deploy").unwrap();
@@ -1253,7 +1257,7 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
 
     // (b) The row leaves (the ghost window: record + cache provenance remain, demand gone): the
     // false refusal is GONE — the bare run DESCRIBES the permanent delete, note honest.
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let outcome = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, false)
         .expect("the ghost falls through to the classic ladder");
     let items = match outcome {
@@ -1321,7 +1325,7 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
         "https://mcp.example/linear",
     ));
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -1338,7 +1342,7 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
 
     // The row leaves by hand: the record and its config entries are now nobody's demand, so the
     // name falls through to the classic ladder's permanent delete.
-    rig.write_global("[bundles]\n");
+    rig.write_global("");
     let named = NamedDirectory(dir.clone());
     let named_connect = |_s: &Session| ops::SessionTransports {
         plane: Box::new(plane.clone()),
@@ -1461,8 +1465,8 @@ fn two_same_named_mcp_bundles_in_one_scope_each_keep_their_own_states() {
     )
     .unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n\
-         \"{}\" = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n",
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n\
+         linear = {{ path = \"{}\", kind = \"mcp\", dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n",
         local.display()
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));

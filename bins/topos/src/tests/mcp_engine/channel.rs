@@ -74,7 +74,7 @@ fn a_channel_dest_places_its_skills_while_its_servers_reach_every_agent() {
     let proj = project_with(
         "ch-dest-co",
         &format!(
-            "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = {{ dest = [\"prompts/skills\"] }}\n"
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\ntools = {{ dest = [\"prompts/skills\"] }}\n"
         ),
     );
     let (sk, sv) = skill_and_server();
@@ -142,7 +142,7 @@ fn a_channels_typoed_mcp_dest_fails_the_server_and_names_the_channel() {
         vec![mcp_catalog_entry("s_a", "alpha", &sv)],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+        "[channels]\n\"{HOST}/{WS_NAME}/tools\" = \
          {{ mcp_dest = [\"~/.cursor/mcp.jsonn\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -261,7 +261,7 @@ fn a_channels_partly_mapping_mcp_dest_delivers_narrowed_with_no_advisory() {
     let plane = FakePlane::new();
     let dir = channel_of(Vec::new(), vec![mcp_catalog_entry("s_a", "alpha", &sv)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+        "[channels]\n\"{HOST}/{WS_NAME}/tools\" = \
          {{ mcp_dest = [\"~/.cursor/mcp.json\", \"~/.typo/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -305,7 +305,7 @@ fn a_config_file_path_in_a_channels_dest_is_a_folder_to_skills_and_nothing_to_se
     let proj = project_with(
         "ch-crossed-co",
         &format!(
-            "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\ntools = \
              {{ dest = [\".openclaw/openclaw.json\"] }}\n"
         ),
     );
@@ -361,7 +361,7 @@ fn each_server_a_channel_strands_is_named_once_and_counted_once() {
         ],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+        "[channels]\n\"{HOST}/{WS_NAME}/tools\" = \
          {{ mcp_dest = [\"~/.typo/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -419,7 +419,7 @@ fn a_mixed_channel_split_gives_each_survivor_its_own_kinds_destinations() {
         vec![mcp_catalog_entry("s_a", "alpha", &sv)],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+        "[channels]\n\"{HOST}/{WS_NAME}/tools\" = \
          {{ dest = [\"~/.claude/skills\"], mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -500,7 +500,7 @@ fn mcp_dest_on_a_bundle_row_refuses_like_any_other_illegal_field() {
             .message
     };
     let workspace = refusal(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     assert_eq!(
         workspace,
@@ -508,16 +508,16 @@ fn mcp_dest_on_a_bundle_row_refuses_like_any_other_illegal_field() {
          `acme.test/eng/alpha` takes `version`, `dest`, `name`"
     );
     let local = refusal(
-        "[bundles]\n\"~/servers/x\" = { kind = \"mcp\", mcp_dest = [\"~/.cursor/mcp.json\"] }\n",
+        "[mcp]\nx = { path = \"~/servers/x\", kind = \"mcp\", mcp_dest = [\"~/.cursor/mcp.json\"] }\n",
     );
     assert_eq!(
         local,
-        "`mcp_dest` does not fit a local folder — `~/servers/x` takes `dest`, `name`, `kind`"
+        "`mcp_dest` does not fit a local folder — `x` takes `dest`, `name`, `kind`"
     );
     // …and it IS legal on a channel, beside `dest`.
     parse_manifest(
         &format!(
-            "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+            "[channels]\n\"{HOST}/{WS_NAME}/tools\" = \
              {{ dest = [\"~/.claude/skills\"], mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
         ),
         ManifestScope::Global,
@@ -537,7 +537,7 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
     let plane = FakePlane::new().with_version("s_dep", &v);
     let dir = FakeDirectory::of_skills(vec![skill_catalog_entry("s_dep", "deploy", &v)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ version = \"*\", dest = [\"~/.codex/skills\"] }}\n"
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let first = sweep(&ctx, &plane, &dir);
@@ -597,7 +597,7 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
     )
     .unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n",
+        "[mcp]\nweather = {{ path = \"{}\", kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n",
         dir.display()
     ));
     let plane = FakePlane::new();
@@ -701,7 +701,7 @@ fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
     // orphan pass declines to retire.
     let placed = std::fs::read_to_string(&cursor).unwrap();
     std::fs::write(&cursor, placed.replace("wx.example", "edited.example")).unwrap();
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
     let _ = sweep(&ctx, &plane, &fdir);
     assert!(
         std::fs::read_to_string(&cursor)
@@ -784,7 +784,9 @@ fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
 /// what mints the RECORD every orphan question below is about (a server only this machine runs is
 /// a line in a file, and leaves no record behind to abandon).
 fn take_server(rig: &Rig, id: &str, name: &str) -> FakeDirectory {
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/{name}\" = \"*\"\n"));
+    rig.write_global(&format!(
+        "[mcp]\n\"{HOST}/{WS_NAME}/{name}\" = \"latest\"\n"
+    ));
     FakeDirectory::of_servers(vec![mcp_catalog_entry(
         id,
         name,
@@ -810,7 +812,7 @@ fn paging_the_rows_never_invents_an_orphan() {
         mcp_catalog_entry("s_zzz", "zzz", &served_at("https://zzz.example/mcp")),
     ]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/aaa\" = \"*\"\n\"{HOST}/{WS_NAME}/zzz\" = \"*\"\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/aaa\" = \"latest\"\n\"{HOST}/{WS_NAME}/zzz\" = \"latest\"\n"
     ));
     sweep(&ctx, &plane, &fdir);
 
@@ -880,7 +882,7 @@ fn a_same_named_healthy_record_never_silences_an_abandoned_one() {
     let plane = FakePlane::new().with_version("s_wx", &v);
     plane.serves(vec![delivered_skill("s_wx", "wx", &v)]);
     let fdir = FakeDirectory::of_skills(vec![skill_catalog_entry("s_wx", "wx", &v)]);
-    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/wx\" = \"*\"\n"));
+    rig.write_global(&format!("[skills]\n\"{HOST}/{WS_NAME}/wx\" = \"latest\"\n"));
     let _ = sweep(&ctx, &plane, &fdir);
 
     let listed = ops::list_with(
@@ -932,7 +934,7 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
     seed_harness_dirs(&rig.home.0);
     let proj = Scratch::new("orphan-proj-checkout");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
     let ctx = rig.ctx_at(Some(&proj.0));
     let plane = FakePlane::new();
     let fdir = take_server(&rig, "s_wx", "wx");
@@ -946,13 +948,13 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
         .map(|e| e.unwrap().path())
         .collect();
     assert_eq!(machine_records.len(), 1, "{machine_records:?}");
-    rig.write_global("[bundles]\n");
+    rig.write_global("schema = 1\n");
 
     // The project takes the same server: the checkout's own store, its own row, its own config
     // entry.
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/wx\" = \"*\"\n"),
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nwx = \"latest\"\n"),
     )
     .unwrap();
     sweep(&ctx, &plane, &fdir);
@@ -963,7 +965,7 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
     std::fs::write(&cursor, placed.replace("wx.example", "edited.example")).unwrap();
 
     // The project row goes; the hand-edited entry stays, so the record sticks — an orphan.
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
     let _ = sweep(&ctx, &plane, &FakeDirectory::default());
 
     let listing = || {
@@ -1049,7 +1051,7 @@ fn a_github_sourced_mcp_row_refuses_when_the_manifest_loads() {
     rig.seed_session();
     let plane = FakePlane::new();
     let dir = FakeDirectory::default();
-    rig.write_global("[bundles]\n\"github.com/o/r/tool\" = { version = \"*\", kind = \"mcp\" }\n");
+    rig.write_global("[skills]\ntool = { source = \"github:o/r\", kind = \"mcp\" }\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let err = ops::manifest_update(
         &ctx,
@@ -1087,7 +1089,10 @@ fn a_folder_named_in_both_scopes_keeps_each_scopes_config_key_stable() {
     .unwrap();
     // The same folder is a line in the PROJECT's file and in the machine's — two scopes, two
     // custody documents, two keys that must not reach across at each other.
-    let row = format!("[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n", dir.display());
+    let row = format!(
+        "[mcp]\nweather = {{ path = \"{}\", kind = \"mcp\" }}\n",
+        dir.display()
+    );
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), &row).unwrap();
     rig.write_global(&row);
     let ctx = rig.ctx_at(Some(&proj.0));
@@ -1135,7 +1140,7 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
     let plane = FakePlane::new();
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_a", "alpha", &s)]);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", {SAFE} }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
