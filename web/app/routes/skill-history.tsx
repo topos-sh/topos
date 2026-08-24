@@ -24,9 +24,9 @@ import {
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
-  authorDisplayMap,
   displayAuthor,
   historyWindowDays,
+  versionAuthorDisplays,
   versionCreatedAtMap,
   versionOutsideHistoryWindow,
 } from "@/lib/db/queries.custody.server";
@@ -150,12 +150,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       }
     }
     // A version's recorded author is the MACHINE that signed it (the commit frame's author is
-    // part of the version's identity and is never rewritten). Who that machine publishes as is
-    // this tier's own record, so the rows render a person; a machine this workspace has never
-    // seen publish keeps the id it signed with.
-    const people = await authorDisplayMap(
+    // part of the version's identity and is never rewritten). WHO published each version is this
+    // tier's own record, so the rows render a person; a version nothing here names keeps the id
+    // it was signed with.
+    const people = await versionAuthorDisplays(
       actor,
-      page.steps.map((s) => s.author),
+      row.skillId,
+      page.steps.map((s) => ({ versionId: s.versionId, author: s.author })),
     );
     history = {
       published: true,
@@ -164,7 +165,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       expectedGeneration: String(row.generation),
       steps: page.steps.map((s) => ({
         ...s,
-        author: displayAuthor(s.author, people),
+        author: displayAuthor(s.versionId, s.author, people),
         locked: locked.has(s.versionId),
       })),
       cursor: page.cursor,

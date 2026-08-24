@@ -61,9 +61,11 @@ caller.
   baseline everyone-row is unassignable at the data layer), upstream provenance
   (`bundle_upstream`/`version_upstream`), the MCP SERVER CATALOG (`mcp_server` +
   `mcp_server_revision` + `bundle_mcp` — see the MCP lane below), notices, proposals + comments,
-  op receipts, `device_owner` (which PERSON a machine publishes as — a version's author is part of
-  its identity and is never rewritten, so who signed it is resolved at render time from what the
-  publishing session knew), `audit_event`, `mail_event`.
+  op receipts, `version_author` (WHO published each version — the commit frame's author is part of
+  the version's identity and is never rewritten, so the acting person is recorded per version, in
+  the same transaction as the accepted write, and resolved at render time; `device_owner` is its
+  append-only fallback for versions written before it, and names a person only for a machine this
+  workspace has seen publish as exactly one), `audit_event`, `mail_event`.
 - **The DAL** (`app/lib/db/queries*.server.ts`) is the one sanctioned door to `web` AND the
   read-only `plane` custody mirror. Every function REQUIRES a branded actor as its first
   argument; mutating ops emit their audit row in the SAME transaction. One named exception: the

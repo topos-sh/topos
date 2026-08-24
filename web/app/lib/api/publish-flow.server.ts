@@ -19,8 +19,8 @@ import {
   openProposalInTx,
   placeIntoChannelInTx,
   publishTargetOf,
+  recordVersionAuthorInTx,
   registerGenesisBundleInTx,
-  rememberDeviceOwner,
 } from "@/lib/db/queries.custody.server";
 import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
 
@@ -114,10 +114,6 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     // Two-parent author merges stay unaccepted (the custody lane commits one parent).
     return badRequest("two-parent author merges are not accepted");
   }
-  // The session names the person and the frame names the machine — the only place the two are
-  // seen together. Remembering the pairing is what lets this version's author render as a person
-  // later, without a byte of the identity-bearing commit frame changing.
-  await rememberDeviceOwner(actor, candidate.author);
   const createdAt = receiptNow();
   const target = await publishTargetOf(actor, skillId);
   const isGenesis = target === undefined;
@@ -219,6 +215,15 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     }
     const envelope = await inFinalTx(async (tx) => {
       await openProposalInTx(tx, actor, target.bundleId, committed.value.version_id);
+      // The candidate is committed — this person authored THAT version, whatever the review
+      // decides about it later, and whoever this machine belongs to next.
+      await recordVersionAuthorInTx(
+        tx,
+        actor,
+        target.bundleId,
+        committed.value.version_id,
+        candidate.author,
+      );
       const details: Record<string, unknown> = args.forceProposal ? {} : { downgraded: true };
       if (channel !== null) {
         details.placement = await placeIntoChannelInTx(tx, actor, target.bundleId, channel);
@@ -273,6 +278,13 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       destination: channel,
       alsoInTx: async (tx, registered) => {
         const details: Record<string, unknown> = {};
+        await recordVersionAuthorInTx(
+          tx,
+          actor,
+          registered.bundleId,
+          registered.versionId,
+          candidate.author,
+        );
         if (registered.placement !== undefined) {
           details.placement = registered.placement;
         }
@@ -403,6 +415,13 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
 
   const details: Record<string, unknown> = {};
   const landed = await inFinalTx(async (tx) => {
+    await recordVersionAuthorInTx(
+      tx,
+      actor,
+      bundleId,
+      published.value.version_id,
+      candidate.author,
+    );
     if (isGenesis) {
       const registration = await registerGenesisBundleInTx(
         tx,
