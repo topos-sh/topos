@@ -6,6 +6,11 @@
 //! successor hint when the skill was resolved by a FREED base name. A channel-typed target is refused
 //! toward the web (curation history is a web surface). Un-enrolled / local-only skills keep today's
 //! purely-local log.
+//!
+//! The halves are merged into ONE history, newest first: each source arrives in its own order, so the
+//! merged list is re-ordered by the `at` stamp every dated event carries. An UNDATED event (a local git
+//! version, a proposal) keeps its place beside the neighbour it arrived next to — nothing is given a
+//! time it does not have.
 
 use std::collections::HashSet;
 
@@ -206,9 +211,13 @@ fn map_local_author(author: &str, me_device: Option<&str>) -> String {
 }
 
 /// Merge the local action log, the local git version events, and the plane's version/proposal events into
-/// ONE ordered list, DEDUPED by version id: a local git version whose id the plane also reports is dropped
-/// (the plane event wins — it carries the display author + the `current`/purge marks). Local-only versions
-/// (this device's drafts, not on the plane) stay.
+/// ONE list ordered NEWEST FIRST, DEDUPED by version id: a local git version whose id the plane also
+/// reports is dropped (the plane event wins — it carries the display author + the `current`/purge marks).
+/// Local-only versions (this device's drafts, not on the plane) stay.
+///
+/// The three sources arrive in their own orders — the action log oldest-first, the plane's versions
+/// newest-first — so concatenating them read as three lists stapled together the moment every version
+/// started printing its own date. [`order_newest_first`] makes it ONE history.
 fn assemble_log_events(
     mut events: Vec<Value>,
     local_versions: Vec<(String, Value)>,
@@ -223,7 +232,49 @@ fn assemble_log_events(
     }
     events.extend(plane_versions);
     events.extend(plane_proposals);
-    events
+    order_newest_first(events)
+}
+
+/// When an event happened, as the merged list records it: the `at` stamp, epoch milliseconds — the one
+/// field every dated event carries, and the one the TTY renderer reads. An event without it has no time,
+/// and none is guessed from anything else it holds.
+fn event_time(event: &Value) -> Option<u64> {
+    event.get("at").and_then(Value::as_u64)
+}
+
+/// Order the merged events NEWEST FIRST — without inventing a time for anything.
+///
+/// Not every event is dated: a local git version carries no stamp, and neither does a proposal. Such an
+/// event is sorted by the time of the neighbour it ALREADY sits next to — the nearest dated event before
+/// it, or, for events ahead of the first dated one, the nearest after — used as a sort key and never
+/// written onto the event. So an undated event travels WITH the event it arrived beside instead of
+/// drifting to one end of the list, and the renderer still prints it with a blank stamp.
+///
+/// The sort is STABLE, so events sharing a time — and whole undated runs — keep the order they arrived
+/// in. A list where nothing carries a time is returned exactly as it was.
+fn order_newest_first(events: Vec<Value>) -> Vec<Value> {
+    let own: Vec<Option<u64>> = events.iter().map(event_time).collect();
+    // Nothing to order by: leave the list alone rather than shuffle it under a made-up key.
+    let Some(first_dated) = own.iter().position(Option::is_some) else {
+        return events;
+    };
+    let lead = own[first_dated].unwrap_or_default();
+
+    let mut keys: Vec<u64> = Vec::with_capacity(own.len());
+    let mut carried = lead;
+    for time in &own {
+        // Before the first dated event `carried` is still `lead` — the nearest time AFTER, which is
+        // the only neighbour those events have.
+        if let Some(time) = *time {
+            carried = time;
+        }
+        keys.push(carried);
+    }
+
+    let mut keyed: Vec<(u64, Value)> = keys.into_iter().zip(events).collect();
+    // `sort_by_key` is STABLE, and `Reverse` is what makes it newest first without losing that.
+    keyed.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    keyed.into_iter().map(|(_, event)| event).collect()
 }
 
 /// A plane version as a log event — a purged version carries its tombstone (`purged_at` / `purged_by`).
@@ -311,6 +362,86 @@ mod tests {
         );
         assert_eq!(events.len(), 1, "the local-only version survives");
         assert_eq!(events[0].get("author").and_then(Value::as_str), Some("you"));
+    }
+
+    /// A dated event: `at` epoch milliseconds, the field every dated event carries.
+    fn dated(tag: &str, at: u64) -> Value {
+        json!({ "action": "add", "name": tag, "at": at })
+    }
+
+    /// An event with NO time — a local git version, a proposal.
+    fn undated(tag: &str) -> Value {
+        json!({ "action": "version", "version_id": tag })
+    }
+
+    /// The tags of a merged list, in the order it reads.
+    fn tags(events: &[Value]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| {
+                e.get("name")
+                    .or_else(|| e.get("version_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_merged_history_reads_newest_first_across_every_source() {
+        // The action log arrives OLDEST first and the plane's versions NEWEST first, so before this
+        // the two read as separate lists stapled together — with dates on the rows to prove it.
+        let events = assemble_log_events(
+            vec![dated("add", 100), dated("error", 300)],
+            Vec::new(),
+            vec![dated("v3", 400), dated("v2", 200)],
+            Vec::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(tags(&events), ["v3", "error", "v2", "add"]);
+    }
+
+    #[test]
+    fn an_undated_event_travels_with_the_neighbour_it_arrived_beside() {
+        // A local git version carries no stamp. It must stay where it was relative to its neighbours
+        // rather than sink to one end — and it must not acquire a time on the way.
+        let events =
+            order_newest_first(vec![dated("old", 100), undated("draft"), dated("new", 900)]);
+        assert_eq!(tags(&events), ["new", "old", "draft"]);
+        assert!(
+            events[2].get("at").is_none(),
+            "no time is written onto an undated event: {}",
+            events[2]
+        );
+    }
+
+    #[test]
+    fn undated_events_ahead_of_every_date_stay_ahead_of_the_one_they_lead() {
+        // Nothing precedes them, so their only neighbour is the event AFTER — they ride with it.
+        let events = order_newest_first(vec![
+            undated("lead-a"),
+            undated("lead-b"),
+            dated("old", 100),
+            dated("new", 900),
+        ]);
+        assert_eq!(tags(&events), ["new", "lead-a", "lead-b", "old"]);
+    }
+
+    #[test]
+    fn events_sharing_a_time_keep_the_order_they_arrived_in() {
+        let events = order_newest_first(vec![
+            dated("first", 500),
+            dated("second", 500),
+            dated("third", 500),
+        ]);
+        assert_eq!(tags(&events), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn a_history_where_nothing_carries_a_time_is_left_exactly_as_it_was() {
+        let events = order_newest_first(vec![undated("a"), undated("b"), undated("c")]);
+        assert_eq!(tags(&events), ["a", "b", "c"]);
     }
 
     #[test]
