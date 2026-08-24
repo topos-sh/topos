@@ -1154,6 +1154,7 @@ fn the_version_verbs_refuse_over_a_connected_server() {
         &"a".repeat(64),
         true,
         None,
+        ops::StoreScope::Here,
     )
     .expect_err("revert refuses");
     says_it_all(&err, "`revert` publishes an earlier version of");

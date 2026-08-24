@@ -1524,11 +1524,17 @@ fn run_command(
             );
             finish_review(json, cmd_name, result, workspace.as_deref(), &diag)
         }
-        Command::Revert { skill, to, yes } => finish_revert(
+        Command::Revert {
+            skill,
+            to,
+            global,
+            yes,
+        } => finish_revert(
             json,
             cmd_name,
             // Two-phase: bare DESCRIBES the forward move (nothing written); `--yes` applies it and also
-            // acknowledges a byte-level no-op.
+            // acknowledges a byte-level no-op. The scope flag picks the copy the way every targeted
+            // verb does: where you stand, or the machine with `-g`.
             ops::revert(
                 &ctx,
                 &ops::RevertConnectors {
@@ -1539,6 +1545,11 @@ fn run_command(
                 &to,
                 yes,
                 workspace.as_deref(),
+                if global {
+                    ops::StoreScope::Machine
+                } else {
+                    ops::StoreScope::Here
+                },
             ),
             &diag,
         ),

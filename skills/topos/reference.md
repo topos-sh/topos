@@ -395,6 +395,7 @@ topos revert [OPTIONS] <SKILL>
 |---|---|
 | `<SKILL>` | The skill to roll back |
 | `--to <TO>` | The version to return to — the good one, not the bad one. A full id, or a unique prefix of at least 8 characters |
+| `-g, --global` | Act on your machine-wide copy of the skill, even when run inside a project |
 | `--yes` | Apply the previewed revert (also confirms when that version is already live) |
 
 

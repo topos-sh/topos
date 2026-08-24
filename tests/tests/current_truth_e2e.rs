@@ -193,6 +193,12 @@ fn machine_placements(machine: &Machine, name: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Whether the MACHINE store tracks `name` at all (a machine that only ever ran project updates
+/// has no such record — and may have no skills dir yet).
+fn machine_tracks(machine: &Machine, name: &str) -> bool {
+    machine.topos_home().join("skills").is_dir() && !machine_placements(machine, name).is_empty()
+}
+
 fn assert_converged(machine: &Machine, files: &[File], what: &str) {
     let dirs = machine_placements(machine, BUNDLE);
     assert!(!dirs.is_empty(), "{what}: the bundle landed somewhere");
@@ -702,5 +708,123 @@ fn an_update_over_an_undone_copy_fast_forwards_and_names_what_it_replaced() {
                 &restored[..12]
             ))),
         "{again}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// revert acts on the scope you stand in: a project that delivers the bundle can revert it even
+// when the machine scope has never tracked it; `-g` names the machine and is an honest miss.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a_revert_from_a_project_needs_no_machine_wide_copy() {
+    let nonce = format!("scope-{}", std::process::id());
+    let stack = start_stack("current-truth-scope");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    let author = Machine::new("scope-author");
+    let (project, copy, v1) = author_publishes_v1(&stack, &author, &owner, &nonce);
+    write_bundle(&copy, &v2_files(&nonce));
+    let v2 = version_of(&publish(
+        &author,
+        &project,
+        "v2: the reference gains a line",
+    ));
+
+    // A reviewer whose machine only ever runs PROJECT updates: the checkout delivers the bundle
+    // into its own store; the machine store never hears of it.
+    let reviewer_browser = stack.add_member("reviewer@acme.test", "reviewer");
+    let reviewer = Machine::new("scope-reviewer");
+    login(&stack, &reviewer, &reviewer_browser);
+    let checkout = reviewer
+        .root()
+        .canonicalize()
+        .expect("canonical reviewer root")
+        .join("checkout");
+    std::fs::create_dir_all(&checkout).expect("create the reviewer's checkout");
+    reviewer
+        .run_in(&checkout, &["init", "--json"])
+        .data("the reviewer's topos init");
+    reviewer
+        .run_in(&checkout, &["add", BUNDLE, "--json"])
+        .data("the checkout asks for the bundle by name");
+    let placed_row = reviewer
+        .run_in(&checkout, &["update", "--json"])
+        .data("the checkout's first update");
+    let theirs = row(&placed_row, BUNDLE)["destinations"][0]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| checkout.join(".claude").join("skills").join(BUNDLE));
+    let theirs = if theirs.is_absolute() {
+        theirs
+    } else {
+        checkout.join(theirs)
+    };
+    assert_eq!(placed(&theirs), expected(&v2_files(&nonce)));
+    assert!(
+        !machine_tracks(&reviewer, BUNDLE),
+        "the machine store never tracked the bundle"
+    );
+
+    // The preview resolves the bundle where the command stands, and a SHORT `--to` resolves
+    // against the workspace's history from there — no machine-wide copy is consulted.
+    let short = &v1[..12];
+    let preview = reviewer
+        .run_in(&checkout, &["revert", BUNDLE, "--to", short, "--json"])
+        .envelope("the revert preview from the checkout");
+    assert_eq!(preview["data"]["describe"]["reverted_to"], v1, "{preview}");
+    assert_eq!(
+        preview["data"]["describe"]["current_version_id"], v2,
+        "{preview}"
+    );
+    let apply: Vec<&str> = preview["next_actions"][0]["argv"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        apply,
+        vec!["topos", "revert", BUNDLE, "--to", short, "--yes"],
+        "{preview}"
+    );
+
+    // `-g` names the machine outright — which holds nothing, and says so.
+    let refused = reviewer
+        .run_in(
+            &checkout,
+            &["revert", "-g", BUNDLE, "--to", short, "--json"],
+        )
+        .refusal("a machine-scope revert over an untracked bundle");
+    assert_eq!(refused["error"]["code"], "NO_SUCH_SKILL", "{refused}");
+
+    // Applied from the checkout: the team moves back, and the checkout's lock records the
+    // forward commit.
+    let reverted = reviewer
+        .run_in(
+            &checkout,
+            &["revert", BUNDLE, "--to", short, "--yes", "--json"],
+        )
+        .data("the revert from the checkout");
+    assert_eq!(reverted["reverted_to"], v1, "{reverted}");
+    let restored = reverted["new_version_id"]
+        .as_str()
+        .expect("the forward-revert commit")
+        .to_owned();
+    assert_eq!(reverted["project_lock"]["version"], restored, "{reverted}");
+    assert_eq!(
+        locked_version(&checkout).as_deref(),
+        Some(restored.as_str())
+    );
+    assert!(
+        !machine_tracks(&reviewer, BUNDLE),
+        "reverting from a checkout tracks nothing machine-wide"
+    );
+    let tty = reviewer
+        .run_in(&checkout, &["revert", BUNDLE, "--to", short])
+        .stdout;
+    assert!(
+        tty.contains("is already at these bytes"),
+        "a second revert to the same bytes is a no-op: {tty}"
     );
 }
