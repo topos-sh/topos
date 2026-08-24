@@ -1621,7 +1621,9 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             }
         }
         if !ws.skills.is_empty() {
-            s.push_str("  skills:\n");
+            // `bundles:`, not `skills:` — the rows under this header carry their own kind, and a
+            // workspace's catalog holds MCP servers beside skill folders.
+            s.push_str("  bundles:\n");
             for r in &ws.skills {
                 s.push_str(&remote_row(r));
             }
@@ -9159,13 +9161,14 @@ mod tests {
     #[test]
     fn list_tty_renders_the_remote_catalog_with_adoption_markers() {
         use topos_types::results::{RemoteAdoption, RemoteChannel, RemoteWorkspace};
-        let skill = |name: &str, state| RemoteSkill {
+        let of_kind = |name: &str, kind: &str, state| RemoteSkill {
             name: name.to_owned(),
-            kind: "skill".to_owned(),
+            kind: kind.to_owned(),
             version_id: "ab".repeat(32),
             open_proposals: if name == "deploy" { 2 } else { 0 },
             state,
         };
+        let skill = |name: &str, state| of_kind(name, "skill", state);
         let out = ListOutcome {
             data: ListData {
                 remote: vec![RemoteWorkspace {
@@ -9191,6 +9194,7 @@ mod tests {
                         skill("notes", RemoteAdoption::AdoptedOnMachine),
                         skill("audit", RemoteAdoption::UpdateAvailable),
                         skill("triage", RemoteAdoption::NotAdopted),
+                        of_kind("linear", "mcp", RemoteAdoption::NotAdopted),
                     ],
                 }],
                 signed_in: true,
@@ -9226,6 +9230,14 @@ mod tests {
         );
         assert!(
             text.contains("triage@abababababab  skill  (not adopted — `topos add triage`)"),
+            "{text}"
+        );
+        // The header covers every kind the catalog holds — MCP servers sit under it beside skill
+        // folders, so it can never say `skills:`.
+        assert!(text.contains("  bundles:\n"), "{text}");
+        assert!(!text.contains("  skills:\n"), "{text}");
+        assert!(
+            text.contains("linear@abababababab  mcp  (not adopted — `topos add linear`)"),
             "{text}"
         );
         // The dead verb never returns; the remote view carries no pointer at itself.
