@@ -80,9 +80,12 @@ pub(crate) use claim::claim;
 pub(crate) use claim::digest_in_history;
 pub(crate) use connect::device_challenge;
 pub(crate) use dest_select::Selection;
-// The RFC-3339 emitter round-trips against the render parser's test.
+// The RFC-3339 pair: the parser reads the server's stamped strings (a proposal's `created_at`, a
+// pending flow's expiry); the emitter is used inside `connect` itself and re-exported for the
+// round-trip test alone.
 #[cfg(test)]
 pub(crate) use connect::fmt_rfc3339_millis;
+pub(crate) use connect::parse_rfc3339_utc_millis;
 // The built-in suite drives the refresh seam + the provenance matcher directly.
 pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 #[cfg(test)]
