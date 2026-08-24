@@ -2777,10 +2777,43 @@ fn reconcile_thing<'a>(
                 {
                     LockedMcp::Honored(delivered) => {
                         let locked = sc.locked_revision(bundle).expect("honored implies locked");
-                        sweep.lock_harvest.mcp.insert(bundle.clone(), locked);
+                        sweep
+                            .lock_harvest
+                            .mcp
+                            .insert(bundle.clone(), locked.clone());
                         sweep.explicit.insert(entry.skill_id.clone());
+                        // The manifest delivery is booked HERE exactly as the ordinary arm books
+                        // it — at the revision the LOCK names, which is what this scope now holds.
+                        // The applied report and the offline cache are both built from this list,
+                        // and a locked row that skipped it would drop out of the fleet's state on
+                        // every install (nothing else carries a manifest-only bundle).
+                        sweep.delivered.push((
+                            run.session.workspace_id.clone(),
+                            entry.skill_id.clone(),
+                            DeliveredSkill {
+                                name: entry.name.clone(),
+                                review_required: false,
+                                served_version: locked,
+                                withdrawn: false,
+                                via_channels: Vec::new(),
+                                via_manifest: true,
+                                assigned_by: None,
+                                kind: BundleKind::Mcp.tag(),
+                                harness_states: Vec::new(),
+                                picked: false,
+                            },
+                        ));
                         // The lock is honored as a skill's is — silently. `delivered: None` runs
                         // the demand from the STANDING record, which already holds this document.
+                        let narrowing = mcp_filter(
+                            sc,
+                            row.fields().dest,
+                            &display,
+                            &DestVoice::Row,
+                            &mut sweep.mcp_warned_dests,
+                            &mut sweep.advisories,
+                            &mut sweep.warnings,
+                        );
                         sync_workspace_server(
                             env,
                             sc,
@@ -2789,17 +2822,11 @@ fn reconcile_thing<'a>(
                                 skill_id: &entry.skill_id,
                                 name: &entry.name,
                                 delivered,
-                                reach: mcp_filter(
-                                    sc,
-                                    row.fields().dest,
-                                    &display,
-                                    &DestVoice::Row,
-                                    &mut sweep.mcp_warned_dests,
-                                    &mut sweep.advisories,
-                                    &mut sweep.warnings,
-                                )
-                                .filter,
-                                unreachable: None,
+                                reach: narrowing.filter,
+                                // A `dest` that maps no config file reaches nobody here just as
+                                // it does on the ordinary arm — the row must not read as a
+                                // healthy install when nothing was placed.
+                                unreachable: narrowing.unreachable,
                                 step: None,
                             },
                             sweep,
@@ -3603,7 +3630,39 @@ fn reconcile_set<'a>(
                             let locked = sc
                                 .locked_revision(&server.name)
                                 .expect("honored implies locked");
+                            // The batch booked this member's delivery at the SERVED revision
+                            // before the lock was consulted; what the scope holds is the locked
+                            // one, and the offline cache answers "is this the version the
+                            // workspace serves?" — so it is corrected here rather than left to
+                            // claim currency this copy does not have.
+                            if let Some((_, _, booked)) =
+                                sweep.delivered.iter_mut().rev().find(|(ws, id, _)| {
+                                    *ws == run.session.workspace_id && *id == server.skill_id
+                                })
+                            {
+                                booked.served_version = locked.clone();
+                            }
                             sweep.lock_harvest.mcp.insert(server.name.clone(), locked);
+                            let narrowing = mcp_filter(
+                                sc,
+                                row.fields().mcp_dest,
+                                &server.name,
+                                &DestVoice::Channel {
+                                    channel,
+                                    identity: server.skill_id.as_str(),
+                                },
+                                &mut sweep.mcp_warned_dests,
+                                &mut sweep.advisories,
+                                &mut sweep.warnings,
+                            );
+                            // ONE BUNDLE, ONE BUCKET, on this arm too: a narrowing that maps
+                            // nothing placed this member nowhere, so its row stands down and it
+                            // counts as failed — exactly as the ordinary arm below.
+                            if narrowing.unreachable.is_some() {
+                                sweep
+                                    .mcp_zero_reach
+                                    .insert((sc.label.clone(), server.skill_id.clone()));
+                            }
                             sync_workspace_server(
                                 env,
                                 sc,
@@ -3612,20 +3671,8 @@ fn reconcile_set<'a>(
                                     skill_id: &server.skill_id,
                                     name: &server.name,
                                     delivered,
-                                    reach: mcp_filter(
-                                        sc,
-                                        row.fields().mcp_dest,
-                                        &server.name,
-                                        &DestVoice::Channel {
-                                            channel,
-                                            identity: server.skill_id.as_str(),
-                                        },
-                                        &mut sweep.mcp_warned_dests,
-                                        &mut sweep.advisories,
-                                        &mut sweep.warnings,
-                                    )
-                                    .filter,
-                                    unreachable: None,
+                                    reach: narrowing.filter,
+                                    unreachable: narrowing.unreachable,
                                     step,
                                 },
                                 sweep,

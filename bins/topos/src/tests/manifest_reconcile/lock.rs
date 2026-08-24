@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::rig::{
-    CallLog, FakeDirectory, FakePlane, HOST, Rig, Scratch, WS_NAME, catalog_entry,
+    CallLog, FakeDirectory, FakePlane, HOST, Rig, Scratch, WS, WS_NAME, catalog_entry,
     catalog_server_at, channel, connect, delivered, delivered_at, one_file, project, sweep,
 };
 use crate::ops;
@@ -759,4 +759,117 @@ fn a_channels_mcp_member_converges_to_the_locked_revision_too() {
     sweep(&ctx, &plane, &dir);
     assert_eq!(recorded(&rig, &proj.0, "s_linear").revision_id, new);
     assert!(lock_text(&proj.0).contains(&new));
+}
+
+#[test]
+fn a_locked_install_books_its_delivery_so_the_fleet_and_the_offline_surfaces_keep_it() {
+    // A manifest-only server rides no channel, so NOTHING else in the sweep carries it: the
+    // applied report's row set and the offline delivery cache are both built from what the
+    // reconcile books here. A locked install that skipped that booking would drop the server out
+    // of the fleet's state on every run — while the config entry it just wrote stands.
+    let rig = Rig::new("lock-mcp-report");
+    rig.seed_session();
+    let (old, new) = (rev("a"), rev("b"));
+    let proj = locked_mcp_project("lock-mcp-report-proj", &old);
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new())
+        .with_server(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v2",
+            &new,
+        ))
+        .with_revision(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v1",
+            &old,
+        ));
+    let ctx = rig.ctx_at(Some(&proj.0));
+    install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+
+    // The applied report carries the bundle, AT THE REVISION THIS MACHINE HOLDS — the locked one,
+    // never the catalog's current.
+    let reported = plane.reported.lock().unwrap().clone();
+    let row = reported
+        .iter()
+        .find(|(id, _, _)| id == "s_linear")
+        .unwrap_or_else(|| panic!("the locked server is reported: {reported:?}"));
+    assert_eq!(row.1, old, "the report names what is held");
+
+    // …and the offline cache says the same, marked as the manifest row's delivery.
+    let cache = crate::sync_status::read(&rig.fs, &rig.layout()).unwrap();
+    let entry = cache
+        .workspaces
+        .get(WS)
+        .unwrap_or_else(|| panic!("a cache row for the workspace: {cache:?}"));
+    let cached = entry
+        .delivered
+        .get("s_linear")
+        .unwrap_or_else(|| panic!("a cache row for the server: {entry:?}"));
+    assert!(cached.via_manifest, "the manifest row is what delivers it");
+    assert_eq!(cached.served_version, old, "held at the locked revision");
+}
+
+#[test]
+fn a_locked_install_that_reaches_no_agent_says_so_instead_of_reading_installed() {
+    // The lock decides WHICH document; `dest` decides WHERE it goes. A dest naming no MCP config
+    // file places nothing, and the row must say that on the honored path exactly as it does on
+    // the ordinary one — a receipt reading `up to date` over a machine holding nothing is the one
+    // thing it may never say.
+    let rig = Rig::new("lock-mcp-noreach");
+    rig.seed_session();
+    let (old, new) = (rev("a"), rev("b"));
+    let proj = project(
+        "lock-mcp-noreach-proj",
+        &format!(
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = {{ dest = \
+             [\"not-a-config.json\"] }}\n"
+        ),
+    );
+    std::fs::write(
+        proj.0.join("topos.lock"),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[mcp.linear]\nrevision = \"{old}\"\n"
+        ),
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new())
+        .with_server(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v2",
+            &new,
+        ))
+        .with_revision(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v1",
+            &old,
+        ));
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+
+    assert!(
+        crate::message::legacy_lines(&out.warnings)
+            .iter()
+            .any(|w| w.contains("reaches no agent")),
+        "{:?}",
+        out.warnings
+    );
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "linear")
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert!(
+        row.note
+            .as_deref()
+            .is_some_and(|n| n.starts_with("reaches no agent")),
+        "the row states it reached nobody: {row:?}"
+    );
 }
