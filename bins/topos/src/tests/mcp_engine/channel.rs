@@ -576,7 +576,7 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
             0,
             clean.unplaced_bundles.len(),
         ),
-        "checked machine-wide\nChecked 1 skill: all up to date."
+        "checked machine-wide\nChecked 1 bundle: all up to date."
     );
 }
 

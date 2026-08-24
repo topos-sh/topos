@@ -144,7 +144,7 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         out.warnings
     );
     // THE SUMMARY AND THE STATUS AGREE. The fault is about a BUNDLE, so the bundle is counted:
-    // the run used to push a line and nothing else, which printed "Checked 0 skills" beside a
+    // the run used to push a line and nothing else, which printed "Checked 0 bundles" beside a
     // non-zero exit — a receipt reporting nothing wrong under a status saying otherwise.
     assert_eq!(
         out.failed_bundles.len(),
@@ -162,7 +162,7 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         out.unplaced_bundles.len(),
     );
     assert!(
-        !tty.contains("Checked 0 skills"),
+        !tty.contains("Checked 0 bundles"),
         "a run with a failed bundle never summarises as having checked none: {tty}"
     );
     // …and an agent reading `--json` gets the SAME way out the prose line spells, as argv.
@@ -428,7 +428,7 @@ fn an_update_never_calls_a_drafted_bundle_all_up_to_date() {
         tty.contains("up to date — your edits are not shared yet (topos publish"),
         "{tty}"
     );
-    assert!(tty.ends_with("Checked 1 skill: 1 draft ahead."), "{tty}");
+    assert!(tty.ends_with("Checked 1 bundle: 1 draft ahead."), "{tty}");
     // …AND THE MACHINE LANE OFFERS THE SAME ACT. The row told an agent, in the payload, that its
     // edits are unshared and then handed it nothing to do about that; the TTY had been printing
     // `topos publish <name>` all along.

@@ -519,7 +519,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             0,
             clean.unplaced_bundles.len(),
         ),
-        "checked machine-wide\nChecked 1 skill: all up to date."
+        "checked machine-wide\nChecked 1 bundle: all up to date."
     );
 
     // The placement folder vanishes (a hand-delete, an agent cleanup). The next update re-creates
@@ -570,7 +570,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             0,
             again.unplaced_bundles.len(),
         ),
-        "checked machine-wide\nChecked 1 skill: all up to date."
+        "checked machine-wide\nChecked 1 bundle: all up to date."
     );
 }
 
