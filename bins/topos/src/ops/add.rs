@@ -1054,6 +1054,16 @@ pub(crate) fn keep_as_yours(
     let placements: Vec<String> = doc::read_map(ctx.fs, &sp.map)?
         .map(|m| m.placements)
         .unwrap_or_default();
+    // A CONNECTED SERVER IS NEVER A FORK CASE. Re-forking means keeping a folder's bytes as your
+    // own local bundle, and a server bundle has no folder — what it puts on this machine is one
+    // entry per agent MCP config. Its placement map is empty by nature, which this ladder read as
+    // "the agent dirs were cleaned", so `topos add deepwiki -g` — the very command
+    // `topos list --remote` prints — failed with a refusal about re-forking, while a skill on the
+    // same feed answered that the workspace already delivers it. Hand it back to the ordinary
+    // bare-name resolution, which answers for both kinds alike.
+    if crate::bundle_kind::classify(ctx, sid.as_str(), &placements).is_mcp() {
+        return Ok(None);
+    }
     let present = placements.iter().any(|p| ctx.fs.exists(Path::new(p)));
 
     // The retained reason — or NOT a fork case (a live delivered skill stays the ordinary
