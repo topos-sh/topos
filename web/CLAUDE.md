@@ -201,6 +201,13 @@ caller.
   `…/registry/v0.1/servers[/{name}/versions[/{version}]]` serves what THIS WORKSPACE runs,
   member-gated by cookie OR bearer, uniform-404 otherwise. There is NO public catalog feed — the
   generic catalog is the committed file, and the boot sync is what makes it authoritative.
+  **The session lane's by-revision read** (`api.v1.mcp-revision.ts` →
+  `laneMcpRevision`) is the other way in, and it is what makes a committed `topos.lock` mean the
+  same thing for a connection as for a skill: `…/mcp-servers/{bundle}/revisions/{revision}` answers
+  with ONE stored revision of a server this workspace connects, in the catalog index's own shape
+  (the read actor's two doors; the document re-validated on the way out). A revision NEVER
+  PROMOTED, one belonging to another server, and a bundle this workspace does not connect are the
+  uniform 404, so it is no oracle for the catalog at large.
   A boot backfill (`app/lib/db/mcp-backfill.server.ts`) connects every MCP bundle written before
   the catalog existed — the name lives in the vault's bytes, so it runs where bytes are readable,
   before the first request; what it cannot read is NAMED in the log, never skipped silently.

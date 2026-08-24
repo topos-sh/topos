@@ -34,8 +34,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   records what every follow row resolved to (`manifest/lock`: sorted blocks — skills' versions
   with `via` for channel-delivered ones, channels' member lists, mcp revisions; deterministic, no
   timestamps). `install` (and EVERY `--quiet` hook run, either verb spelling) converges to the
-  lock: entries pin the fetch, a channel takes exactly its locked member list, a row the lock
-  lacks resolves once and its entry is written, an existing entry never moves; `--frozen` refuses
+  lock: entries pin the fetch — an `[mcp]` entry included, whose locked revision is fetched BY ID
+  from the workspace and rendered, so a checkout writes the configuration its lock names rather
+  than today's catalog (a workspace that cannot serve that revision is the degraded path: frozen
+  refuses, a plain install takes the served one and discloses the swap) — a channel takes exactly
+  its locked member list, a row the lock lacks resolves once and its entry is written, an existing
+  entry never moves; `--frozen` refuses
   on any gap or failure and writes nothing (the CI mode). A typed `update` re-resolves follow
   rows to current and rewrites the lock. A pinned apply leaves the go-back's `applied` sentinel
   (`sync_engine::mark_applied_behind`), so unpinning reads behind and moves. The machine scope

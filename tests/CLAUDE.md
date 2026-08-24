@@ -37,7 +37,11 @@ what only a cross-crate composed run can prove.
   DRIFTED and disclosed, project scope reaching the four project surfaces alone, the two kinds
   coexisting under one skills root, a curated channel finally delivering the server through the
   feed, `publish` refused over a bundle that has no files, and — with the app killed — the entries
-  healing from the machine's own record alone. Drives the REAL CLI BINARY as a subprocess over a
+  healing from the machine's own record alone. A second arc follows the COMMITTED LOCK: the
+  catalog is moved to a new revision behind the project's back, and a fresh checkout of the
+  committed `topos.toml`/`topos.lock` pair still installs — under `--frozen` — the document the
+  LOCKED revision holds, fetched by id from the real app, with `topos update` the one thing that
+  moves the entry and the lock together. Drives the REAL CLI BINARY as a subprocess over a
   fake `$HOME` — harness detection and the config surfaces resolve against the environment, so
   only a real process proves them (the fixture rig still owns the browser login; both halves share
   one `~/.topos`).
