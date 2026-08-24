@@ -104,8 +104,8 @@ pub(crate) fn uninstall(
     if sidecar_present && !looks_like_sidecar(ctx, home) {
         return Err(ClientError::InvalidArgument(format!(
             "`{sidecar_path}` does not look like a topos sidecar (none of skills/, identity/, \
-             ops/, state/, locks/, or log.jsonl inside) — refusing to delete it. If TOPOS_HOME is \
-             set, point it at the real topos home"
+             ops/, state/, locks/, cache/, or log.jsonl inside) — refusing to delete it. If \
+             TOPOS_HOME is set, point it at the real topos home"
         ))
         .into());
     }
@@ -345,6 +345,11 @@ fn looks_like_sidecar(ctx: &Ctx<'_>, home: &std::path::Path) -> bool {
         ctx.layout.state_dir(),
         ctx.layout.locks_dir(),
         ctx.layout.log_path(),
+        // The machine-wide fetch cache (`crate::fetch_cache`). It is the one entry the layout does
+        // not own — it is keyed by content, not by scope — and a home that holds ONLY it is a real
+        // state: a sign-out, or a `remove` of everything, leaves downloaded blobs behind. Without
+        // this marker that home would refuse to uninstall.
+        home.join("cache"),
     ];
     if markers.iter().any(|m| ctx.fs.exists(m)) {
         return true;

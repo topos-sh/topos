@@ -106,7 +106,9 @@ pub(crate) enum NewOutcome {
 /// link+unlink dance elsewhere). A check-then-write birth silently overwrites a file an outside
 /// editor created between the absence check and the write; this one cannot — a target that
 /// exists at the landing instant answers [`NewOutcome::Exists`] with the staged temp discarded
-/// and nothing overwritten.
+/// and nothing overwritten. Temp = `target` + [`TMP_SUFFIX`]; a writer that must not share a
+/// predictable temp name with a CONCURRENT writer of the same target picks its own through
+/// [`atomic_write_new_at`].
 ///
 /// # Errors
 /// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
@@ -115,13 +117,31 @@ pub(crate) fn atomic_write_new(
     target: &Path,
     bytes: &[u8],
 ) -> Result<NewOutcome, ClientError> {
-    let tmp = temp_path(target);
-    fs.write_temp(&tmp, bytes)?;
-    fs.fsync_file(&tmp)?;
-    match fs.rename_file_noreplace(&tmp, target) {
+    atomic_write_new_at(fs, target, &temp_path(target), bytes)
+}
+
+/// [`atomic_write_new`] with the temp path the CALLER picks (the same caller-picks-the-tmp
+/// convention as [`atomic_write_at`] / [`atomic_write_executable`]), for a birth whose writers can
+/// race each other on the very same target: the predictable `<target>.tmp` is one name, so two
+/// concurrent stagers of one file would truncate each other's staging and land torn bytes. A
+/// unique temp gives each writer its own staging file, and the no-replace rename still elects
+/// exactly one winner. `tmp` MUST be a sibling of `target` (same filesystem), so the landing is a
+/// real rename.
+///
+/// # Errors
+/// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
+pub(crate) fn atomic_write_new_at(
+    fs: &dyn FsOps,
+    target: &Path,
+    tmp: &Path,
+    bytes: &[u8],
+) -> Result<NewOutcome, ClientError> {
+    fs.write_temp(tmp, bytes)?;
+    fs.fsync_file(tmp)?;
+    match fs.rename_file_noreplace(tmp, target) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            fs.remove_file(&tmp)?;
+            fs.remove_file(tmp)?;
             return Ok(NewOutcome::Exists);
         }
         Err(e) => return Err(e.into()),
