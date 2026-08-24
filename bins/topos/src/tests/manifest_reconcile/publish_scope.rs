@@ -784,6 +784,43 @@ fn an_unmodified_copy_of_an_older_version_carries_forward_over_the_live_current(
     );
 }
 
+/// The delivery's advertised digest is DISCLOSURE, not trust. A snapshot that advertises the
+/// copy's own digest for a current whose verified bytes differ must never end in "already
+/// published": the verdict is confirmed against the bytes that reproduce the version id, and the
+/// publish proceeds as the forward publish it is.
+#[test]
+fn a_lying_advertised_digest_never_yields_already_published() {
+    let rig = Rig::new("pubscope-lying-digest");
+    rig.seed_session();
+    let mine = one_file(b"# deploy\n");
+    let restored = revert_shaped(b"# deploy\nthe version the revert restored\n");
+    let seams = publish_seams_with(&mine, &[&restored]);
+    let (proj, _machine_dir, _project_dir) =
+        both_scopes("pubscope-lying-digest-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    // The current moved to `restored`, but the snapshot advertises the COPY's digest for it.
+    let mut lying = delivered_at("s_deploy", "deploy", &restored, 2);
+    lying.bundle_digest = mine.digest;
+    seams.plane.serves(vec![lying]);
+
+    let ops::PublishPreview::Describe(preview) =
+        describe_at(&ctx, &seams, ops::StoreScope::Here).unwrap()
+    else {
+        panic!("never 'already published' on an advertised digest alone")
+    };
+    let rep = preview
+        .republish
+        .expect("the copy is an older version carried forward");
+    assert_eq!(rep.current_version_id, hex(&restored.id));
+    assert_eq!(rep.copy_version_id, hex(&mine.id));
+    let data = landed(publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap());
+    assert_eq!(data.bundle_digest, hex(&mine.digest));
+    assert_eq!(
+        data.republish.map(|r| r.current_version_id),
+        Some(hex(&restored.id))
+    );
+}
+
 /// The other half of the same truth: a copy whose BYTES equal the live current is already
 /// published, whatever the cache's lock says — the sweep just has not caught up.
 #[test]
