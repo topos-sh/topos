@@ -1242,22 +1242,60 @@ export const proposalComment = webSchema.table(
   ],
 );
 
-// ── Who a machine's commit-author id belongs to ─────────────────────────────────────────────
+// ── Who authored a version ──────────────────────────────────────────────────────────────────
 
 /**
- * WHICH PERSON A MACHINE PUBLISHES AS — the display-time key for a version's recorded author.
+ * WHO PUBLISHED THIS VERSION — the display-time key for a version's recorded author.
  *
  * A version's author is part of its identity: the client derives the version id from
  * `(parents, tree, author, message)` and verifies the server landed exactly that id, so what
  * the commit frame carries is the machine's own `d_…` id and can never be rewritten into a
  * person's name — not at publish time, and certainly not afterwards. But the session that sent
- * the candidate DOES know the person, so the app writes that pairing down here and resolves it
- * when it renders. The stored history is untouched; only the reading of it changes.
+ * the candidate DOES know the person, so the app writes it down HERE, against the one version
+ * that person actually published. The stored history is untouched; only the reading of it
+ * changes.
  *
- * One row per (workspace, machine). It outlives the session that taught it — a person logging a
- * machine out does not un-author their versions — and dies with the workspace or the person.
- * A machine that has not published since this table existed simply has no row, and its versions
- * keep showing the id they were signed with.
+ * ONE ROW PER VERSION, written in the same transaction as the accepted write and never
+ * rewritten. That is what makes authorship per-version: the same machine signing in as someone
+ * else later authors ITS OWN versions and relabels nobody else's, and an op that was refused
+ * leaves no row at all. The row outlives the session that wrote it — logging a machine out does
+ * not un-author its versions — and dies with the bundle or the person.
+ */
+export const versionAuthor = webSchema.table(
+  "version_author",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    bundleId: text("bundle_id").notNull(),
+    versionId: text("version_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.bundleId, table.versionId] }),
+    index("version_author_user_idx").on(table.userId),
+    foreignKey({
+      name: "version_author_bundle_fk",
+      columns: [table.bundleId, table.workspaceId],
+      foreignColumns: [bundle.id, bundle.workspaceId],
+    }).onDelete("cascade"),
+  ],
+);
+
+/**
+ * WHICH PEOPLE A MACHINE HAS PUBLISHED AS — the FALLBACK for versions written before
+ * `version_author` existed, and only for those.
+ *
+ * A machine id is not a person and never became one: one laptop can be signed in as different
+ * people over its life. So this table does not claim a machine's owner, it OBSERVES: one
+ * append-only row per (workspace, machine, person), never updated, never deleted. A device with
+ * exactly one row names that person for its pre-table versions; a device with two rows names
+ * nobody, and those versions keep showing the id they were signed with. Guessing between two
+ * people is worse than showing the machine.
+ *
+ * Rows are written only where a write was ACCEPTED, beside the `version_author` row of the same
+ * op — so a refused publish teaches this table nothing either.
  */
 export const deviceOwner = webSchema.table(
   "device_owner",
@@ -1271,10 +1309,11 @@ export const deviceOwner = webSchema.table(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
-    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.workspaceId, table.deviceId] }),
+    // The PERSON is part of the key: a second person on the same machine ADDS a row rather than
+    // taking the first one's place, which is what makes the ambiguity visible instead of silent.
+    primaryKey({ columns: [table.workspaceId, table.deviceId, table.userId] }),
     index("device_owner_user_idx").on(table.userId),
   ],
 );

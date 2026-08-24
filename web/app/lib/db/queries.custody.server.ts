@@ -11,6 +11,7 @@ import {
   notice,
   opReceipt,
   proposal,
+  versionAuthor,
   workspace,
 } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
@@ -330,7 +331,7 @@ export async function versionCreatedAtMap(
   return new Map(rows.map((r) => [r.versionId, r.createdAt]));
 }
 
-// ── Who a machine publishes as (the author display-time key) ────────────────────────────────
+// ── Who authored a version (the display-time key) ───────────────────────────────────────────
 
 /**
  * The commit-author string a client signs with: `d_` + 32 lowercase hex. Anything else is a
@@ -345,61 +346,120 @@ export function isDeviceAuthor(author: string): boolean {
 }
 
 /**
- * Remember that THIS machine publishes as THIS person, so a version signed with a machine id
- * can be rendered as its author afterwards.
+ * Record WHO published this version — the acting person against the one version they published.
  *
- * Called wherever the session lane accepts a candidate frame: the session names the person, the
- * frame names the machine, and the two are only ever seen together here. Deliberately outside
- * the publish's own transaction — the pairing is true whether or not the publish lands, and a
- * failure to record it must never fail a publish. Idempotent: a repeat only moves `last_seen_at`.
+ * Called from inside the transaction that lands an ACCEPTED write (a publish, a proposal's
+ * ingest, a revert's forward commit) and nowhere else, so a refused op records nothing and
+ * authorship is bound to a version rather than to a machine. The row is written once and never
+ * rewritten: the same machine signing in as someone else later authors ITS OWN versions and
+ * relabels none of the ones already here.
+ *
+ * The `device_owner` row beside it is the fallback for versions written BEFORE this table
+ * existed — an append-only observation, first write per person wins, and a machine seen as two
+ * people ends up naming neither (see [`versionAuthorDisplays`]).
  */
-export async function rememberDeviceOwner(actor: PublishActor, author: string): Promise<void> {
+export async function recordVersionAuthorInTx(
+  tx: Tx,
+  actor: PublishActor,
+  bundleId: string,
+  versionId: string,
+  author: string,
+): Promise<void> {
+  await tx
+    .insert(versionAuthor)
+    .values({ workspaceId: actor.workspaceId, bundleId, versionId, userId: actor.userId })
+    .onConflictDoNothing({ target: [versionAuthor.bundleId, versionAuthor.versionId] });
   if (!isDeviceAuthor(author)) {
     return;
   }
-  try {
-    await getDb()
-      .insert(deviceOwner)
-      .values({ workspaceId: actor.workspaceId, deviceId: author, userId: actor.userId })
-      .onConflictDoUpdate({
-        target: [deviceOwner.workspaceId, deviceOwner.deviceId],
-        set: { userId: actor.userId, lastSeenAt: new Date() },
-      });
-  } catch {
-    // A display convenience is never worth a failed publish.
-  }
+  await tx
+    .insert(deviceOwner)
+    .values({ workspaceId: actor.workspaceId, deviceId: author, userId: actor.userId })
+    .onConflictDoNothing();
+}
+
+/** One version as the display resolver reads it: its id and the author custody recorded. */
+export interface RecordedAuthor {
+  versionId: string;
+  author: string;
 }
 
 /**
- * The people behind a set of recorded authors — the display-time half. Authors that are not
- * machine ids pass through untouched (they are already a person's own attribution), and a
- * machine this workspace has never seen publish is simply absent, so the caller keeps the id
- * the version was signed with rather than inventing a name for it.
+ * WHO to show as each version's author, keyed by version id.
+ *
+ * Two sources, in order. `version_author` is the authority: it names the person who published
+ * that exact version, so a machine that has since changed hands cannot touch it. A version with
+ * no such row predates the table, and only then does the machine-level fallback speak — and only
+ * when it is unambiguous: a device this workspace has seen publish as exactly ONE person names
+ * them, a device seen as two names nobody. Versions absent from the returned map keep the author
+ * they were signed with, which for a machine id means the id itself.
  */
-export async function authorDisplayMap(
+export async function versionAuthorDisplays(
   // Every surface that renders an author reads it: the session lane's log (a SessionActor or a
   // machine token) and the web's own bundle pages (a MemberActor). Only the workspace scope is
   // used — this read asks no other question of the actor.
   actor: ReadActor | MemberActor,
-  authors: readonly string[],
+  bundleId: string,
+  versions: readonly RecordedAuthor[],
 ): Promise<Map<string, string>> {
-  const devices = [...new Set(authors.filter(isDeviceAuthor))];
-  if (devices.length === 0) {
-    return new Map();
+  const display = new Map<string, string>();
+  if (versions.length === 0) {
+    return display;
   }
-  const rows = await getDb()
+  const db = getDb();
+  const ids = [...new Set(versions.map((v) => v.versionId))];
+  const authored = await db
+    .select({ versionId: versionAuthor.versionId, name: user.name, email: user.email })
+    .from(versionAuthor)
+    .innerJoin(user, eq(user.id, versionAuthor.userId))
+    .where(
+      and(
+        eq(versionAuthor.workspaceId, actor.workspaceId),
+        eq(versionAuthor.bundleId, bundleId),
+        inArray(versionAuthor.versionId, ids),
+      ),
+    );
+  for (const row of authored) {
+    display.set(row.versionId, personAttribution(row.name, row.email));
+  }
+
+  // The fallback, for versions this app has no author row for at all.
+  const orphans = versions.filter((v) => !display.has(v.versionId) && isDeviceAuthor(v.author));
+  const devices = [...new Set(orphans.map((v) => v.author))];
+  if (devices.length === 0) {
+    return display;
+  }
+  const observed = await db
     .select({ deviceId: deviceOwner.deviceId, name: user.name, email: user.email })
     .from(deviceOwner)
     .innerJoin(user, eq(user.id, deviceOwner.userId))
     .where(
       and(eq(deviceOwner.workspaceId, actor.workspaceId), inArray(deviceOwner.deviceId, devices)),
     );
-  return new Map(rows.map((r) => [r.deviceId, personAttribution(r.name, r.email)]));
+  const byDevice = new Map<string, string | null>();
+  for (const row of observed) {
+    // A SECOND person on the same machine settles it as unknowable — never a coin toss.
+    byDevice.set(
+      row.deviceId,
+      byDevice.has(row.deviceId) ? null : personAttribution(row.name, row.email),
+    );
+  }
+  for (const orphan of orphans) {
+    const person = byDevice.get(orphan.author);
+    if (person != null) {
+      display.set(orphan.versionId, person);
+    }
+  }
+  return display;
 }
 
-/** One recorded author as a person, or the author verbatim when nothing names them. */
-export function displayAuthor(author: string, people: Map<string, string>): string {
-  return people.get(author) ?? author;
+/** One version's author as a person, or the author custody recorded when nothing names them. */
+export function displayAuthor(
+  versionId: string,
+  author: string,
+  people: Map<string, string>,
+): string {
+  return people.get(versionId) ?? author;
 }
 
 export interface GenesisRegistration {

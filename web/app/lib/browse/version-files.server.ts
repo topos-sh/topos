@@ -1,5 +1,5 @@
 import type { MemberActor } from "@/lib/auth/guards.server";
-import { authorDisplayMap, displayAuthor } from "@/lib/db/queries.custody.server";
+import { displayAuthor, versionAuthorDisplays } from "@/lib/db/queries.custody.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
 import { MAX_BLOB_BYTES } from "@/lib/diff/model";
 import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.server";
@@ -54,8 +54,9 @@ export async function loadVersionFilesData(
   const version = meta.data;
   const entries = buildListing(version.files);
   const authorDisplay = displayAuthor(
+    versionId,
     version.author,
-    await authorDisplayMap(actor, [version.author]),
+    await versionAuthorDisplays(actor, skillId, [{ versionId, author: version.author }]),
   );
 
   const doc = docFileOf(version.files);

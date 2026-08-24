@@ -224,6 +224,13 @@
       "when": 1787603617071,
       "tag": "0031_device-owner",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1787607277587,
+      "tag": "0032_version-author",
+      "breakpoints": true
     }
   ]
 }
