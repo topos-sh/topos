@@ -25,9 +25,11 @@
 //! - [`Tty`] — stderr is a terminal: ONE repainted line (an `indicatif` spinner + the label + human
 //!   bytes), steady-ticked so it stays alive through a stalled socket, and CLEARED on end so the
 //!   receipt that follows on stdout prints against a clean screen.
-//! - [`Plain`] — stderr is a pipe or a file: one plain `topos: <label>` line per phase start (the
-//!   same prefix the recovery disclosures use), present-participle, no repainting and no spinner
-//!   glyphs — a log reader gets a legible trace instead of a stream of escape codes.
+//! - [`Plain`] — stderr is a pipe or a file: one plain `topos: <label>` line the first time a phase
+//!   opens (the same prefix the recovery disclosures use), present-participle, no repainting and no
+//!   spinner glyphs — a log reader gets a legible trace instead of a stream of escape codes. A
+//!   label already announced is never announced again, so a verb making four requests behind one
+//!   label reads the way it does on a terminal, where one line is repainted.
 //! - [`Silent`] — nothing at all. The harness hook sweep (`update --quiet`), and every unit test.
 
 use std::cell::{Cell, RefCell};
@@ -177,15 +179,24 @@ impl ProgressSink for Silent {
 // Plain — one line per phase, for a stderr nobody is watching live.
 // =================================================================================================
 
-/// The line-per-phase sink: writes `topos: <label>` once when a phase opens and says nothing more.
-/// No cursor movement, no spinner glyph, no byte churn — a redirected stderr stays a readable log.
-/// Generic over the writer so the shape is asserted in-crate against a buffer.
+/// The line-per-phase sink: writes `topos: <label>` the first time that phase opens and says
+/// nothing more. No cursor movement, no spinner glyph, no byte churn — a redirected stderr stays a
+/// readable log. Generic over the writer so the shape is asserted in-crate against a buffer.
+///
+/// **One line per label per invocation.** The animated sink repaints ONE line, so a verb that makes
+/// four requests behind one label looks identical whether it made one or four; here each request
+/// used to cost another identical line, and `topos login --json` announced `contacting topos.sh`
+/// twice for a single sign-in. A label already announced is never announced again — the reader
+/// learned that fact the first time, and repeating it says nothing about progress.
 #[derive(Debug)]
 pub(crate) struct Plain<W: Write> {
     out: RefCell<W>,
-    /// Whether a phase is in flight — the only state a non-repainting sink needs (it answers
-    /// [`ProgressSink::begin_if_idle`]).
+    /// Whether a phase is in flight — what [`ProgressSink::begin_if_idle`] answers. Independent of
+    /// whether the phase printed: a suppressed repeat still HOLDS the line, so the layers beneath
+    /// it stay quiet exactly as they would under its first run.
     active: Cell<bool>,
+    /// Every label this invocation has already announced.
+    announced: RefCell<std::collections::BTreeSet<String>>,
 }
 
 impl<W: Write> Plain<W> {
@@ -193,17 +204,21 @@ impl<W: Write> Plain<W> {
         Self {
             out: RefCell::new(out),
             active: Cell::new(false),
+            announced: RefCell::new(std::collections::BTreeSet::new()),
         }
     }
 }
 
 impl<W: Write> ProgressSink for Plain<W> {
     fn begin(&self, label: &str) {
+        self.active.set(true);
+        if !self.announced.borrow_mut().insert(label.to_owned()) {
+            return;
+        }
         // Best-effort: a broken/full stderr must never fail a verb over a progress line.
         let mut out = self.out.borrow_mut();
         let _ = writeln!(out, "topos: {label}");
         let _ = out.flush();
-        self.active.set(true);
     }
 
     fn begin_if_idle(&self, label: &str) -> bool {
@@ -364,6 +379,41 @@ mod tests {
         assert_eq!(
             text(&p),
             "topos: fetching github.com/o/r\ntopos: downloading topos 0.1.18\n"
+        );
+    }
+
+    /// One invocation, one line per label. A verb that dials the same server four times used to
+    /// cost four identical `topos: contacting topos.sh` lines — `topos login --json` announced it
+    /// twice for a single sign-in — while a terminal repainted ONE line for the same work.
+    #[test]
+    fn a_label_is_announced_once_per_invocation_however_many_requests_it_covers() {
+        let p = captured();
+        for _ in 0..4 {
+            let _phase = phase_if_idle(&p, "contacting topos.sh");
+        }
+        assert_eq!(text(&p), "topos: contacting topos.sh\n");
+        // A DIFFERENT label is still its own line — the rule suppresses repetition, not activity.
+        {
+            let _phase = phase(&p, "downloading deploy-checklist");
+        }
+        // …and the first label, re-entered after it, stays said-once.
+        {
+            let _phase = phase_if_idle(&p, "contacting topos.sh");
+        }
+        assert_eq!(
+            text(&p),
+            "topos: contacting topos.sh\ntopos: downloading deploy-checklist\n"
+        );
+        // A suppressed repeat still HOLDS the line, so the layers beneath it stay quiet.
+        let outer = phase(&p, "contacting topos.sh");
+        assert!(p.active.get(), "a suppressed repeat still owns the phase");
+        {
+            let _inner = phase_if_idle(&p, "downloading deploy-checklist");
+        }
+        drop(outer);
+        assert_eq!(
+            text(&p),
+            "topos: contacting topos.sh\ntopos: downloading deploy-checklist\n"
         );
     }
 
