@@ -14,11 +14,22 @@ use topos_types::results::{RevertData, RevertDescribeData};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
+use super::reconcile::SessionConnect;
 use super::{VersionRef, resolve_followed_skill_in_workspace, resolve_version_ref, workspace_of};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
-use crate::{op_wal, sidecar};
+use crate::{op_wal, sessions::Session, sidecar};
+
+/// The seams `revert` needs: the contribute lane it POSTs the forward move on, and the per-session
+/// transports it reads the workspace's version history through — the same history `topos log`
+/// prints, which is where a short id a person copies off that listing comes from.
+pub(crate) struct RevertConnectors<'a> {
+    /// The contribute-write lane (the forward move's POST).
+    pub contribute: &'a ContributeConnect<'a>,
+    /// The per-session transports (each read rides its session's own credential).
+    pub session: &'a SessionConnect<'a>,
+}
 
 /// The verb's outcome — the two-phase pair plus the byte-level no-op.
 #[derive(Debug)]
@@ -48,7 +59,7 @@ pub(crate) enum RevertOutcome {
 /// error if the good version does not reproduce its id; a transport failure otherwise.
 pub(crate) fn revert(
     ctx: &Ctx<'_>,
-    connect: &ContributeConnect<'_>,
+    connectors: &RevertConnectors<'_>,
     skill_name: &str,
     to: &str,
     yes: bool,
@@ -88,21 +99,8 @@ pub(crate) fn revert(
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
-    // Resolve the ref against the versions this client holds locally (a revert target is a version this
-    // client has previously fetched). The resolved FULL hex is what every downstream surface carries
-    // (`good`, the WAL, `reverted_to` — whose schema pins 64 hex), so a prefix never leaks into a document
-    // or the wire.
-    let known = super::local_version_ids(ctx, &sp)?;
-    let good_commit = resolve_version_ref(&known, &to_ref)?.ok_or_else(|| {
-        ClientError::InvalidArgument(format!(
-            "--to '{}' matches no locally recorded version of '{skill_name}'; use the full \
-             64-char version id",
-            to_ref.shown()
-        ))
-    })?;
-    let good_hex = to_hex(&good_commit);
-
-    // The SESSION lane: the skill's own workspace names the session whose credential signs.
+    // The SESSION lane: the skill's own workspace names the session whose credential signs — and,
+    // for a short `--to`, the session whose credential reads the workspace's history.
     let all = crate::sessions::read_sessions(ctx.fs, &ctx.layout)?;
     let lane_session = all
         .sessions
@@ -114,7 +112,33 @@ pub(crate) fn revert(
                           first"
                 .into(),
         })?;
-    let transport = connect(&lane_session.base_url, Some(&lane_session.credential));
+
+    // Resolve the ref against WHAT THE WORKSPACE HAS PUBLISHED — the same versions `topos log`
+    // prints — not merely the ones this machine happens to have applied. A short id is something a
+    // person copies off that listing, and a machine that never took a version still reverts the
+    // team to it; refusing with "matches no locally recorded version" over an id the listing had
+    // just shown made the documented prefix form unusable. The resolved FULL hex is what every
+    // downstream surface carries (`good`, the WAL, `reverted_to` — whose schema pins 64 hex), so a
+    // prefix never leaks into a document or the wire.
+    let mut known = super::local_version_ids(ctx, &sp)?;
+    if let VersionRef::Prefix(_) = &to_ref {
+        known.extend(workspace_version_ids(
+            connectors,
+            lane_session,
+            &workspace_id,
+            id.as_str(),
+        ));
+    }
+    let good_commit = resolve_version_ref(&known, &to_ref)?.ok_or_else(|| {
+        ClientError::InvalidArgument(format!(
+            "--to '{}' matches no version of '{skill_name}' in this workspace's history — \
+             `topos log {skill_name}` lists them",
+            to_ref.shown()
+        ))
+    })?;
+    let good_hex = to_hex(&good_commit);
+
+    let transport = (connectors.contribute)(&lane_session.base_url, Some(&lane_session.credential));
 
     let kinds = [OpKind::Revert];
     let rec = match op_wal::find_pending_for_skill(
@@ -170,12 +194,15 @@ pub(crate) fn revert(
                 // paste-ready `--yes` apply. A `--workspace` disambiguation is PRESERVED on it (as the
                 // canonical id), so the suggested apply re-resolves to exactly the skill described —
                 // never ambiguously against whatever local state the re-run finds.
+                // The SHORT id, the way every listing prints it and every person copies it. A
+                // 64-char hex in a paste-ready line is a line nobody reads, and `--to` resolves a
+                // prefix against this workspace's whole history — the same set the id came from.
                 let mut yes_argv = vec![
                     "topos".to_owned(),
                     "revert".to_owned(),
                     skill_name.to_owned(),
                     "--to".to_owned(),
-                    good_hex.clone(),
+                    crate::render::short(&good_hex).to_owned(),
                 ];
                 if workspace.is_some() {
                     yes_argv.push("--workspace".to_owned());
@@ -219,6 +246,22 @@ pub(crate) fn revert(
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
     let workspace = crate::ops::session_workspace_ref(lane_session);
     map_outcome(ctx, &sp, &rec, &receipt, &name, &good_hex, &workspace).map(RevertOutcome::Applied)
+}
+
+/// The 64-hex version ids the WORKSPACE holds for this bundle — the same list `topos log` prints
+/// under the plane half. Best-effort: a transport fault, an unreadable answer, or a workspace that
+/// has never heard of the bundle contributes nothing, and the local history still answers alone.
+fn workspace_version_ids(
+    connectors: &RevertConnectors<'_>,
+    session: &Session,
+    workspace_id: &str,
+    skill_id: &str,
+) -> Vec<String> {
+    (connectors.session)(session)
+        .directory
+        .skill_log(workspace_id, skill_id)
+        .map(|log| log.versions.into_iter().map(|v| v.version_id).collect())
+        .unwrap_or_default()
 }
 
 fn map_outcome(

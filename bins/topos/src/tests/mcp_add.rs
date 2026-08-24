@@ -1144,8 +1144,18 @@ fn the_version_verbs_refuse_over_a_connected_server() {
     let no_contribute = |_: &str, _: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
         unreachable!("the kind is asked before any write is built")
     };
-    let err = ops::revert(&ctx, &no_contribute, "weather", &"a".repeat(64), true, None)
-        .expect_err("revert refuses");
+    let err = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &no_contribute,
+            session: &no_session,
+        },
+        "weather",
+        &"a".repeat(64),
+        true,
+        None,
+    )
+    .expect_err("revert refuses");
     says_it_all(&err, "`revert` publishes an earlier version of");
 
     let err = ops::pull(

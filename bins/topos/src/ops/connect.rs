@@ -191,6 +191,26 @@ fn compose_machine_name(user: Option<&str>, node: &str) -> String {
     }
 }
 
+/// Format epoch-millis as a coarse RFC-3339 UTC string (seconds precision) — the pending-flow
+/// expiry disclosure.
+pub(crate) fn fmt_rfc3339_millis(millis: i64) -> String {
+    let secs = millis.max(0) as u64 / 1000;
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (y, m, d) = crate::render::civil_from_days(days as i64);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// The device-code CHALLENGE the loopback approval URL carries (hex sha256 of the flow's device
+/// code) — the approval card resolves with zero typing while the short code never rides a URL.
+pub(crate) fn device_challenge(device_code: &str) -> String {
+    topos_core::digest::to_hex(&topos_core::digest::sha256(device_code.as_bytes()))
+}
+
 #[cfg(test)]
 mod machine_name_tests {
     use super::compose_machine_name;
@@ -232,26 +252,9 @@ mod machine_name_tests {
     #[test]
     fn nothing_nameable_keeps_the_bare_label() {
         assert_eq!(compose_machine_name(None, "  "), "topos CLI");
-        assert_eq!(compose_machine_name(Some("robert"), ""), "topos CLI · robert");
+        assert_eq!(
+            compose_machine_name(Some("robert"), ""),
+            "topos CLI · robert"
+        );
     }
-}
-
-/// Format epoch-millis as a coarse RFC-3339 UTC string (seconds precision) — the pending-flow
-/// expiry disclosure.
-pub(crate) fn fmt_rfc3339_millis(millis: i64) -> String {
-    let secs = millis.max(0) as u64 / 1000;
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let (y, m, d) = crate::render::civil_from_days(days as i64);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
-}
-
-/// The device-code CHALLENGE the loopback approval URL carries (hex sha256 of the flow's device
-/// code) — the approval card resolves with zero typing while the short code never rides a URL.
-pub(crate) fn device_challenge(device_code: &str) -> String {
-    topos_core::digest::to_hex(&topos_core::digest::sha256(device_code.as_bytes()))
 }
