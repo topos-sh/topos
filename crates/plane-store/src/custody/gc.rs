@@ -21,16 +21,19 @@
 //! same row. Each step is its own short transaction (or none, for the delete), so no write
 //! transaction is held across the store op. GC acts ONLY on objects with an `object_presence` row.
 //!
-//! **THE DELETE-LIFETIME INVARIANT (remote store).** A DELETE issued under an acquire token must be
-//! provably DEAD before that token can be superseded — otherwise a delayed/retried DELETE could
-//! remove bytes a later ingest re-installed under a fresh token (Postgres would then say `present`
-//! over missing bytes). The seam enforces it structurally: the delete client has transport retries
-//! DISABLED (single attempt), a hard request timeout, and the whole call is bounded by
-//! [`REMOTE_DELETE_TIMEOUT_MS`] wall-clock — strictly below [`RECOVERY_STALE_MS`] (the compile-time
-//! assertion below pins the ordering), and recovery may supersede a token only once the row is
-//! RECOVERY_STALE_MS old. Ownership is re-verified in the same task immediately before the call is
-//! issued. An AMBIGUOUS outcome (timeout, transport fault) never finalizes absence — the row stays
-//! `deleting` for a later recovery pass, which re-runs the idempotent delete under its own token.
+//! **THE DELETE-LIFETIME INVARIANT.** A DELETE issued under an acquire token must not outlive
+//! that token — otherwise a delayed/retried DELETE could remove bytes a later ingest re-installed
+//! under a fresh token (Postgres would then say `present` over missing bytes). On the LOCAL
+//! backend that holds absolutely: the delete is awaited to completion, untimed (join semantics —
+//! the pre-object-store inline unlink's shape; nothing detached exists). On a REMOTE store the
+//! seam forecloses the unbounded case structurally: transport retries DISABLED (single attempt)
+//! and a hard [`REMOTE_DELETE_TIMEOUT_MS`] wall-clock bound strictly below [`RECOVERY_STALE_MS`]
+//! (the compile-time assertion below pins the ordering), so this process cannot re-issue after
+//! ownership moves; the endpoint-side execution residual of a request already received is stated
+//! honestly in DESIGN.md. Ownership is re-verified in the same task immediately before the call
+//! is issued. An AMBIGUOUS outcome (timeout, transport fault) never finalizes absence — the row
+//! stays `deleting` for a later recovery pass, which re-runs the idempotent delete under its own
+//! token.
 //!
 //! **Recovery sweep:** finalizes a STALE `deleting` (one a crashed GC left behind), each via a
 //! one-winner re-acquire that re-verifies the retention surface at delete time (no live version roots
@@ -188,16 +191,17 @@ pub(crate) async fn quarantine_janitor(authority: &Authority, now: i64) -> Resul
     Ok(swept)
 }
 
-/// One owned, bounded store delete — the shared delete step of the live GC, the recovery sweep, and
-/// the purge's inline reclaim. Returns whether the caller may FINALIZE absence.
+/// One owned store delete — the shared delete step of the live GC, the recovery sweep, and the
+/// purge's inline reclaim. Returns whether the caller may FINALIZE absence.
 ///
 /// **INVARIANT (delete-vs-reinstall):** ownership of `acquire_token` is re-verified HERE, in the
-/// same task, immediately before the delete is issued; the delete itself is a SINGLE attempt whose
-/// total wall-clock is bounded by `REMOTE_DELETE_TIMEOUT_MS` — strictly below `RECOVERY_STALE_MS`,
-/// the earliest instant recovery may supersede the token. So by the time any other actor can own
-/// this object (and an ingest can re-install its bytes), this call's delete is guaranteed dead —
-/// a delayed delete can never land on freshly re-installed bytes. An ambiguous outcome returns
-/// `false`: absence is NEVER finalized on ambiguity; the row stays `deleting` for a later pass.
+/// same task, immediately before the delete is issued, and the delete is a SINGLE attempt. On the
+/// local backend it is awaited to completion (nothing of it can outlive this call). On a remote
+/// store its wall-clock is bounded by `REMOTE_DELETE_TIMEOUT_MS` — strictly below
+/// `RECOVERY_STALE_MS`, the earliest instant recovery may supersede the token — so this process
+/// can never re-issue the delete after another actor owns the object; the endpoint-side residual
+/// is DESIGN.md's named remainder. An ambiguous outcome returns `false`: absence is NEVER
+/// finalized on ambiguity; the row stays `deleting` for a later pass.
 pub(crate) async fn delete_owned(
     authority: &Authority,
     ws: &WorkspaceId,

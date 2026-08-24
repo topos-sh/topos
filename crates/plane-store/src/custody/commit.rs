@@ -505,7 +505,12 @@ pub(crate) async fn delete_workspace(authority: &Authority, ws: &WorkspaceId) ->
         Ok(())
     })
     .await?;
-    // The store prefix — list + bulk-delete, the one sanctioned prefix operation.
+    // The store prefix — list + bulk-delete, the one sanctioned prefix operation. It rides the
+    // ordinary retried ops client DELIBERATELY (the single-attempt discipline is the GC's, for
+    // keys a live ingest could reuse; these rows are gone, so nothing reaches these keys) — and
+    // it ASSUMES the app does not recreate the same workspace id concurrently with the sweep
+    // (the same assumption the old rm -rf carried). A failed or partial sweep leaves orphan
+    // bytes no row reaches: the accepted residue, finished by an idempotent re-run.
     authority.store().delete_workspace_prefix(ws).await?;
     Ok(())
 }

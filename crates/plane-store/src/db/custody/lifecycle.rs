@@ -192,11 +192,12 @@ impl Db {
     }
 
     /// Whether THIS actor still owns the `deleting` acquire it took — `status = 'deleting'` AND the row's
-    /// `status_updated_at` still equals the `acquire_token` the acquirer stamped. The GC + recovery unlink
-    /// steps consult this IMMEDIATELY before the physical unlink (with no `.await` between the
-    /// check and the synchronous unlink), so a row a concurrent recovery sweep re-acquired — which bumps the
-    /// token — is never also unlinked by the superseded original acquirer. Exactly one actor ever removes the
-    /// bytes. A pool read: it sees the latest committed acquire.
+    /// `status_updated_at` still equals the `acquire_token` the acquirer stamped. The GC + recovery delete
+    /// steps consult this IMMEDIATELY before issuing the store delete, so a row a concurrent recovery sweep
+    /// re-acquired — which bumps the token — is never also deleted by the superseded original acquirer:
+    /// exactly one actor ISSUES a delete for a given ownership. (What bounds the issued delete itself is
+    /// the seam's per-backend discipline — awaited-to-completion locally, single-attempt + hard-bounded
+    /// remotely; see `store.rs` and DESIGN.md.) A pool read: it sees the latest committed acquire.
     pub(crate) async fn confirm_deleting_owner(
         &self,
         ws: &WorkspaceId,

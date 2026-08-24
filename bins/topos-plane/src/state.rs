@@ -104,6 +104,62 @@ fn pool_config_from_env() -> PoolConfig {
     }
 }
 
+/// Resolve + SECURE the ephemeral staging root: the dir is created `0700` if absent; a
+/// pre-existing one must be a real directory (never a symlink) owned by the serving euid, and is
+/// re-tightened to `0700`. This is what lets the default live under a shared temp dir without a
+/// predictable-path squat: a foreign-owned or linked entry at the path is a typed refusal naming
+/// the cure, never adopted.
+///
+/// # Errors
+/// An [`anyhow::Error`] naming the offending path and the property it failed.
+pub fn secure_staging_dir(path: &std::path::Path) -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(path)
+                .or_else(|e| {
+                    // A racer (another instance booting) may have created it; re-verify below.
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .with_context(|| format!("creating the staging dir {}", path.display()))?;
+        }
+        Err(e) => return Err(e).with_context(|| format!("probing {}", path.display())),
+        Ok(_) => {}
+    }
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("probing {}", path.display()))?;
+    anyhow::ensure!(
+        meta.file_type().is_dir(),
+        "the staging path {} is not a plain directory (a symlink or file is squatting it) — remove it or point TOPOS_PLANE_TMP elsewhere",
+        path.display()
+    );
+    let euid: u32 = rustix::process::geteuid().as_raw();
+    anyhow::ensure!(
+        meta.uid() == euid,
+        "the staging dir {} is owned by uid {} but the vault runs as uid {euid} — remove it or point TOPOS_PLANE_TMP at a directory the service owns",
+        path.display(),
+        meta.uid()
+    );
+    // Tighten to owner-only; staged candidate bytes are nobody else's to read.
+    let mut perms = meta.permissions();
+    if perms.mode() & 0o077 != 0 {
+        perms.set_mode(0o700);
+        std::fs::set_permissions(path, perms)
+            .with_context(|| format!("tightening {}", path.display()))?;
+    }
+    Ok(path.to_path_buf())
+}
+
 impl PlaneState {
     /// Construct from an already-built [`Authority`]. This names the `plane_store` [`Authority`] in
     /// its signature — it is the explicit test / advanced construction path; a composer builds

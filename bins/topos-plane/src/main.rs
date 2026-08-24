@@ -51,7 +51,9 @@ struct Config {
     #[arg(long, env = "TOPOS_PLANE_S3_REGION", default_value = "auto")]
     s3_region: String,
     /// The EPHEMERAL upload-staging directory (no volume required; losing it on a container
-    /// replacement loses only in-flight uploads, which clients replay).
+    /// replacement loses only in-flight uploads, which clients replay). Default: `.staging`
+    /// under the local store root, or a service-owned per-uid temp dir on the s3 backend. The
+    /// dir is created 0700; a pre-existing symlink or foreign-owned entry at the path refuses.
     #[arg(long, env = "TOPOS_PLANE_TMP")]
     tmp: Option<PathBuf>,
     /// The internal-lane bearer token (a secret — never logged; only its sha256 is retained). Arms
@@ -104,9 +106,19 @@ fn store_backend(cfg: &Config) -> Result<StoreBackend> {
     }
 }
 
-/// The default ephemeral staging root when `TOPOS_PLANE_TMP` is unset: under the system temp dir.
-fn default_tmp() -> PathBuf {
-    std::env::temp_dir().join("topos-plane")
+/// The default ephemeral staging root when `TOPOS_PLANE_TMP` is unset: `.staging` under the
+/// local store root when one exists (service-owned by construction; the dot prefix is reserved —
+/// no workspace id may start with one), else a per-euid dir under the system temp dir (never a
+/// bare predictable name a squatter could pre-create — and `secure_staging_dir` refuses one that
+/// was).
+fn default_tmp(backend: &StoreBackend) -> PathBuf {
+    match backend {
+        StoreBackend::Local { root } => root.join(".staging"),
+        StoreBackend::S3 { .. } => std::env::temp_dir().join(format!(
+            "topos-plane-{}",
+            rustix::process::geteuid().as_raw()
+        )),
+    }
 }
 
 #[tokio::main]
@@ -136,10 +148,13 @@ async fn main() -> Result<()> {
     }
 
     let cfg = Config::parse_from(argv);
+    let backend = store_backend(&cfg)?;
+    let staging_root =
+        topos_plane::secure_staging_dir(&cfg.tmp.clone().unwrap_or_else(|| default_tmp(&backend)))?;
     let state = PlaneState::open(PlaneConfig {
         database_url: cfg.database_url.clone(),
-        store: store_backend(&cfg)?,
-        staging_root: cfg.tmp.clone().unwrap_or_else(default_tmp),
+        store: backend,
+        staging_root,
     })
     .await?;
     // The internal-lane token (post-construction): only its sha256 is retained; unset (or blank),

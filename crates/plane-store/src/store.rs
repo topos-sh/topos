@@ -13,11 +13,14 @@
 //! re-put is self-HEALING, never destructive — and no conditional-write support is required of a
 //! backend (the weakest-backend rule; the atomic swap is the Postgres transaction).
 //!
-//! **Delete safety (the GC invariant):** the remote DELETE a GC issues runs on a dedicated
-//! client with transport retries DISABLED (single attempt) and a hard request timeout, and the
-//! call's total wall-clock is additionally bounded by [`REMOTE_DELETE_TIMEOUT_MS`] — strictly
-//! below the recovery-staleness threshold — so a delete can never outlive the ownership token
-//! that authorized it. An ambiguous failure (timeout, transport fault) reports
+//! **Delete safety (the GC invariant):** on the LOCAL backend a delete is awaited to completion
+//! with no timeout — join semantics, exactly the pre-object-store inline unlink; no detached
+//! execution exists to outlive anything. On an S3-compatible endpoint the DELETE runs on a
+//! dedicated client with transport retries DISABLED (single attempt) and a hard request timeout,
+//! and the call's total wall-clock is additionally bounded by [`REMOTE_DELETE_TIMEOUT_MS`] —
+//! strictly below the recovery-staleness threshold — which forecloses the unbounded failure
+//! (transport-level re-issue minutes later); the endpoint-side execution residual that remains
+//! is stated honestly in DESIGN.md. An ambiguous failure (timeout, transport fault) reports
 //! [`DeleteOutcome::Ambiguous`] and the caller leaves the row for a later pass: absence is never
 //! finalized on ambiguity.
 
@@ -35,11 +38,13 @@ use crate::id::WorkspaceId;
 /// The width of a git object id (SHA-1) — the seam's key unit.
 const GIT_OID_LEN: usize = 20;
 
-/// The hard bound on one GC DELETE call's total wall-clock (transport timeout AND an outer
-/// `tokio::time::timeout`), in epoch milliseconds' unit. MUST stay strictly below the recovery
-/// staleness threshold (`gc::RECOVERY_STALE_MS`, 60s — a compile-time assertion there pins the
-/// ordering), so a delete issued under an ownership token is guaranteed dead before recovery may
-/// hand that object to another actor.
+/// The hard bound on one REMOTE GC DELETE call's total wall-clock (transport timeout AND an
+/// outer `tokio::time::timeout`), in epoch milliseconds' unit. MUST stay strictly below the
+/// recovery staleness threshold (`gc::RECOVERY_STALE_MS`, 60s — a compile-time assertion there
+/// pins the ordering), so this process's attempt is over — and cannot be transport-re-issued —
+/// well before recovery may hand the object to another actor. (The endpoint-side execution
+/// residual of a request it already received is DESIGN.md's honestly-named remainder; the local
+/// backend has no such residual — its deletes are awaited to completion, untimed.)
 pub(crate) const REMOTE_DELETE_TIMEOUT_MS: u64 = 15_000;
 
 /// Which physical backend the vault's object store runs on. Built by the composing server from
@@ -232,16 +237,27 @@ impl PlaneStore {
         }
     }
 
-    /// The GC unlink: ONE delete attempt on the retry-disabled client, bounded by
-    /// [`REMOTE_DELETE_TIMEOUT_MS`] total wall-clock. Never errors — the tri-state outcome is the
-    /// caller's fence input: `Removed` (incl. already-gone, the idempotent recovery re-run) may
-    /// finalize absence; `Ambiguous` must not.
+    /// The GC unlink — ONE attempt, never an error; the tri-state outcome is the caller's fence
+    /// input: `Removed` (incl. already-gone, the idempotent recovery re-run) may finalize
+    /// absence; `Ambiguous` must not.
+    ///
+    /// LOCAL backend: awaited to completion, NO timeout — join semantics, the pre-object-store
+    /// inline unlink's exact shape; nothing detached can execute after this returns. Remote
+    /// (S3-compatible): the retry-disabled client, bounded by [`REMOTE_DELETE_TIMEOUT_MS`] total
+    /// wall-clock — the bound forecloses transport re-issue after ownership moves; the
+    /// endpoint-side execution residual is DESIGN.md's.
     pub(crate) async fn delete_loose_single_attempt(
         &self,
         ws: &WorkspaceId,
         git_oid: &[u8; GIT_OID_LEN],
     ) -> DeleteOutcome {
         let key = loose_key(ws, git_oid);
+        if self.local_root.is_some() {
+            return match self.deleter.delete(&key).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => DeleteOutcome::Removed,
+                Err(e) => DeleteOutcome::Ambiguous(format!("delete failed: {e}")),
+            };
+        }
         let attempt = tokio::time::timeout(
             Duration::from_millis(REMOTE_DELETE_TIMEOUT_MS),
             self.deleter.delete(&key),

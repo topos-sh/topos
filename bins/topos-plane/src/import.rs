@@ -98,8 +98,12 @@ pub async fn import_local_main(argv: Vec<OsString>) -> Result<()> {
         }
     };
 
-    // The staging root is unused by the import; a temp path satisfies construction.
-    let staging = std::env::temp_dir().join("topos-plane-import-staging");
+    // The staging root is unused by the import; it still rides the same secured resolution as
+    // serve (0700, owned, never a squattable predictable name).
+    let staging = crate::state::secure_staging_dir(&std::env::temp_dir().join(format!(
+        "topos-plane-import-{}",
+        rustix::process::geteuid().as_raw()
+    )))?;
     let authority =
         plane_store::Authority::open(&args.database_url, &backend.to_store_config(), &staging)
             .await
