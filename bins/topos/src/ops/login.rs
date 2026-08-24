@@ -303,8 +303,8 @@ fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
         server: Some(wal.base_url.clone()),
         session_id: None,
         session_status: "awaiting-approval".to_owned(),
-        delivered: None,
-        delivered_names: Vec::new(),
+        assigned: None,
+        assigned_names: Vec::new(),
         pending: Some(EnrollmentPending {
             verification_uri: wal.verification_uri.clone(),
             user_code: wal.user_code.clone(),
@@ -627,8 +627,8 @@ fn connected_data(
         server: Some(session.base_url.clone()),
         session_id: Some(session.session_id.clone()),
         session_status: status.to_owned(),
-        delivered: snapshot.map(|s| s.skills.len() as u64),
-        delivered_names: snapshot
+        assigned: snapshot.map(|s| s.skills.len() as u64),
+        assigned_names: snapshot
             .map(|s| s.skills.iter().map(|d| d.name.clone()).collect())
             .unwrap_or_default(),
         pending: None,
@@ -1388,7 +1388,7 @@ mod tests {
                     (ws.host.as_str(), ws.name.as_str()),
                     ("topos.example.com", "eng")
                 );
-                assert_eq!(done.delivered, Some(0));
+                assert_eq!(done.assigned, Some(0));
                 // Login ARMS: the report says the trigger is live, and the harness's own config
                 // carries the managed entry that makes it so — the file, not just the receipt.
                 let armed = done.currency.expect("login arms the trigger");
@@ -1661,8 +1661,23 @@ mod tests {
                 assert_eq!(out.session_status, "active");
                 assert_eq!(out.workspace_id, "w_eng");
                 // A LIVE count, read now — the receipt states what the session adopts today.
-                assert_eq!(out.delivered, Some(2));
-                assert_eq!(out.delivered_names, vec!["deploy", "code-review"]);
+                assert_eq!(out.assigned, Some(2));
+                assert_eq!(out.assigned_names, vec!["deploy", "code-review"]);
+                // ASSIGNED, not delivered. Login mints the session and reads the feed; the first
+                // exchange that puts bytes on this machine is `topos update`, and `status` run
+                // immediately after this login still says there has been no delivery yet. The
+                // `--json` field names have to say the thing they count.
+                let json = serde_json::to_value(&out).expect("LoginData serializes");
+                let keys: Vec<&str> = json
+                    .as_object()
+                    .expect("an object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                assert!(keys.contains(&"assigned"), "{keys:?}");
+                assert!(keys.contains(&"assigned_names"), "{keys:?}");
+                assert!(!keys.contains(&"delivered"), "{keys:?}");
+                assert!(!keys.contains(&"delivered_names"), "{keys:?}");
                 // Nothing was minted, armed, or written: reporting is not re-accepting.
                 assert!(out.currency.is_none());
                 assert!(out.manifest_note.is_none());
@@ -1720,7 +1735,7 @@ mod tests {
                 assert!(out.pending.is_none(), "no browser for the second workspace");
                 assert_eq!(out.workspace_id, "w_ops");
                 assert_eq!(out.session_status, "active");
-                assert_eq!(out.delivered, Some(1));
+                assert_eq!(out.assigned, Some(1));
                 assert!(out.currency.is_some(), "a fresh session arms the trigger");
                 // The lane connect is a landing too: the first connection writes ops's line.
                 assert!(out.feed_row_added);
@@ -1840,7 +1855,7 @@ mod tests {
                 login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
                 let done = login(ctx, connectors, None, false).unwrap();
                 assert_eq!(done.session_status, "pending");
-                assert!(done.delivered.is_none());
+                assert!(done.assigned.is_none());
                 assert_eq!(
                     *rig.delivery.calls.borrow(),
                     0,

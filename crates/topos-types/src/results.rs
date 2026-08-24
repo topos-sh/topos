@@ -1698,14 +1698,17 @@ pub struct LoginData {
     /// `"active"`, `"pending"` while the workspace's session-approval knob holds it (no data flows
     /// until an owner approves), or `"awaiting-approval"` while the browser approval is pending.
     pub session_status: String,
-    /// How many skills the person's profile delivers here right now (the acceptance disclosure;
-    /// best-effort — absent when the count could not be read).
+    /// How many bundles the workspace ASSIGNS this person right now (the acceptance disclosure;
+    /// best-effort — absent when the count could not be read). Assigned, not delivered: login
+    /// mints the session and reads the feed, and the first exchange that puts bytes on this
+    /// machine is `topos update` — which is why `status` right after a login still says there has
+    /// been no delivery yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delivered: Option<u64>,
-    /// The delivered skills' NAMES (the same best-effort read as `delivered`) — the receipt names
+    pub assigned: Option<u64>,
+    /// The assigned bundles' NAMES (the same best-effort read as `assigned`) — the receipt names
     /// what the acceptance brings, not just a number. **Additive.**
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delivered_names: Vec<String>,
+    pub assigned_names: Vec<String>,
     /// Present while the login awaits the browser approval (re-run `topos login` to resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<EnrollmentPending>,

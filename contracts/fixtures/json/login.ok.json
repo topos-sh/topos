@@ -3,8 +3,8 @@
   "command": "login",
   "ok": true,
   "data": {
-    "delivered": 3,
-    "delivered_names": [
+    "assigned": 3,
+    "assigned_names": [
       "deploy",
       "code-review",
       "release-notes"
