@@ -5,7 +5,6 @@ import { getDb } from "@/lib/db/index.server";
 import type { ReportedHarnessState } from "@/lib/db/queries.lane.server";
 import { MCP_RESOLVED_REVISION } from "@/lib/db/queries.mcp-catalog.server";
 import { bundle, cliSession, sessionBundleState, workspace } from "@/lib/db/schema.app";
-import { planeCurrentPointer } from "@/lib/db/schema.custody";
 
 /**
  * The SESSIONS data access layer — a session is user × workspace × installation, the ONE
@@ -73,18 +72,21 @@ export async function sessionsFor(actor: UserActor): Promise<AccountSession[]> {
 
 // ── The workspace sessions page ─────────────────────────────────────────────────────────────
 
-/** How this session's copy of one bundle sits against the workspace's current pointer. */
+/** How this session's copy of one bundle sits against what the workspace serves for it. */
 export type SessionSkillStatus = "current" | "behind";
 
-/** One (session × bundle) applied-state row, joined to the catalog and the current pointer. */
+/** One (session × bundle) applied-state row, joined to the catalog and to what is served. */
 export interface SessionSkillState {
   skillId: string;
   /** The catalog name, or null when the id is no longer cataloged (a purged tombstone). */
   skillName: string | null;
   skillStatus: "active" | "archived" | "deleted" | null;
-  /** The version this session last applied. */
+  /** The version this session last applied — a file bundle's vault commit, or a connected
+   * server's catalog revision (`mcpr_…`). One field, because a report is one snapshot. */
   appliedVersionId: string;
-  /** The workspace's current version, or null when nothing is published (or withdrawn). */
+  /** What this workspace SERVES for the bundle, in the same spelling the machine reports: the
+   * resolved catalog revision for a connected server, the vault pointer for a file bundle.
+   * Null when nothing is published (or withdrawn). */
   currentVersionId: string | null;
   status: SessionSkillStatus;
   /** The per-harness applied states a CONFIG-placed ('mcp') bundle reports — which detected
@@ -202,28 +204,47 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
   }
 
   const sessionIds = sessions.map((s) => s.id);
-  const stateRows = await db
-    .select({
-      sessionId: sessionBundleState.sessionId,
-      skillId: sessionBundleState.bundleId,
-      appliedVersionId: sessionBundleState.appliedVersionId,
-      harnessState: sessionBundleState.harnessState,
-      reportedAtMs: sql<string>`(extract(epoch from ${sessionBundleState.reportedAt}) * 1000)::bigint`,
-      skillName: bundle.name,
-      skillStatus: bundle.status,
-      currentVersionId: planeCurrentPointer.versionId,
-    })
-    .from(sessionBundleState)
-    .innerJoin(bundle, and(eq(bundle.id, sessionBundleState.bundleId), eq(bundle.workspaceId, ws)))
-    .leftJoin(
-      planeCurrentPointer,
-      and(
-        eq(planeCurrentPointer.workspaceId, ws),
-        eq(planeCurrentPointer.bundleId, sessionBundleState.bundleId),
-      ),
-    )
-    .where(inArray(sessionBundleState.sessionId, sessionIds))
-    .orderBy(asc(sessionBundleState.sessionId), asc(bundle.name));
+  // Every id its own bind parameter: a bare JS array in a template renders as a parenthesised
+  // list, which is not an array value and is refused by the server.
+  const sessionIdList = sql.join(
+    sessionIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+  // WHAT EACH MACHINE SHOULD BE HOLDING, in the SAME spelling it reports — the comparison is
+  // only honest when both sides name the same thing. A file bundle is served by vault version;
+  // a connected MCP server is served BY REVISION (`mcpr_…`), so its machines report a revision
+  // id and a pointer comparison would call every up-to-date machine behind. The CONNECTION
+  // comes first for the same reason `yourSessionsApplying` puts it first: a bundle that predates
+  // the catalog still carries a pointer nobody is served from any more, and reading that one
+  // inverts the whole page — a machine that just updated reads behind while a stale one, still
+  // reporting the abandoned pointer, reads current.
+  const stateRows = (
+    await db.execute(sql`
+      SELECT st.session_id, st.bundle_id, st.applied_version_id, st.harness_state,
+             (extract(epoch from st.reported_at) * 1000)::bigint AS reported_ms,
+             b.name AS skill_name, b.status AS skill_status,
+             COALESCE(${MCP_RESOLVED_REVISION}, cp.version_id) AS current_version_id
+      FROM web.session_bundle_state st
+      JOIN web.bundle b ON b.id = st.bundle_id AND b.workspace_id = ${ws}
+      LEFT JOIN plane.current_pointer cp
+        ON cp.workspace_id = ${ws} AND cp.bundle_id = st.bundle_id
+      LEFT JOIN web.bundle_mcp bm
+        ON bm.workspace_id = ${ws} AND bm.bundle_id = st.bundle_id
+      LEFT JOIN web.mcp_server ms ON ms.id = bm.server_id
+      WHERE st.session_id IN (${sessionIdList})
+      ORDER BY st.session_id, b.name
+    `)
+  ).rows as unknown as {
+    session_id: string;
+    bundle_id: string;
+    applied_version_id: string;
+    harness_state: unknown;
+    reported_ms: string;
+    skill_name: string | null;
+    skill_status: string | null;
+    current_version_id: string | null;
+  }[];
 
   // The declined-but-still-applied gap: a bundle this session reports holding whose OWNER has
   // declined it. One query over the same session set, keyed by session so the page can say it
@@ -235,12 +256,7 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
     JOIN web.bundle b ON b.id = st.bundle_id AND b.workspace_id = ${ws}
     JOIN web.decline d ON d.workspace_id = ${ws} AND d.user_id = cs.user_id
                       AND d.bundle_id = st.bundle_id
-    WHERE cs.workspace_id = ${ws} AND st.session_id IN (${sql.join(
-      // Every id its own bind parameter: a bare JS array in a template renders as a
-      // parenthesised list, which is not an array value and is refused by the server.
-      sessionIds.map((id) => sql`${id}`),
-      sql`, `,
-    )})
+    WHERE cs.workspace_id = ${ws} AND st.session_id IN (${sessionIdList})
     ORDER BY b.name
   `);
   const declinedBySession = new Map<string, string[]>();
@@ -253,22 +269,22 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
   const statesBySession = new Map<string, SessionSkillState[]>();
   for (const row of stateRows) {
     const status: SessionSkillStatus =
-      row.currentVersionId !== null && row.appliedVersionId === row.currentVersionId
+      row.current_version_id !== null && row.applied_version_id === row.current_version_id
         ? "current"
         : "behind";
     const state: SessionSkillState = {
-      skillId: row.skillId,
-      skillName: row.skillName,
-      skillStatus: row.skillStatus as SessionSkillState["skillStatus"],
-      appliedVersionId: row.appliedVersionId,
-      currentVersionId: row.currentVersionId,
+      skillId: row.bundle_id,
+      skillName: row.skill_name,
+      skillStatus: row.skill_status as SessionSkillState["skillStatus"],
+      appliedVersionId: row.applied_version_id,
+      currentVersionId: row.current_version_id,
       status,
-      harnesses: harnessesOf(row.harnessState),
-      reportedAtMs: Number(row.reportedAtMs),
+      harnesses: harnessesOf(row.harness_state),
+      reportedAtMs: Number(row.reported_ms),
     };
-    const list = statesBySession.get(row.sessionId);
+    const list = statesBySession.get(row.session_id);
     if (list === undefined) {
-      statesBySession.set(row.sessionId, [state]);
+      statesBySession.set(row.session_id, [state]);
     } else {
       list.push(state);
     }
