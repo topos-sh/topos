@@ -78,6 +78,12 @@ A revert records a new version whose contents are the old one's — history stay
 revert can itself be reverted. It takes a reviewer or owner; a member's revert is refused, not
 turned into a proposal. In the browser: **Roll back** on the skill's History tab.
 
+Like every command, `revert` acts where you stand: inside a checkout it names the copy that
+checkout delivers, and once the team has moved it updates that copy the way `topos update
+<skill>` would (a copy with unpublished edits gets the same merge handling) and moves the
+checkout's `topos.lock` — commit it. `topos revert -g <skill> --to <version>` names your
+machine-wide copy instead. Everyone else picks the restored version up at their next update.
+
 ## Your edits are safe
 
 Editing a delivered skill creates a **draft**: an update never overwrites unpublished edits — it

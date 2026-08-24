@@ -102,9 +102,17 @@ says which command shares them.
 "Current" is what the workspace serves, read fresh on every publish and every `topos diff` — never
 what this machine last saw. So if your copy equals an older version than current (you published,
 then someone reverted, say), it is not "already published": the preview says which version current
-is, and `--yes` publishes your copy's content forward as a new version on top of it. Re-publishing
-older content is an ordinary act; `topos log` keeps every hop, and the receipt's `undo:` line puts
-the team back.
+is and that `--yes` will publish your copy's content forward as a new version on top of it; the
+receipt names the version that landed (the preview does not guess it — `-m` is part of the id).
+Re-publishing older content is an ordinary act; `topos log` keeps every hop, and the receipt's
+`undo:` line puts the team back.
+
+## The checkout's lock follows
+
+A publish run inside a checkout moves that checkout's `topos.lock` entry to the version that
+just landed — a commit moves `HEAD` — and the receipt asks you to commit the file. Nothing else
+in the repo changes; a row your `topos.toml` pins is left at its pin, and the receipt says so.
+See [topos.toml and topos.lock](/docs/topos-toml).
 
 ## If it refuses
 
