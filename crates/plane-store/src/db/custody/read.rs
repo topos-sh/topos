@@ -28,6 +28,10 @@ pub(crate) struct LogHop {
     pub author_display: String,
     pub created_at_ms: i64,
     pub purged_at_ms: Option<i64>,
+    /// The hop's own first parent — what lets the read surface tell a chain that ENDED (genesis:
+    /// `None`) from one that BROKE (a parent named but not joined: lineage corruption, surfaced
+    /// as Integrity rather than a silently shorter history).
+    pub first_parent: Option<CommitId>,
 }
 
 impl Db {
@@ -160,6 +164,7 @@ impl Db {
                       author_display AS "author_display!",
                       (extract(epoch FROM created_at) * 1000.0)::bigint AS "created_at_ms!",
                       (extract(epoch FROM purged_at) * 1000.0)::bigint AS "purged_at_ms",
+                      first_parent,
                       depth AS "depth!"
                FROM chain ORDER BY depth"#,
             ws_s,
@@ -178,6 +183,11 @@ impl Db {
                     author_display: r.author_display,
                     created_at_ms: r.created_at_ms,
                     purged_at_ms: r.purged_at_ms,
+                    first_parent: r
+                        .first_parent
+                        .as_deref()
+                        .map(parse_stored_version)
+                        .transpose()?,
                 })
             })
             .collect()

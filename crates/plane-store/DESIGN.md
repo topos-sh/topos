@@ -191,10 +191,15 @@ there. A few decisions earn their keep:
   compile-time assertion — while recovery may supersede a token only once the row is that stale.
   An AMBIGUOUS outcome (timeout, transport fault) **never finalizes absence**: the row stays
   `deleting` for a later pass, which re-runs the idempotent delete under its own token. The named
-  residual: a DELETE whose connection was torn down at the bound may still execute server-side
-  moments later — that execution window is bounded far below the 45s margin between the two
-  constants, and transport-level re-issue (the dangerous, minutes-later replay) is what the
-  retry-disabled client forecloses.
+  residual: a DELETE the endpoint RECEIVED before the teardown may still execute server-side
+  after it — a local timeout is not a server-side cancellation. That window is probabilistic,
+  not proven: in practice an accepted single-object DELETE executes in well under the 45s margin
+  between the two constants, but a pathologically delayed execution landing after a reinstall is
+  not physically foreclosed by this protocol (only a server-visible fence — e.g. non-reused
+  physical keys — could do that, and the content-addressed key shape is a deliberate ruling).
+  What the protocol DOES foreclose is the dangerous, unbounded case: transport-level re-issue
+  minutes later, which the retry-disabled client makes impossible; and an ambiguous outcome never
+  finalizes absence, so the row stays fenced for recovery either way.
 - **Scheduling is the composing server's.** `run_gc` / `run_recovery` / `run_janitor` are public ops;
   this library holds no scheduler and no background task. One server-clock unit is one epoch
   **millisecond** throughout — a seconds-valued TTL constant would collapse these fences

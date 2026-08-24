@@ -265,6 +265,16 @@ pub(crate) async fn log(
         .db()
         .log_chain(ws, bundle, pointer.version_id, limit)
         .await?;
+    // A walk that stopped SHORT of the cap must have stopped at genesis (a NULL first parent).
+    // Stopping on a hop that NAMES a parent means the named row is missing from this bundle —
+    // lineage corruption, surfaced loudly rather than served as a silently shorter history.
+    // (The head itself always joins — the pointer's FK guarantees its row.)
+    if hops.len() < limit
+        && let Some(last) = hops.last()
+        && last.first_parent.is_some()
+    {
+        return Err(AuthorityError::integrity(LogChainBroken));
+    }
     hops.into_iter()
         .map(|hop| {
             let message = hop
@@ -379,3 +389,7 @@ struct LooseObjectMissing;
 #[derive(Debug, thiserror::Error)]
 #[error("a stored tree nests deeper than the codec could have written")]
 struct TreeTooDeep;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a first-parent log hop names a parent this bundle does not hold (broken lineage)")]
+struct LogChainBroken;

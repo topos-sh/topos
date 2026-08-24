@@ -67,6 +67,37 @@ impl Db {
         })
     }
 
+    /// Every non-purged version with its commit locator, as `(bundle, version, locator)` — the
+    /// deep-verification walk's roots.
+    pub(crate) async fn import_live_versions(
+        &self,
+        ws: &WorkspaceId,
+    ) -> Result<Vec<(String, String, [u8; 20])>> {
+        let ws_s = ws.as_str();
+        let rows = sqlx::query!(
+            r#"SELECT bundle_id AS "bundle_id!", version_id AS "version_id!",
+                      git_commit_oid AS "git_commit_oid!: Vec<u8>"
+               FROM version
+               WHERE workspace_id = $1 AND purged_at IS NULL AND git_commit_oid IS NOT NULL
+               ORDER BY bundle_id, version_id"#,
+            ws_s,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok((
+                    r.bundle_id,
+                    r.version_id,
+                    r.git_commit_oid
+                        .try_into()
+                        .map_err(|_| AuthorityError::integrity(BadWidth))?,
+                ))
+            })
+            .collect()
+    }
+
     /// Every non-purged version row still missing its commit locator, as `(bundle, version)`.
     pub(crate) async fn import_unbackfilled(
         &self,
