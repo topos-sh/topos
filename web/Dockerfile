@@ -17,8 +17,12 @@ FROM oven/bun:1.3.10@sha256:b86c67b531d87b4db11470d9b2bd0c519b1976eee6fcd71634e7
 WORKDIR /app/web
 
 # Lockfile-first so `bun install` caches on the manifest, not the whole source tree. `--frozen-lockfile`
-# fails the build if bun.lock and package.json disagree — the same contract CI enforces.
+# fails the build if bun.lock and package.json disagree — the same contract CI enforces. `patches/`
+# rides with them because `patchedDependencies` in package.json names files inside it: without the
+# folder here the install fails rather than quietly producing an unpatched image (see
+# web/patches/README.md for what is patched and why).
 COPY web/package.json web/bun.lock ./
+COPY web/patches ./patches
 RUN bun install --frozen-lockfile
 
 # The two repo files the app reads relative to its own root (kept at the mirrored sibling paths):

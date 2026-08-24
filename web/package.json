@@ -84,5 +84,8 @@
     "vite": "^7",
     "vite-tsconfig-paths": "^6.1.1",
     "vitest": "4.1.9"
+  },
+  "patchedDependencies": {
+    "compression@1.8.1": "patches/compression@1.8.1.patch"
   }
 }

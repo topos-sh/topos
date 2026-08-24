@@ -1,0 +1,51 @@
+diff --git a/index.js b/index.js
+index c0638e08280d5f67067c225f0e6f471f90065fcb..8405a456a26283b8927191818fd8e5f249eb6dbc 100644
+--- a/index.js
++++ b/index.js
+@@ -85,6 +85,7 @@ function compression (options) {
+ 
+     var _end = res.end
+     var _on = res.on
++    var _removeListener = res.removeListener
+     var _write = res.write
+ 
+     // flush
+@@ -152,6 +153,38 @@ function compression (options) {
+       return this
+     }
+ 
++    // PATCHED (topos): make the 'drain' redirection SYMMETRIC.
++    //
++    // `res.on('drain', …)` above moves the listener onto the compression stream, but removal was
++    // never proxied — `res.removeListener('drain', …)` went to the response, which never had it,
++    // so every listener attached this way stayed on the stream forever. That also breaks
++    // `res.once('drain', …)`: node's once-wrapper registers through the patched `on` (so it lands
++    // on the stream) and unregisters through `removeListener` (so it did not). A caller that
++    // waits for drain once per write — which is exactly how a streamed response is written back —
++    // therefore accumulated one permanent listener per chunk and, past ten, printed
++    // MaxListenersExceededWarning about a Gzip stream. Node's removeListener matches a
++    // once-wrapper by its `.listener`, so removing the caller's own function is enough.
++    res.removeListener = function removeListener (type, listener) {
++      if (!listeners || type !== 'drain') {
++        return _removeListener.call(this, type, listener)
++      }
++
++      if (stream) {
++        stream.removeListener(type, listener)
++        return this
++      }
++
++      for (var i = listeners.length - 1; i >= 0; i--) {
++        if (listeners[i][0] === type && listeners[i][1] === listener) {
++          listeners.splice(i, 1)
++        }
++      }
++
++      return this
++    }
++
++    res.off = res.removeListener
++
+     function nocompress (msg) {
+       debug('no compression: %s', msg)
+       addListeners(res, _on, listeners)
