@@ -40,7 +40,8 @@ control, so the boundary has to live at the access layer:
 ## The vault is stateless
 
 Postgres + the object store are the vault's whole durable state. Upload staging is an **ephemeral
-local directory** (`TOPOS_PLANE_TMP`, default under `/tmp`): no volume, no fsync, and losing it on
+local directory** (`TOPOS_PLANE_TMP`; the bin creates it `0700`, service-owned, defaulting under
+the local store root or a per-uid temp dir): no volume, no fsync, and losing it on
 a container replacement is safe by design — the janitor reconciles leftover `upload` rows via the
 existing protocol (`remove` tolerates a dir that is already gone), and an interrupted upload
 replays from the client's write-ahead log. A PUT that landed without its `absent → present`
@@ -181,7 +182,10 @@ there. A few decisions earn their keep:
   it immediately before issuing, and the finalize is gated on matching it, so a recovery sweep
   taking over a frozen pass can never also delete or finalize the same row. Each step is its own
   short transaction (or none, for the delete), so no write transaction is held across a store op.
-- **THE DELETE-LIFETIME INVARIANT.** On a remote store, "one actor" needs one more leg: a DELETE
+- **THE DELETE-LIFETIME INVARIANT.** On the LOCAL backend it is absolute: the delete is awaited
+  to completion, untimed — join semantics, the pre-object-store inline unlink's shape — so
+  nothing of it can outlive the ownership check that authorized it. On a remote store, "one
+  actor" needs one more leg: a DELETE
   issued under a token must be provably DEAD before that token can be superseded, or a
   delayed/retried DELETE could remove bytes a later ingest re-installed under a fresh token —
   leaving Postgres saying `present` over missing bytes. The seam enforces it structurally: the GC
@@ -199,7 +203,9 @@ there. A few decisions earn their keep:
   physical keys — could do that, and the content-addressed key shape is a deliberate ruling).
   What the protocol DOES foreclose is the dangerous, unbounded case: transport-level re-issue
   minutes later, which the retry-disabled client makes impossible; and an ambiguous outcome never
-  finalizes absence, so the row stays fenced for recovery either way.
+  finalizes absence, so the row stays fenced for recovery either way. One deployment invariant
+  rides these fences: `RECOVERY_STALE_MS` must exceed the maximum clock skew between any two
+  vault processes sharing a database — the staleness comparison is cross-process wall-clock.
 - **Scheduling is the composing server's.** `run_gc` / `run_recovery` / `run_janitor` are public ops;
   this library holds no scheduler and no background task. One server-clock unit is one epoch
   **millisecond** throughout — a seconds-valued TTL constant would collapse these fences

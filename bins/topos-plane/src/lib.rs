@@ -38,4 +38,4 @@ pub use import::import_local_main;
 pub use maintenance::{MaintenancePass, run_maintenance_pass, spawn_maintenance};
 pub use openapi::openapi;
 pub use router::router;
-pub use state::{PlaneConfig, PlaneState, StoreBackend};
+pub use state::{PlaneConfig, PlaneState, StoreBackend, secure_staging_dir};

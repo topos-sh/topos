@@ -427,7 +427,8 @@ The local volume stays untouched throughout, so falling back is flipping the var
 - **Storage:** `plane` runs recovery, staging-janitor, and GC passes on an interval
   (`TOPOS_PLANE_GC_INTERVAL_SECS`, default 300). On the local store, watch the `plane-data` volume
   as version history grows; on a bucket, watch the bucket. Upload staging is an ephemeral local
-  dir (`TOPOS_PLANE_TMP`, default under `/tmp`) — no volume, safe to lose.
+  dir (`TOPOS_PLANE_TMP`; created `0700`, service-owned — the compose file pins `/data/staging`)
+  — no dedicated volume, safe to lose.
 - **Error reporting:** optional `SENTRY_DSN`, server-side only — no tracing, no cookies, no PII.
 
 The rest of the environment surface (pool sizes, timeouts, bind addresses, migration paths) is

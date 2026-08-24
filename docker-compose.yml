@@ -173,8 +173,9 @@ services:
       TOPOS_PLANE_S3_ACCESS_KEY_ID: ${TOPOS_PLANE_S3_ACCESS_KEY_ID:-}
       TOPOS_PLANE_S3_SECRET_ACCESS_KEY: ${TOPOS_PLANE_S3_SECRET_ACCESS_KEY:-}
       TOPOS_PLANE_S3_REGION: ${TOPOS_PLANE_S3_REGION:-auto}
-      # The EPHEMERAL upload-staging dir (no volume; losing it on replacement is safe).
-      TOPOS_PLANE_TMP: ${TOPOS_PLANE_TMP:-/tmp/topos-plane}
+      # The EPHEMERAL upload-staging dir (created 0700, service-owned; losing it on replacement
+      # is safe). Under /data — a directory the image owns — never a shared predictable /tmp name.
+      TOPOS_PLANE_TMP: ${TOPOS_PLANE_TMP:-/data/staging}
     volumes:
       # The local object store (the default backend; unused when TOPOS_PLANE_STORE=s3). Objects
       # are immutable and content-addressed and the database records a version only after its

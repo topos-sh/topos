@@ -8,6 +8,19 @@ use crate::db::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{ObjectId, WorkspaceId};
 
+/// One non-purged version's deep-verification root: the locator plus the pre-import row facts
+/// the identity recompute anchors on.
+#[derive(Debug, Clone)]
+pub(crate) struct ImportLiveVersion {
+    pub bundle_id: String,
+    pub version_id: String,
+    pub git_commit_oid: [u8; 20],
+    /// The frame's one parent (a pre-import column — written at the original ingest).
+    pub first_parent: Option<String>,
+    /// The frame's author (ditto).
+    pub author_display: String,
+}
+
 /// What one version backfill did.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BackfillOutcome {
@@ -67,16 +80,18 @@ impl Db {
         })
     }
 
-    /// Every non-purged version with its commit locator, as `(bundle, version, locator)` — the
-    /// deep-verification walk's roots.
+    /// Every non-purged version with its commit locator PLUS the row facts the identity
+    /// recompute anchors on (`first_parent` and `author_display` predate the import, so they are
+    /// independent of anything the backfill wrote) — the deep-verification walk's roots.
     pub(crate) async fn import_live_versions(
         &self,
         ws: &WorkspaceId,
-    ) -> Result<Vec<(String, String, [u8; 20])>> {
+    ) -> Result<Vec<ImportLiveVersion>> {
         let ws_s = ws.as_str();
         let rows = sqlx::query!(
             r#"SELECT bundle_id AS "bundle_id!", version_id AS "version_id!",
-                      git_commit_oid AS "git_commit_oid!: Vec<u8>"
+                      git_commit_oid AS "git_commit_oid!: Vec<u8>",
+                      first_parent, author_display AS "author_display!"
                FROM version
                WHERE workspace_id = $1 AND purged_at IS NULL AND git_commit_oid IS NOT NULL
                ORDER BY bundle_id, version_id"#,
@@ -87,18 +102,23 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         rows.into_iter()
             .map(|r| {
-                Ok((
-                    r.bundle_id,
-                    r.version_id,
-                    r.git_commit_oid
+                Ok(ImportLiveVersion {
+                    bundle_id: r.bundle_id,
+                    version_id: r.version_id,
+                    git_commit_oid: r
+                        .git_commit_oid
                         .try_into()
                         .map_err(|_| AuthorityError::integrity(BadWidth))?,
-                ))
+                    first_parent: r.first_parent,
+                    author_display: r.author_display,
+                })
             })
             .collect()
     }
 
-    /// Every non-purged version row still missing its commit locator, as `(bundle, version)`.
+    /// Every version row still missing its commit locator, as `(bundle, version)` — PURGED rows
+    /// included: their refs survive, `log` traverses them (and fails closed on a NULL message),
+    /// so completeness covers the whole history, not just the live half.
     pub(crate) async fn import_unbackfilled(
         &self,
         ws: &WorkspaceId,
@@ -106,7 +126,7 @@ impl Db {
         let ws_s = ws.as_str();
         let rows = sqlx::query!(
             r#"SELECT bundle_id AS "bundle_id!", version_id AS "version_id!" FROM version
-               WHERE workspace_id = $1 AND purged_at IS NULL AND git_commit_oid IS NULL
+               WHERE workspace_id = $1 AND git_commit_oid IS NULL
                ORDER BY bundle_id, version_id"#,
             ws_s,
         )
@@ -119,13 +139,13 @@ impl Db {
             .collect())
     }
 
-    /// The distinct commit locators of the workspace's non-purged versions (existence-checked
-    /// against the store).
+    /// The distinct commit locators of EVERY version — purged included, whose skeletons the log
+    /// still walks (existence-checked against the store).
     pub(crate) async fn import_version_locators(&self, ws: &WorkspaceId) -> Result<Vec<[u8; 20]>> {
         let ws_s = ws.as_str();
         let rows = sqlx::query!(
             r#"SELECT DISTINCT git_commit_oid AS "git_commit_oid!: Vec<u8>" FROM version
-               WHERE workspace_id = $1 AND purged_at IS NULL AND git_commit_oid IS NOT NULL"#,
+               WHERE workspace_id = $1 AND git_commit_oid IS NOT NULL"#,
             ws_s,
         )
         .fetch_all(self.pool())

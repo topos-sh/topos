@@ -531,8 +531,14 @@ impl PlaneSource for UreqPlane {
         // a downloaded one.
         let mut blobs: HashMap<String, Vec<u8>> = HashMap::with_capacity(wanted.len());
         let mut misses: Vec<(String, [u8; 32])> = Vec::new();
+        // The cache scope: this server's host + THIS workspace — the isolation boundary that
+        // keeps one workspace's downloads from priming (or revealing themselves to) another's.
+        let scope = crate::fetch_cache::CacheScope {
+            host: &host_label(&self.base_url),
+            workspace: &workspace_id,
+        };
         for (object_id_hex, object_id) in wanted {
-            match self.cache.as_ref().and_then(|c| c.read(&object_id)) {
+            match self.cache.as_ref().and_then(|c| c.read(scope, &object_id)) {
                 Some(bytes) => {
                     blobs.insert(object_id_hex, bytes);
                 }
@@ -553,7 +559,7 @@ impl PlaneSource for UreqPlane {
             if digest::sha256(&bytes) == object_id
                 && let Some(cache) = &self.cache
             {
-                cache.write(&object_id, &bytes);
+                cache.write(scope, &object_id, &bytes);
             }
             blobs.insert(object_id_hex, bytes);
         }

@@ -614,9 +614,12 @@ fn stateless_vault_on_minio() {
         .run(&["diff", BUNDLE, &format!("{v1}..{v2}"), "--json"])
         .data("the diff after the rebuild");
     let body = diff["diff"].as_str().expect("the diff body");
+    // This proves diff still RESOLVES both versions through the restarted stack — the machine's
+    // own per-bundle repo may satisfy the bytes locally, so it is NOT the bucket proof; the
+    // third-machine install below is (every one of its bytes crosses the bucket).
     assert!(
         body.contains(CHANGED) && !body.contains(UNCHANGED),
-        "both versions' bytes came back out of the bucket: {body}"
+        "diff resolves both versions after the rebuild: {body}"
     );
 
     // ── 4. …and a THIRD, EMPTY machine installs from scratch through that vault ─────────────────

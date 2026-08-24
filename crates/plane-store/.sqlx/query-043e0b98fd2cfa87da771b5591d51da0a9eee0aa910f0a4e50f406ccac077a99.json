@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT DISTINCT git_commit_oid AS \"git_commit_oid!: Vec<u8>\" FROM version\n               WHERE workspace_id = $1 AND purged_at IS NULL AND git_commit_oid IS NOT NULL",
+  "query": "SELECT DISTINCT git_commit_oid AS \"git_commit_oid!: Vec<u8>\" FROM version\n               WHERE workspace_id = $1 AND git_commit_oid IS NOT NULL",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       true
     ]
   },
-  "hash": "bdcb70b7c8891fd7a2ce014c60712f001013feac0a71eec9497e442d8633d672"
+  "hash": "043e0b98fd2cfa87da771b5591d51da0a9eee0aa910f0a4e50f406ccac077a99"
 }

@@ -7,5 +7,6 @@ mod support;
 mod commit_publish;
 mod gc_delete_race;
 mod gc_purge;
+mod import_cutover;
 mod reads;
 mod store_contract;

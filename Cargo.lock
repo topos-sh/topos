@@ -4037,6 +4037,7 @@ dependencies = [
  "base64",
  "clap",
  "plane-store",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",

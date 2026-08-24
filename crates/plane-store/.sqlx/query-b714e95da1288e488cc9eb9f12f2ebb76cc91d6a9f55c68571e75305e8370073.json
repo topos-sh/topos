@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT bundle_id AS \"bundle_id!\", version_id AS \"version_id!\" FROM version\n               WHERE workspace_id = $1 AND purged_at IS NULL AND git_commit_oid IS NULL\n               ORDER BY bundle_id, version_id",
+  "query": "SELECT bundle_id AS \"bundle_id!\", version_id AS \"version_id!\" FROM version\n               WHERE workspace_id = $1 AND git_commit_oid IS NULL\n               ORDER BY bundle_id, version_id",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "40d69d70badcf92568163352751bf0adb4bf65c4ba51ef2a566204f7105a4961"
+  "hash": "b714e95da1288e488cc9eb9f12f2ebb76cc91d6a9f55c68571e75305e8370073"
 }

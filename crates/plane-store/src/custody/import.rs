@@ -7,13 +7,20 @@
 //!    old git root — the keys are the same paths);
 //! 2. convert every large-store raw file into git-blob framing, verifying BOTH identities
 //!    (`sha256(bytes)` = the filename, and the framed blob's git OID = the presence row's
-//!    recorded locator), then flip the row's `location`;
+//!    recorded locator), write the framed blob to the TARGET store AND into the old git root's
+//!    loose layout (so flipping the backend back to local stays a valid rollback at all times),
+//!    then flip the row's `location`;
 //! 3. walk `refs/topos/versions/*` + the commit objects to BACKFILL `git_commit_oid` and
 //!    `message` into version rows (upsert; a row already backfilled to a DIFFERENT locator fails
 //!    loudly);
-//! 4. verify completeness — every non-purged version row carries a non-NULL locator whose commit
-//!    object exists in the store; every reachable blob's loose object exists; no live row still
-//!    reads a pre-import location — and report per-workspace counts + a final PASS/FAIL.
+//! 4. verify completeness — EVERY version row (purged included: the log walks them) carries a
+//!    non-NULL locator whose commit object exists in the store; every reachable blob's loose
+//!    object exists; no live row still reads a pre-import location — then verify IDENTITY for
+//!    every live version: decode its commit + trees out of the store, recompute the bundle
+//!    digest from the tree's leaves and the kernel commit id from
+//!    `(first_parent, digest, author, message)`, and require it to equal the version id — a
+//!    legacy ref swapped to point at a DIFFERENT internally-valid commit fails the import — and
+//!    report per-workspace counts + a final PASS/FAIL.
 //!
 //! Packfiles are rejected loudly (the vault's repos were loose-only by construction; a packed one
 //! was produced by outside tooling and this tool will not guess at it).
@@ -221,8 +228,13 @@ async fn import_workspace(
                     }
                     authority
                         .store()
-                        .put_loose(ws, &framed.git_oid, framed.zlib_bytes)
+                        .put_loose(ws, &framed.git_oid, framed.zlib_bytes.clone())
                         .await?;
+                    // Rollback readability: the framed blob ALSO lands in the OLD git root's
+                    // loose layout (write-if-absent; in an in-place local import the store put
+                    // above already wrote this exact file), so `TOPOS_PLANE_STORE=local` over the
+                    // old volume stays a valid fallback at every point of the cutover.
+                    write_loose_into_old_root(&objects_dir, &framed.git_oid, &framed.zlib_bytes)?;
                     authority
                         .db()
                         .import_flip_large_location(ws, ObjectId(object_id))
@@ -333,10 +345,11 @@ async fn import_workspace(
     // discovery of source-side corruption the import waved through.
     let mut verified_blobs: std::collections::BTreeSet<[u8; 20]> =
         std::collections::BTreeSet::new();
-    for (bundle, version_hex, commit_oid) in authority.db().import_live_versions(ws).await? {
-        if let Err(e) = deep_verify_version(authority, ws, commit_oid, &mut verified_blobs).await {
+    for live in authority.db().import_live_versions(ws).await? {
+        if let Err(e) = deep_verify_version(authority, ws, &live, &mut verified_blobs).await {
             failures.push(format!(
-                "{name}: version {bundle}/{version_hex} fails deep verification: {e}"
+                "{name}: version {}/{} fails deep verification: {e}",
+                live.bundle_id, live.version_id
             ));
         }
     }
@@ -350,37 +363,94 @@ async fn import_workspace(
     })
 }
 
-/// Deep-verify one version against the STORE: decode its commit, walk its trees (each object
-/// verified against its id by the codec), require a present row for every leaf, and decode each
-/// not-yet-verified blob, re-hashing the payload to the row's content id.
+/// Deep-verify one version against the STORE, all the way to IDENTITY: decode its commit, walk
+/// its trees (each object verified against its id by the codec), require a present row for every
+/// leaf, decode each not-yet-verified blob (payload re-hashed to the row's content id) — then
+/// recompute BOTH topos identities from what the store actually holds: the bundle digest over the
+/// tree's `(path, mode, content id)` leaves, and the kernel commit id over
+/// `(first_parent, digest, author_display, commit message)`, which must equal the row's
+/// `version_id`. `first_parent` and `author_display` predate the import (written at the original
+/// ingest), so a legacy ref swapped to a DIFFERENT internally-valid commit cannot satisfy this —
+/// its tree/message produce a different kernel id than the ref's own name.
 async fn deep_verify_version(
     authority: &Authority,
     ws: &WorkspaceId,
-    commit_oid: [u8; 20],
+    live: &crate::db::custody::import::ImportLiveVersion,
     verified_blobs: &mut std::collections::BTreeSet<[u8; 20]>,
 ) -> Result<()> {
-    let commit = crate::read::read_commit(authority, ws, commit_oid).await?;
+    let commit = crate::read::read_commit(authority, ws, live.git_commit_oid).await?;
     let leaves = crate::read::walk_tree_leaves(authority, ws, commit.tree_oid).await?;
     let leaf_oids: Vec<[u8; 20]> = leaves.iter().map(|(_, _, oid)| *oid).collect();
     let by_git_oid = authority.db().objects_by_git_oids(ws, &leaf_oids).await?;
-    for (path, _, git_oid) in leaves {
+    let mut manifest = Vec::with_capacity(leaves.len());
+    for (path, mode, git_oid) in leaves {
         let Some(object_id) = by_git_oid.get(&git_oid).copied() else {
             return Err(AuthorityError::integrity(LeafWithoutPresentRow { path }));
         };
-        if !verified_blobs.insert(git_oid) {
-            continue; // already decoded through another version
+        if verified_blobs.insert(git_oid) {
+            let Some(zlib) = authority.store().get_loose(ws, &git_oid).await? else {
+                return Err(AuthorityError::integrity(LeafBytesMissing { path }));
+            };
+            let (kind, payload) =
+                codec::decode_loose(&zlib, git_oid).map_err(AuthorityError::integrity)?;
+            if !matches!(kind, codec::ObjectKind::Blob)
+                || topos_core::digest::sha256(&payload) != object_id
+            {
+                return Err(AuthorityError::integrity(LeafContentMismatch { path }));
+            }
         }
-        let Some(zlib) = authority.store().get_loose(ws, &git_oid).await? else {
-            return Err(AuthorityError::integrity(LeafBytesMissing { path }));
-        };
-        let (kind, payload) =
-            codec::decode_loose(&zlib, git_oid).map_err(AuthorityError::integrity)?;
-        if !matches!(kind, codec::ObjectKind::Blob)
-            || topos_core::digest::sha256(&payload) != object_id
-        {
-            return Err(AuthorityError::integrity(LeafContentMismatch { path }));
-        }
+        manifest.push(topos_core::digest::ManifestEntry {
+            path,
+            mode,
+            content_sha256: object_id,
+        });
     }
+    // The identity recompute: store bytes → digest → kernel commit id → the version id itself.
+    let bundle_digest = topos_core::digest::bundle_digest(&manifest)
+        .map_err(|r| AuthorityError::integrity(DigestRejected(format!("{r:?}"))))?;
+    let expected = crate::id::CommitId::parse_hex(&live.version_id)
+        .ok_or_else(|| AuthorityError::integrity(BadStoredId))?;
+    let parents: Vec<[u8; 32]> = match live.first_parent.as_deref() {
+        None => Vec::new(),
+        Some(hex) => vec![
+            crate::id::CommitId::parse_hex(hex)
+                .ok_or_else(|| AuthorityError::integrity(BadStoredId))?
+                .0,
+        ],
+    };
+    let recomputed = topos_core::identity::commit_id(&topos_core::identity::Commit {
+        parents: &parents,
+        tree: bundle_digest,
+        author: &live.author_display,
+        message: &commit.message,
+    })
+    .map_err(|e| AuthorityError::integrity(DigestRejected(format!("{e:?}"))))?;
+    if recomputed != expected.0 {
+        return Err(AuthorityError::integrity(IdentityMismatch));
+    }
+    Ok(())
+}
+
+/// Write one framed loose object into the OLD git root's layout
+/// (`<ws>/objects/<aa>/<38-hex>`), write-if-absent — the conversion's rollback guarantee. The
+/// bytes land through a temp name + rename, so a crash mid-write never leaves a truncated object
+/// at the final name for a re-run's write-if-absent to keep (the loose lister skips the non-hex
+/// temp name, as it does any crash residue).
+fn write_loose_into_old_root(
+    objects_dir: &Path,
+    git_oid: &[u8; 20],
+    zlib_bytes: &[u8],
+) -> Result<()> {
+    let hex = crate::store::hex_lower(git_oid);
+    let shard = objects_dir.join(&hex[..2]);
+    let file = shard.join(&hex[2..]);
+    if file.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&shard).map_err(AuthorityError::internal)?;
+    let tmp = shard.join(format!("{}.tmp-{}", &hex[2..], std::process::id()));
+    std::fs::write(&tmp, zlib_bytes).map_err(AuthorityError::internal)?;
+    std::fs::rename(&tmp, &file).map_err(AuthorityError::internal)?;
     Ok(())
 }
 
@@ -447,3 +517,17 @@ struct LeafBytesMissing {
 struct LeafContentMismatch {
     path: String,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the store's bytes rebuild a DIFFERENT version id than the row's (a swapped ref or a substituted skeleton)"
+)]
+struct IdentityMismatch;
+
+#[derive(Debug, thiserror::Error)]
+#[error("the kernel refused the recomputed frame: {0}")]
+struct DigestRejected(String);
+
+#[derive(Debug, thiserror::Error)]
+#[error("a stored id column is not 64 lowercase hex characters")]
+struct BadStoredId;
