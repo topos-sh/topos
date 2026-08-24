@@ -1275,6 +1275,22 @@ pub(super) fn feed_items(ctx: &Ctx<'_>, connect: &SessionConnect<'_>) -> Vec<Fee
                         declined: false,
                     });
                 }
+                // BOTH KINDS. The delivery answer keeps connected servers in their own list, and
+                // reading only the file bundles made every caller here kind-blind: an
+                // `add <host>/<ws>/<server>` of a server the feed already delivers wrote a
+                // redundant row, while the same add of a skill correctly wrote nothing and said
+                // so. The offline branch below has always counted both — the two must agree.
+                for m in &snapshot.mcp_servers {
+                    if m.revoked {
+                        continue;
+                    }
+                    out.push(FeedItem {
+                        host: session.host.clone(),
+                        workspace: session.workspace_name.clone(),
+                        name: m.name.clone(),
+                        declined: false,
+                    });
+                }
                 for (_, name) in &snapshot.declined {
                     out.push(FeedItem {
                         host: session.host.clone(),

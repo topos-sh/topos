@@ -429,7 +429,12 @@ fn add_workspace(
         if feed_carries && flowing && matches!(value, EntryValue::Star) {
             data.manifest = None;
             data.reference = Some(resolved.canonical.clone());
+            data.source = Some(resolved.canonical.clone());
             data.undo = Vec::new();
+            // NOTHING HAPPENED, so nothing happened is the lead. An `added <name>` headline over a
+            // note retracting it announces an act that did not occur, and the reader has to reach
+            // the second line to learn the first was untrue.
+            data.unchanged = true;
             medit::push_note(
                 &mut data,
                 format!(

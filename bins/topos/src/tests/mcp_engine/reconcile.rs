@@ -1519,3 +1519,133 @@ fn a_delivered_gateway_server_is_placed_as_this_binarys_own_relay() {
         "a fresh placement everywhere the row reaches: {row:?}"
     );
 }
+
+/// A CONNECTED SERVER THE FEED ALREADY DELIVERS answers a bare `add` exactly as a skill on the
+/// same feed does. `topos list --remote` prints `topos add <name>` under every catalog row; for a
+/// server that command used to fail with
+/// `'deepwiki' has no recorded placement to re-fork — adopt it by path instead` (exit 1), because
+/// the keep-as-yours ladder read a server bundle's empty placement map as agent folders a
+/// withdrawal had cleaned. A server has no folder to re-fork — what it puts here is one entry per
+/// agent MCP config — so the ladder hands it back and the ordinary standing resolution answers.
+#[test]
+fn a_bare_add_of_a_feed_delivered_server_answers_the_way_a_skill_does() {
+    let rig = Rig::new("bare-add-server");
+    rig.seed_session();
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    let s = served_at("https://mcp.example/deepwiki");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_deep", "deepwiki", &s)]);
+    let dir = FakeDirectory {
+        servers: vec![mcp_catalog_entry("s_deep", "deepwiki", &s)],
+        ..FakeDirectory::default()
+    };
+    // The machine's own file after a login: the feed row, and nothing else.
+    rig.write_global(&format!(
+        "schema = 1\n\n[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
+    let ctx = rig.ctx_at(None);
+    sweep_machine(&ctx, &plane, &dir);
+
+    // The fork ladder CLAIMS NOTHING here — it is a question about a folder's bytes, and there is
+    // no folder.
+    assert!(
+        ops::keep_as_yours(&ctx, "deepwiki", false).unwrap().is_none(),
+        "a server bundle is never a re-fork case"
+    );
+
+    let roots = crate::ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: None,
+    };
+    let plan = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "deepwiki",
+        ops::BareAdd {
+            subscribe: true,
+            dest_selected: false,
+            global: true,
+            workspace: None,
+        },
+    )
+    .unwrap();
+    let ops::BareAddPlan::SetDelivered {
+        name,
+        reference,
+        set,
+    } = plan
+    else {
+        panic!("the feed line is what delivers it: {plan:?}");
+    };
+    assert_eq!(name, "deepwiki");
+    assert_eq!(reference, format!("{HOST}/{WS_NAME}/deepwiki"));
+    assert_eq!(set, format!("{HOST}/{WS_NAME}"));
+    // The FINAL answer — the same sentence, word for word, that a skill on this feed gets.
+    let data = ops::set_delivered_answer(&name, &reference, set, true);
+    assert_eq!(
+        crate::render::add_tty(&data),
+        format!(
+            "deepwiki already reaches every agent on this machine through {HOST}/{WS_NAME} — no \
+             row to record.\nnothing changed"
+        )
+    );
+    assert_eq!(data.manifest, None, "no file was edited");
+    assert!(data.undo.is_empty(), "nothing was recorded to invert");
+}
+
+/// THE ADDRESS FORM of a bundle the feed already delivers writes nothing and says so — for a
+/// connected server as for a skill. The redundancy check read only the delivery answer's FILE
+/// bundles, so a server slipped past it and got a redundant `[mcp]` row beside the feed line that
+/// was already delivering it. And the answer LEADS with what happened: an `added deepwiki`
+/// headline over a note retracting it announces an act that did not occur.
+#[test]
+fn an_address_add_of_a_feed_delivered_server_writes_nothing_and_leads_with_that() {
+    let rig = Rig::new("address-add-server");
+    rig.seed_session();
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    let s = served_at("https://mcp.example/deepwiki");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_deep", "deepwiki", &s)]);
+    let dir = FakeDirectory {
+        servers: vec![mcp_catalog_entry("s_deep", "deepwiki", &s)],
+        ..FakeDirectory::default()
+    };
+    rig.write_global(&format!(
+        "schema = 1\n\n[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
+    let ctx = rig.ctx_at(None);
+    sweep_machine(&ctx, &plane, &dir);
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let before = std::fs::read_to_string(&manifest).unwrap();
+
+    let outcome = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("{HOST}/{WS_NAME}/deepwiki"),
+        true,
+        false,
+        &crate::ops::dest_select::Selection::new(&[], &[]),
+        None,
+    )
+    .unwrap();
+    let ops::AddRefOutcome::Applied { data, .. } = outcome else {
+        panic!("a redundant add applies, it does not describe");
+    };
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        before,
+        "no row is written — the feed row already delivers it"
+    );
+    assert_eq!(data.manifest, None, "no file was edited");
+    assert!(data.undo.is_empty(), "nothing was recorded to invert");
+    assert!(data.unchanged, "the answer says nothing happened");
+    assert_eq!(
+        crate::render::add_tty(&data),
+        format!(
+            "{WS_NAME}\'s feed already delivers \'deepwiki\' here — a bare row would add \
+             nothing, so nothing was written\nsource: {HOST}/{WS_NAME}/deepwiki"
+        )
+    );
+}
