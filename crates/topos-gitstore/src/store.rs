@@ -14,8 +14,8 @@ use crate::{VERSION_REF_PREFIX, error::VerifyError};
 /// Fixed git committer identity for sidecar commits — keeps the git commit object (and thus its SHA-1
 /// OID) reproducible. It is **not** topos identity: `version_id` is the kernel `commit_id`, which never
 /// commits to git time or email.
-const TOPOS_COMMITTER_NAME: &str = "topos";
-const TOPOS_COMMITTER_EMAIL: &str = "topos@localhost";
+pub(crate) const TOPOS_COMMITTER_NAME: &str = "topos";
+pub(crate) const TOPOS_COMMITTER_EMAIL: &str = "topos@localhost";
 
 /// One file handed to [`Store::write_bundle`]: its bundle-relative forward-slash path, mode, and raw
 /// bytes. The caller (the client scanner) has already applied the filesystem-level reject rules.

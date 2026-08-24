@@ -22,6 +22,9 @@ imara-diff = { workspace = true }
 # The per-file three-way (diff3) content-merge ENGINE. Pinned exact + golden-vectored: its conflict-marker
 # bytes are a consent artifact, so an upgrade is a reviewed change. Used only by `merge.rs`.
 diffy = { workspace = true }
+# The in-memory loose-object codec (`codec.rs`) zlib-frames objects exactly as a bare repo stores
+# them. Default features = pure-Rust `miniz_oxide` (same choice as the client's self-update codec).
+flate2 = "1"
 
 [lints]
 workspace = true
