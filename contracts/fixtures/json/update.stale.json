@@ -32,6 +32,10 @@
         "last_delivery_at": 1699000000000,
         "last_report_at": 1699000000000,
         "staleness_window_ms": 604800000,
+        "workspace": {
+          "host": "topos.sh",
+          "name": "acme"
+        },
         "workspace_id": "w_acme"
       }
     ]

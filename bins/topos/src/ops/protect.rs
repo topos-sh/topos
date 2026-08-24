@@ -136,15 +136,18 @@ pub(crate) fn protect(
         _ => None,
     };
 
-    let workspace_address = universe
+    let workspace = universe
         .iter()
         .find(|w| w.workspace_id == workspace_id)
-        .map(|w| format!("{}/{}", w.host, w.name));
+        .map(|w| topos_types::results::WorkspaceRef {
+            host: w.host.clone(),
+            name: w.name.clone(),
+        });
     let data = ProtectData {
         target: target.to_owned(),
         kind: kind.noun().to_owned(),
         workspace_id: workspace_id.clone(),
-        workspace_address,
+        workspace,
         level: level.clone(),
         loosening,
         note,

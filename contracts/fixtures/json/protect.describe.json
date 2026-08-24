@@ -8,7 +8,10 @@
     "level": "reviewed",
     "loosening": false,
     "target": "deploy",
-    "workspace_address": "topos.sh/acme",
+    "workspace": {
+      "host": "topos.sh",
+      "name": "acme"
+    },
     "workspace_id": "w_acme"
   },
   "warnings": [],

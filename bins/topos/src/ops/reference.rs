@@ -160,6 +160,10 @@ fn add_feed(
     }
     let target = medit::global_target(ctx);
     let mut data = set_data(workspace);
+    data.workspace = Some(topos_types::results::WorkspaceRef {
+        host: host.to_owned(),
+        name: workspace.to_owned(),
+    });
     // Idempotent: a feed row already standing is stated, never rewritten.
     if let Some(text) = medit::read_text(ctx, &target.path)?
         && let Ok(editor) = crate::manifest::document::ManifestEditor::open(&text, target.scope)
@@ -287,6 +291,7 @@ fn add_workspace(
         },
         None => set_data(&resolved.name),
     };
+    data.workspace = Some(super::session_workspace_ref(&resolved.session));
     // A CONNECTED SERVER has no version a row could pin: what it receives is the workspace's own
     // resolution, and a commit hash written on such a row names nothing on either side of the
     // wire. The reconcile reads one as ABSENT, silently — so the row this add writes carries none
@@ -1318,6 +1323,7 @@ fn set_data(name: &str) -> AddData {
         machine_copy: None,
         set_delivery: None,
         display: None,
+        workspace: None,
     }
 }
 
@@ -2066,6 +2072,20 @@ pub(crate) struct WriteLane {
     pub workspace_name: String,
     pub workspace_id: String,
     pub transports: SessionTransports,
+}
+
+impl WriteLane {
+    /// The uniform `workspace` field for a receipt this lane's act produced — the lane's OWN
+    /// record of the address, which is the one spelling every surface must agree on. `None` for a
+    /// session record missing either half (nothing invents an address from one of them).
+    pub(crate) fn workspace_ref(&self) -> Option<topos_types::results::WorkspaceRef> {
+        (!self.host.is_empty() && !self.workspace_name.is_empty()).then(|| {
+            topos_types::results::WorkspaceRef {
+                host: self.host.clone(),
+                name: self.workspace_name.clone(),
+            }
+        })
+    }
 }
 
 /// Resolve the session a write verb signs in: `None` when this installation has no session at all

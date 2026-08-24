@@ -84,6 +84,7 @@ pub(crate) fn invite(
         let me = lane.transports.directory.me(&workspace_id)?;
         return Ok(InviteOutcome::Read(InviteReadData {
             address: me.address,
+            workspace: lane.workspace_ref(),
             changed: false,
         }));
     }
@@ -113,6 +114,7 @@ pub(crate) fn invite(
         return Ok(InviteOutcome::Described {
             describe: InviteDescribeData {
                 address: me.address,
+                workspace: lane.workspace_ref(),
                 seat: emails,
                 skill,
                 channel,

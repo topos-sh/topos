@@ -38,9 +38,8 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
         .iter()
         .map(|s| StatusSession {
             workspace_id: s.workspace_id.clone(),
-            name: s.workspace_name.clone(),
+            workspace: crate::ops::session_workspace_ref(s),
             display_name: s.display_name.clone(),
-            host: s.host.clone(),
             session_status: (s.status != sessions::SESSION_ACTIVE).then(|| s.status.clone()),
         })
         .collect();

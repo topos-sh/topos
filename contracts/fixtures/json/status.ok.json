@@ -38,8 +38,10 @@
     "sessions": [
       {
         "display_name": "Demo",
-        "host": "topos.sh",
-        "name": "demo",
+        "workspace": {
+          "host": "topos.sh",
+          "name": "demo"
+        },
         "workspace_id": "w_demo"
       }
     ],

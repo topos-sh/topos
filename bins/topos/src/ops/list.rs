@@ -1023,8 +1023,7 @@ fn remote_view(
             }
         };
         out.push(RemoteWorkspace {
-            host: s.host.clone(),
-            workspace: s.workspace_name.clone(),
+            workspace: crate::ops::session_workspace_ref(s),
             workspace_id: s.workspace_id.clone(),
             channels: channels
                 .channels
@@ -1068,9 +1067,10 @@ fn remote_view(
     }
     // Deterministic order however the sessions file lists them.
     out.sort_by(|a, b| {
-        a.host
-            .cmp(&b.host)
-            .then_with(|| a.workspace.cmp(&b.workspace))
+        a.workspace
+            .host
+            .cmp(&b.workspace.host)
+            .then_with(|| a.workspace.name.cmp(&b.workspace.name))
     });
     Ok(out)
 }
@@ -1813,6 +1813,7 @@ mod tests {
             unchanged: false,
             machine_copy: None,
             set_delivery: None,
+            workspace: None,
         }
     }
 
@@ -3897,7 +3898,7 @@ mod tests {
         assert_eq!(out.data.remote.len(), 1);
         let ws = &out.data.remote[0];
         assert_eq!(
-            (ws.host.as_str(), ws.workspace.as_str()),
+            (ws.workspace.host.as_str(), ws.workspace.name.as_str()),
             ("topos.sh", "acme")
         );
         let backend = ws.channels.iter().find(|c| c.name == "backend").unwrap();

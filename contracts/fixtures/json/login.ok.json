@@ -11,8 +11,6 @@
     ],
     "display_name": "Acme",
     "feed_row_added": true,
-    "host": "topos.sh",
-    "name": "acme",
     "server": "https://topos.sh/api",
     "session_id": "sn_01hzy3",
     "session_status": "active",
@@ -22,6 +20,10 @@
       "@acme"
     ],
     "user": "robert",
+    "workspace": {
+      "host": "topos.sh",
+      "name": "acme"
+    },
     "workspace_id": "w_acme"
   },
   "warnings": [],

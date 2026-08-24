@@ -71,6 +71,7 @@ pub(crate) fn status(
         };
         workspaces.push(AuthWorkspaceStatus {
             workspace_id: s.workspace_id.clone(),
+            workspace: crate::ops::session_workspace_ref(s),
             display_name: Some(s.display_name.clone()),
             credential: true,
             health,
@@ -85,6 +86,9 @@ pub(crate) fn status(
         .iter()
         .map(|(ws, e)| AuthReportingStatus {
             workspace_id: ws.clone(),
+            // The local document keys by id alone, so the address comes from the session — and
+            // a workspace this installation no longer holds one for honestly names none.
+            workspace: crate::ops::workspace_ref(ctx, ws),
             last_delivery_at: e.last_delivery_at,
             last_report_at: e.last_report_at,
             staleness_window_ms: e.staleness_window_ms,

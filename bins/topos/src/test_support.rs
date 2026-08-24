@@ -393,7 +393,7 @@ impl SessionInstall {
                 ))
             };
             ops::session_logout(ctx, &revoke, None, true)
-                .map(|d| d.ended)
+                .map(|d| d.ended.into_iter().map(|ws| ws.name).collect())
                 .map_err(err_str)
         })
     }

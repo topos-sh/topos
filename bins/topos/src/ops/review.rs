@@ -111,7 +111,10 @@ fn review_inbox(
         for p in index.proposals {
             let entry = ReviewIndexEntry {
                 workspace_id: ws.workspace_id.clone(),
-                workspace_name: ws.name.clone(),
+                workspace: topos_types::results::WorkspaceRef {
+                    host: ws.host.clone(),
+                    name: ws.name.clone(),
+                },
                 skill: p.skill_name.clone(),
                 proposal: format!("{}@{}", p.skill_name, p.version_id),
                 proposer: p.proposer.clone(),
@@ -237,6 +240,7 @@ fn review_describe(
     Ok(ReviewOutcome::Describe {
         data: Box::new(ReviewDescribeData {
             proposal: handle,
+            workspace: super::workspace_ref(ctx, &workspace_id),
             skill: skill_name,
             proposer: proposal.proposer,
             message: proposal.message,
@@ -484,6 +488,7 @@ fn map_outcome(
             };
             Ok(ReviewData {
                 proposal: target.to_owned(),
+                workspace: super::workspace_ref(ctx, &rec.workspace_id),
                 decision,
                 current_generation,
             })

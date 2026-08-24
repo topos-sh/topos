@@ -383,6 +383,9 @@ fn unclaimed_record(
         // composition root's breadth sweep + built-in placement ride.
         currency: recognize(ctx, &source_abs).map(|_| ctx.triggers.active().install()),
         triggers: Vec::new(),
+        // A folder adopted in place is nobody's workspace bundle — the reference arm fills this
+        // wherever the source names one.
+        workspace: None,
         origin: None,
         // All three set by the manifest-edit step at the composition root, exactly as on a
         // fresh adopt.
@@ -642,7 +645,8 @@ pub(crate) fn add_with_name(
         tracked: true,
         currency,
         triggers: Vec::new(),
-        // Set by the remote-import wrapper ([`add_remote`]); a local adopt has no upstream.
+        // As above: a local adopt's source is a folder, not a workspace.
+        workspace: None,
         origin: None,
         // All three set by the manifest-edit step at the composition root (the verb records the
         // demand line, and the row's key decides how the receipt spells the source).
@@ -1073,6 +1077,7 @@ pub(crate) fn keep_as_yours(
             data: KeepAsYoursData {
                 name: name.to_owned(),
                 workspace_id: Some(entry_ws.clone()),
+                workspace: super::workspace_ref(ctx, entry_ws.as_str()),
                 reason,
                 has_draft,
             },
@@ -1686,7 +1691,10 @@ impl PublishedName {
     /// unknown digest reads `false` — the disclosure never claims agreement it did not check).
     pub(crate) fn suggestion(&self, adopted_digest: &str) -> topos_types::results::PublishedMatch {
         topos_types::results::PublishedMatch {
-            workspace: self.workspace.clone(),
+            workspace: topos_types::results::WorkspaceRef {
+                host: self.host.clone(),
+                name: self.workspace.clone(),
+            },
             name: self.name.clone(),
             reference: self.reference.clone(),
             identical: self.bundle_digest.as_deref() == Some(adopted_digest),
@@ -2164,6 +2172,9 @@ pub(crate) fn extend_folder_dest(
     } else {
         selection.skill_entries(scope.target.scope)?
     };
+    // The bundle standing here may be a workspace's; the follow state is what knows.
+    let workspace =
+        super::followed_workspace(ctx, sid.as_str()).and_then(|ws| super::workspace_ref(ctx, &ws));
     let mut data = AddData {
         skill_id: Some(sid.into_string()),
         name: lock.name,
@@ -2173,6 +2184,7 @@ pub(crate) fn extend_folder_dest(
         // Nothing was adopted, so no trigger was armed and no arming sweep rides this receipt.
         currency: None,
         triggers: Vec::new(),
+        workspace,
         origin: None,
         source: Some(dir.display().to_string()),
         manifest: None,
@@ -3097,7 +3109,7 @@ pub(crate) fn governed_copy_suggestion(
             }
             let same_path = e.upstream_path.as_deref().unwrap_or("") == want_path;
             let copy = topos_types::results::GovernedCopy {
-                workspace: s.workspace_name.clone(),
+                workspace: super::session_workspace_ref(s),
                 name: e.name.clone(),
                 // The CANONICAL host-qualified spelling — a bare `@ws/name` is ambiguous when
                 // sessions on different servers share a workspace slug.
@@ -3339,7 +3351,7 @@ mod tests {
     fn a_receipt_suggestion_calls_the_bytes_identical_only_when_they_are() {
         let live = pn("acme.test", "eng", "deploy", Some("beef"));
         let same = live.suggestion("beef");
-        assert_eq!(same.workspace, "eng");
+        assert_eq!(same.workspace.name, "eng");
         assert_eq!(same.name, "deploy");
         assert_eq!(same.reference, "acme.test/eng/deploy");
         assert!(same.identical);

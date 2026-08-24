@@ -5,6 +5,7 @@
   "type": "object",
   "properties": {
     "address": {
+      "description": "The workspace's JOIN LINK, as the server spells it (see [`InviteReadData::address`]).",
       "type": "string"
     },
     "channel": {
@@ -27,10 +28,41 @@
         "string",
         "null"
       ]
+    },
+    "workspace": {
+      "description": "The workspace the invitations would seat people in, as a person addresses it. Absent when\nthis installation holds no session naming it. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
     "address",
     "seat"
-  ]
+  ],
+  "$defs": {
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
+      ]
+    }
+  }
 }

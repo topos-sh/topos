@@ -290,8 +290,10 @@ pub(crate) fn resolve(
         let unadopted = assigned_not_adopted(&person_plan, cache, host, ws);
         if let Some(regime) = person_plan.regime(host, ws, unadopted) {
             regimes.push(StatusRegime {
-                host: host.clone(),
-                workspace: ws.clone(),
+                workspace: topos_types::results::WorkspaceRef {
+                    host: host.clone(),
+                    name: ws.clone(),
+                },
                 regime,
             });
         }
@@ -2597,7 +2599,7 @@ mod tests {
         let regime = |ws: &str| {
             r.regimes
                 .iter()
-                .find(|x| x.workspace == ws)
+                .find(|x| x.workspace.name == ws)
                 .map(|x| x.regime.clone())
                 .unwrap_or_default()
         };

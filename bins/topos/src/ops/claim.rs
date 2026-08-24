@@ -640,6 +640,10 @@ fn receipt(
         scope: None,
         reference: None,
         undo: Vec::new(),
+        // A claim records a folder against a bundle this scope already manages — the follow state
+        // is what knows whether that bundle is a workspace's.
+        workspace: crate::ops::followed_workspace(ctx, target.id.as_str())
+            .and_then(|ws| crate::ops::workspace_ref(ctx, &ws)),
         governed_copy: None,
         published_match: None,
         note: None,

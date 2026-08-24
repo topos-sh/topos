@@ -158,11 +158,15 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "workspace_address": {
-      "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names\nWHERE these bytes landed. Read from the same best-effort `me` the lines below come from;\nabsent when that read failed or the address does not validate. **INFERRED**\n(additive-only).",
-      "type": [
-        "string",
-        "null"
+    "workspace": {
+      "description": "The workspace this publish reached, as a person addresses it — how the receipt names\nWHERE these bytes landed. Absent when neither this installation's session nor the\nbest-effort `me` read could name it. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceRef"
+        },
+        {
+          "type": "null"
+        }
       ]
     }
   },
@@ -210,6 +214,24 @@
       "required": [
         "folder",
         "machine"
+      ]
+    },
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
       ]
     }
   }

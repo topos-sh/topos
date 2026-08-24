@@ -658,18 +658,23 @@ pub(crate) fn to_json(envelope: &JsonEnvelope) -> String {
 /// means, undo-led — a re-login prints the first line alone (the line's absence from the file is
 /// deliberate, and login never re-adds it).
 pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> String {
-    let server = if data.host.is_empty() {
-        data.server.clone().unwrap_or_default()
-    } else {
-        data.host.clone()
+    // The two halves of the address, each honestly empty where the login does not know it yet: a
+    // bare login has chosen no workspace, and its SERVER is the API base it is dialing.
+    let name = data.workspace.as_ref().map_or("", |w| w.name.as_str());
+    let server = match data.workspace.as_ref().map(|w| w.host.clone()) {
+        Some(host) if !host.is_empty() => host,
+        _ => match data.server.as_deref().map(crate::ops::host_of) {
+            Some(host) if !host.is_empty() => host,
+            _ => data.server.clone().unwrap_or_default(),
+        },
     };
     if let Some(p) = &data.pending {
         // A bare `topos login` has no workspace to name yet — the human picks (or creates) one at
         // the approval, so the lead names the SERVER this login is toward.
-        let lead = if data.name.is_empty() {
+        let lead = if name.is_empty() {
             format!("Logging in to {server} — choose your workspace in the browser.")
         } else {
-            format!("Logging in to {}.", address_of(data, &server))
+            format!("Logging in to {}.", address_of(name, &server))
         };
         return format!(
             "{lead}\nApprove this login in your browser:\n  Open: {}\n  Code: {} (the page shows \
@@ -683,14 +688,14 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
             .display_name
             .clone()
             .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| data.name.clone());
+            .unwrap_or_else(|| name.to_owned());
         let mut s = format!(
             "Connected to {} — the session awaits an owner's approval; nothing arrives until \
              then.",
-            if data.name.is_empty() {
-                &label
+            if name.is_empty() {
+                label.as_str()
             } else {
-                &data.name
+                name
             }
         );
         if let Some(note) = &data.manifest_note {
@@ -698,15 +703,15 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
         }
         s.push_str(&format!(
             "\nUndo: topos logout{}",
-            if data.name.is_empty() {
+            if name.is_empty() {
                 String::new()
             } else {
-                format!(" {}", data.name)
+                format!(" {name}")
             }
         ));
         return s;
     }
-    let mut s = format!("signed in to {}", address_of(data, &server));
+    let mut s = format!("signed in to {}", address_of(name, &server));
     if let Some(user) = data.user.as_deref().filter(|u| !u.is_empty()) {
         s.push_str(&format!(" as {user}"));
     }
@@ -714,8 +719,7 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
         // The feed line this login wrote (only ever on the machine's first connection): what it
         // means, then the paste-ready inverse.
         s.push_str(&format!(
-            "\nwhat {} delivers to you installs on this machine",
-            data.name
+            "\nwhat {name} delivers to you installs on this machine"
         ));
         if !data.undo.is_empty() {
             s.push_str(&format!("\n(undo: topos {})", data.undo.join(" ")));
@@ -735,17 +739,18 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
 
 /// The workspace's full address for a receipt — `<host>/<name>` when the host is known (it always
 /// is on a live session), else the bare name.
-fn address_of(data: &topos_types::results::LoginData, server: &str) -> String {
+fn address_of(name: &str, server: &str) -> String {
     if server.is_empty() {
-        data.name.clone()
+        name.to_owned()
     } else {
-        format!("{server}/{}", data.name)
+        format!("{server}/{name}")
     }
 }
 
 /// The `logout` receipt — the ended sessions + the honest server-side outcome.
 pub(crate) fn session_logout_tty(data: &topos_types::results::LogoutData) -> String {
-    let mut s = format!("Logged out of {}.", data.ended.join(", "));
+    let names: Vec<&str> = data.ended.iter().map(|w| w.name.as_str()).collect();
+    let mut s = format!("Logged out of {}.", names.join(", "));
     if !data.server_revoked {
         s.push_str(
             "\nNote: at least one session could not be revoked server-side (already ended, or \
@@ -1024,7 +1029,7 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         out.push_str(&format!(
             "\nAlso published: workspace '{}' has '{}' as {} — {} `topos add {}` subscribes to the \
              team's copy (delivered and kept current), instead of this local one.",
-            p.workspace,
+            p.workspace.name,
             p.name,
             p.reference,
             if p.identical {
@@ -1041,7 +1046,7 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         out.push_str(&format!(
             "\nAlready governed: workspace '{}' has this {} as {} — `topos add {}` delivers the \
              team's copy (updates, review, one shared history) instead of a separate import.",
-            g.workspace,
+            g.workspace.name,
             if g.same_path { "source" } else { "repository" },
             g.reference,
             g.reference
@@ -1600,7 +1605,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     // The `--remote` catalog — per workspace: the channels (with the adopting file, when one
     // adopts), then the skills with this machine's adoption markers.
     for ws in &data.remote {
-        s.push_str(&format!("{}/{}:\n", ws.host, ws.workspace));
+        s.push_str(&format!("{}:\n", ws.workspace.address()));
         if !ws.channels.is_empty() {
             s.push_str("  channels:\n");
             for c in &ws.channels {
@@ -2474,14 +2479,15 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
         s.push_str("\nsessions:");
         for sess in &d.sessions {
             s.push_str(&format!(
-                "\n  {}/{} ({})",
-                sess.host, sess.name, sess.display_name
+                "\n  {} ({})",
+                sess.workspace.address(),
+                sess.display_name
             ));
             match sess.session_status.as_deref() {
                 Some("pending") => s.push_str(" — awaiting owner approval"),
                 Some("ended") => s.push_str(&format!(
-                    " — ended; `topos login {}/{}` starts a fresh one",
-                    sess.host, sess.name
+                    " — ended; `topos login {}` starts a fresh one",
+                    sess.workspace.address()
                 )),
                 _ => {}
             }
@@ -2495,7 +2501,7 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             scope_header(&scope.scope, scope.manifest.as_deref())
         ));
         for r in &scope.regimes {
-            s.push_str(&format!("\n  {}/{} — {}", r.host, r.workspace, r.regime));
+            s.push_str(&format!("\n  {} — {}", r.workspace.address(), r.regime));
         }
         for note in &scope.notes {
             s.push_str(&format!("\n  {note}"));
@@ -3278,8 +3284,8 @@ pub(crate) fn protect_describe_tty(
         "{direction} {} '{}' to `{}`",
         data.kind, data.target, data.level
     );
-    if let Some(address) = &data.workspace_address {
-        s.push_str(&format!(" in {address}"));
+    if let Some(ws) = &data.workspace {
+        s.push_str(&format!(" in {}", ws.address()));
     }
     if data.loosening {
         s.push_str(" (an owner act)");
@@ -3299,8 +3305,8 @@ pub(crate) fn protect_describe_tty(
 /// The `protect` APPLY's TTY.
 pub(crate) fn protect_applied_tty(data: &topos_types::results::ProtectData) -> String {
     let mut s = format!("Set {} '{}' to `{}`", data.kind, data.target, data.level);
-    if let Some(address) = &data.workspace_address {
-        s.push_str(&format!(" in {address}"));
+    if let Some(ws) = &data.workspace {
+        s.push_str(&format!(" in {}", ws.address()));
     }
     s.push('.');
     s
@@ -3399,8 +3405,8 @@ pub(crate) fn publish_describe_tty(
     use topos_types::results::PublishGate;
     // A workspace is named by its ADDRESS — the handle a person recognizes and types. The display
     // name is the fallback for an address that could not be read, never the first choice.
-    let ws = data
-        .workspace_address
+    let address = data.workspace.as_ref().map(|w| w.address());
+    let ws = address
         .as_deref()
         .or(data.workspace_display_name.as_deref())
         .unwrap_or(&data.workspace_id);
@@ -3620,8 +3626,8 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         data.name,
         short(&data.version_id),
     ));
-    if let Some(address) = &data.workspace_address {
-        out.push_str(&format!(" to {address}"));
+    if let Some(ws) = &data.workspace {
+        out.push_str(&format!(" to {}", ws.address()));
     }
     // WHICH copy shipped, and what became of the ones that did not — printed only where the skill
     // was edited in more than one folder, which is the only time either was a choice. The fact is
@@ -3732,8 +3738,8 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
         Some((skill, version)) => (skill, format!("{skill}@{}", short(version))),
         None => (data.title.as_str(), data.proposal.clone()),
     };
-    let destination = match &data.workspace_address {
-        Some(address) => format!(" to {address}"),
+    let destination = match &data.workspace {
+        Some(ws) => format!(" to {}", ws.address()),
         None => String::new(),
     };
     // WHICH copy these bytes came from — the same parenthetical the landed receipt prints, in the
@@ -3797,8 +3803,8 @@ pub(crate) fn revert_tty(data: &RevertData) -> String {
         short(&data.reverted_to),
         short(&data.new_version_id),
     );
-    if let Some(address) = &data.workspace_address {
-        s.push_str(&format!(" in {address}"));
+    if let Some(ws) = &data.workspace {
+        s.push_str(&format!(" in {}", ws.address()));
     }
     s.push_str(" — nothing was deleted; move current forward again to redo.");
     s
@@ -3840,7 +3846,7 @@ pub(crate) fn review_inbox_tty(data: &topos_types::results::ReviewIndexData) -> 
         };
         format!(
             "  {}  ({})\n    {}  by {}{}\n    review with `topos review {} --approve` (or `--reject -m <reason>`)",
-            e.message, e.workspace_name, e.proposal, e.proposer, stale, e.proposal
+            e.message, e.workspace.name, e.proposal, e.proposer, stale, e.proposal
         )
     };
     if data.inbox.is_empty() && data.outbox.is_empty() {
@@ -3860,7 +3866,7 @@ pub(crate) fn review_inbox_tty(data: &topos_types::results::ReviewIndexData) -> 
             s.push_str(&format!(
                 "  {}  ({})\n    {}  awaiting review{}\n",
                 e.message,
-                e.workspace_name,
+                e.workspace.name,
                 e.proposal,
                 if e.stale {
                     "  [STALE — re-propose]"
@@ -5155,6 +5161,7 @@ mod tests {
         AgentView, BehindElsewhere, ConflictHolds, ConflictPathReport, ListData, LogData,
         MergeReport, MergeResolution, ProposeData, PublishData, PullAction, PullData, PullSkill,
         ReceiptScope, RemoteSkill, RemoveData, RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
+        WorkspaceRef,
     };
 
     use crate::ops::ListOutcome;
@@ -5574,6 +5581,10 @@ mod tests {
             machine_copy: None,
             set_delivery: None,
             display: None,
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
         };
         // The SET-DELIVERED arm, on each of its three answers.
         let delivered = |surfaces: Vec<topos_types::results::Surface>, asked: Vec<String>| {
@@ -5673,6 +5684,7 @@ mod tests {
             set_delivery: None,
             // The local source's tell: no workspace qualifies it.
             display: None,
+            workspace: None,
         };
         let one = add_tty(&local(vec!["~/.codex/skills".to_owned()]));
         assert_eq!(
@@ -5836,6 +5848,7 @@ mod tests {
             machine_copy: None,
             set_delivery: None,
             display: None,
+            workspace: None,
         };
         // A local folder adopted into this project: the row's own `./…` spelling never surfaces —
         // it means nothing away from the file that holds it.
@@ -5966,7 +5979,7 @@ mod tests {
             rewrite_pending: None,
             rewrite_skipped: None,
             kind: None,
-            workspace_address: None,
+            workspace: None,
             share_line: None,
             undo: None,
             from_placement: None,
@@ -5987,7 +6000,10 @@ mod tests {
             skill_id: "topos_a1b2c3".to_owned(),
             workspace_id: "w_ideamotive".to_owned(),
             workspace_display_name: Some("Ideamotive".to_owned()),
-            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "ideamotive".to_owned(),
+            }),
             bundle_digest: "b".repeat(64),
             placements: Vec::new(),
             from_placement: None,
@@ -6060,7 +6076,7 @@ mod tests {
         // An unreadable address never becomes a broken one — the header degrades to the display
         // name, and to the opaque workspace id only when there is nothing else.
         let mut data = describing(PublishGate::Lands);
-        data.workspace_address = None;
+        data.workspace = None;
         let s = super::publish_describe_tty(&data, &yes_argv());
         assert!(
             s.starts_with("Publish 'coolify-deploy' to Ideamotive:"),
@@ -6083,7 +6099,10 @@ mod tests {
             .map(|s| (*s).to_owned())
             .collect();
         let mut data = topos_types::results::ProtectData {
-            workspace_address: Some("topos.sh/acme".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             target: "deploy".to_owned(),
             kind: "skill".to_owned(),
             workspace_id: "w_acme".to_owned(),
@@ -6122,7 +6141,10 @@ mod tests {
         // The whole receipt: what shipped, where it went, the way back out, the members' link, and
         // the one line that brings in someone who is not a member yet.
         let data = PublishData {
-            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "ideamotive".to_owned(),
+            }),
             share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
             undo: Some("topos revert coolify-deploy --to f154315d5fd9".to_owned()),
             invite_line: Some(INVITE.to_owned()),
@@ -6170,7 +6192,10 @@ mod tests {
         );
 
         let landed = PublishData {
-            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "ideamotive".to_owned(),
+            }),
             share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
             undo: Some("topos revert coolify-deploy --to f154315d5fd9".to_owned()),
             from_placement: Some("project/.agents/skills/coolify-deploy".to_owned()),
@@ -6241,7 +6266,10 @@ mod tests {
         );
 
         let landed = PublishData {
-            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "ideamotive".to_owned(),
+            }),
             from_placement: Some("~/.claude/skills/coolify-deploy".to_owned()),
             from_machine: true,
             ..published()
@@ -6274,7 +6302,10 @@ mod tests {
         };
         // The bare publish from a checkout: the project's copy shipped, the machine's kept.
         let landed = PublishData {
-            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "ideamotive".to_owned(),
+            }),
             other_scope_draft: Some(machine.clone()),
             ..published()
         };
@@ -6482,7 +6513,10 @@ mod tests {
             converted_from: None,
             rewrite_pending: None,
             rewrite_skipped: None,
-            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "ideamotive".to_owned(),
+            }),
             share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
             from_placement: None,
             from_machine: false,
@@ -6586,7 +6620,7 @@ mod tests {
     #[test]
     fn propose_tty_omits_a_destination_it_could_not_read() {
         let s = propose_tty(&ProposeData {
-            workspace_address: None,
+            workspace: None,
             share_line: None,
             ..proposed()
         });
@@ -9135,8 +9169,10 @@ mod tests {
         let out = ListOutcome {
             data: ListData {
                 remote: vec![RemoteWorkspace {
-                    host: "topos.sh".to_owned(),
-                    workspace: "acme".to_owned(),
+                    workspace: WorkspaceRef {
+                        host: "topos.sh".to_owned(),
+                        name: "acme".to_owned(),
+                    },
                     workspace_id: "w_acme".to_owned(),
                     channels: vec![
                         RemoteChannel {
@@ -9467,9 +9503,11 @@ mod tests {
             signed_in: true,
             sessions: vec![StatusSession {
                 workspace_id: "w_demo".to_owned(),
-                name: "demo".to_owned(),
+                workspace: WorkspaceRef {
+                    host: "topos.sh".to_owned(),
+                    name: "demo".to_owned(),
+                },
                 display_name: "Demo".to_owned(),
-                host: "topos.sh".to_owned(),
                 session_status: None,
             }],
             scopes: vec![StatusScope {
@@ -9569,8 +9607,10 @@ mod tests {
                 scope: "machine".to_owned(),
                 manifest: None,
                 regimes: vec![StatusRegime {
-                    host: "topos.sh".to_owned(),
-                    workspace: "demo".to_owned(),
+                    workspace: WorkspaceRef {
+                        host: "topos.sh".to_owned(),
+                        name: "demo".to_owned(),
+                    },
                     regime: "adopting all assigned, 1 off".to_owned(),
                 }],
                 notes: Vec::new(),
@@ -10077,6 +10117,7 @@ mod tests {
             topos_types::results::ResetData {
                 skill: "coolify-deploy".to_owned(),
                 workspace_id: None,
+                workspace: None,
                 to_version: "abc1234def56".to_owned() + &"0".repeat(52),
                 drop_diff: String::new(),
                 applied: true,
@@ -10772,8 +10813,10 @@ mod tests {
 
         let connected = |feed_row_added: bool| LoginData {
             workspace_id: "w_acme".to_owned(),
-            host: "topos.sh".to_owned(),
-            name: "acme".to_owned(),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             display_name: Some("Acme".to_owned()),
             server: Some("https://topos.sh/api".to_owned()),
             session_id: Some("sn_1".to_owned()),
@@ -10825,7 +10868,10 @@ mod tests {
 
         // A pending session promises nothing until an owner acts (unchanged copy).
         let mut waiting = connected(false);
-        waiting.name = "eng".to_owned();
+        waiting.workspace = Some(WorkspaceRef {
+            host: "topos.sh".to_owned(),
+            name: "eng".to_owned(),
+        });
         waiting.session_status = "pending".to_owned();
         let text = session_login_tty(&waiting);
         assert!(
@@ -10838,8 +10884,10 @@ mod tests {
         // server and says where the choice happens; a named one spells the address.
         let pending = |name: &str| LoginData {
             workspace_id: String::new(),
-            host: "topos.example.com".to_owned(),
-            name: name.to_owned(),
+            workspace: (!name.is_empty()).then(|| WorkspaceRef {
+                host: "topos.example.com".to_owned(),
+                name: name.to_owned(),
+            }),
             display_name: None,
             server: Some("https://topos.example.com/api".to_owned()),
             session_id: None,

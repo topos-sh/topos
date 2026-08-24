@@ -780,12 +780,7 @@ export interface components {
              */
             share_line?: string | null;
             title: string;
-            /**
-             * @description The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
-             *     WHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed
-             *     or the address does not validate. **INFERRED** (additive-only).
-             */
-            workspace_address?: string | null;
+            workspace?: null | components["schemas"]["WorkspaceRef"];
         };
         /**
          * @description `POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving
@@ -965,13 +960,7 @@ export interface components {
             undo?: string | null;
             /** @description The new commit (the shipped `version_id`). */
             version_id: string;
-            /**
-             * @description The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
-             *     WHERE these bytes landed. Read from the same best-effort `me` the lines below come from;
-             *     absent when that read failed or the address does not validate. **INFERRED**
-             *     (additive-only).
-             */
-            workspace_address?: string | null;
+            workspace?: null | components["schemas"]["WorkspaceRef"];
         };
         /**
          * @description `POST /v1/publish` body — a direct publish that moves `current`. The acting device rides the
@@ -1064,11 +1053,7 @@ export interface components {
             /** @description The good version named by `--to` (the bytes being restored). */
             reverted_to: string;
             skill_id: string;
-            /**
-             * @description The workspace's ADDRESS (`<host>/<name>`) — the receipt names where the pointer moved.
-             *     **INFERRED** (additive-only).
-             */
-            workspace_address?: string | null;
+            workspace?: null | components["schemas"]["WorkspaceRef"];
         };
         /**
          * @description `POST /v1/reverts` body — a **forward** revert: the server constructs a new 1-parent commit carrying the
@@ -1107,6 +1092,7 @@ export interface components {
             decision: components["schemas"]["ReviewDecision"];
             /** @description `<skill>@<version_id>` of the reviewed proposal. */
             proposal: string;
+            workspace?: null | components["schemas"]["WorkspaceRef"];
         };
         /**
          * @description A review verdict — `approve` promotes, `reject` carries a reason back, `withdraw` is the author
@@ -1867,6 +1853,20 @@ export interface components {
             direct: boolean;
             /** @description `true` when the caller's OWN pick (a self-assignment) delivers it. */
             picked?: boolean | null;
+        };
+        /**
+         * @description THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.
+         *
+         *     `<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a
+         *     consumer can hand what it read here straight back to `--workspace`. The two halves ride apart
+         *     because a slash inside a name would make parsing one string ambiguous, and the opaque
+         *     `workspace_id` stays exactly what it was — the wire key — and is never spelled here.
+         */
+        WorkspaceRef: {
+            /** @description The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`). */
+            host: string;
+            /** @description The workspace's ADDRESS name — the slug, never the display name and never the opaque id. */
+            name: string;
         };
     };
     responses: never;

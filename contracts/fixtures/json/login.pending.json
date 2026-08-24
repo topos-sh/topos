@@ -3,8 +3,6 @@
   "command": "login",
   "ok": true,
   "data": {
-    "host": "topos.sh",
-    "name": "acme",
     "pending": {
       "expires_at": "2026-06-25T00:15:00Z",
       "interval_secs": 5,
@@ -12,7 +10,11 @@
       "verification_uri": "https://topos.sh/verify"
     },
     "server": "https://topos.sh/api",
-    "session_status": "awaiting-approval"
+    "session_status": "awaiting-approval",
+    "workspace": {
+      "host": "topos.sh",
+      "name": "acme"
+    }
   },
   "warnings": [],
   "next_actions": [

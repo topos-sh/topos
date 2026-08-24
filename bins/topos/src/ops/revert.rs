@@ -217,8 +217,8 @@ pub(crate) fn revert(
     };
 
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
-    let address = format!("{}/{}", lane_session.host, lane_session.workspace_name);
-    map_outcome(ctx, &sp, &rec, &receipt, &name, &good_hex, &address).map(RevertOutcome::Applied)
+    let workspace = crate::ops::session_workspace_ref(lane_session);
+    map_outcome(ctx, &sp, &rec, &receipt, &name, &good_hex, &workspace).map(RevertOutcome::Applied)
 }
 
 fn map_outcome(
@@ -228,7 +228,7 @@ fn map_outcome(
     receipt: &WriteReceipt,
     name: &str,
     good_hex: &str,
-    workspace_address: &str,
+    workspace: &topos_types::results::WorkspaceRef,
 ) -> Result<RevertData, ClientError> {
     match receipt.outcome() {
         TerminalOutcome::Ok => {
@@ -238,7 +238,7 @@ fn map_outcome(
             let new_gen = contribute::apply_light_advance(ctx, sp, rec, record)?;
             Ok(RevertData {
                 skill_id: rec.skill_id.clone(),
-                workspace_address: Some(workspace_address.to_owned()),
+                workspace: Some(workspace.clone()),
                 name: name.to_owned(),
                 reverted_to: good_hex.to_owned(),
                 new_version_id: rec.candidate_commit.clone(),
