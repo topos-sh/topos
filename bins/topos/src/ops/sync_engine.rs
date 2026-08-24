@@ -1109,13 +1109,14 @@ fn undone_version_note(
                 .flatten()
                 .is_some_and(|d| to_hex(&d) == target_digest_hex)
         });
+    // The way back is spelled SHORT, like every version every surface prints: `revert --to`
+    // resolves a prefix against the workspace's history, in the scope the command stands in.
     let short = |hex: &str| hex.get(..12).unwrap_or(hex).to_owned();
     restores_ancestor.then(|| {
         let (was, now) = (short(&lock.base_commit), short(&to_hex(&target)));
         format!(
             "replaced your copy (= version {was}) with current {now} — {was} stays in history: \
-             topos revert {name} --to {}",
-            lock.base_commit
+             topos revert {name} --to {was}"
         )
     })
 }
