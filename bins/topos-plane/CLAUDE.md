@@ -7,10 +7,11 @@ publicly reachable: no published port, no public router.
 
 ## lib
 
-- **Construction:** `PlaneConfig { database_url, git_root, large_root }` + `PlaneState::open(cfg)`
-  (leak-free — the composer names no `plane_store` type); `PlaneState::new(Arc<Authority>)` for
-  tests. `PlaneState::with_internal_token(token)` arms the custody lane (sha256-only retention;
-  unarmed, every `/internal/v1/*` route answers the uniform 404).
+- **Construction:** `PlaneConfig { database_url, store: StoreBackend, staging_root }` +
+  `PlaneState::open(cfg)` (leak-free — the composer names no `plane_store` type; `StoreBackend`
+  is `Local { root }` or `S3 { endpoint, bucket, keys, region }`); `PlaneState::new(Arc<Authority>)`
+  for tests. `PlaneState::with_internal_token(token)` arms the custody lane (sha256-only
+  retention; unarmed, every `/internal/v1/*` route answers the uniform 404).
 - **`router(state)`** — the whole HTTP surface: `GET /healthz` (unauthenticated liveness) + the
   bearer-gated `/internal/v1` custody lane; anything else is a uniform JSON 404. Request-level
   tracing wraps everything (matched route template, never a raw path).
@@ -30,10 +31,13 @@ publicly reachable: no published port, no public router.
 
 ## bin
 
-A thin `axum` main: parse config (`TOPOS_PLANE_BIND`, `DATABASE_URL`, `TOPOS_PLANE_GIT_ROOT`,
-`TOPOS_PLANE_LARGE_ROOT`, `TOPOS_PLANE_INTERNAL_TOKEN`, `TOPOS_PLANE_GC_INTERVAL_SECS`; pool
-tuning via `TOPOS_PLANE_DB_*`), open the state, arm the lane, spawn maintenance, serve. No
-subcommands, no trust logic.
+Two commands, no trust logic. **serve** (the default — a bare `topos-plane`, flags and env as
+ever): parse config (`TOPOS_PLANE_BIND`, `DATABASE_URL`, `TOPOS_PLANE_STORE` local|s3 with
+`TOPOS_PLANE_GIT_ROOT` as the local root and `TOPOS_PLANE_S3_*` for a bucket, `TOPOS_PLANE_TMP`
+for the ephemeral staging dir, `TOPOS_PLANE_INTERNAL_TOKEN`, `TOPOS_PLANE_GC_INTERVAL_SECS`; pool
+tuning via `TOPOS_PLANE_DB_*`), open the state, arm the lane, spawn maintenance, serve.
+**import-local** (`src/import.rs`): the one-shot cutover from the pre-object-store on-disk layout
+— run with the vault stopped; prints per-workspace counts + PASS/FAIL; idempotent.
 
 Dependencies: `plane-store`, `topos-core` (sha256 for the token hash), `topos-types`
 (contract-derives — one of the two contract producers), `axum`, `utoipa`, `tokio`, `tracing`,

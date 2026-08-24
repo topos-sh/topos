@@ -25,13 +25,12 @@
 //! recomputed digest, which fails **typed**. gix's own sha-1 verification is irrelevant — we authenticate
 //! against topos's sha256, end to end.
 //!
-//! ## Placement-independent identity (the large-object offload is a drop-in)
+//! ## Placement-independent identity
 //!
 //! Every file is a real content-addressed blob addressed by `blob_id = sha256(raw bytes)`. Because
 //! identity is recomputed over real bytes, *which* store physically holds a blob never changes any id or
-//! digest. The [`largeobj`] module wires the local-filesystem [`largeobj::LocalLargeStore`] behind the
-//! [`largeobj::LargeObjectStore`] trait; the authority crate routes a big blob there at migrate (keyed by
-//! the same `blob_id`) and dispatches reads/unlinks on the recorded location — with zero identity impact.
+//! digest — the vault keeps its objects in an object store through the [`codec`], the client in bare
+//! repos, and both agree on every id.
 
 mod diff;
 mod error;
@@ -41,7 +40,6 @@ mod read;
 mod store;
 
 pub mod codec;
-pub mod largeobj;
 
 #[cfg(test)]
 mod tests;
@@ -49,7 +47,6 @@ mod tests;
 pub use diff::{DiffFile, FileDiffSection, unified_diff, unified_diff_sections};
 pub use error::{GitstoreError, VerifyError};
 pub use fence::{GIT_OID_LEN, StagedBundle, StagedEntry};
-pub use largeobj::{LargeObjectStore, LocalLargeStore};
 pub use merge::{
     MERGE_INPUT_CAP, MERGE_OUTPUT_CAP, MergeError, MergeFileResult, merge_file,
     merge_file_keep_ours,

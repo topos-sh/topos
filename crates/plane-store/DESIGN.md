@@ -17,23 +17,36 @@ The consequence for this document: every rule below is a **custody** rule — te
 integrity, reachability, lifecycle. None of them is an access-control rule, and none should be grown
 into one; a request that reached this layer has already been judged.
 
-## The security boundary is the database, not the directory
+## The security boundary is the database, not the key prefix
 
-The vault stores all of one workspace's bundles in a **single per-workspace git object store** (a
-monorepo). That is an operational choice — one cloneable artifact, one history, one store to back up
-— and it is **not** the tenant boundary. Git has no per-object access control and objects are
-content-addressed, so the boundary has to live at the access layer. It is two independent
-mechanisms, and the directory layout is never one of them:
+The vault stores every byte in **one object store** — a local directory (the self-host default) or
+any S3-compatible bucket, behind one seam (`src/store.rs`) — as immutable zlib **loose git
+objects** keyed by their own git OID at the exact bare-repo path shape
+`<workspace>/objects/<aa>/<38-hex>`. That shape is an operational choice (a pre-existing git root
+is readable in place; any git tooling pointed at a synced store reads it natively) — and it is
+**not** the tenant boundary. Objects are content-addressed and the store has no per-object access
+control, so the boundary has to live at the access layer:
 
 1. **Binding.** Every row in every table carries `workspace_id`, and every query predicates on it
    (bound, never interpolated). Structurally, every database method takes `workspace_id` as a
    mandatory argument — a query without it cannot be written outside `mod db`. A forgotten predicate
-   is the monorepo's likeliest leak, so it is made unrepresentable. The metadata is one shared
-   Postgres database, so this binding — not a physical file — is the whole of the metadata
-   separation.
-2. **Physical.** A per-workspace git store and a per-workspace large-object root, both under
-   confined roots (the object bytes). `WorkspaceId` is a path-safe newtype (no separators, no `..`,
-   no leading dot), so a store path can never escape its root.
+   is the likeliest leak, so it is made unrepresentable. The metadata is one shared Postgres
+   database, so this binding — not a key prefix — is the whole of the separation.
+2. **Prefixing.** Every key begins with the workspace id — `WorkspaceId` is a path-safe newtype (no
+   separators, no `..`, no leading dot), so a key can never name another tenant's prefix. The
+   prefix is bookkeeping hygiene (it is what lets workspace deletion be one bounded prefix sweep,
+   and it forecloses cross-workspace byte dedup by construction), never the access decision.
+
+## The vault is stateless
+
+Postgres + the object store are the vault's whole durable state. Upload staging is an **ephemeral
+local directory** (`TOPOS_PLANE_TMP`, default under `/tmp`): no volume, no fsync, and losing it on
+a container replacement is safe by design — the janitor reconciles leftover `upload` rows via the
+existing protocol (`remove` tolerates a dir that is already gone), and an interrupted upload
+replays from the client's write-ahead log. A PUT that landed without its `absent → present`
+transition is a harmless content-addressed orphan, dedup-verified on the next ingest of the same
+content. The vault must serve correctly after container replacement with only Postgres + the
+store — the composed e2e suite proves exactly that (restart with an empty local filesystem).
 
 ## The bundle-scoped read rule
 
@@ -105,12 +118,38 @@ constraints, so an ordinary unique violation (a genuine bug) still surfaces. Eve
 invariant — the whole-`generation` CAS, the object-presence fence, the GC keep-set — is re-proven by
 SSI plus retry rather than by a global lock. Reads run autocommit at READ COMMITTED.
 
+## History lives in rows; the skeleton lives in the store
+
+Refs are gone server-side. A version row carries its **git commit locator** (`git_commit_oid`) and
+its **message** beside the facts it always carried (`first_parent`, attribution, timestamps), so
+`log` is one recursive Postgres query and version metadata needs the store only for the file
+listing (commit → tree walk). Both columns are nullable — rows written before the object-store
+import have neither, and every read that needs them **fails closed** with a typed error naming
+`topos-plane import-local` (which backfills them from the old repos' refs). New writes always fill
+both; a deduped re-commit of an identical candidate heals a pre-import row's NULLs.
+
+Tree and commit objects — the version **skeleton** — carry no presence or reachability rows: they
+are addressing structure, not custody content, and they are retained until **workspace deletion**
+(a store prefix-list + bulk-delete, run after the rows drop), exactly the retention the
+per-workspace repo used to give them. They are written in `migrate_finish`, immediately before the
+commit-version transaction; a crash in between leaves **orphan skeleton objects — accepted**
+(immutable, content-addressed, bytes-cheap, invisible to every read, reclaimed with the
+workspace). No sweeper exists for them in this increment, deliberately.
+
+**Write policy: plain idempotent put.** Keys are content-addressed on both lanes (sha256-identified
+file bytes framed as git blobs; OID-keyed skeleton), so an overwrite writes the identical logical
+object — a re-put is self-HEALING, never destructive — and no conditional-write support is asked of
+a backend (the weakest-backend rule; the atomic swap is the Postgres pointer transaction).
+Corrupted-object repair is a re-put from a healthy source; verify-on-read remains the gate. (The
+zlib envelope may differ across compressor versions; identity is the OID over the *decompressed*
+frame, which every read verifies.)
+
 ## The object-lifecycle / garbage-collection fence
 
-The database is the single authority for every object's byte status; the git store holds dumb bytes
-and always *trails* the database. No git ref is used for reachability, and no operation stats the
-store to decide presence — `object_presence` is the sole presence authority, and GC acts only on
-objects that have a row there. A few decisions earn their keep:
+The database is the single authority for every object's byte status; the store holds dumb bytes
+and always *trails* the database. No operation stats the store to decide presence —
+`object_presence` is the sole presence authority, and GC acts only on objects that have a row
+there. A few decisions earn their keep:
 
 - **The keep-set is exactly the read-authorization surface, not the `current` ancestry.**
   `read_object` serves a blob reachable from *any* non-purged version of the bundle; it never
@@ -138,47 +177,63 @@ objects that have a row there. A few decisions earn their keep:
   until the commit transaction consumes it and its `version_object` edges take over. That
   lease→edge handoff is what closes the reclaim window by construction rather than by timing.
 - **One actor removes the bytes.** The acquire stamps an accurate wall-clock into
-  `status_updated_at` and that value is the actor's token: the unlink re-confirms ownership of it and
-  the finalize is gated on matching it, so a recovery sweep taking over a frozen pass can never also
-  unlink or finalize the same row. Each step is its own short transaction (or none, for the unlink),
-  so no write transaction is held across a filesystem op.
+  `status_updated_at` and that value is the actor's token: the delete step re-confirms ownership of
+  it immediately before issuing, and the finalize is gated on matching it, so a recovery sweep
+  taking over a frozen pass can never also delete or finalize the same row. Each step is its own
+  short transaction (or none, for the delete), so no write transaction is held across a store op.
+- **THE DELETE-LIFETIME INVARIANT.** On a remote store, "one actor" needs one more leg: a DELETE
+  issued under a token must be provably DEAD before that token can be superseded, or a
+  delayed/retried DELETE could remove bytes a later ingest re-installed under a fresh token —
+  leaving Postgres saying `present` over missing bytes. The seam enforces it structurally: the GC
+  delete rides a dedicated client with transport retries DISABLED (a single attempt), a hard
+  request timeout, and an outer wall-clock bound (`REMOTE_DELETE_TIMEOUT_MS`, 15s) **strictly
+  below** the recovery-staleness threshold (`RECOVERY_STALE_MS`, 60s) — the ordering is a
+  compile-time assertion — while recovery may supersede a token only once the row is that stale.
+  An AMBIGUOUS outcome (timeout, transport fault) **never finalizes absence**: the row stays
+  `deleting` for a later pass, which re-runs the idempotent delete under its own token. The named
+  residual: a DELETE whose connection was torn down at the bound may still execute server-side
+  moments later — that execution window is bounded far below the 45s margin between the two
+  constants, and transport-level re-issue (the dangerous, minutes-later replay) is what the
+  retry-disabled client forecloses.
 - **Scheduling is the composing server's.** `run_gc` / `run_recovery` / `run_janitor` are public ops;
   this library holds no scheduler and no background task. One server-clock unit is one epoch
   **millisecond** throughout — a seconds-valued TTL constant would collapse these fences
   thousandfold, which is why the convention is stated at every site that owns one.
 
-## The size-routed large-object store
+## One store, one blob shape (the large-object split is gone)
 
-Built on the fence: at install a **file blob** is routed by **size** — at or above a configurable
-threshold (1 MiB by default) it is physically offloaded to a per-workspace content-addressed
-`LocalLargeStore` (`object_presence.location = large-local`), below it stays a git loose object
-(`git`); commits and trees always stay in git. A per-blob reject cap (100 MiB by default) fails
-typed at **ingest**, before any bytes are staged.
-
-- **Identity is placement-independent, and there are no pointer files.** `version_id` and
-  `bundle_digest` are topos's own sha256 over real bytes, computed at ingest *before* any routed
-  write, so which store holds a blob changes no id or digest. The git tree faithfully carries an
-  offloaded blob's `git_oid` (the tree is built with the low-level plumbing editor, which tolerates a
-  child object absent from git) — no LFS pointer object, no `.gitattributes`. `size` and `location`
-  are operational and never enter a manifest.
-- **The database owns `location`; reads and the GC unlink dispatch on it.** A read looks up the
-  *present* row's `location` and fetches from git or the large store — always after the same
-  bundle-scoped reachability probe, and a post-probe miss in either store is `Integrity`, never
-  not-found. The GC unlink step dispatches on `location` (a loose-object delete, or a
-  `LocalLargeStore` delete keyed on the object id); the lease, the CAS, the `deleting` fence, and
-  recovery are unchanged by the routing.
-- **Per-workspace roots; no cross-workspace dedup.** Each workspace gets its own large-object root,
-  so byte-identical content in two workspaces is two distinct physical objects and the hard tenant
-  boundary is the path, not just a predicate. `LocalLargeStore` is a dumb byte layer (crash-safe
-  two-phase install, verify-on-read); the routing and the `location` dispatch live here.
+Every file blob — 1 KiB or 90 MiB — is one zlib loose blob object at its `git_oid` key; the
+size-routed `LocalLargeStore` and its threshold are deleted (the object store is the remote-capable
+byte layer they were reserving a seat for). The per-blob reject cap (100 MiB by default) survives,
+failing typed at **ingest** before any bytes are staged. `object_presence.location` **stays as a
+column with one live value** (`git`): dropping it would buy nothing (the CHECK and every row would
+need rewriting) and cost the seam a future placement split would need back, it still documents
+which store family holds the bytes, and — the load-bearing part — a legacy value (`large-local`)
+is how a PRE-IMPORT row is recognized: reads of one fail closed naming `import-local`, and the
+import flips the column as it converts the raw large-store files into git-blob frames (verifying
+BOTH identities: the sha256 filename and the recorded `git_oid` locator). `size` stays raw file
+bytes, so the storage-accounting contract (`storage_stats` = the sum of present raw sizes, never
+compressed store bytes, never the skeleton) is unchanged.
 
 ## What this deliberately is not
 
 - **No signing, no keys, no credentials.** Nothing here signs a pointer or hashes a credential;
   integrity rests on content addressing plus verify-on-read. Optional signing could layer on later
   without touching identity, the schema, or the read signature.
-- **The `large-remote` backend is schema-reserved, not built.** An S3-compatible impl shaped like
-  `LocalLargeStore` plus a third `location` arm, and the idempotent online backfill it would need
-  (copy → verify → flip `location` → repack), are additive and client-invisible when they land.
+- **No conditional writes, no presigned URLs, no cross-workspace dedup.** The store contract is
+  put/get/exists/delete plus prefix-list + bulk-delete used ONLY by workspace deletion and import
+  verification — the weakest S3-compatible backend suffices, and every byte still streams through
+  the vault's verified reads.
 - **No policy, no scheduler, no HTTP.** The composing server owns the wire, the clock ticks, and
   every decision about who may ask.
+
+## Named residuals
+
+- The LOCAL backend fsyncs a landed object + its dir chain inside the seam (the backend's own
+  stage-and-rename does not), so "put returned ⇒ durable" holds on both backends; macOS
+  `F_FULLFSYNC` remains the platform residual it always was.
+- Workspace deletion on the local backend prunes emptied shard dirs (the backend's automatic
+  cleanup); a crashed staged-upload temp beside a local object is invisible garbage the next
+  workspace deletion sweeps with the prefix.
+- Workspace deletion assumes the app does not recreate the same workspace id concurrently with the
+  prefix sweep — the same assumption the old `rm -rf` carried.

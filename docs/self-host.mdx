@@ -272,7 +272,9 @@ loudly rather than serving an unmigrated database.
 
 **Back up first** — migrations apply automatically and there is no automated downgrade. Rolling
 back is: stop the stack, restore the pre-upgrade backup, check out the previous tag, `pull` and
-`up -d`, and pin clients to match (`topos self-update --version <tag>`).
+`up -d`, and pin clients to match (`topos self-update --version <tag>`). Upgrading an existing
+deployment across the object-store release additionally needs the
+[one-shot import](#upgrading-an-existing-deployment-run-the-import-once).
 
 Each side declares a compatibility floor, so an upgrade is not a fleet-wide chase. The server's
 protocol card carries the release it runs and the oldest CLI it speaks to; every CLI carries the
@@ -294,19 +296,21 @@ declare nothing and simply pass, until the next actual break.
 
 ## Backups
 
-All durable state lives in **three volumes** — and the order you snapshot them in matters:
+A restore needs exactly **three things**: the database, the object store, and the gateway key.
 
-| Volume | Holds |
-|---|---|
-| `gateway-key` (`/run/topos`) | The gateway's master key. Tiny, and custody-critical: the tool sign-ins in the database decrypt only with it — lose it and every connected sign-in must be redone |
-| `plane-data` (`/data`) | The bytes: per-workspace git object stores and large objects |
-| `pg-data` (`/var/lib/postgresql`) | The schemas: identity, membership, catalog, channels, proposals, audit, encrypted tool sign-ins — plus the version index and `current` pointers |
+| State | Where | Holds |
+|---|---|---|
+| `gateway-key` (`/run/topos`) | volume | The gateway's master key. Tiny, and custody-critical: the tool sign-ins in the database decrypt only with it — lose it and every connected sign-in must be redone |
+| the object store | `plane-data` volume (`/data`) — or your S3-compatible bucket | The bytes: every bundle's content, as immutable content-addressed objects |
+| `pg-data` (`/var/lib/postgresql`) | volume | The schemas: identity, membership, catalog, channels, proposals, audit, encrypted tool sign-ins — plus the version index and `current` pointers |
 
-<Warning>
-  **Snapshot the bytes first, then the database.** A pointer in the database may name a byte
-  written a moment ago. Bytes first, and the worst case is a few unreferenced blobs — harmless.
-  Database first, and a pointer can name a byte your snapshot missed — a real hole.
-</Warning>
+Every object in the store is immutable and named by its own hash, and the database records a
+version only after its bytes are durably stored — so snapshot order between the store and the
+database cannot corrupt anything. Skew in either direction is benign or loud: a store snapshot
+taken later than the database's holds at worst a few unreferenced objects (harmless); a database
+snapshot taken later can name a version the store snapshot missed, and reading that version fails
+as a **loud integrity error** on exactly that version — never silent corruption, never damage to
+any other version.
 
 ```bash
 docker run --rm -v topos_plane-data:/data -v "$PWD":/backup alpine \
@@ -314,13 +318,20 @@ docker run --rm -v topos_plane-data:/data -v "$PWD":/backup alpine \
 docker compose exec -T db pg_dump -U topos -d topos --format=custom > topos-$(date +%F).dump
 ```
 
-To restore: bring the stack down, restore the bytes volume, start only `db` and `pg_restore` into
-it, then bring the rest up. **Restore the database before the app first serves a request** — on an
-empty database the first-boot ceremony would mint a fresh workspace and claim link.
+On the S3-compatible backend there is no byte tar at all: the bucket **is** the byte backup
+(durability is your storage provider's), and a restore is the Postgres dump + the same bucket +
+the `gateway-key` volume. One honest caveat: bytes you deleted after the dump stay deleted — a
+restored older index that still names a since-purged version fails loudly on that version's reads.
+
+To restore: bring the stack down, restore the store (skip this on a bucket — it is already there),
+start only `db` and `pg_restore` into it, then bring the rest up. **Restore the database before
+the app first serves a request** — on an empty database the first-boot ceremony would mint a fresh
+workspace and claim link.
 
 A backup deliberately covers none of: copies already delivered to people's machines (those are
 theirs), client credentials (`~/.topos/identity/sessions.json` — losing it just means logging in
-again), or your `.env` (rotating `TOPOS_WEB_AUTH_SECRET` signs every browser out).
+again), upload staging (ephemeral by design — an interrupted upload replays from the client), or
+your `.env` (rotating `TOPOS_WEB_AUTH_SECRET` signs every browser out).
 
 ## Bring your own Postgres
 
@@ -347,8 +358,60 @@ and proves the grants hold:
 sh scripts/check-db-grants.sh
 ```
 
-A managed-database backup covers the metadata half only — **the `plane-data` volume is still yours
-to back up.**
+A managed-database backup covers the metadata half only — **the object store (the `plane-data`
+volume, or your bucket) is still yours to back up.**
+
+## The object store
+
+The vault keeps every bundle byte in one object store. The default is a **local directory** (the
+`plane-data` volume) and needs zero configuration — a fresh install and an existing one both just
+work. Optionally, point it at any **S3-compatible** endpoint instead:
+
+```bash title=".env"
+TOPOS_PLANE_STORE=s3
+TOPOS_PLANE_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+TOPOS_PLANE_S3_BUCKET=<bucket>
+TOPOS_PLANE_S3_ACCESS_KEY_ID=<key id>
+TOPOS_PLANE_S3_SECRET_ACCESS_KEY=<secret>
+TOPOS_PLANE_S3_REGION=auto        # "auto" for R2; your region elsewhere
+```
+
+With the store on a bucket the vault is stateless: it serves correctly after any container
+replacement with only the database and the bucket, and the byte half of your backup story is the
+bucket itself (see [Backups](#backups)).
+
+### Upgrading an existing deployment: run the import once
+
+This release moves version history's bookkeeping into the database, and reads of pre-existing
+versions **fail closed until the one-shot import has run** — even if you stay on the local store.
+With the vault **stopped**:
+
+```bash
+docker compose stop plane
+docker compose run --rm plane import-local
+docker compose up -d plane
+```
+
+`import-local` backfills the new version columns from the old repos' refs, converts any
+large-object files into ordinary store objects, verifies everything it touched (every live
+version's objects must exist and hash to their ids), prints per-workspace counts, and ends with a
+single `PASS` or `FAIL`. It is idempotent — a rerun resumes; on `FAIL` nothing is lost: fix the
+named items and rerun. A brand-new install needs none of this.
+
+### Switching backends (local → S3-compatible)
+
+The same tool is the cutover. Expand first, then import, then flip:
+
+1. Create the bucket and credentials; add the `TOPOS_PLANE_S3_*` variables to `.env` but leave
+   `TOPOS_PLANE_STORE` at `local`.
+2. Stop the vault (`docker compose stop plane`) — the import runs against a quiet store.
+3. Import into the bucket:
+   `docker compose run --rm -e TOPOS_PLANE_STORE=s3 plane import-local`
+   and wait for `PASS`.
+4. Flip `TOPOS_PLANE_STORE=s3` in `.env` and `docker compose up -d plane`.
+
+The local volume stays untouched throughout, so falling back is flipping the variable back. Keep
+`gateway-key` regardless — the bucket restores custody bytes, never encrypted gateway credentials.
 
 ## Operating it
 
@@ -361,9 +424,10 @@ to back up.**
 - **Rate limiting:** the API belts key on the last `x-forwarded-for` hop. With **no** reverse
   proxy in front, every caller shares one bucket — set `TOPOS_WEB_RATELIMIT=off` and let your
   ingress do it.
-- **Storage:** `plane` runs recovery, quarantine-janitor, and GC passes on an interval
-  (`TOPOS_PLANE_GC_INTERVAL_SECS`, default 300). Watch the `plane-data` volume as version history
-  grows.
+- **Storage:** `plane` runs recovery, staging-janitor, and GC passes on an interval
+  (`TOPOS_PLANE_GC_INTERVAL_SECS`, default 300). On the local store, watch the `plane-data` volume
+  as version history grows; on a bucket, watch the bucket. Upload staging is an ephemeral local
+  dir (`TOPOS_PLANE_TMP`, default under `/tmp`) — no volume, safe to lose.
 - **Error reporting:** optional `SENTRY_DSN`, server-side only — no tracing, no cookies, no PII.
 
 The rest of the environment surface (pool sizes, timeouts, bind addresses, migration paths) is

@@ -29,8 +29,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/topos-plane /usr/local/bin/topos-plane
 
-# The vault's own state lives under /data (mount a volume): the per-workspace git + large object
-# stores. The metadata lives in Postgres (DATABASE_URL), NOT here.
+# The DEFAULT (local) object store lives under /data (mount a volume): every bundle byte as
+# immutable loose objects at the bare-repo path shape. The metadata lives in Postgres
+# (DATABASE_URL), NOT here. With TOPOS_PLANE_STORE=s3 (+ TOPOS_PLANE_S3_*) the bytes live in the
+# bucket instead and /data is unused — the vault is then stateless (upload staging is ephemeral,
+# under /tmp by default; TOPOS_PLANE_TMP overrides). TOPOS_PLANE_LARGE_ROOT feeds only the
+# one-shot `topos-plane import-local` cutover (the pre-object-store large-object layout).
 ENV TOPOS_PLANE_BIND=0.0.0.0:8787 \
     TOPOS_PLANE_GIT_ROOT=/data/git \
     TOPOS_PLANE_LARGE_ROOT=/data/large
