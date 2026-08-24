@@ -749,6 +749,50 @@ pub(crate) fn followed_workspace(ctx: &Ctx<'_>, skill_id: &str) -> Option<String
         .map(|(_, fc)| fc.workspace_id)
 }
 
+/// Advance the cwd project's `topos.lock` entry for `name` to `version` after a pointer move this
+/// machine just made (a landed publish; a landed revert) — a commit moves `HEAD`, and the project
+/// the command stood in runs the new version at once instead of reading `[behind]` until a
+/// separate `topos update`. The nearest manifest up from the cwd names the project; an entry the
+/// manifest PINS (`name = "<version>"`) is left alone, because the pin is what that project asked
+/// to run. Returns the lock's path when an entry moved (or already stood at the version).
+///
+/// Best-effort by design: the remote half has landed, and a local fault must never fail the
+/// command — it is said on stderr and the next `topos update` there converges the lock.
+pub(crate) fn advance_project_lock(ctx: &Ctx<'_>, name: &str, version: &str) -> Option<String> {
+    let roots = ctx.roots.as_ref()?;
+    let cwd = roots.cwd.as_deref()?;
+    let dir = crate::manifest::scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home))?;
+    let path = dir.join(crate::manifest::lock::LOCK_FILE);
+    // The row that asks for the bundle, when the manifest spells one: a pinned row holds.
+    let manifest = dir.join(crate::manifest::MANIFEST_FILE);
+    let pinned = manifest_edit::local_rows(ctx)
+        .ok()
+        .into_iter()
+        .flatten()
+        .find(|(p, _, _)| *p == manifest)
+        .is_some_and(|(_, _, rows)| {
+            rows.iter()
+                .any(|row| row.shape.leaf_name() == name && row.pin().is_some())
+        });
+    if pinned {
+        return None;
+    }
+    match crate::manifest::lock::advance_entry(ctx.fs, &dir, name, version) {
+        Ok(true) => Some(path.display().to_string()),
+        Ok(false) => None,
+        Err(e) => {
+            crate::out::errln!(
+                "topos: {name}: {} could not be advanced to {}: {} — `topos update` there \
+                 converges it",
+                path.display(),
+                crate::render::short(version),
+                crate::render::safe_message(&e)
+            );
+            None
+        }
+    }
+}
+
 /// The workspace a followed skill lives in, or a typed error if it is not followed — the STRICT scope the
 /// plane ops on an already-existing skill need (`diff <ref>` reads it; `review` / `revert` sign in it).
 /// Unlike [`write_workspace_for_skill`], there is NO ambient fallback: those verbs always act on a skill
