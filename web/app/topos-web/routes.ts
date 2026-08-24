@@ -152,6 +152,9 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       // Sharing a server with the workspace, from a machine: the spelling goes over the wire and
       // the ruling happens here, so the lane and the web form answer alike.
       route("mcp-servers", file("api.v1.mcp-servers.ts")),
+      // What a committed lock converges an MCP entry to: ONE stored revision of a connected
+      // server, in the shape the catalog index serves the current one.
+      route("mcp-servers/:skill/revisions/:revisionId", file("api.v1.mcp-revision.ts")),
       // No route writes a person's feed: what the server says someone should have is decided
       // here (a curator's assignment, or their own click), never by a machine they logged in
       // from. The retired `profile*` paths fall through to the splat's uniform 404.
