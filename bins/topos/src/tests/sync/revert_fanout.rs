@@ -113,6 +113,7 @@ impl crate::plane::DirectorySource for HistoryDirectory {
                     current: false,
                     purged_at: None,
                     purged_by: None,
+                    at: None,
                 })
                 .collect(),
             proposals: Vec::new(),
