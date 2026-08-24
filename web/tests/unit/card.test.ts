@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { installTestEnv } from "./helpers/test-env";
 
 /**
@@ -99,7 +100,7 @@ describe("cardResponse — the served card", () => {
       server_version: string;
       min_cli_version: string;
     };
-    expect(body.schema_version).toBe(1);
+    expect(body.schema_version).toBe(WIRE_SCHEMA_VERSION);
     expect(body.card).toBe("topos-protocol-card");
     // The API base a client re-roots onto is this origin's /api mount — the app is the door.
     expect(body.api_base_url).toBe(`${ORIGIN}/api`);

@@ -16,10 +16,10 @@
  * envelopes, exactly as the vault's `skip_serializing_if` drops them.
  */
 
+import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { type NextAction, nextAction } from "./next-actions.server";
 import { internalError, uniformNotFound } from "./wire.server";
 
-const WIRE_SCHEMA_VERSION = 1;
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
 /** The `[RequestAccess, ContactAdmin]` recovery actions a DENIED carries (on both envelope + error). */

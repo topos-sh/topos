@@ -3,6 +3,7 @@ import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireReadActor } from "@/lib/auth/guards.server";
 import { publishTargetOf } from "@/lib/db/queries.custody.server";
+import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { custodyCurrent } from "@/lib/plane/reads.server";
 
 /**
@@ -32,7 +33,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   }
   return Response.json(
     {
-      schema_version: 1,
+      schema_version: WIRE_SCHEMA_VERSION,
       scope: { workspace_id: actor.workspaceId, skill_id: target.bundleId },
       record: { version_id: current.data.version_id, generation: current.data.generation },
     },

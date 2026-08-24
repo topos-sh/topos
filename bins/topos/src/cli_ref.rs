@@ -409,7 +409,7 @@ fn render_md(table: &[&'static KnownHarness]) -> String {
     // emits; the worked examples live in the agents guide (topos.sh/docs/agents).
     out.push_str(
         "## The `--json` envelope\n\n\
-         Every `--json` run prints one object on stdout: `schema_version` (1), `command`, `ok`, a \
+         Every `--json` run prints one object on stdout: `schema_version` (2), `command`, `ok`, a \
          per-command `data` payload, `warnings`, `messages`, `next_actions`, and — on `ok: false` \
          — an `error` (`code`, `outcome`, `retryable`, plus its own `next_actions`). Each \
          `next_actions` entry is a ready-to-run step: `argv` is a complete command; `needs` lists \

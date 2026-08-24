@@ -21,7 +21,7 @@ fn validator_for<T: schemars::JsonSchema>() -> Validator {
 
 fn good_pointer() -> WireCurrentRecord {
     WireCurrentRecord {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         scope: PointerScope {
             workspace_id: "w_1".into(),
             skill_id: "s_1".into(),
@@ -56,18 +56,18 @@ fn current_pointer_accepts_valid_and_rejects_malformed() {
         "an uppercase version_id must be rejected (lowercase-hex pattern)"
     );
 
-    // schema_version is pinned const 1.
+    // schema_version is pinned const to THIS contract's version — the previous one is refused.
     let mut bad = good.clone();
-    bad["schema_version"] = json!(2);
+    bad["schema_version"] = json!(topos_types::WIRE_SCHEMA_VERSION - 1);
     assert!(
         !v.is_valid(&bad),
-        "schema_version != 1 must be rejected (const)"
+        "another schema_version must be rejected (const)"
     );
 }
 
 fn good_delivery() -> WireDelivery {
     WireDelivery {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         workspace_id: "w_1".into(),
         skills: vec![WireDeliverySkill {
             skill_id: "s_1".into(),
@@ -157,12 +157,12 @@ fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
         "a delivery omitting mcp_servers must be rejected"
     );
 
-    // schema_version is pinned const 1.
+    // schema_version is pinned const to THIS contract's version — the previous one is refused.
     let mut bad = good.clone();
-    bad["schema_version"] = json!(2);
+    bad["schema_version"] = json!(topos_types::WIRE_SCHEMA_VERSION - 1);
     assert!(
         !v.is_valid(&bad),
-        "schema_version != 1 must be rejected (const)"
+        "another schema_version must be rejected (const)"
     );
 
     // The `declined` list is optional (absent defaults empty) — a body that omits it validates.
@@ -208,7 +208,7 @@ fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
 fn receipt_accepts_valid_and_rejects_malformed() {
     let v = validator_for::<Receipt>();
     let good = serde_json::to_value(Receipt {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".into(),
         command: "publish".into(),
         outcome: TerminalOutcome::Ok,
@@ -248,7 +248,7 @@ fn receipt_accepts_valid_and_rejects_malformed() {
 fn the_protocol_card_accepts_a_version_declaration_and_its_absence() {
     let v = validator_for::<WireProtocolCard>();
     let good = serde_json::to_value(WireProtocolCard {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         card: "topos-protocol-card".into(),
         api_base_url: "https://topos.example/api".into(),
         server_version: Some("0.1.20".into()),
@@ -258,7 +258,7 @@ fn the_protocol_card_accepts_a_version_declaration_and_its_absence() {
 
     // The declaration is ADDITIVE: a card that omits it still validates.
     let bare = json!({
-        "schema_version": 1,
+        "schema_version": topos_types::WIRE_SCHEMA_VERSION,
         "card": "topos-protocol-card",
         "api_base_url": "https://topos.example/api",
     });
@@ -281,11 +281,11 @@ fn the_protocol_card_accepts_a_version_declaration_and_its_absence() {
         "a non-string server_version must be rejected"
     );
 
-    // schema_version stays pinned const 1 — the declarations did not move the contract version.
+    // schema_version stays pinned const — the declarations did not move the contract version.
     let mut bad = good.clone();
-    bad["schema_version"] = json!(2);
+    bad["schema_version"] = json!(topos_types::WIRE_SCHEMA_VERSION - 1);
     assert!(
         !v.is_valid(&bad),
-        "schema_version != 1 must be rejected (const)"
+        "another schema_version must be rejected (const)"
     );
 }

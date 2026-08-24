@@ -38,6 +38,7 @@ import {
   hasStreamableRemote,
   sanitizeReservedMeta,
 } from "@/lib/gateway/delivery.server";
+import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 
 /**
  * The SESSION lane's data access — the row-op half of `/api/v1`, served entirely by this
@@ -145,7 +146,7 @@ export interface DeliveryNotice {
 
 /** The complete `WireDelivery` body (the route serializes it verbatim). */
 export interface DeliveryBody {
-  schema_version: 1;
+  schema_version: typeof WIRE_SCHEMA_VERSION;
   workspace_id: string;
   /** The session's status; "pending" delivers NOTHING (the empty body below). */
   session_status: "active" | "pending";
@@ -171,7 +172,7 @@ export async function emptyDeliveryFor(actor: SessionActor): Promise<DeliveryBod
     .where(eq(workspace.id, actor.workspaceId))
     .limit(1);
   return {
-    schema_version: 1,
+    schema_version: WIRE_SCHEMA_VERSION,
     workspace_id: actor.workspaceId,
     session_status: "pending",
     skills: [],
@@ -449,7 +450,7 @@ export async function deliveryFor(
         .limit(1);
 
       const body: DeliveryBody = {
-        schema_version: 1,
+        schema_version: WIRE_SCHEMA_VERSION,
         workspace_id: ws,
         session_status: "active",
         skills,

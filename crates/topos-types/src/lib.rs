@@ -24,7 +24,13 @@ pub mod requests;
 
 /// Bumped on any breaking change to a WIRE shape (the `--json` envelope, the `current`
 /// pointer, the HTTP request/response bodies); every wire document carries it.
-pub const WIRE_SCHEMA_VERSION: u32 = 1;
+///
+/// **v2** — every payload that names a workspace does it in ONE shape,
+/// [`results::WorkspaceRef`] (`{host, name}`): it replaced the ad-hoc `workspace_address` string
+/// and the flat `host`/`name` pairs the publish family, `login`, `logout`, `status`,
+/// `list --remote` and the review inbox each spelled their own way. A v1 consumer's
+/// deserializers do not read those payloads, and the version is the signal that says so.
+pub const WIRE_SCHEMA_VERSION: u32 = 2;
 
 /// Bumped on any breaking change to an on-disk persisted client document ([`persisted`]).
 pub const PERSISTED_SCHEMA_VERSION: u32 = 1;
@@ -54,8 +60,8 @@ fn empty_object() -> serde_json::Value {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct JsonEnvelope {
-    /// Always `1` for this contract version (the schema pins it `const`).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    /// Always `2` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     /// The verb that produced this (`add`, `follow`, `pull`, `list`, `publish`, …).
     pub command: String,
@@ -373,8 +379,8 @@ pub struct Affected {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct Receipt {
-    /// Always `1` for this contract version (the schema pins it `const`).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    /// Always `2` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     /// Client-minted UUIDv4, persisted before the first send.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
@@ -470,8 +476,8 @@ pub struct CurrentRecord {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct WireCurrentRecord {
-    /// Always `1` for this contract version (the schema pins it `const`).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    /// Always `2` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     pub scope: PointerScope,
     pub record: CurrentRecord,

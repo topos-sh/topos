@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MIN_CLI_VERSION } from "@/lib/api/compat.server";
-import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
+import { SERVER_RELEASE_VERSION, WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { action as catchAllAction, loader as catchAllLoader } from "@/routes/api.v1.$";
 import { action as channelProtAction } from "@/routes/api.v1.channel-protection";
 import { loader as channelsLoader, action as channelsWrongMethod } from "@/routes/api.v1.channels";
@@ -115,7 +115,7 @@ async function drive(
 // ── expected wire bodies ─────────────────────────────────────────────────────────────────────
 
 const NOT_FOUND_BODY = {
-  schema_version: 1,
+  schema_version: WIRE_SCHEMA_VERSION,
   command: "error",
   ok: false,
   data: {},
@@ -133,7 +133,7 @@ const NOT_FOUND_BODY = {
 
 function badRequestBody(message: string) {
   return {
-    schema_version: 1,
+    schema_version: WIRE_SCHEMA_VERSION,
     command: "error",
     ok: false,
     data: {},
@@ -152,7 +152,7 @@ function badRequestBody(message: string) {
 
 function okStatusBody(command: string, status: string) {
   return {
-    schema_version: 1,
+    schema_version: WIRE_SCHEMA_VERSION,
     command,
     ok: true,
     data: { status },
@@ -168,7 +168,7 @@ const DENIED_ACTIONS = [
 
 function deniedBody(command: string, code: string) {
   return {
-    schema_version: 1,
+    schema_version: WIRE_SCHEMA_VERSION,
     command,
     ok: false,
     data: {},
@@ -838,7 +838,7 @@ describe("delivery", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.schema_version).toBe(1);
+    expect(body.schema_version).toBe(WIRE_SCHEMA_VERSION);
     expect(body.workspace_id).toBe(wsId);
     expect(body.session_status).toBe("active");
     expect(body.staleness_window_ms).toBe(604800000);
@@ -1353,7 +1353,7 @@ describe("skill current (the conditional-GET currency read)", () => {
     expect(res.headers.get("etag")).toBe('"1"');
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.json()).toEqual({
-      schema_version: 1,
+      schema_version: WIRE_SCHEMA_VERSION,
       scope: { workspace_id: wsId, skill_id: "s_alpha" },
       record: { version_id: V_ALPHA, generation: 1 },
     });

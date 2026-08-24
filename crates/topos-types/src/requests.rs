@@ -594,8 +594,8 @@ pub struct WireNotice {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct WireDelivery {
-    /// Always `1` for this contract version (the schema pins it `const`).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    /// Always `2` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     /// The workspace this delivery is scoped to (echoed from the path).
     pub workspace_id: String,
@@ -650,8 +650,8 @@ pub struct WireDeclined {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct McpAddRequest {
-    /// Always `1` for this contract version (the schema pins it `const`).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    /// Always `2` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     /// The official registry identity of the server (`io.github.acme/weather`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -730,8 +730,8 @@ pub struct WireHarnessState {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct WireAppliedReport {
-    /// Always `1` for this contract version (the schema pins it `const`).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    /// Always `2` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     /// The device's applied skills (possibly empty — a device holding nothing reports an empty list).
     pub applied: Vec<WireAppliedSkill>,
@@ -1024,8 +1024,8 @@ pub struct NoticeAckRequest {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct WireProtocolCard {
-    /// Always `1` for this contract version (the schema pins it `const`).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    /// Always `2` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     /// The constant discriminant a client dispatches on (`"topos-protocol-card"`).
     pub card: String,
@@ -1473,7 +1473,7 @@ mod tests {
     #[test]
     fn delivery_round_trips_snake_case_and_omits_absent_notice_fields() {
         let delivery = WireDelivery {
-            schema_version: 1,
+            schema_version: crate::WIRE_SCHEMA_VERSION,
             workspace_id: "w_demo".to_owned(),
             skills: vec![WireDeliverySkill {
                 skill_id: "s_prdescribe".to_owned(),
@@ -1530,7 +1530,7 @@ mod tests {
             session_status: "active".to_owned(),
         };
         let v = serde_json::to_value(&delivery).unwrap();
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], crate::WIRE_SCHEMA_VERSION);
         assert_eq!(v["workspace_id"], "w_demo");
         assert_eq!(v["skills"][0]["skill_id"], "s_prdescribe");
         assert_eq!(v["skills"][0]["protection"], "reviewed");
@@ -1591,7 +1591,7 @@ mod tests {
     #[test]
     fn applied_report_round_trips_snake_case() {
         let report = WireAppliedReport {
-            schema_version: 1,
+            schema_version: crate::WIRE_SCHEMA_VERSION,
             applied: vec![WireAppliedSkill {
                 skill_id: "s_prdescribe".to_owned(),
                 version_id: "c".repeat(64),
@@ -1599,7 +1599,7 @@ mod tests {
             }],
         };
         let v = serde_json::to_value(&report).unwrap();
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], crate::WIRE_SCHEMA_VERSION);
         assert_eq!(v["applied"][0]["skill_id"], "s_prdescribe");
         assert_eq!(v["applied"][0]["version_id"], "c".repeat(64));
         let back: WireAppliedReport = serde_json::from_value(v).unwrap();
@@ -1665,7 +1665,7 @@ mod tests {
         // The two declarations ride the constant card so a client can judge, before it commits to
         // a login, whether the two ends still speak the same wire.
         let card = WireProtocolCard {
-            schema_version: 1,
+            schema_version: crate::WIRE_SCHEMA_VERSION,
             card: "topos-protocol-card".to_owned(),
             api_base_url: "https://topos.example/api".to_owned(),
             server_version: Some("0.1.20".to_owned()),

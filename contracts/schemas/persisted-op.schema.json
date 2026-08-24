@@ -189,10 +189,10 @@
           "$ref": "#/$defs/TerminalOutcome"
         },
         "schema_version": {
-          "description": "Always `1` for this contract version (the schema pins it `const`).",
+          "description": "Always `2` for this contract version (the schema pins it `const`).",
           "type": "integer",
           "format": "uint32",
-          "const": 1,
+          "const": 2,
           "minimum": 0
         },
         "skill_id": {

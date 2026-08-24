@@ -5,9 +5,9 @@
  * stores the WHOLE envelope, so a replay re-serves these bytes verbatim.
  */
 
+import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { type NextAction, nextAction } from "./next-actions.server";
 
-const WIRE_SCHEMA_VERSION = 1;
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
 export interface ReceiptShape {
