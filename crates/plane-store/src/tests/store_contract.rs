@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use futures_util::StreamExt as _;
 use object_store::ObjectStore;
 
 use crate::id::WorkspaceId;
@@ -209,12 +210,14 @@ pub(crate) enum FirstDeleteFault {
 }
 
 /// A deleter whose FIRST delete faults per `fault` — every other op passes through untouched.
+/// The counters ride `Arc`s so the pass-through stream (which must be `'static`) can stamp
+/// completions.
 #[derive(Debug)]
 pub(crate) struct FaultFirstDelete {
     pub(crate) inner: Arc<dyn ObjectStore>,
     pub(crate) fault: FirstDeleteFault,
-    pub(crate) deletes_started: AtomicUsize,
-    pub(crate) deletes_completed: AtomicUsize,
+    pub(crate) deletes_started: Arc<AtomicUsize>,
+    pub(crate) deletes_completed: Arc<AtomicUsize>,
 }
 
 impl FaultFirstDelete {
@@ -222,8 +225,8 @@ impl FaultFirstDelete {
         Arc::new(Self {
             inner,
             fault,
-            deletes_started: AtomicUsize::new(0),
-            deletes_completed: AtomicUsize::new(0),
+            deletes_started: Arc::new(AtomicUsize::new(0)),
+            deletes_completed: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -261,21 +264,39 @@ impl ObjectStore for FaultFirstDelete {
         self.inner.get_opts(location, options).await
     }
 
-    async fn delete(&self, location: &object_store::path::Path) -> object_store::Result<()> {
+    /// The interception point: a single delete (`ObjectStoreExt::delete`) drives ONE
+    /// `delete_stream` call, so faulting the first call faults the first delete. The fault stream
+    /// never touches the backend; pass-through streams count each path the backend confirms.
+    fn delete_stream(
+        &self,
+        locations: futures_util::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+    {
         if self.deletes_started.fetch_add(1, Ordering::SeqCst) == 0 {
-            match self.fault {
-                FirstDeleteFault::Hang => std::future::pending::<()>().await,
-                FirstDeleteFault::Error => {
-                    return Err(object_store::Error::Generic {
+            return match self.fault {
+                FirstDeleteFault::Hang => futures_util::stream::pending().boxed(),
+                FirstDeleteFault::Error => futures_util::stream::once(async {
+                    Err(object_store::Error::Generic {
                         store: "fault",
                         source: "injected transport fault on the first delete".into(),
-                    });
-                }
-            }
+                    })
+                })
+                .boxed(),
+            };
         }
-        let out = self.inner.delete(location).await;
-        self.deletes_completed.fetch_add(1, Ordering::SeqCst);
-        out
+        let completed = Arc::clone(&self.deletes_completed);
+        self.inner
+            .delete_stream(locations)
+            .map(move |item| {
+                if item.is_ok() {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+                item
+            })
+            .boxed()
     }
 
     fn list(
@@ -293,20 +314,13 @@ impl ObjectStore for FaultFirstDelete {
         self.inner.list_with_delimiter(prefix).await
     }
 
-    async fn copy(
+    async fn copy_opts(
         &self,
         from: &object_store::path::Path,
         to: &object_store::path::Path,
+        options: object_store::CopyOptions,
     ) -> object_store::Result<()> {
-        self.inner.copy(from, to).await
-    }
-
-    async fn copy_if_not_exists(
-        &self,
-        from: &object_store::path::Path,
-        to: &object_store::path::Path,
-    ) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
+        self.inner.copy_opts(from, to, options).await
     }
 }
 
