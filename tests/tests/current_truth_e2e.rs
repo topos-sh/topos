@@ -381,9 +381,14 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
     // now, the receipt says which file to commit, and `list` shows the bundle current — never
     // `[behind]` until a separate update.
     assert!(
-        v2_receipt["project_lock"]
+        v2_receipt["project_lock"]["file"]
             .as_str()
             .is_some_and(|p| p.ends_with("topos.lock")),
+        "{v2_receipt}"
+    );
+    assert_eq!(v2_receipt["project_lock"]["version"], v2, "{v2_receipt}");
+    assert!(
+        v2_receipt["project_lock"].get("held").is_none(),
         "{v2_receipt}"
     );
     assert_eq!(locked_version(&project).as_deref(), Some(v2.as_str()));
@@ -417,11 +422,12 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
     assert_ne!(restored, v2);
     // A revert from inside the project moves its lock too: the forward commit is the new current.
     assert!(
-        reverted["project_lock"]
+        reverted["project_lock"]["file"]
             .as_str()
             .is_some_and(|p| p.ends_with("topos.lock")),
         "{reverted}"
     );
+    assert_eq!(reverted["project_lock"]["version"], restored, "{reverted}");
     assert_eq!(locked_version(&project).as_deref(), Some(restored.as_str()));
 
     // The project copy still holds v2's bytes — the version the revert just undid. Nothing here

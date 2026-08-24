@@ -3795,14 +3795,12 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     if let Some(rep) = &data.republish {
         out.push_str(&format!("\n{}", republish_line(rep, true)));
     }
-    // The cwd project's lock MOVED with this publish (a commit moves `HEAD`): the checkout runs
-    // the new version at once, and the file it records that in wants committing.
-    if data.project_lock.is_some() {
-        out.push_str(&format!(
-            "\nthis project's topos.lock now records {}@{} — commit it",
-            data.name,
-            short(&data.version_id)
-        ));
+    // The cwd project's lock beside this publish: MOVED with it (a commit moves `HEAD` — the
+    // checkout runs the new version at once, and the file it records that in wants committing),
+    // or HELD by the manifest's pin, which is then the one thing standing between the project
+    // and this version.
+    if let Some(lock) = &data.project_lock {
+        out.push_str(&format!("\n{}", project_lock_line(&data.name, lock)));
     }
     // The KIND the catalog now records — stated because it is what decides how every receiving
     // machine places these bytes (an mcp bundle lands in each agent's MCP config, not a folder).
@@ -3954,16 +3952,28 @@ pub(crate) fn revert_tty(data: &RevertData) -> String {
         s.push_str(&format!(" in {}", ws.address()));
     }
     s.push_str(" — nothing was deleted; move current forward again to redo.");
-    // The cwd project's lock MOVED with the revert: the checkout runs the restored version at
-    // its next update, and the file it records that in wants committing.
-    if data.project_lock.is_some() {
-        s.push_str(&format!(
-            "\nthis project's topos.lock now records {}@{} — commit it",
-            data.name,
-            short(&data.new_version_id)
-        ));
+    // The cwd project's lock beside the revert: moved with it (the checkout runs the restored
+    // version at its next update), or held by the manifest's pin.
+    if let Some(lock) = &data.project_lock {
+        s.push_str(&format!("\n{}", project_lock_line(&data.name, lock)));
     }
     s
+}
+
+/// The one line a pointer move prints about the cwd project's lock — moved, or held by a pin.
+fn project_lock_line(name: &str, lock: &topos_types::results::ProjectLock) -> String {
+    if lock.held {
+        format!(
+            "this project pins {name}@{} in topos.toml — its topos.lock stays there; change the \
+             pin to run this version here",
+            short(&lock.version)
+        )
+    } else {
+        format!(
+            "this project's topos.lock now records {name}@{} — commit it",
+            short(&lock.version)
+        )
+    }
 }
 
 /// The bare `revert` DESCRIBE's TTY — what the forward move would do (nothing has changed yet).
@@ -6299,7 +6309,11 @@ mod tests {
         );
         // The project lock moved with the publish: said once, with the file to commit.
         let locked = publish_tty(&PublishData {
-            project_lock: Some("/repo/topos.lock".to_owned()),
+            project_lock: Some(topos_types::results::ProjectLock {
+                file: "/repo/topos.lock".to_owned(),
+                version: format!("fed180d80b8a{}", "0".repeat(52)),
+                held: false,
+            }),
             ..published()
         });
         assert!(
@@ -6307,6 +6321,23 @@ mod tests {
                 "\nthis project's topos.lock now records coolify-deploy@fed180d80b8a — commit it"
             ),
             "{locked}"
+        );
+        // A pin the manifest carries HOLDS the lock: the pinned version is disclosed, never
+        // silently left in place.
+        let held = publish_tty(&PublishData {
+            project_lock: Some(topos_types::results::ProjectLock {
+                file: "/repo/topos.lock".to_owned(),
+                version: format!("f154315d5fd9{}", "0".repeat(52)),
+                held: true,
+            }),
+            ..published()
+        });
+        assert!(
+            held.contains(
+                "\nthis project pins coolify-deploy@f154315d5fd9 in topos.toml — its topos.lock \
+                 stays there; change the pin to run this version here"
+            ),
+            "{held}"
         );
     }
 

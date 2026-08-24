@@ -2683,6 +2683,28 @@
           }
         }
       },
+      "ProjectLock": {
+        "type": "object",
+        "description": "The cwd project's `topos.lock` beside a pointer move this machine made (a landed publish, a\nlanded revert): which file, which version its entry now records, and whether that entry was\nHELD rather than moved — the manifest pins the bundle, so the lock keeps the pinned version\nand the move changes nothing about what the project runs. A reader branches on `held`.\n**INFERRED** (additive-only).",
+        "required": [
+          "file",
+          "version"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "The lock file, as a path."
+          },
+          "held": {
+            "type": "boolean",
+            "description": "Whether the entry was HELD by a manifest pin instead of moved."
+          },
+          "version": {
+            "type": "string",
+            "description": "The version the entry records now: the moved-to version, or the pinned one it kept."
+          }
+        }
+      },
       "ProposeData": {
         "type": "object",
         "description": "`publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns\n`NEEDS_REVIEW`. **INFERRED.**",
@@ -3001,11 +3023,15 @@
             "description": "The channel whose placement was WITHHELD by its curated mode (the receipt's\n`details.placement = curated_role_required`): the publish itself landed — catalog + moved\npointer — but the skill's reference was NOT placed into this channel (the `--to` target, or\nthe default `everyone` for a brand-new skill). A reviewer or owner places it\n(`topos channel add <channel> <skill>`). **INFERRED** (additive-only)."
           },
           "project_lock": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —\nthe checkout the command stood in runs the new version at once, the way a commit moves\n`HEAD`. Absent when no project lock records the bundle (or its row pins a version).\n**INFERRED** (additive-only)."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProjectLock",
+                "description": "The cwd project's `topos.lock` beside this publish: its entry for the bundle ADVANCED to\nthe version just shipped (the checkout runs it at once, the way a commit moves `HEAD`), or\nwas HELD at the version the manifest pins. Absent when no project lock records the bundle.\n**INFERRED** (additive-only)."
+              }
+            ]
           },
           "reference": {
             "type": [
@@ -3271,11 +3297,15 @@
             "description": "The new forward-revert commit that carries those bytes."
           },
           "project_lock": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the\ncheckout the command stood in runs the restored version at its next update. Absent when no\nproject lock records the bundle (or its row pins a version). **INFERRED** (additive-only)."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProjectLock",
+                "description": "The cwd project's `topos.lock` beside this revert: its entry for the bundle ADVANCED to the\nforward commit (the checkout runs the restored version at its next update), or was HELD at\nthe version the manifest pins. Absent when no project lock records the bundle. **INFERRED**\n(additive-only)."
+              }
+            ]
           },
           "reverted_to": {
             "type": "string",

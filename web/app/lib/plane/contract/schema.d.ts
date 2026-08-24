@@ -723,6 +723,21 @@ export interface components {
             workspace_id: string;
         };
         /**
+         * @description The cwd project's `topos.lock` beside a pointer move this machine made (a landed publish, a
+         *     landed revert): which file, which version its entry now records, and whether that entry was
+         *     HELD rather than moved — the manifest pins the bundle, so the lock keeps the pinned version
+         *     and the move changes nothing about what the project runs. A reader branches on `held`.
+         *     **INFERRED** (additive-only).
+         */
+        ProjectLock: {
+            /** @description The lock file, as a path. */
+            file: string;
+            /** @description Whether the entry was HELD by a manifest pin instead of moved. */
+            held?: boolean;
+            /** @description The version the entry records now: the moved-to version, or the pinned one it kept. */
+            version: string;
+        };
+        /**
          * @description `publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns
          *     `NEEDS_REVIEW`. **INFERRED.**
          */
@@ -938,13 +953,7 @@ export interface components {
              *     (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
              */
             placement_withheld?: string | null;
-            /**
-             * @description The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —
-             *     the checkout the command stood in runs the new version at once, the way a commit moves
-             *     `HEAD`. Absent when no project lock records the bundle (or its row pins a version).
-             *     **INFERRED** (additive-only).
-             */
-            project_lock?: string | null;
+            project_lock?: null | components["schemas"]["ProjectLock"];
             /** @description The canonical workspace reference the manifest now stores. **INFERRED** (additive-only). */
             reference?: string | null;
             republish?: null | components["schemas"]["Republish"];
@@ -1092,12 +1101,7 @@ export interface components {
             name: string;
             /** @description The new forward-revert commit that carries those bytes. */
             new_version_id: string;
-            /**
-             * @description The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the
-             *     checkout the command stood in runs the restored version at its next update. Absent when no
-             *     project lock records the bundle (or its row pins a version). **INFERRED** (additive-only).
-             */
-            project_lock?: string | null;
+            project_lock?: null | components["schemas"]["ProjectLock"];
             /** @description The good version named by `--to` (the bytes being restored). */
             reverted_to: string;
             skill_id: string;

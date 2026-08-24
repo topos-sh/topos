@@ -1820,12 +1820,12 @@ pub enum ExchangeFault {
 )]
 pub struct PublishData {
     pub skill_id: String,
-    /// The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —
-    /// the checkout the command stood in runs the new version at once, the way a commit moves
-    /// `HEAD`. Absent when no project lock records the bundle (or its row pins a version).
+    /// The cwd project's `topos.lock` beside this publish: its entry for the bundle ADVANCED to
+    /// the version just shipped (the checkout runs it at once, the way a commit moves `HEAD`), or
+    /// was HELD at the version the manifest pins. Absent when no project lock records the bundle.
     /// **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_lock: Option<String>,
+    pub project_lock: Option<ProjectLock>,
     /// Present when the shipped copy EQUALED an older version than the workspace's live `current`
     /// (a revert had moved `current` past this machine's own publish, say): the publish carried
     /// that version's content forward as the new version, and the receipt names both. **INFERRED**
@@ -2088,11 +2088,32 @@ pub struct RevertData {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub new_version_id: String,
     pub current_generation: u64,
-    /// The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the
-    /// checkout the command stood in runs the restored version at its next update. Absent when no
-    /// project lock records the bundle (or its row pins a version). **INFERRED** (additive-only).
+    /// The cwd project's `topos.lock` beside this revert: its entry for the bundle ADVANCED to the
+    /// forward commit (the checkout runs the restored version at its next update), or was HELD at
+    /// the version the manifest pins. Absent when no project lock records the bundle. **INFERRED**
+    /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_lock: Option<String>,
+    pub project_lock: Option<ProjectLock>,
+}
+
+/// The cwd project's `topos.lock` beside a pointer move this machine made (a landed publish, a
+/// landed revert): which file, which version its entry now records, and whether that entry was
+/// HELD rather than moved — the manifest pins the bundle, so the lock keeps the pinned version
+/// and the move changes nothing about what the project runs. A reader branches on `held`.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct ProjectLock {
+    /// The lock file, as a path.
+    pub file: String,
+    /// The version the entry records now: the moved-to version, or the pinned one it kept.
+    pub version: String,
+    /// Whether the entry was HELD by a manifest pin instead of moved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 /// `revert <skill> --to <good>` (bare, no `--yes`) — the two-phase DESCRIBE of the forward move: what
