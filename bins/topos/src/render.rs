@@ -9485,6 +9485,16 @@ mod tests {
                     "message": "topos: publish",
                     "parents": [],
                 }),
+                // A PLANE version: the server records when it was committed, so the row stamps
+                // itself instead of reading under whatever date printed above it.
+                serde_json::json!({
+                    "action": "version",
+                    "source": "plane",
+                    "version_id": "ef".repeat(32),
+                    "at": 1_700_086_400_000i64,
+                    "author": "Robert <robert@topos.sh>",
+                    "message": "topos: publish v2",
+                }),
                 serde_json::json!({
                     "action": "error",
                     "verb": "pull",
@@ -9510,6 +9520,14 @@ mod tests {
         // A git version event (no `at`) keeps columns with a blank stamp + the author and message.
         assert!(
             out.contains("version  d_test  @cdcdcdcdcdcd  topos: publish"),
+            "{out}"
+        );
+        // A plane version prints its OWN date and time, in the same column the pull events use.
+        assert!(
+            out.contains(
+                "2023-11-15 22:13  version  Robert <robert@topos.sh>  @efefefefefef  topos: \
+                 publish v2"
+            ),
             "{out}"
         );
         // The error event is readable: verb, code, FIRST line of detail only.

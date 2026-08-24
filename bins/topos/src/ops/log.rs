@@ -227,11 +227,14 @@ fn assemble_log_events(
 }
 
 /// A plane version as a log event — a purged version carries its tombstone (`purged_at` / `purged_by`).
+/// `at` is the commit time the server recorded, in the same field and units a `pull` event carries, so
+/// every history line stamps itself instead of borrowing the date of whatever printed above it.
 fn plane_version_event(v: &WireLogVersion) -> serde_json::Value {
     json!({
         "action": "version",
         "source": "plane",
         "version_id": v.version_id,
+        "at": v.at,
         "author": v.author,
         "message": v.message,
         "current": v.current,
@@ -308,6 +311,36 @@ mod tests {
         );
         assert_eq!(events.len(), 1, "the local-only version survives");
         assert_eq!(events[0].get("author").and_then(Value::as_str), Some("you"));
+    }
+
+    #[test]
+    fn a_plane_version_event_carries_the_time_the_server_recorded() {
+        // `--json` version entries stamp themselves the same way a `pull` event does (`at`, epoch
+        // milliseconds), so a caller never has to infer a version's date from the line above it.
+        let event = plane_version_event(&WireLogVersion {
+            version_id: "a".repeat(64),
+            at: Some(1_700_086_400_000),
+            author: Some("Robert <robert@topos.sh>".to_owned()),
+            message: Some("topos: publish".to_owned()),
+            current: true,
+            purged_at: None,
+            purged_by: None,
+        });
+        assert_eq!(event["at"].as_i64(), Some(1_700_086_400_000));
+    }
+
+    #[test]
+    fn a_version_the_server_recorded_no_time_for_omits_at_rather_than_faking_one() {
+        let event = plane_version_event(&WireLogVersion {
+            version_id: "a".repeat(64),
+            at: None,
+            author: None,
+            message: None,
+            current: false,
+            purged_at: None,
+            purged_by: None,
+        });
+        assert!(event["at"].is_null(), "{event}");
     }
 
     #[test]
