@@ -2128,8 +2128,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             server: Some("https://topos.sh/api".to_owned()),
             session_id: None,
             session_status: "awaiting-approval".to_owned(),
-            delivered: None,
-            delivered_names: Vec::new(),
+            assigned: None,
+            assigned_names: Vec::new(),
             manifest_note: None,
             user: None,
             feed_row_added: false,
@@ -2155,8 +2155,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
     };
 
     // The GRANTED login — the session row persisted (workspace-scoped credential), the acceptance
-    // disclosure (`delivered` = what the profile delivers here right now; from here delivery is
-    // silent).
+    // disclosure (`assigned` = what the workspace assigns this person right now; the bytes arrive
+    // on the first `topos update`, and from there delivery is silent).
     let login_ok = JsonEnvelope {
         schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "login".to_owned(),
@@ -2171,8 +2171,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             server: Some("https://topos.sh/api".to_owned()),
             session_id: Some("sn_01hzy3".to_owned()),
             session_status: "active".to_owned(),
-            delivered: Some(3),
-            delivered_names: vec![
+            assigned: Some(3),
+            assigned_names: vec![
                 "deploy".to_owned(),
                 "code-review".to_owned(),
                 "release-notes".to_owned(),

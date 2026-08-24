@@ -4,6 +4,22 @@
   "description": "`login <workspace-address>` — the SESSION mint + the acceptance disclosure (what connecting\ndelivers). A session = user × workspace × installation, carrying ONE workspace-scoped bearer\ncredential; further workspaces are further logins. Login IS the acceptance: from here delivery\nis silent, npm-style. **INFERRED** (additive-only).",
   "type": "object",
   "properties": {
+    "assigned": {
+      "description": "How many bundles the workspace ASSIGNS this person right now (the acceptance disclosure;\nbest-effort — absent when the count could not be read). Assigned, not delivered: login\nmints the session and reads the feed, and the first exchange that puts bytes on this\nmachine is `topos update` — which is why `status` right after a login still says there has\nbeen no delivery yet.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "assigned_names": {
+      "description": "The assigned bundles' NAMES (the same best-effort read as `assigned`) — the receipt names\nwhat the acceptance brings, not just a number. **Additive.**",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "currency": {
       "description": "The active adapter's auto-update-trigger outcome, when the login armed it.",
       "anyOf": [
@@ -14,22 +30,6 @@
           "type": "null"
         }
       ]
-    },
-    "delivered": {
-      "description": "How many skills the person's profile delivers here right now (the acceptance disclosure;\nbest-effort — absent when the count could not be read).",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint64",
-      "minimum": 0
-    },
-    "delivered_names": {
-      "description": "The delivered skills' NAMES (the same best-effort read as `delivered`) — the receipt names\nwhat the acceptance brings, not just a number. **Additive.**",
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
     },
     "display_name": {
       "type": [
