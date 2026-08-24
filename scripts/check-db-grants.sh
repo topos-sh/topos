@@ -62,11 +62,10 @@ provision() {
     psql -X -q -v ON_ERROR_STOP=1 -d "$db" \
       -c "ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane REVOKE SELECT ON TABLES FROM topos_web" >/dev/null
   fi
-  # The real lineages, each applied AS ITS OWN role (exactly how the applications boot). The web
-  # lineage runs WHOLE — the gateway reads tables that arrived long after 0000, so a first-file
-  # shortcut would prove the boundary against a schema nothing runs.
-  PGPASSWORD=plane psql -X -q -v ON_ERROR_STOP=1 -U topos_plane -d "$db" \
-    -f "$repo_root/crates/plane-store/migrations/0001_custody.sql" >/dev/null
+  # The real lineages, each applied AS ITS OWN role (exactly how the applications boot). Every
+  # lineage runs WHOLE — the app and the gateway read tables that arrived long after the first
+  # migration, so a first-file shortcut would prove the boundary against a schema nothing runs.
+  run_lineage topos_plane plane "$repo_root/crates/plane-store/migrations"
   run_lineage topos_web web "$repo_root/web/drizzle"
   run_lineage topos_gateway gateway "$repo_root/gateway/migrations"
   # A table from a "future" vault migration — the default-privileges proof target.
