@@ -134,10 +134,27 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     (!token.is_empty()).then(|| token.to_owned())
 }
 
+/// The route the container healthcheck polls. It is a constant `200 ok` that touches no state, and
+/// a compose/Coolify probe hits it every few seconds — at INFO it drowns the log it shares with the
+/// real custody traffic (a production sample: 171 of 243 lines).
+const PROBE_ROUTE: &str = "/healthz";
+
+/// Which level one served request's access-log line takes: the liveness probe is DEBUG (turn the
+/// filter up to see it), every other route — the whole custody lane, and the `(unmatched)` miss —
+/// stays INFO.
+fn access_log_level(route: &str) -> tracing::Level {
+    if route == PROBE_ROUTE {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    }
+}
+
 /// Request-level tracing: ONE `request` span per request carrying the method + the matched ROUTE
-/// TEMPLATE, and one completion `info` event recording the status + latency. Handlers — and the
-/// error mapper's `tracing::error!` fault chains — run inside the span, so a 500's server-side
-/// diagnostics correlate with exactly one request line in the JSON logs.
+/// TEMPLATE, and one completion event recording the status + latency at the route's own
+/// [`access_log_level`]. Handlers — and the error mapper's `tracing::error!` fault chains — run
+/// inside the span, so a 500's server-side diagnostics correlate with exactly one request line in
+/// the JSON logs.
 ///
 /// The span records the route TEMPLATE, never the raw path (the bearer rides only the never-logged
 /// Authorization header, but templates keep the logs free of any caller-composed string). A request
@@ -154,6 +171,31 @@ async fn trace_requests(req: Request, next: Next) -> Response {
     let response = next.run(req).instrument(span.clone()).await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let status = response.status().as_u16();
-    span.in_scope(|| tracing::info!(status, latency_ms, "request served"));
+    span.in_scope(|| match access_log_level(&route) {
+        tracing::Level::DEBUG => tracing::debug!(status, latency_ms, "request served"),
+        _ => tracing::info!(status, latency_ms, "request served"),
+    });
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PROBE_ROUTE, access_log_level};
+
+    #[test]
+    fn the_liveness_probe_logs_at_debug_and_every_real_route_at_info() {
+        assert_eq!(access_log_level(PROBE_ROUTE), tracing::Level::DEBUG);
+        for route in [
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/publish",
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/log",
+            "/internal/v1/storage",
+            "(unmatched)",
+        ] {
+            assert_eq!(
+                access_log_level(route),
+                tracing::Level::INFO,
+                "{route} is real traffic"
+            );
+        }
+    }
 }
