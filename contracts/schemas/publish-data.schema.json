@@ -257,15 +257,17 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "new_version_id": {
-          "description": "The version the forward publish mints (predicted on the preview from the same preimage\nthe apply commits; the landed id on the receipt).",
-          "type": "string",
+          "description": "The version the forward publish minted — on the RECEIPT only. A preview does not predict\nit: the id folds in the message and the parent the apply will see, and a preview that\nnamed one landed beside a receipt naming another the moment a `-m` was added.",
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^[0-9a-f]{64}$"
         }
       },
       "required": [
         "current_version_id",
-        "copy_version_id",
-        "new_version_id"
+        "copy_version_id"
       ]
     },
     "ScopeDraft": {

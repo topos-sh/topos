@@ -271,6 +271,9 @@ pub(crate) fn publish_describe(
 ) -> Result<PublishPreview, ClientError> {
     let (source_str, pin) = parse_target(target);
     let _ = roots;
+    // The message rides the apply, not the preview: it is folded into the version the apply
+    // mints, and the preview names no version — so nothing here reads it.
+    let _ = message;
     // A describe MUTATES NOTHING (the consent contract). An already-tracked target is scanned in place;
     // an UNTRACKED source is NOT adopted here — adopting mints a sidecar and arms the session-start hook,
     // a durable change the human has not confirmed. The apply (`--yes`) does the adoption and discloses
@@ -563,8 +566,10 @@ pub(crate) fn publish_describe(
     // worse than no line.
     let review = (!genesis).then(|| review_command(&skill_name, from_machine, picked.as_ref()));
     // What this publish CHANGES, counted against the live current (a genesis counts every file
-    // as new), and — for a copy equal to an older version — which version `current` is, spelled
-    // with the version the apply would mint from this very preimage.
+    // as new), and — for a copy equal to an older version — which version `current` is. The
+    // version the apply will mint is NOT predicted: its id folds in the message and the parent
+    // the apply sees, and a preview that named one stood beside a receipt naming another the
+    // moment a `-m` rode the apply. The receipt names the landed id.
     let (current_files, current_message) = match &live {
         Some(l) => current_bundle_files(ctx, &sp, id.as_str(), l)?,
         None => (Vec::new(), None),
@@ -572,14 +577,6 @@ pub(crate) fn publish_describe(
     let changes = Some(change_summary(&current_files, &scanned));
     let republish = match standing {
         Standing::Forward(mut rep) => {
-            if let Some(l) = &live {
-                let base = PublishBase {
-                    parent: l.commit,
-                    expected: l.generation,
-                };
-                rep.new_version_id =
-                    predicted_version_id(ctx, &base, scanned.bundle_digest, message)?;
-            }
             rep.current_message = current_message;
             Some(rep)
         }
@@ -812,7 +809,7 @@ fn standing(live: Option<&LiveCurrent>, lock: &Lock, digest_hex: &str) -> Standi
             current_version_id: l.hex.clone(),
             current_message: None,
             copy_version_id: lock.base_commit.clone(),
-            new_version_id: String::new(),
+            new_version_id: None,
         });
     }
     Standing::Behind
@@ -965,25 +962,6 @@ fn lands_in(
         }
     }
     out
-}
-
-/// The version id a forward publish MINTS — the same preimage the apply commits (parent = the
-/// live current, tree = the copy's digest, author = this device, message = `-m` or the default),
-/// so the preview names the version the receipt will.
-fn predicted_version_id(
-    ctx: &Ctx<'_>,
-    base: &PublishBase,
-    digest: [u8; 32],
-    message: Option<&str>,
-) -> Result<String, ClientError> {
-    let id = identity::commit_id(&Commit {
-        parents: &[base.parent],
-        tree: digest,
-        author: &ctx.device_id,
-        message: message.unwrap_or(PUBLISH_MESSAGE),
-    })
-    .map_err(|_| ClientError::Corrupt("commit id preimage".to_owned()))?;
-    Ok(to_hex(&id))
 }
 
 /// The already-published answer: nothing to ship, and — when the edits are in the OTHER scope's
@@ -1466,7 +1444,7 @@ fn enrolled_publish(
                             .and_then(|c| Store::open(&sp.store).ok()?.read_commit_meta(c).ok())
                             .map(|node| node.message),
                         copy_version_id: copy.clone(),
-                        new_version_id: pending.candidate_commit.clone(),
+                        new_version_id: Some(pending.candidate_commit.clone()),
                     });
                 }
             }
@@ -1530,7 +1508,7 @@ fn enrolled_publish(
                 undo_base = l.hex.clone();
             }
             let mut republished_version: Option<String> = None;
-            if let (Standing::Forward(mut rep), Some(l), Some(b)) = (standing, &live, &base) {
+            if let (Standing::Forward(mut rep), Some(l)) = (standing, &live) {
                 // The forward commit parents on a version this store may never have fetched (a
                 // revert made elsewhere) — backfill it so the local history links up and the
                 // authoring commit's strict parent check holds; its history line rides the receipt.
@@ -1539,11 +1517,10 @@ fn enrolled_publish(
                     .read_commit_meta(l.commit)
                     .ok()
                     .map(|node| node.message);
-                rep.new_version_id = predicted_version_id(ctx, b, scanned.bundle_digest, message)?;
                 republished_version = Some(rep.copy_version_id.clone());
                 republish = Some(rep);
             }
-            build_publish_op(
+            let rec = build_publish_op(
                 ctx,
                 &sp,
                 id.as_str(),
@@ -1557,7 +1534,13 @@ fn enrolled_publish(
                 bundle_kind.tag(),
                 base.as_ref(),
                 republished_version.as_deref(),
-            )?
+            )?;
+            // The receipt names the version the op actually minted — the one id, read back off
+            // the record rather than computed a second time.
+            if let Some(rep) = &mut republish {
+                rep.new_version_id = Some(rec.candidate_commit.clone());
+            }
+            rec
         }
     };
 

@@ -513,10 +513,8 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
     assert_eq!(republish["current_version_id"], restored, "{described}");
     assert_eq!(republish["current_message"], "topos: revert", "{described}");
     assert_eq!(republish["copy_version_id"], v2, "{described}");
-    let predicted = republish["new_version_id"]
-        .as_str()
-        .expect("the preview names the version the apply mints")
-        .to_owned();
+    // No predicted id: the apply's own `-m` (or a moved parent) would make it a lie.
+    assert!(republish.get("new_version_id").is_none(), "{described}");
     // The counts are against the LIVE current (v1's bytes): one changed, two added, one of them
     // executable — and the undo names the live current.
     assert_eq!(described["changes"]["files"], 3, "{described}");
@@ -533,11 +531,10 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
     assert!(
         tty.contains(&format!(
             "current is {} (\"topos: revert\"); your copy equals {} — publishing {}'s content \
-             forward as {}",
+             forward as a new version",
             &restored[..12],
             &v2[..12],
             &v2[..12],
-            &predicted[..12]
         )),
         "{tty}"
     );
@@ -554,11 +551,18 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
     // ── 5. applied: a NEW version whose content equals v2, parented on the revert ───────────────
     let again = publish(&author, &project, "v2 again");
     let v3 = version_of(&again);
-    assert_eq!(
-        v3, predicted,
-        "the apply mints the version the preview named"
-    );
     assert_ne!(v3, v2, "a new version, not the old id resurrected");
+    assert_eq!(
+        again["republish"]["new_version_id"], v3,
+        "the receipt names the version that landed: {again}"
+    );
+    let tty = author
+        .run_in(&project, &["revert", BUNDLE, "--to", &v3[..12]])
+        .stdout;
+    assert!(
+        tty.contains("is already at these bytes"),
+        "the landed id resolves as a short prefix: {tty}"
+    );
     assert_eq!(
         again["bundle_digest"], v2_receipt["bundle_digest"],
         "…whose content equals v2's: {again}"
