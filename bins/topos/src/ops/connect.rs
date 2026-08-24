@@ -167,16 +167,72 @@ fn authority_usable(uri: &ureq::http::Uri) -> bool {
     }
 }
 
-/// The human-readable machine name the approval page shows (`topos CLI (<hostname>)`) — a
-/// confused-deputy aid, never authority.
+/// The human-readable machine name the approval page shows (`topos CLI · <user>@<hostname>`) — a
+/// confused-deputy aid, never authority. It carries the OS user AND the hostname because the
+/// label is the ONLY thing telling two sessions apart on the approval page, the bundle page's
+/// "On your machines", and Sessions: a hostname alone collapses a laptop and a build box a
+/// person is signed in from into one indistinguishable row.
 pub(crate) fn machine_name() -> String {
     let uname = rustix::system::uname();
-    let node = uname.nodename().to_string_lossy();
+    let node = uname.nodename().to_string_lossy().into_owned();
+    compose_machine_name(std::env::var("USER").ok().as_deref(), &node)
+}
+
+/// The label's pure half — the OS user (`$USER`) and the hostname, each dropped when it is
+/// missing or blank, so an unnameable machine still gets a label rather than a dangling `@`.
+fn compose_machine_name(user: Option<&str>, node: &str) -> String {
     let node = node.trim();
-    if node.is_empty() {
-        "topos CLI".to_owned()
-    } else {
-        format!("topos CLI ({node})")
+    let user = user.map(str::trim).filter(|u| !u.is_empty());
+    match (user, node) {
+        (Some(user), "") => format!("topos CLI · {user}"),
+        (Some(user), node) => format!("topos CLI · {user}@{node}"),
+        (None, "") => "topos CLI".to_owned(),
+        (None, node) => format!("topos CLI · {node}"),
+    }
+}
+
+#[cfg(test)]
+mod machine_name_tests {
+    use super::compose_machine_name;
+
+    /// Two machines one person is signed in from must be tellable apart on the approval page and
+    /// in Sessions, so the label carries the OS user beside the hostname.
+    #[test]
+    fn label_carries_user_and_host() {
+        assert_eq!(
+            compose_machine_name(Some("robert"), "MacBookPro"),
+            "topos CLI · robert@MacBookPro"
+        );
+    }
+
+    /// No usable user name (unset, or blank after trimming) — the hostname alone, never a
+    /// dangling separator.
+    #[test]
+    fn no_user_falls_back_to_host_alone() {
+        assert_eq!(
+            compose_machine_name(None, "build-box"),
+            "topos CLI · build-box"
+        );
+        assert_eq!(
+            compose_machine_name(Some("   "), "build-box"),
+            "topos CLI · build-box"
+        );
+    }
+
+    /// Surrounding whitespace on either half never reaches the label.
+    #[test]
+    fn halves_are_trimmed() {
+        assert_eq!(
+            compose_machine_name(Some(" robert "), "  MacBookPro\n"),
+            "topos CLI · robert@MacBookPro"
+        );
+    }
+
+    /// Neither half nameable — the bare product label, as before.
+    #[test]
+    fn nothing_nameable_keeps_the_bare_label() {
+        assert_eq!(compose_machine_name(None, "  "), "topos CLI");
+        assert_eq!(compose_machine_name(Some("robert"), ""), "topos CLI · robert");
     }
 }
 
