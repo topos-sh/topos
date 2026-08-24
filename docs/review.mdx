@@ -80,8 +80,11 @@ turned into a proposal. In the browser: **Roll back** on the skill's History tab
 
 ## Your edits are safe
 
-Editing a delivered skill creates a **draft**: updates merge around your changes and never
-overwrite them.
+Editing a delivered skill creates a **draft**: an update never overwrites unpublished edits — it
+merges the team's changes around them. A copy you have not edited follows the team, the way a clean
+checkout does; when an update replaces it with a version that undoes one you published (a revert,
+say), the receipt says which version it replaced and how to bring it back. A published version can
+always be brought back: `topos revert <skill> --to <version>`.
 
 If the same skill sits in several of your agents' directories, edit **one** of them. Once your edit
 has settled — unchanged since the previous check — the next update copies it onto the skill's other
