@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createRequire } from "node:module";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, connect } from "node:net";
+import { writeReadableStreamToWritable } from "@react-router/node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 /**
@@ -127,4 +128,96 @@ describe("a response compression is holding", () => {
       expect(res.listenerCount("close")).toBe(0);
     });
   });
+});
+
+/**
+ * THE SAME INVARIANT, END TO END — the leak as production meets it, not as the middleware
+ * describes itself.
+ *
+ * The cases above pin compression's own semantics; this one runs the whole serving path: the
+ * middleware `react-router-serve` mounts, the write loop `@react-router/express` uses
+ * (`writeReadableStreamToWritable`, which awaits one drain per chunk the response could not
+ * take), and a client that reads slowly enough to make the gzip stream fill and drain over and
+ * over. That combination is the only thing that reproduces the production line
+ * (`MaxListenersExceededWarning: 11 drain listeners added to [Gzip]`), and it is what tells an
+ * UNPATCHED install apart from a patched one — module semantics look fine either way until the
+ * listeners actually pile up.
+ */
+describe("a streamed response written back under real backpressure", () => {
+  /** Chunky, and compressible enough to be worth gzipping — a real page, scaled up. */
+  const CHUNK = Buffer.from("<p>the quick brown fox jumps over the lazy dog</p>\n".repeat(1400));
+  const CHUNKS = 400;
+
+  it("leaves the Gzip stream with no accumulated drain listeners, and warns about none", async () => {
+    const warnings: string[] = [];
+    const onWarning = (w: Error) => {
+      if (w.name === "MaxListenersExceededWarning") {
+        warnings.push(w.message);
+      }
+    };
+    process.on("warning", onWarning);
+
+    let peakOnGzip = 0;
+    const middleware = compression();
+    const streaming = createServer((req, res) => {
+      middleware(req, res, () => {
+        res.writeHead(200, { "content-type": "text/html" });
+        // `res.on('drain', …)` hands back whatever compression parked the listener on — the gzip
+        // stream itself, which is the emitter the production warning names.
+        const probe = () => undefined;
+        const gzip = res.on("drain", probe) as unknown as NodeJS.EventEmitter;
+        res.removeListener("drain", probe);
+        const sample = setInterval(() => {
+          peakOnGzip = Math.max(peakOnGzip, gzip.listenerCount("drain"));
+        }, 2);
+
+        let sent = 0;
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (sent++ >= CHUNKS) {
+              controller.close();
+              return;
+            }
+            controller.enqueue(CHUNK);
+          },
+        });
+        void writeReadableStreamToWritable(body, res).finally(() => clearInterval(sample));
+      });
+    });
+    await new Promise<void>((resolve) => streaming.listen(0, "127.0.0.1", resolve));
+    const streamingPort = (streaming.address() as AddressInfo).port;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const socket = connect(streamingPort, "127.0.0.1", () => {
+          socket.write(
+            "GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n",
+          );
+          // A slow reader: resume in short bursts so the socket — and behind it the gzip stream —
+          // fills and drains repeatedly, which is the only way a per-chunk drain wait recurs.
+          socket.pause();
+          const sip = setInterval(() => {
+            socket.resume();
+            setTimeout(() => socket.pause(), 1);
+          }, 4);
+          socket.on("close", () => {
+            clearInterval(sip);
+            resolve();
+          });
+          socket.on("error", (err) => {
+            clearInterval(sip);
+            reject(err);
+          });
+        });
+      });
+    } finally {
+      process.off("warning", onWarning);
+      await new Promise<void>((resolve) => streaming.close(() => resolve()));
+    }
+
+    // One wait at a time is the whole shape: the loop adds a listener, the drain resolves it, and
+    // the wait is cleaned up before the next chunk. Anything that climbs is the leak.
+    expect(peakOnGzip).toBeLessThanOrEqual(2);
+    expect(warnings).toEqual([]);
+  }, 60000);
 });
