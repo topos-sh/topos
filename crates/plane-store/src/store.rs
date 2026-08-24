@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use object_store::path::Path as StorePath;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload};
 
 use crate::error::{AuthorityError, Result};
 use crate::id::WorkspaceId;
