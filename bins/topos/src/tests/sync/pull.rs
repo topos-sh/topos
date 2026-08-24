@@ -56,6 +56,67 @@ fn clean_follower_auto_fast_forwards() {
 /// **A manifest row IS the consent.** A bundle this machine's recipe demands but has never
 /// received places its first bytes on the BARE sweep — no offer, no second command — and the row
 /// reads `installed`, naming the folder it landed in. The next bare sweep then has nothing to do.
+/// THE SERVER'S CURRENT IS THE TRUTH for `diff` too. A revert run elsewhere moves `current`
+/// without touching this store's base, and a bare diff that compared the copy against the cached
+/// base answered "no changes" over a copy that differs from what the team runs. The left side is
+/// the LIVE current, read from the plane; its id is what the answer names.
+#[test]
+fn a_bare_diff_reads_against_the_live_current_not_the_cached_base() {
+    let rig = Rig::new("diff-live");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id);
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::FastForwarded);
+
+    // The copy is untouched; against the base it applied, there is nothing to show.
+    let same = ops::diff(
+        &rig.ctx(&plane, &foll),
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+        ops::StoreScope::Here,
+    )
+    .unwrap();
+    assert!(same.diff.is_empty(), "{}", same.diff);
+    assert_eq!(same.version_id, to_hex(&v1.id));
+
+    // A revert (run from another machine) moves `current` back onto the genesis bytes. No sweep
+    // has run here since — the cached base still says v1.
+    let restored = mk_version(&[v1.id], BASE, "d_rev", "topos: revert");
+    plane.add_version(&id, &restored);
+    plane.set_current(&id, served(WS, &id, restored.id, 2));
+    let diffed = ops::diff(
+        &rig.ctx(&plane, &foll),
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+        ops::StoreScope::Here,
+    )
+    .unwrap();
+    assert_eq!(
+        diffed.version_id,
+        to_hex(&restored.id),
+        "the left side is the live current"
+    );
+    assert!(
+        diffed.diff.contains("+# v1") && diffed.diff.contains("ref/notes.md"),
+        "the real difference against what the team runs: {}",
+        diffed.diff
+    );
+    assert_eq!(
+        rig.read_sync(&id).base_commit,
+        to_hex(&v1.id),
+        "a read verb moved nothing"
+    );
+}
+
 #[test]
 fn a_never_received_bundle_installs_on_the_bare_sweep() {
     let rig = Rig::new("first-receive");

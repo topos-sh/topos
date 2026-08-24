@@ -108,8 +108,8 @@
         "null"
       ]
     },
-    "project_locked_version": {
-      "description": "The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the\nversion this publish just shipped — the receipt's \"this project is locked\" line.",
+    "project_lock": {
+      "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —\nthe checkout the command stood in runs the new version at once, the way a commit moves\n`HEAD`. Absent when no project lock records the bundle (or its row pins a version).\n**INFERRED** (additive-only).",
       "type": [
         "string",
         "null"
@@ -120,6 +120,17 @@
       "type": [
         "string",
         "null"
+      ]
+    },
+    "republish": {
+      "description": "Present when the shipped copy EQUALED an older version than the workspace's live `current`\n(a revert had moved `current` past this machine's own publish, say): the publish carried\nthat version's content forward as the new version, and the receipt names both. **INFERRED**\n(additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Republish"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "rewrite_pending": {
@@ -196,6 +207,39 @@
       },
       "required": [
         "name"
+      ]
+    },
+    "Republish": {
+      "description": "A publish that ships an OLDER version's content forward: the copy equalled `copy_version_id`,\nthe workspace's live `current` was `current_version_id`, and the apply mints a new version\nparented on that current with the copy's bytes. Re-publishing old content is an ordinary act\n(a commit can restate an earlier tree); what the reader is owed is which version `current` is.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "copy_version_id": {
+          "description": "The older version the copy's bytes equal — the version being carried forward.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "current_message": {
+          "description": "That version's history line (`topos: revert`, or the message its publish carried), when\nthe server named it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_version_id": {
+          "description": "The workspace's live `current` at the time of the publish.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "new_version_id": {
+          "description": "The version the forward publish mints (predicted on the preview from the same preimage\nthe apply commits; the landed id on the receipt).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "current_version_id",
+        "copy_version_id",
+        "new_version_id"
       ]
     },
     "ScopeDraft": {

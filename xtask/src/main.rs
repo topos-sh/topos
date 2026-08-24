@@ -445,14 +445,15 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::{ConflictPathKind, ConflictReason};
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ClaimReceipt, ClaimState, ClaimTwin, ConflictHolds, ConflictPathReport,
-        ConflictPlacement, DestChange, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending,
-        InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
-        PublishData, PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult,
-        PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SetDelivery, SignInPath,
-        SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
-        Surface, TargetOutcome, VerifyData, VerifyState, WorkspaceRef, WorkspaceSyncReport,
+        AddData, ChangeSummary, ClaimReceipt, ClaimState, ClaimTwin, ConflictHolds,
+        ConflictPathReport, ConflictPlacement, DestChange, DiffData, DiffPatchInfo, DiffSource,
+        EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport,
+        ProtectData, PublishData, PublishDescribeData, PublishGate, PublishNoChangesData,
+        PublishResult, PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData,
+        RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SetDelivery,
+        SignInPath, SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary,
+        StatusTrigger, Surface, TargetOutcome, VerifyData, VerifyState, WorkspaceRef,
+        WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -1789,6 +1790,15 @@ fn fixtures() -> Vec<(&'static str, String)> {
             converted_from: None,
             // The ordinary skill publish: the additive kind tag omits (absent = a skill).
             kind: None,
+            // The copy is a draft on the live current, not an older version carried forward.
+            republish: None,
+            changes: Some(ChangeSummary {
+                files: 2,
+                added: 1,
+                removed: 0,
+                executable: 1,
+            }),
+            lands_in: vec!["everyone".to_owned()],
         })
         .expect("PublishDescribeData serializes"),
         warnings: vec![],
@@ -1811,7 +1821,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "publish".to_owned(),
         ok: true,
         data: serde_json::to_value(PublishData {
-            project_locked_version: None,
+            project_lock: None,
+            republish: None,
             manifest: None,
             reference: None,
             converted_from: None,

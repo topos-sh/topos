@@ -10,10 +10,11 @@ use topos_gitstore::{DiffFile, FileDiffSection, Store, unified_diff_sections};
 use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::results::{DiffData, DiffPatchInfo, DiffSource};
 
-use super::contribute;
 use super::{VersionRef, parse_hex32, resolve_version_ref};
+use super::{contribute, sync_engine};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
+use crate::plane::{PlaneError, PointerFetch};
 use crate::scan::{self, ScannedBundle};
 use crate::{doc, sidecar};
 
@@ -211,9 +212,20 @@ fn diff_draft_vs_current(
         return Err(refusal);
     }
     let store = Store::open(&sp.store)?;
-    let version_id = parse_hex32(&lock.base_commit)?;
-    let bundle_digest = parse_hex32(&lock.bundle_digest)?;
-    let base = store.render_verified(version_id, bundle_digest)?;
+    // THE SERVER'S CURRENT IS THE TRUTH: the left side is the workspace's LIVE current, read
+    // here, never the sidecar's cached base. A revert run elsewhere moves `current` without
+    // touching this store, and a diff against the cached base then answered "no changes" over
+    // a copy that differs from what the team runs. The cached base stands only where there is
+    // no live current to read (a bundle no workspace delivers here) or where it IS the current.
+    let (version_id, base_files) = match live_current(ctx, lock, &store)? {
+        Some(live) => live,
+        None => {
+            let version_id = parse_hex32(&lock.base_commit)?;
+            let bundle_digest = parse_hex32(&lock.bundle_digest)?;
+            let base = store.render_verified(version_id, bundle_digest)?;
+            (lock.base_commit.clone(), rendered_files(base))
+        }
+    };
     // The draft side is the WORK TREE — the single edited copy when one exists (draft-anywhere),
     // else the first placement; several divergent copies freeze typed. A `-a`/`--dest` selection
     // names ONE copy instead and BYPASSES that freeze: the aggregate classification refuses before
@@ -238,15 +250,7 @@ fn diff_draft_vs_current(
         source_dir.unwrap_or_else(|| super::dest_select::copy_spellings(ctx, &placement).display)
     });
 
-    let base_files: Vec<DiffFile<'_>> = base
-        .files
-        .iter()
-        .map(|f| DiffFile {
-            path: &f.path,
-            mode: f.mode,
-            bytes: &f.bytes,
-        })
-        .collect();
+    let base_files: Vec<DiffFile<'_>> = diff_files(&base_files);
     let draft_files: Vec<DiffFile<'_>> = draft
         .iter()
         .map(|f| DiffFile {
@@ -264,7 +268,7 @@ fn diff_draft_vs_current(
         // ITS digest — the byte-exact value `publish <skill>@<digest>` consents to — not
         // the base's. When the draft equals current the scan reproduces the current digest, so a
         // no-change diff is unaffected.
-        version_id: lock.base_commit.clone(),
+        version_id,
         bundle_digest: to_hex(&draft_digest),
         diff,
         truncated,
@@ -272,6 +276,80 @@ fn diff_draft_vs_current(
         skill: dest.as_ref().map(|_| lock.name.clone()),
         dest,
     })
+}
+
+/// The workspace's LIVE `current` for a followed bundle, when it is NOT the version this store
+/// applied: `(version id, its verified files)` — from this store when the version is held here,
+/// else fetched and re-verified. `None` when the bundle is delivered by no workspace (nothing
+/// to read against), when the workspace serves no current for it, or when the live current IS
+/// the applied base (the store's own render is then the same bytes).
+///
+/// # Errors
+/// [`ClientError::Plane`] on a transport fault — a diff against a base this run could not
+/// confirm is current would be exactly the stale answer this read exists to prevent.
+fn live_current(
+    ctx: &Ctx<'_>,
+    lock: &Lock,
+    store: &Store,
+) -> Result<Option<(String, Vec<DiffFileOwned>)>, ClientError> {
+    let Some(workspace_id) = super::followed_workspace(ctx, &lock.skill_id) else {
+        return Ok(None);
+    };
+    let skill_id = lock.skill_id.as_str();
+    ctx.plane.bind_skill(&workspace_id, skill_id);
+    let rec = match ctx.plane.get_current(skill_id, None) {
+        Ok(PointerFetch::Record(rec)) => rec,
+        Ok(PointerFetch::NotModified) => {
+            return Err(ClientError::Corrupt(
+                "an unconditional current read returned not-modified".to_owned(),
+            ));
+        }
+        Err(PlaneError::NotFound) => return Ok(None),
+        Err(PlaneError::UpdateRequired { min }) => return Err(ClientError::UpdateRequired { min }),
+        Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m)) => {
+            return Err(ClientError::Plane(format!(
+                "could not read the current version of '{}' from the workspace: {m} — retry",
+                lock.name
+            )));
+        }
+    };
+    let commit =
+        sync_engine::scoped_version_id(&rec, skill_id, &workspace_id).ok_or_else(|| {
+            ClientError::WireInvalid(
+                "the current pointer is scoped to a different workspace/skill".to_owned(),
+            )
+        })?;
+    let hex = to_hex(&commit);
+    if hex == lock.base_commit {
+        return Ok(None);
+    }
+    let files = match sync_engine::store_bundle_digest_opt(store, commit)? {
+        Some(digest) => rendered_files(store.render_verified(commit, digest)?),
+        None => contribute::fetch_verified_bundle(ctx, skill_id, commit)?
+            .1
+            .files
+            .into_iter()
+            .map(|f| DiffFileOwned {
+                path: f.path,
+                mode: f.mode,
+                bytes: f.bytes,
+            })
+            .collect(),
+    };
+    Ok(Some((hex, files)))
+}
+
+/// A rendered version's files in the owned diff shape.
+fn rendered_files(bundle: topos_gitstore::RenderedBundle) -> Vec<DiffFileOwned> {
+    bundle
+        .files
+        .into_iter()
+        .map(|f| DiffFileOwned {
+            path: f.path,
+            mode: f.mode,
+            bytes: f.bytes,
+        })
+        .collect()
 }
 
 /// Resolve a plane-backed diff endpoint to its verified bytes. `current` = the PLANE's live signed current

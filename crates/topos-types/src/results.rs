@@ -1820,10 +1820,18 @@ pub enum ExchangeFault {
 )]
 pub struct PublishData {
     pub skill_id: String,
-    /// The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the
-    /// version this publish just shipped — the receipt's "this project is locked" line.
+    /// The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —
+    /// the checkout the command stood in runs the new version at once, the way a commit moves
+    /// `HEAD`. Absent when no project lock records the bundle (or its row pins a version).
+    /// **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_locked_version: Option<String>,
+    pub project_lock: Option<String>,
+    /// Present when the shipped copy EQUALED an older version than the workspace's live `current`
+    /// (a revert had moved `current` past this machine's own publish, say): the publish carried
+    /// that version's content forward as the new version, and the receipt names both. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub republish: Option<Republish>,
     /// The skill's NAME — the handle humans speak and the TTY success line leads with
     /// (`Published <name>@…`); the opaque `skill_id` above stays the machine key.
     pub name: String,
@@ -2080,6 +2088,11 @@ pub struct RevertData {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub new_version_id: String,
     pub current_generation: u64,
+    /// The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the
+    /// checkout the command stood in runs the restored version at its next update. Absent when no
+    /// project lock records the bundle (or its row pins a version). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_lock: Option<String>,
 }
 
 /// `revert <skill> --to <good>` (bare, no `--yes`) — the two-phase DESCRIBE of the forward move: what
@@ -2546,6 +2559,66 @@ pub struct PublishDescribeData {
     /// would print nothing. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
+    /// Present when the copy EQUALS an older version than the workspace's live `current`: the
+    /// apply would carry that version's content forward as a new version, and the preview says
+    /// which version stands as `current` now. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub republish: Option<Republish>,
+    /// What the draft changes against the live `current`, counted per file. A GENESIS publish
+    /// counts every file as added (there is no current to count against). **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<ChangeSummary>,
+    /// The channels the published version reaches: the `--to` target (or `everyone` for a
+    /// brand-new bundle) plus the channels that already carry the bundle. Empty when the bundle
+    /// sits in the catalog alone. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lands_in: Vec<String>,
+}
+
+/// A publish that ships an OLDER version's content forward: the copy equalled `copy_version_id`,
+/// the workspace's live `current` was `current_version_id`, and the apply mints a new version
+/// parented on that current with the copy's bytes. Re-publishing old content is an ordinary act
+/// (a commit can restate an earlier tree); what the reader is owed is which version `current` is.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct Republish {
+    /// The workspace's live `current` at the time of the publish.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub current_version_id: String,
+    /// That version's history line (`topos: revert`, or the message its publish carried), when
+    /// the server named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_message: Option<String>,
+    /// The older version the copy's bytes equal — the version being carried forward.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub copy_version_id: String,
+    /// The version the forward publish mints (predicted on the preview from the same preimage
+    /// the apply commits; the landed id on the receipt).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub new_version_id: String,
+}
+
+/// A publish preview's per-file count of what the draft changes against the live `current`.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct ChangeSummary {
+    /// Every file that differs: added, removed, or changed in content or mode.
+    pub files: u64,
+    /// Files the draft adds.
+    pub added: u64,
+    /// Files the draft removes.
+    pub removed: u64,
+    /// Files that are executable in the draft and were not (added executable, or the bit flipped).
+    pub executable: u64,
 }
 
 /// `publish` when the copy already matches the published `current`: a SUCCESS with nothing to ship
@@ -3016,7 +3089,8 @@ mod tests {
     #[test]
     fn publish_data_carries_the_move_and_omits_an_absent_added_note() {
         let done = PublishData {
-            project_locked_version: None,
+            project_lock: None,
+            republish: None,
             manifest: None,
             reference: None,
             converted_from: None,

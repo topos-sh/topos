@@ -3000,12 +3000,12 @@
             ],
             "description": "The channel whose placement was WITHHELD by its curated mode (the receipt's\n`details.placement = curated_role_required`): the publish itself landed — catalog + moved\npointer — but the skill's reference was NOT placed into this channel (the `--to` target, or\nthe default `everyone` for a brand-new skill). A reviewer or owner places it\n(`topos channel add <channel> <skill>`). **INFERRED** (additive-only)."
           },
-          "project_locked_version": {
+          "project_lock": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the\nversion this publish just shipped — the receipt's \"this project is locked\" line."
+            "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —\nthe checkout the command stood in runs the new version at once, the way a commit moves\n`HEAD`. Absent when no project lock records the bundle (or its row pins a version).\n**INFERRED** (additive-only)."
           },
           "reference": {
             "type": [
@@ -3013,6 +3013,17 @@
               "null"
             ],
             "description": "The canonical workspace reference the manifest now stores. **INFERRED** (additive-only)."
+          },
+          "republish": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Republish",
+                "description": "Present when the shipped copy EQUALED an older version than the workspace's live `current`\n(a revert had moved `current` past this machine's own publish, say): the publish carried\nthat version's content forward as the new version, and the receipt names both. **INFERRED**\n(additive-only)."
+              }
+            ]
           },
           "rewrite_pending": {
             "type": [
@@ -3205,6 +3216,36 @@
           }
         }
       },
+      "Republish": {
+        "type": "object",
+        "description": "A publish that ships an OLDER version's content forward: the copy equalled `copy_version_id`,\nthe workspace's live `current` was `current_version_id`, and the apply mints a new version\nparented on that current with the copy's bytes. Re-publishing old content is an ordinary act\n(a commit can restate an earlier tree); what the reader is owed is which version `current` is.\n**INFERRED** (additive-only).",
+        "required": [
+          "current_version_id",
+          "copy_version_id",
+          "new_version_id"
+        ],
+        "properties": {
+          "copy_version_id": {
+            "type": "string",
+            "description": "The older version the copy's bytes equal — the version being carried forward."
+          },
+          "current_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That version's history line (`topos: revert`, or the message its publish carried), when\nthe server named it."
+          },
+          "current_version_id": {
+            "type": "string",
+            "description": "The workspace's live `current` at the time of the publish."
+          },
+          "new_version_id": {
+            "type": "string",
+            "description": "The version the forward publish mints (predicted on the preview from the same preimage\nthe apply commits; the landed id on the receipt)."
+          }
+        }
+      },
       "RevertData": {
         "type": "object",
         "description": "`revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —\nnever a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**",
@@ -3228,6 +3269,13 @@
           "new_version_id": {
             "type": "string",
             "description": "The new forward-revert commit that carries those bytes."
+          },
+          "project_lock": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the\ncheckout the command stood in runs the restored version at its next update. Absent when no\nproject lock records the bundle (or its row pins a version). **INFERRED** (additive-only)."
           },
           "reverted_to": {
             "type": "string",

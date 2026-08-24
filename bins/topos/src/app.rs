@@ -1447,6 +1447,7 @@ fn run_command(
                     propose,
                     to.as_deref(),
                     workspace.as_deref(),
+                    message.as_deref(),
                     &selection,
                     store_scope,
                 );

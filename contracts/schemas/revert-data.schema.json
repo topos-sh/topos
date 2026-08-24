@@ -18,6 +18,13 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "project_lock": {
+      "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the\ncheckout the command stood in runs the restored version at its next update. Absent when no\nproject lock records the bundle (or its row pins a version). **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "reverted_to": {
       "description": "The good version named by `--to` (the bytes being restored).",
       "type": "string",

@@ -939,12 +939,15 @@ export interface components {
              */
             placement_withheld?: string | null;
             /**
-             * @description The version the CWD project's `topos.lock` pins this bundle to, when it is now BEHIND the
-             *     version this publish just shipped — the receipt's "this project is locked" line.
+             * @description The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —
+             *     the checkout the command stood in runs the new version at once, the way a commit moves
+             *     `HEAD`. Absent when no project lock records the bundle (or its row pins a version).
+             *     **INFERRED** (additive-only).
              */
-            project_locked_version?: string | null;
+            project_lock?: string | null;
             /** @description The canonical workspace reference the manifest now stores. **INFERRED** (additive-only). */
             reference?: string | null;
+            republish?: null | components["schemas"]["Republish"];
             /**
              * @description The publish LANDED but the local governance-transfer rewrite did NOT (a manifest
              *     read/write fault): the truthful receipt half — the manifest still spells the local-path
@@ -1053,6 +1056,29 @@ export interface components {
             workspace_id: string;
         };
         /**
+         * @description A publish that ships an OLDER version's content forward: the copy equalled `copy_version_id`,
+         *     the workspace's live `current` was `current_version_id`, and the apply mints a new version
+         *     parented on that current with the copy's bytes. Re-publishing old content is an ordinary act
+         *     (a commit can restate an earlier tree); what the reader is owed is which version `current` is.
+         *     **INFERRED** (additive-only).
+         */
+        Republish: {
+            /** @description The older version the copy's bytes equal — the version being carried forward. */
+            copy_version_id: string;
+            /**
+             * @description That version's history line (`topos: revert`, or the message its publish carried), when
+             *     the server named it.
+             */
+            current_message?: string | null;
+            /** @description The workspace's live `current` at the time of the publish. */
+            current_version_id: string;
+            /**
+             * @description The version the forward publish mints (predicted on the preview from the same preimage
+             *     the apply commits; the landed id on the receipt).
+             */
+            new_version_id: string;
+        };
+        /**
          * @description `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
          *     never a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
          */
@@ -1066,6 +1092,12 @@ export interface components {
             name: string;
             /** @description The new forward-revert commit that carries those bytes. */
             new_version_id: string;
+            /**
+             * @description The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the
+             *     checkout the command stood in runs the restored version at its next update. Absent when no
+             *     project lock records the bundle (or its row pins a version). **INFERRED** (additive-only).
+             */
+            project_lock?: string | null;
             /** @description The good version named by `--to` (the bytes being restored). */
             reverted_to: string;
             skill_id: string;
