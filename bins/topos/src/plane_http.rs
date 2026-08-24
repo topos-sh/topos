@@ -10,6 +10,13 @@
 //! wire logic is unit-tested without a live server; the full loopback round-trips live in the `tests/`
 //! member.
 //!
+//! A version's blobs are fetched **in parallel over a small worker pool** (a `ureq::Agent` is
+//! `Send + Sync` and shares one connection pool, so the clones the workers carry reuse
+//! connections), behind the **machine-wide fetch cache** ([`crate::fetch_cache`]): the distinct
+//! objects a version names are asked of the cache first and only the misses are downloaded. Both
+//! are transport-internal optimizations — every verification stays where it was, the workers write
+//! nothing durable, and the wire contract is untouched.
+//!
 //! **Ids are validated at this boundary.** Every skill/workspace id a response carries (the granted
 //! poll's workspace id) is parsed through [`crate::id`] before it is returned — a server-chosen
 //! `"../../x"` fails here as a malformed response, never reaching a path join or a URL splice.
@@ -17,9 +24,11 @@
 //! The client stays **sync + tokio-free**: `ureq` brings its own blocking TLS stack, so this adds no
 //! `plane-store`/`sqlx`/`tokio` edge (`check-arch` holds the line).
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use topos_core::digest::{self, FileMode, to_hex};
@@ -34,6 +43,7 @@ use topos_types::requests::{
 use topos_types::{JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
 use crate::error::{ClientError, FetchFault};
+use crate::fetch_cache::FetchCache;
 use crate::git_source::RepoHead;
 use crate::plane::{
     ConnectedSession, ContributeSource, DeviceAuthPoll, DeviceAuthStart, DirectorySource,
@@ -88,6 +98,10 @@ pub(crate) struct UreqPlane {
     /// this transport is boxed as a `'static` trait object and cannot borrow the composition root's
     /// binding. Silent by default — [`Self::with_progress`] is what wires the real one.
     progress: Rc<dyn ProgressSink>,
+    /// The MACHINE-WIDE blob cache a version fetch consults before dialing, and fills after
+    /// ([`Self::with_fetch_cache`]). `None` = no cache at all: every blob is downloaded, which is
+    /// exactly what the unit tests and the pure-transport fixtures want.
+    cache: Option<FetchCache>,
 }
 
 impl std::fmt::Debug for UreqPlane {
@@ -125,6 +139,7 @@ impl UreqPlane {
             agent: ureq::Agent::new_with_config(agent_config()),
             machine_label,
             progress: Rc::new(progress::Silent),
+            cache: None,
         }
     }
 
@@ -140,6 +155,14 @@ impl UreqPlane {
     /// silent, which is exactly what the unit tests and fixtures want.
     pub(crate) fn with_progress(mut self, progress: Rc<dyn ProgressSink>) -> Self {
         self.progress = progress;
+        self
+    }
+
+    /// Attach the machine-wide blob cache ([`crate::fetch_cache`]) a version fetch reads before
+    /// dialing and fills after. Without it every blob is downloaded — the transport's behavior is
+    /// otherwise identical, because the cache is a pure optimization behind the same verifications.
+    pub(crate) fn with_fetch_cache(mut self, cache: FetchCache) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -171,35 +194,16 @@ impl UreqPlane {
         self
     }
 
-    /// A `GET` carrying `Authorization: Bearer <credential>` (current + versions + bundles). Returns the
-    /// raw body on 2xx, [`PlaneError::NotFound`] on 404, [`PlaneError::Unreachable`] on a connect-level
-    /// fault, and [`PlaneError::Unavailable`] on any other status. `url` never contains the secret (the
-    /// credential is in the header), so it is safe in the error text.
+    /// A `GET` carrying `Authorization: Bearer <credential>` — every SMALL body this transport
+    /// reads (the `current` record, a version's metadata frame, a proposal list), read whole.
+    /// Returns the raw body on 2xx, [`PlaneError::NotFound`] on 404, [`PlaneError::Unreachable`] on
+    /// a connect-level fault, and [`PlaneError::Unavailable`] on any other status. `url` never
+    /// contains the secret (the credential is in the header), so it is safe in the error text.
+    ///
+    /// A BLOB does not come through here: those are streamed, several at a time, by
+    /// [`Self::fetch_blobs`] over the thread-safe [`fetch_blob`] — which makes the same request and
+    /// applies the same mapping, so the two cannot drift.
     fn bearer_get(&self, url: &str, credential: &str) -> Result<Vec<u8>, PlaneError> {
-        self.bearer_get_inner(url, credential, None)
-    }
-
-    /// [`Self::bearer_get`] for ONE BLOB of a version being assembled: the body is streamed and its
-    /// bytes reported into the phase in flight, on top of the `carried` total the version's earlier
-    /// blobs already contributed — so a multi-file bundle shows one climbing figure, not a counter
-    /// that restarts at every file.
-    fn bearer_get_part(
-        &self,
-        url: &str,
-        credential: &str,
-        carried: u64,
-    ) -> Result<Vec<u8>, PlaneError> {
-        self.bearer_get_inner(url, credential, Some(carried))
-    }
-
-    /// The shared body of the two above. `part` selects the read: `None` = a small metadata body
-    /// read whole; `Some(carried)` = a watched blob streamed on top of that running total.
-    fn bearer_get_inner(
-        &self,
-        url: &str,
-        credential: &str,
-        part: Option<u64>,
-    ) -> Result<Vec<u8>, PlaneError> {
         // Only when the verb above named nothing better — a `downloading <skill>` phase says more
         // than the server's hostname does.
         let _phase = progress::phase_if_idle(
@@ -220,10 +224,7 @@ impl UreqPlane {
             })?;
         let status = resp.status().as_u16();
         match classify(status) {
-            HttpClass::Ok => match part {
-                Some(carried) => read_body_reported(resp, &*self.progress, carried, false),
-                None => read_body(resp),
-            },
+            HttpClass::Ok => read_body(resp),
             HttpClass::NotFound => Err(PlaneError::NotFound),
             HttpClass::UpgradeRequired => Err(update_required(resp)),
             // No conditional headers are sent here, so 304 cannot occur; fold it in with other statuses.
@@ -232,6 +233,213 @@ impl UreqPlane {
             )),
         }
     }
+
+    /// Download the blobs the cache did not answer for, SEVERAL AT A TIME. A bundle is many small
+    /// files, so a sequential fetch spends its wall clock on round trips rather than on bandwidth;
+    /// a small pool hides most of that. Each worker gets a CLONE of the `ureq` agent (`Agent` is
+    /// `Send + Sync` and shares one connection pool, so the clones reuse connections rather than
+    /// each dialing its own), the strings it needs, and two shared counters — never `self`, which
+    /// is `!Send` by construction (the `RefCell` scope map, the `Rc` sink). No filesystem write
+    /// happens out here: the workers hand back bytes, and everything durable stays on the
+    /// coordinating thread.
+    ///
+    /// The FIRST failure ends the round — a version cannot be assembled without every blob, so the
+    /// siblings' remaining bytes are wasted work — and comes back as-is, mapped exactly as the
+    /// sequential lane maps it.
+    fn fetch_blobs(
+        &self,
+        misses: &[(String, [u8; 32])],
+        bundles_base: &str,
+        credential: &str,
+    ) -> Result<Vec<FetchedBlob>, PlaneError> {
+        if misses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let host = host_label(&self.base_url);
+        // The work, popped one index at a time (order is irrelevant — every result names the
+        // object it belongs to).
+        let queue: Mutex<Vec<usize>> = Mutex::new((0..misses.len()).rev().collect());
+        // What the workers report and the coordinator paints: the sinks are `!Sync`, so bytes
+        // travel as a plain running total and only this thread turns it into a line.
+        let counted = AtomicU64::new(0);
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<Vec<u8>, PlaneError>)>();
+        let mut fetched: Vec<FetchedBlob> = Vec::with_capacity(misses.len());
+        let mut first_err: Option<PlaneError> = None;
+        std::thread::scope(|scope| {
+            for _ in 0..misses.len().min(FETCH_WORKERS) {
+                let tx = tx.clone();
+                let agent = self.agent.clone();
+                let host = host.clone();
+                let credential = credential.to_owned();
+                let machine_label = self.machine_label.clone();
+                let (queue, counted, stop) = (&queue, &counted, &stop);
+                scope.spawn(move || {
+                    loop {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        // A poisoned queue means a sibling panicked mid-pop; the `Vec` behind it
+                        // is still a `Vec`, and abandoning the round over it would be worse.
+                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
+                        let Some(i) = next else { break };
+                        let url = format!("{bundles_base}/{}", misses[i].0);
+                        let out = fetch_blob(
+                            &agent,
+                            &host,
+                            &url,
+                            &credential,
+                            machine_label.as_deref(),
+                            counted,
+                            stop,
+                        );
+                        if tx.send((i, out)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            // From here only the workers hold senders, so a pool that panicked outright
+            // disconnects the channel instead of wedging this loop.
+            drop(tx);
+            let mut pending = misses.len();
+            while pending > 0 {
+                match rx.recv_timeout(FETCH_POLL) {
+                    Ok((i, Ok(bytes))) => {
+                        pending -= 1;
+                        fetched.push((misses[i].0.clone(), misses[i].1, bytes));
+                    }
+                    Ok((_, Err(e))) => {
+                        pending -= 1;
+                        if first_err.is_none() {
+                            stop.store(true, Ordering::Relaxed);
+                            first_err = Some(e);
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                // ONE climbing figure for the whole bundle, repainted as the workers stream. The
+                // metadata frame carries no sizes, so the total stays unknown and the line shows a
+                // figure climbing rather than a fabricated percentage.
+                self.progress.bytes(counted.load(Ordering::Relaxed), None);
+            }
+        });
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(fetched),
+        }
+    }
+}
+
+/// One downloaded blob on its way from a worker to the assembly: `(the object's hex id as the
+/// metadata spells it, the same id parsed, the bytes)`.
+type FetchedBlob = (String, [u8; 32], Vec<u8>);
+
+/// How many blob downloads one version fetch runs at once — enough to hide the round trips a
+/// many-file bundle is made of, small enough that a fleet on a session-start sweep never becomes a
+/// connection storm at the plane.
+const FETCH_WORKERS: usize = 4;
+
+/// How often the coordinating thread wakes to repaint the byte total while the workers stream.
+const FETCH_POLL: Duration = Duration::from_millis(50);
+
+/// The DISTINCT objects a version's file list names, in FIRST-OCCURRENCE order, each id parsed
+/// once. Two paths holding identical bytes are one object on the wire, so a bundle that repeats a
+/// file (a licence, an empty `__init__.py`) costs one download rather than one per path.
+fn distinct_objects(meta: &WireVersionMeta) -> Result<Vec<(String, [u8; 32])>, PlaneError> {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(meta.files.len());
+    let mut out = Vec::with_capacity(meta.files.len());
+    for f in &meta.files {
+        let object_id = parse_id(&f.object_id)?;
+        if seen.insert(f.object_id.as_str()) {
+            out.push((f.object_id.clone(), object_id));
+        }
+    }
+    Ok(out)
+}
+
+/// ONE blob's request + streamed read, pure of `&self` so a worker thread can run it: the same
+/// Bearer credential, the same machine label a labelled transport sends, and the same
+/// [`classify`] status mapping [`UreqPlane::bearer_get_inner`] applies to the sequential routes.
+/// No progress sink (they are `!Sync`) — the bytes land in `counted`, which the coordinator reads.
+fn fetch_blob(
+    agent: &ureq::Agent,
+    host: &str,
+    url: &str,
+    credential: &str,
+    machine_label: Option<&str>,
+    counted: &AtomicU64,
+    stop: &AtomicBool,
+) -> Result<Vec<u8>, PlaneError> {
+    let mut req = agent
+        .get(url)
+        .header("authorization", format!("Bearer {credential}"));
+    if let Some(label) = machine_label {
+        req = req.header("x-topos-machine", label);
+    }
+    let resp = req
+        .call()
+        // A `.call()` Err is connect-level (dial/TLS/timeout before any status), exactly as on the
+        // sequential lane: the plane itself is unreachable, so the sweep's breaker may trip on it.
+        .map_err(|e| PlaneError::Unreachable(transport_reason(host, &e)))?;
+    let status = resp.status().as_u16();
+    match classify(status) {
+        HttpClass::Ok => read_body_counted(resp, counted, stop),
+        HttpClass::NotFound => Err(PlaneError::NotFound),
+        HttpClass::UpgradeRequired => Err(update_required(resp)),
+        // No conditional headers are sent here, so 304 cannot occur; fold it in with the rest.
+        HttpClass::NotModified | HttpClass::Other => {
+            Err(PlaneError::Unavailable(status_reason(host, status)))
+        }
+    }
+}
+
+/// [`read_body_reported_limited`]'s loop with the progress sink swapped for a shared counter — the
+/// read a worker thread runs. Byte-for-byte the same read: the same [`MAX_FETCH_BYTES`] limiter,
+/// the same [`STREAM_CHUNK_BYTES`] chunks, the same `Interrupted` retry (a signal during a long
+/// download must not surface as a transport fault), and the same transient mapping for every other
+/// fault.
+///
+/// `stop` is checked BETWEEN chunks: once a sibling blob has failed the version cannot be
+/// assembled, so this download ends at the next chunk boundary instead of at its last byte. That
+/// abandonment reads as the transient it is, and is never the error the caller reports — the
+/// failure that set the flag already won.
+fn read_body_counted(
+    resp: ureq::http::Response<ureq::Body>,
+    counted: &AtomicU64,
+    stop: &AtomicBool,
+) -> Result<Vec<u8>, PlaneError> {
+    use std::io::Read;
+
+    let mut reader = resp
+        .into_body()
+        .into_with_config()
+        .limit(MAX_FETCH_BYTES)
+        .reader();
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(PlaneError::Unavailable(
+                "the download was abandoned".to_owned(),
+            ));
+        }
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                counted.fetch_add(u64::try_from(n).unwrap_or(u64::MAX), Ordering::Relaxed);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                return Err(PlaneError::Unavailable(
+                    "the response was cut short".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl PlaneSource for UreqPlane {
@@ -313,22 +521,48 @@ impl PlaneSource for UreqPlane {
         let meta_bytes = self.bearer_get(&meta_url, &credential)?;
         let meta: WireVersionMeta = serde_json::from_slice(&meta_bytes)
             .map_err(|e| PlaneError::Malformed(format!("version metadata for {skill_id}: {e}")))?;
-        // The bundle's blobs are the bytes worth watching — one running total across all of them
-        // (the metadata frame carries no sizes, so the total stays unknown and the line shows the
-        // figure climbing rather than a fabricated percentage).
-        let carried = Cell::new(0u64);
+        // The DISTINCT objects this version is made of, ids parsed BEFORE any byte is asked for:
+        // a malformed one is the same `Malformed` refusal [`build_fetched_version`] would raise,
+        // taken here so a hex outside the id charset never reaches a URL splice.
+        let wanted = distinct_objects(&meta)?;
+        // The cache answers first. What it hands back has already been re-verified against its own
+        // object id (a mismatch evicts rather than serves), and it is verified AGAIN below by
+        // `build_fetched_version`'s per-blob gate — a cached blob is trusted exactly as little as
+        // a downloaded one.
+        let mut blobs: HashMap<String, Vec<u8>> = HashMap::with_capacity(wanted.len());
+        let mut misses: Vec<(String, [u8; 32])> = Vec::new();
+        for (object_id_hex, object_id) in wanted {
+            match self.cache.as_ref().and_then(|c| c.read(&object_id)) {
+                Some(bytes) => {
+                    blobs.insert(object_id_hex, bytes);
+                }
+                None => misses.push((object_id_hex, object_id)),
+            }
+        }
+        let bundles_base = format!(
+            "{}/v1/workspaces/{}/skills/{}/bundles",
+            self.base_url, workspace_id, skill_id
+        );
+        for (object_id_hex, object_id, bytes) in
+            self.fetch_blobs(&misses, &bundles_base, &credential)?
+        {
+            // The content gate runs on THIS thread before a byte reaches the cache: a
+            // content-addressed store may never hold bytes under an id they do not hash to. A blob
+            // that fails is simply not cached — `build_fetched_version` below raises the one
+            // refusal for it, exactly as it always has.
+            if digest::sha256(&bytes) == object_id
+                && let Some(cache) = &self.cache
+            {
+                cache.write(&object_id, &bytes);
+            }
+            blobs.insert(object_id_hex, bytes);
+        }
         build_fetched_version(&meta, |object_id_hex| {
-            let url = format!(
-                "{}/v1/workspaces/{}/skills/{}/bundles/{}",
-                self.base_url, workspace_id, skill_id, object_id_hex
-            );
-            let bytes = self.bearer_get_part(&url, &credential, carried.get())?;
-            carried.set(
-                carried
-                    .get()
-                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
-            );
-            Ok(bytes)
+            // Every id in the metadata is a key of this map by construction (it was built from
+            // exactly this file list), so the miss arm is a refusal no run reaches.
+            blobs.get(object_id_hex).cloned().ok_or_else(|| {
+                PlaneError::Malformed(format!("blob {object_id_hex} was not fetched"))
+            })
         })
     }
 
@@ -686,19 +920,21 @@ fn read_body(resp: ureq::http::Response<ureq::Body>) -> Result<Vec<u8>, PlaneErr
 /// disappears next to the socket read, small enough that a slow link still moves the line.
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
-/// [`read_body`] for a body worth WATCHING — a repo tarball, a release asset, a bundle blob — read in
-/// chunks so the activity line advances while the bytes arrive instead of after they all have.
+/// [`read_body`] for a body worth WATCHING — a repo tarball, a release asset — read in chunks so
+/// the activity line advances while the bytes arrive instead of after they all have. (A bundle
+/// blob takes the parallel lane's [`read_body_counted`], which is this loop reporting into a
+/// shared counter rather than into a `!Sync` sink.)
 ///
 /// Byte-for-byte the same read as [`read_body`]: the same [`MAX_FETCH_BYTES`] limiter (`read_to_vec`
 /// is exactly this loop over the same limited reader), so an over-limit body still fails, and every
 /// fault still maps to the same transient [`PlaneError::Unavailable`] with the same `read body:`
 /// prefix. Only the reporting is new.
 ///
-/// `carried` is what EARLIER bodies of the same phase already contributed — a version's per-file
-/// blob fetches report ONE running total for the whole bundle rather than a counter that restarts
-/// at every file. `declare_total` says whether this body's own `Content-Length` may stand as the
-/// phase's total: true when this body IS the whole download (so a percentage is honest), false for
-/// one part of many (where the phase's real total is unknown).
+/// `carried` is what EARLIER bodies of the same phase already contributed, so a phase made of
+/// several downloads shows one climbing figure rather than a counter that restarts at every body.
+/// `declare_total` says whether this body's own `Content-Length` may stand as the phase's total:
+/// true when this body IS the whole download (so a percentage is honest), false for one part of
+/// many (where the phase's real total is unknown).
 fn read_body_reported(
     resp: ureq::http::Response<ureq::Body>,
     progress: &dyn ProgressSink,
@@ -2696,6 +2932,43 @@ mod tests {
         let meta = meta_for(files, vec![]);
         let err = build_fetched_version(&meta, |_id| Err(PlaneError::NotFound)).unwrap_err();
         assert!(matches!(err, PlaneError::NotFound), "got {err:?}");
+    }
+
+    /// What the fetch asks the cache and the network for: each DISTINCT object once, in
+    /// first-occurrence order. Three paths holding two distinct contents are two downloads, not
+    /// three — and the repeat keeps the order the metadata put it in, so a receipt's byte counter
+    /// climbs in the order the frame reads.
+    #[test]
+    fn distinct_objects_collapses_repeats_and_keeps_first_occurrence_order() {
+        let files: &[(&str, WireFileMode, &[u8])] = &[
+            ("SKILL.md", WireFileMode::Regular, b"hello\n"),
+            ("docs/a.md", WireFileMode::Regular, b"shared\n"),
+            ("docs/b.md", WireFileMode::Regular, b"shared\n"),
+            ("run.sh", WireFileMode::Executable, b"hello\n"),
+        ];
+        let meta = meta_for(files, vec![]);
+        let objects = distinct_objects(&meta).expect("every id parses");
+        assert_eq!(
+            objects
+                .iter()
+                .map(|(hex, _)| hex.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                to_hex(&digest::sha256(b"hello\n")),
+                to_hex(&digest::sha256(b"shared\n")),
+            ]
+        );
+        assert_eq!(objects[0].1, digest::sha256(b"hello\n"));
+    }
+
+    /// A malformed object id is refused BEFORE any byte is asked for — the same `Malformed` the
+    /// assembly raises, taken early so a hex outside the id charset never reaches a URL splice.
+    #[test]
+    fn distinct_objects_refuses_a_malformed_object_id() {
+        let mut meta = meta_for(&[("a", WireFileMode::Regular, b"x")], vec![]);
+        meta.files[0].object_id = "../../etc/passwd".to_owned();
+        let err = distinct_objects(&meta).unwrap_err();
+        assert!(matches!(err, PlaneError::Malformed(_)), "got {err:?}");
     }
 
     // ---- The invitation all-outcome 200 envelope mapping. ----

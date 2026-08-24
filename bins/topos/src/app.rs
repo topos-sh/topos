@@ -271,6 +271,14 @@ fn run_command(
     // binding, so each one clones a handle to the same sink.
     let quiet_sweep = matches!(&command, Command::Update { quiet: true, .. });
     let progress = crate::progress::select(quiet_sweep);
+    // The MACHINE-WIDE fetched-object cache every byte transport built below shares: blob bytes
+    // under `<machine home>/cache/objects`, keyed by the object id the plane names. Resolved from
+    // the MACHINE home and nowhere else — an object id IS its bytes, so one download serves every
+    // scope on this box, while a project store's `.topos/` is per-checkout state that would make
+    // each checkout pay for the same bytes again.
+    let fetch_cache_dir = resolve_home().join("cache").join("objects");
+    let fetch_cache =
+        || crate::fetch_cache::FetchCache::new(fetch_cache_dir.clone(), Rc::new(RealFs));
 
     // `uninstall` dispatches BEFORE state recovery and enrollment loading: its whole point is to
     // remove `~/.topos/` even when that state is corrupt — an unreadable/newer credentials doc or a
@@ -389,7 +397,8 @@ fn run_command(
                     Default::default(),
                 )
                 .with_workspaces(vec![s.workspace_id.clone()])
-                .with_progress(Rc::clone(&progress)),
+                .with_progress(Rc::clone(&progress))
+                .with_fetch_cache(fetch_cache()),
             ),
             directory: Box::new(
                 UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
@@ -466,7 +475,8 @@ fn run_command(
                     Default::default(),
                 )
                 .with_workspaces(vec![s.workspace_id.clone()])
-                .with_progress(Rc::clone(&progress)),
+                .with_progress(Rc::clone(&progress))
+                .with_fetch_cache(fetch_cache()),
             ),
             directory: Box::new(
                 UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
@@ -532,7 +542,8 @@ fn run_command(
                     Box::new(
                         UreqPlane::new(base.to_owned(), Some(cred.to_owned()), Default::default())
                             .with_workspaces(vec![ws.to_owned()])
-                            .with_progress(Rc::clone(&progress)),
+                            .with_progress(Rc::clone(&progress))
+                            .with_fetch_cache(fetch_cache()),
                     )
                 };
             let connect_session_lane = |base: &str, cred: &str| -> Box<dyn GovernanceSource> {
