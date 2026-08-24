@@ -10,7 +10,10 @@
       "identical": true,
       "name": "pr-describe",
       "reference": "topos.sh/acme/pr-describe",
-      "workspace": "acme"
+      "workspace": {
+        "host": "topos.sh",
+        "name": "acme"
+      }
     },
     "reference": "./tools/pr-describe",
     "scope": "project",

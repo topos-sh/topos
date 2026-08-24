@@ -562,9 +562,13 @@ pub(crate) fn reset(
             }
             Err(e) => return Err(e),
         };
+        let workspace_id = super::followed_workspace(ctx, id.as_str());
         items.push(ResetData {
             skill: lock.name.clone(),
-            workspace_id: super::followed_workspace(ctx, id.as_str()),
+            workspace: workspace_id
+                .as_deref()
+                .and_then(|ws| super::workspace_ref(ctx, ws)),
+            workspace_id,
             to_version: lock.base_commit.clone(),
             drop_diff,
             applied: false,

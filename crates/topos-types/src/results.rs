@@ -12,6 +12,37 @@
 use serde::{Deserialize, Serialize};
 
 // =================================================================================================
+// The one shape every verb names a workspace with.
+// =================================================================================================
+
+/// THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.
+///
+/// `<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a
+/// consumer can hand what it read here straight back to `--workspace`. The two halves ride apart
+/// because a slash inside a name would make parsing one string ambiguous, and the opaque
+/// `workspace_id` stays exactly what it was — the wire key — and is never spelled here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WorkspaceRef {
+    /// The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).
+    pub host: String,
+    /// The workspace's ADDRESS name — the slug, never the display name and never the opaque id.
+    pub name: String,
+}
+
+impl WorkspaceRef {
+    /// The `<host>/<name>` address, joined — what a person reads and types. Written once here so
+    /// no surface invents a second spelling of the same two fields.
+    #[must_use]
+    pub fn address(&self) -> String {
+        format!("{}/{}", self.host, self.name)
+    }
+}
+
+// =================================================================================================
 // PINNED — `pull` (the four-state sync machine, per skill).
 // =================================================================================================
 
@@ -73,6 +104,10 @@ pub struct BehindElsewhere {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct WorkspaceSyncReport {
     pub workspace_id: String,
+    /// The workspace this row is about, as a person addresses it. Absent only when this
+    /// installation holds no session naming it. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     /// When the last successful delivery answered (epoch millis; absent if never).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_delivery_at: Option<i64>,
@@ -612,10 +647,8 @@ pub struct UntrackedSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct RemoteWorkspace {
-    /// The server host the workspace lives on.
-    pub host: String,
-    /// The workspace's address name.
-    pub workspace: String,
+    /// The workspace this section is about, as a person addresses it.
+    pub workspace: WorkspaceRef,
     /// The workspace's opaque id.
     pub workspace_id: String,
     /// The workspace's channels.
@@ -1214,6 +1247,11 @@ pub struct AddData {
     /// source. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    /// The WORKSPACE this add's source names, when one does — a workspace reference, a bare name
+    /// that resolved to one, a channel or a feed row. Absent for a path, a forge import and the
+    /// built-in. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     /// Where those destinations RESOLVED to on this machine, when that differs from how the
     /// manifest spells them.
     ///
@@ -1535,8 +1573,8 @@ pub struct FmtData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct GovernedCopy {
-    /// The workspace's address name.
-    pub workspace: String,
+    /// The workspace holding the governed copy, as a person addresses it.
+    pub workspace: WorkspaceRef,
     /// The skill's catalog name there.
     pub name: String,
     /// The paste-ready reference, in the canonical host-qualified form
@@ -1555,8 +1593,8 @@ pub struct GovernedCopy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PublishedMatch {
-    /// The workspace's address name.
-    pub workspace: String,
+    /// The workspace publishing the same name, as a person addresses it.
+    pub workspace: WorkspaceRef,
     /// The bundle's catalog name there (the name that matched).
     pub name: String,
     /// The paste-ready reference, in the canonical host-qualified form
@@ -1593,6 +1631,10 @@ pub struct KeepAsYoursData {
     /// The workspace the retained copy was followed in (its former upstream), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    /// That same workspace as a person addresses it. Absent alongside `workspace_id`, and
+    /// whenever no session on this installation names it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     /// Why the local copy is retained (and no longer delivering here).
     pub reason: KeepReason,
     /// Whether a local draft rides along into the fork (a snapshotted or on-disk edit ahead of the base).
@@ -1640,13 +1682,11 @@ pub struct LoginData {
     /// The logged-into workspace's id (empty while the login is still pending approval).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
-    /// The workspace's ADDRESS name (the slug the browser approval recorded; empty while a bare
-    /// login still awaits it).
-    pub name: String,
-    /// The SERVER host the session lives on (`topos.sh`, `topos.example.com:3000`) — the manifest
-    /// grammar's host half, and the `<host>/<name>` address a receipt names. **Additive.**
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub host: String,
+    /// The workspace this login connected to, as a person addresses it — the slug the browser
+    /// approval recorded, on the host the session lives on. Absent while a bare login still
+    /// awaits the approval that names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// The API base this installation dials (from the protocol card).
@@ -1700,8 +1740,8 @@ pub struct LoginData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct LogoutData {
-    /// The sessions ended, by workspace ADDRESS name.
-    pub ended: Vec<String>,
+    /// The sessions ended, one entry per workspace, each as a person addresses it.
+    pub ended: Vec<WorkspaceRef>,
     /// Whether the server-side revoke landed for EVERY ended session (`false` = at least one was
     /// already gone server-side, or unreachable — the local sign-out proceeded regardless).
     pub server_revoked: bool,
@@ -1742,7 +1782,10 @@ pub struct LogData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct SyncFault {
-    /// The workspace as a person addresses it — never the opaque id.
+    /// The workspace as a person NAMES it — the recorded address name, and the opaque id only
+    /// where nothing on this machine still names it. Deliberately NOT the uniform
+    /// [`WorkspaceRef`]: a workspace whose session is gone has no knowable host, and half an
+    /// address is worse than the name a person would recognize.
     pub workspace: String,
     /// What went wrong.
     pub kind: ExchangeFault,
@@ -1828,12 +1871,11 @@ pub struct PublishData {
     /// itself is unaffected). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_line: Option<String>,
-    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
-    /// WHERE these bytes landed. Read from the same best-effort `me` the lines below come from;
-    /// absent when that read failed or the address does not validate. **INFERRED**
-    /// (additive-only).
+    /// The workspace this publish reached, as a person addresses it — how the receipt names
+    /// WHERE these bytes landed. Absent when neither this installation's session nor the
+    /// best-effort `me` read could name it. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_address: Option<String>,
+    pub workspace: Option<WorkspaceRef>,
     /// The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
     /// just published. Absent when the workspace address is not known. **INFERRED**
     /// (additive-only).
@@ -1980,11 +2022,11 @@ pub struct ProposeData {
     /// undone. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite_skipped: Option<String>,
-    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
-    /// WHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed
-    /// or the address does not validate. **INFERRED** (additive-only).
+    /// The workspace this proposal was opened in, as a person addresses it. Absent when neither
+    /// this installation's session nor the best-effort `me` read could name it. **INFERRED**
+    /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_address: Option<String>,
+    pub workspace: Option<WorkspaceRef>,
     /// The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
     /// under proposal. Absent when the workspace address is not known. **INFERRED**
     /// (additive-only). No `undo` rides this shape: a proposal never moved `current`, so there is
@@ -2021,10 +2063,10 @@ pub struct ProposeData {
 )]
 pub struct RevertData {
     pub skill_id: String,
-    /// The workspace's ADDRESS (`<host>/<name>`) — the receipt names where the pointer moved.
-    /// **INFERRED** (additive-only).
+    /// The workspace this revert reached, as a person addresses it — the receipt names where the
+    /// pointer moved. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_address: Option<String>,
+    pub workspace: Option<WorkspaceRef>,
     /// The skill's NAME — the handle humans speak and the TTY success line leads with
     /// (`Reverted <name> …`); the opaque `skill_id` above stays the machine key.
     pub name: String,
@@ -2068,6 +2110,10 @@ pub struct RevertDescribeData {
 pub struct ReviewData {
     /// `<skill>@<version_id>` of the reviewed proposal.
     pub proposal: String,
+    /// The workspace this verdict reached, as a person addresses it. Absent when no session on
+    /// this installation names it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     pub decision: ReviewDecision,
     /// The pointer's new generation when an approval moved `current`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2219,10 +2265,10 @@ pub struct ProtectData {
     /// `skill` or `channel`.
     pub kind: String,
     pub workspace_id: String,
-    /// The workspace's ADDRESS (`<host>/<name>`) — what the receipt NAMES, so a person always
-    /// reads which workspace this act reached. **INFERRED** (additive-only).
+    /// The workspace this act reached, as a person addresses it — so a receipt always names it.
+    /// **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_address: Option<String>,
+    pub workspace: Option<WorkspaceRef>,
     /// The level being set (`reviewed` / `curated` / `open`).
     pub level: String,
     /// `true` when the level LOOSENS protection (`open`) — the owner-gated direction.
@@ -2250,8 +2296,8 @@ pub struct ReviewIndexData {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ReviewIndexEntry {
     pub workspace_id: String,
-    /// The workspace's address name (the inbox groups by it).
-    pub workspace_name: String,
+    /// The workspace this proposal lives in, as a person addresses it (the inbox groups by it).
+    pub workspace: WorkspaceRef,
     pub skill: String,
     /// The review target handle, `<skill>@<version_id>`.
     pub proposal: String,
@@ -2272,6 +2318,10 @@ pub struct ReviewIndexEntry {
 pub struct ReviewDescribeData {
     /// The review target handle, `<skill>@<version_id>`.
     pub proposal: String,
+    /// The workspace the proposal lives in, as a person addresses it. Absent when no session on
+    /// this installation names it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     pub skill: String,
     pub proposer: String,
     pub message: String,
@@ -2296,8 +2346,14 @@ pub struct ReviewDescribeData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct InviteReadData {
-    /// The workspace address teammates paste to join.
+    /// The workspace's JOIN LINK — the URL teammates paste, as the server spells it (a scheme and,
+    /// in a multi-workspace deployment, the name segment). Not the `<host>/<name>` address below:
+    /// this one is what a person opens.
     pub address: String,
+    /// The workspace they would join, as a person addresses it. Absent when this installation
+    /// holds no session naming it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     /// Always `false` — a bare read sends nothing and changes nothing.
     pub changed: bool,
 }
@@ -2307,7 +2363,12 @@ pub struct InviteReadData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct InviteDescribeData {
+    /// The workspace's JOIN LINK, as the server spells it (see [`InviteReadData::address`]).
     pub address: String,
+    /// The workspace the invitations would seat people in, as a person addresses it. Absent when
+    /// this installation holds no session naming it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     /// The emails that would be seated (canonical form).
     pub seat: Vec<String>,
     /// The first-destination SKILL hint the invitation would carry (at most one of skill/channel).
@@ -2326,6 +2387,10 @@ pub struct ResetData {
     pub skill: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    /// That same workspace as a person addresses it. Absent alongside `workspace_id`, and
+    /// whenever no session on this installation names it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     /// The version the reset lands on (the followed current / the origin snapshot).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub to_version: String,
@@ -2385,13 +2450,12 @@ pub struct PublishDescribeData {
     pub workspace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_display_name: Option<String>,
-    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the describe names
-    /// WHERE these bytes would land. Derived from the same server-supplied address the share line
-    /// reads; absent when that read failed or the address does not validate (the copy then falls
-    /// back to the display name rather than printing a broken address). **INFERRED**
-    /// (additive-only).
+    /// The workspace these bytes would land in, as a person addresses it — how the describe names
+    /// the destination. Absent when neither this installation's session nor the server-supplied
+    /// address could name it (the copy then falls back to the display name rather than printing a
+    /// broken address). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_address: Option<String>,
+    pub workspace: Option<WorkspaceRef>,
     /// The byte-exact digest of the draft being published.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
@@ -2625,10 +2689,8 @@ pub struct StatusScopeSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct StatusRegime {
-    /// The server host.
-    pub host: String,
-    /// The workspace's address name.
-    pub workspace: String,
+    /// The workspace this line is about, as a person addresses it.
+    pub workspace: WorkspaceRef,
     /// The regime sentence (e.g. "adopting all assigned, 2 off" or "explicit: 3 bundles; 1
     /// assigned not adopted here").
     pub regime: String,
@@ -2640,11 +2702,9 @@ pub struct StatusRegime {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct StatusSession {
     pub workspace_id: String,
-    /// The ADDRESS name (what you logged in by).
-    pub name: String,
+    /// The workspace this session is in, as a person addresses it — what you logged in by.
+    pub workspace: WorkspaceRef,
     pub display_name: String,
-    /// The server host the workspace lives on (the manifest grammar's host half).
-    pub host: String,
     /// The session's status, when it is NOT plainly active: `"pending"` (awaiting an owner's
     /// approval — delivery starts automatically once approved) or `"ended"` (revoked or gone —
     /// `topos login <address>` starts a fresh one). Absent = active.
@@ -2733,8 +2793,8 @@ pub struct WorkspaceListData {
 pub struct WorkspaceListRow {
     /// The address: `<host>/<name>`.
     pub address: String,
-    pub host: String,
-    pub name: String,
+    /// The same two halves apart — the ONE shape every other verb names a workspace with.
+    pub workspace: WorkspaceRef,
     /// The workspace's display name, for humans.
     pub display_name: String,
     /// `active` / `pending` / `ended`.
@@ -2749,6 +2809,8 @@ pub struct WorkspaceListRow {
 pub struct WorkspaceUseData {
     /// The new default's address.
     pub address: String,
+    /// The new default, as a person addresses it.
+    pub workspace: WorkspaceRef,
     /// The previous default, when one stood.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<String>,
@@ -2781,6 +2843,8 @@ pub struct AuthStatusData {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct AuthWorkspaceStatus {
     pub workspace_id: String,
+    /// The workspace this session is in, as a person addresses it.
+    pub workspace: WorkspaceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Whether this session's credential is stored locally (always true for a live session row).
@@ -2799,6 +2863,10 @@ pub struct AuthWorkspaceStatus {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct AuthReportingStatus {
     pub workspace_id: String,
+    /// The workspace this posture is about, as a person addresses it. Absent when no session on
+    /// this installation names it (the local document keys by id alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_delivery_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2956,7 +3024,7 @@ mod tests {
             rewrite_pending: None,
             rewrite_skipped: None,
             kind: None,
-            workspace_address: None,
+            workspace: None,
             share_line: None,
             undo: None,
             from_placement: None,
@@ -2979,7 +3047,7 @@ mod tests {
         // The receipt's address-derived lines and its undo are all additive: each omits when the
         // producer withheld it (a failed `me` read, or an undo that would not restore the state).
         assert!(
-            v.get("workspace_address").is_none() && v.get("share_line").is_none(),
+            v.get("workspace").is_none() && v.get("share_line").is_none(),
             "the address-derived lines omit when the address is unknown"
         );
         assert!(v.get("undo").is_none(), "a withheld undo omits");

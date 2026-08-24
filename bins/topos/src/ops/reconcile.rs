@@ -2260,6 +2260,7 @@ pub(crate) fn manifest_update(
     let sync = sync_updates
         .into_iter()
         .map(|(workspace_id, e)| WorkspaceSyncReport {
+            workspace: super::workspace_ref(ctx, &workspace_id),
             workspace_id,
             last_delivery_at: e.last_delivery_at,
             last_report_at: e.last_report_at,

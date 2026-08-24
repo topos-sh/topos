@@ -4,7 +4,11 @@
   "ok": true,
   "data": {
     "address": "https://topos.sh/acme",
-    "changed": false
+    "changed": false,
+    "workspace": {
+      "host": "topos.sh",
+      "name": "acme"
+    }
   },
   "warnings": [],
   "next_actions": []

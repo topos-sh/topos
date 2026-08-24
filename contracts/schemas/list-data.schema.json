@@ -646,10 +646,6 @@
             "$ref": "#/$defs/RemoteChannel"
           }
         },
-        "host": {
-          "description": "The server host the workspace lives on.",
-          "type": "string"
-        },
         "skills": {
           "description": "The workspace's catalog skills.",
           "type": "array",
@@ -658,8 +654,8 @@
           }
         },
         "workspace": {
-          "description": "The workspace's address name.",
-          "type": "string"
+          "description": "The workspace this section is about, as a person addresses it.",
+          "$ref": "#/$defs/WorkspaceRef"
         },
         "workspace_id": {
           "description": "The workspace's opaque id.",
@@ -667,7 +663,6 @@
         }
       },
       "required": [
-        "host",
         "workspace",
         "workspace_id",
         "channels",
@@ -997,6 +992,24 @@
         "skills",
         "folders",
         "command"
+      ]
+    },
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
       ]
     }
   }

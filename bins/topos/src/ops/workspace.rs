@@ -28,8 +28,7 @@ pub(crate) fn list(fs: &dyn FsOps, layout: &Layout) -> Result<WorkspaceListData,
             WorkspaceListRow {
                 default: default.as_deref() == Some(address.as_str()),
                 address,
-                host: s.host.clone(),
-                name: s.workspace_name.clone(),
+                workspace: crate::ops::session_workspace_ref(s),
                 display_name: s.display_name.clone(),
                 status: s.status.clone(),
             }
@@ -54,6 +53,7 @@ pub(crate) fn switch(
     let address = format!("{}/{}", session.host, session.workspace_name);
     Ok(WorkspaceUseData {
         previous: previous.filter(|p| *p != address),
+        workspace: crate::ops::session_workspace_ref(&session),
         address,
     })
 }

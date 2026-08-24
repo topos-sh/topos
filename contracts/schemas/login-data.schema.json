@@ -41,20 +41,12 @@
       "description": "Whether THIS login wrote the workspace's feed row into the machine's own `topos.toml` —\ntrue only on this machine's first connection to the workspace (login never re-adds a row\nsomeone deleted). **Additive.**",
       "type": "boolean"
     },
-    "host": {
-      "description": "The SERVER host the session lives on (`topos.sh`, `topos.example.com:3000`) — the manifest\ngrammar's host half, and the `<host>/<name>` address a receipt names. **Additive.**",
-      "type": "string"
-    },
     "manifest_note": {
       "description": "The honest reason this machine's own `topos.toml` was left alone when the login could not\nrecord the workspace's feed row there (an unreadable or unwritable file). Absent on every\nclean login. **Additive.**",
       "type": [
         "string",
         "null"
       ]
-    },
-    "name": {
-      "description": "The workspace's ADDRESS name (the slug the browser approval recorded; empty while a bare\nlogin still awaits it).",
-      "type": "string"
     },
     "pending": {
       "description": "Present while the login awaits the browser approval (re-run `topos login` to resume).",
@@ -106,13 +98,23 @@
         "null"
       ]
     },
+    "workspace": {
+      "description": "The workspace this login connected to, as a person addresses it — the slug the browser\napproval recorded, on the host the session lives on. Absent while a bare login still\nawaits the approval that names it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "workspace_id": {
       "description": "The logged-into workspace's id (empty while the login is still pending approval).",
       "type": "string"
     }
   },
   "required": [
-    "name",
     "session_status"
   ],
   "$defs": {
@@ -226,6 +228,24 @@
           "type": "string",
           "const": "already_present_unmanaged"
         }
+      ]
+    },
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
       ]
     }
   }

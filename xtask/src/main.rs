@@ -452,7 +452,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
         RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SetDelivery, SignInPath,
         SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
-        Surface, TargetOutcome, VerifyData, VerifyState, WorkspaceSyncReport,
+        Surface, TargetOutcome, VerifyData, VerifyState, WorkspaceRef, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -482,6 +482,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             // no harness and arms no auto-update trigger — all three omit from the envelope.
             currency: None,
             triggers: Vec::new(),
+            // Adopted from a folder — a local source names no workspace.
+            workspace: None,
             // Adopted from a local dir, not a remote source — no upstream origin.
             origin: None,
             // The fixture adopt writes no manifest line (no machine roots in the fixture rig).
@@ -530,6 +532,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             tracked: true,
             currency: None,
             triggers: Vec::new(),
+            // The subscribe's source IS the workspace — named here in the one uniform shape.
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             origin: None,
             source: Some("topos.sh/acme/code-review".to_owned()),
             manifest: Some("/work/acme-api/topos.toml".to_owned()),
@@ -579,6 +586,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             tracked: true,
             currency: None,
             triggers: Vec::new(),
+            // Adopted from a folder — a local source names no workspace.
+            workspace: None,
             origin: None,
             // The row spells the folder relative to the file that holds it; the `source:` line
             // spells it canonically, which is the form that means the same thing anywhere.
@@ -589,7 +598,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
             undo: argv(&["topos", "remove", "./tools/pr-describe"]),
             governed_copy: None,
             published_match: Some(PublishedMatch {
-                workspace: "acme".to_owned(),
+                workspace: WorkspaceRef {
+                    host: "topos.sh".to_owned(),
+                    name: "acme".to_owned(),
+                },
                 name: "pr-describe".to_owned(),
                 reference: "topos.sh/acme/pr-describe".to_owned(),
                 // The adopted bytes hash to exactly what the workspace serves today.
@@ -673,6 +685,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             tracked: true,
             currency: None,
             triggers: Vec::new(),
+            // The claimed bundle is that workspace's; the claim changed nothing about that.
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "ideamotive".to_owned(),
+            }),
             origin: None,
             // The RECORD's source, not the claimed folder's — the claim did not change where this
             // bundle comes from.
@@ -825,6 +842,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             tracked: true,
             currency: None,
             triggers: Vec::new(),
+            // Adopted from a folder — a local source names no workspace.
+            workspace: None,
             origin: None,
             source: Some("/home/ada/work/team-weather".to_owned()),
             manifest: Some("/home/ada/.topos/topos.toml".to_owned()),
@@ -898,6 +917,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             tracked: true,
             currency: None,
             triggers: Vec::new(),
+            // The row's source is this workspace.
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             origin: None,
             source: Some("topos.sh/acme/coolify-deploy".to_owned()),
             manifest: Some("/home/ada/.topos/topos.toml".to_owned()),
@@ -962,6 +986,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             tracked: true,
             currency: None,
             triggers: Vec::new(),
+            // The row's source is this workspace.
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             origin: None,
             source: Some("topos.sh/acme/sentry".to_owned()),
             manifest: None,
@@ -1553,7 +1582,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "protect".to_owned(),
         ok: true,
         data: serde_json::to_value(ProtectData {
-            workspace_address: Some("topos.sh/acme".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             target: "deploy".to_owned(),
             kind: "skill".to_owned(),
             workspace_id: "w_acme".to_owned(),
@@ -1669,7 +1701,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(ReviewIndexData {
             inbox: vec![ReviewIndexEntry {
                 workspace_id: "w_acme".to_owned(),
-                workspace_name: "acme".to_owned(),
+                workspace: WorkspaceRef {
+                    host: "topos.sh".to_owned(),
+                    name: "acme".to_owned(),
+                },
                 skill: "deploy".to_owned(),
                 proposal: format!("deploy@{}", "c".repeat(64)),
                 proposer: "alice@acme.com".to_owned(),
@@ -1696,6 +1731,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::to_value(InviteReadData {
             address: "https://topos.sh/acme".to_owned(),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             changed: false,
         })
         .expect("InviteReadData serializes"),
@@ -1719,7 +1758,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skill_id: "s_deploy".to_owned(),
             workspace_id: "w_acme".to_owned(),
             workspace_display_name: Some("Acme".to_owned()),
-            workspace_address: Some("topos.sh/acme".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             bundle_digest: "b".repeat(64),
             placements: vec!["everyone".to_owned()],
             // ONE edited copy in the scope this stands in — nothing was chosen between, so no
@@ -1791,7 +1833,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
             rewrite_skipped: None,
             // The ordinary skill publish: the additive kind tag omits (absent = a skill).
             kind: None,
-            workspace_address: Some("topos.sh/acme".to_owned()),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
             undo: Some("topos revert deploy --to aaaaaaaaaaaa".to_owned()),
             // ONE edited copy — the receipt names no folder and leaves none behind, at this
@@ -1878,6 +1923,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }],
             sync: vec![WorkspaceSyncReport {
                 workspace_id: "w_acme".to_owned(),
+                workspace: Some(WorkspaceRef {
+                    host: "topos.sh".to_owned(),
+                    name: "acme".to_owned(),
+                }),
                 last_delivery_at: Some(1_699_000_000_000),
                 last_report_at: Some(1_699_000_000_000),
                 staleness_window_ms: 604_800_000,
@@ -2000,9 +2049,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             signed_in: true,
             sessions: vec![topos_types::results::StatusSession {
                 workspace_id: "w_demo".to_owned(),
-                name: "demo".to_owned(),
+                workspace: WorkspaceRef {
+                    host: "topos.sh".to_owned(),
+                    name: "demo".to_owned(),
+                },
                 display_name: "Demo".to_owned(),
-                host: "topos.sh".to_owned(),
                 // An active session omits its status (the shape stays lean); a pending one
                 // would read "pending" — awaiting owner approval.
                 session_status: None,
@@ -2069,8 +2120,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::to_value(LoginData {
             workspace_id: String::new(),
-            host: "topos.sh".to_owned(),
-            name: "acme".to_owned(),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             display_name: None,
             server: Some("https://topos.sh/api".to_owned()),
             session_id: None,
@@ -2110,8 +2163,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::to_value(LoginData {
             workspace_id: "w_acme".to_owned(),
-            host: "topos.sh".to_owned(),
-            name: "acme".to_owned(),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
             display_name: Some("Acme".to_owned()),
             server: Some("https://topos.sh/api".to_owned()),
             session_id: Some("sn_01hzy3".to_owned()),
@@ -2178,7 +2233,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "logout".to_owned(),
         ok: true,
         data: serde_json::to_value(LogoutData {
-            ended: vec!["acme".to_owned()],
+            ended: vec![WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }],
             server_revoked: true,
         })
         .expect("LogoutData serializes"),

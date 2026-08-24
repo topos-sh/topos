@@ -139,21 +139,16 @@
       "description": "One workspace's regime line in a [`StatusScope`]. **INFERRED** (additive-only).",
       "type": "object",
       "properties": {
-        "host": {
-          "description": "The server host.",
-          "type": "string"
-        },
         "regime": {
           "description": "The regime sentence (e.g. \"adopting all assigned, 2 off\" or \"explicit: 3 bundles; 1\nassigned not adopted here\").",
           "type": "string"
         },
         "workspace": {
-          "description": "The workspace's address name.",
-          "type": "string"
+          "description": "The workspace this line is about, as a person addresses it.",
+          "$ref": "#/$defs/WorkspaceRef"
         }
       },
       "required": [
-        "host",
         "workspace",
         "regime"
       ]
@@ -226,14 +221,6 @@
         "display_name": {
           "type": "string"
         },
-        "host": {
-          "description": "The server host the workspace lives on (the manifest grammar's host half).",
-          "type": "string"
-        },
-        "name": {
-          "description": "The ADDRESS name (what you logged in by).",
-          "type": "string"
-        },
         "session_status": {
           "description": "The session's status, when it is NOT plainly active: `\"pending\"` (awaiting an owner's\napproval — delivery starts automatically once approved) or `\"ended\"` (revoked or gone —\n`topos login <address>` starts a fresh one). Absent = active.",
           "type": [
@@ -241,15 +228,18 @@
             "null"
           ]
         },
+        "workspace": {
+          "description": "The workspace this session is in, as a person addresses it — what you logged in by.",
+          "$ref": "#/$defs/WorkspaceRef"
+        },
         "workspace_id": {
           "type": "string"
         }
       },
       "required": [
         "workspace_id",
-        "name",
-        "display_name",
-        "host"
+        "workspace",
+        "display_name"
       ]
     },
     "StatusTrigger": {
@@ -285,6 +275,24 @@
       },
       "required": [
         "agent"
+      ]
+    },
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
       ]
     }
   }

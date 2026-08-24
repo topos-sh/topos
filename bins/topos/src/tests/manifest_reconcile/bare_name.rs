@@ -133,7 +133,7 @@ fn a_form_that_cannot_subscribe_still_discloses_the_team_spelling_on_its_adopt()
     .unwrap();
     let same = published.suggestion(data.bundle_digest.as_deref().unwrap_or_default());
     assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/{BARE}"));
-    assert_eq!(same.workspace, WS_NAME);
+    assert_eq!(same.workspace.name, WS_NAME);
     assert!(same.identical, "byte-identical to what the catalog serves");
 
     // A local copy that has DRIFTED from the team's version is disclosed just the same — only the

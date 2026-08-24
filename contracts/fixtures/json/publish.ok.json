@@ -11,7 +11,10 @@
     "skill_id": "s_deploy",
     "undo": "topos revert deploy --to aaaaaaaaaaaa",
     "version_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "workspace_address": "topos.sh/acme"
+    "workspace": {
+      "host": "topos.sh",
+      "name": "acme"
+    }
   },
   "warnings": [],
   "next_actions": []

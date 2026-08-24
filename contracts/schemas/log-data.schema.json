@@ -82,7 +82,7 @@
           "$ref": "#/$defs/ExchangeFault"
         },
         "workspace": {
-          "description": "The workspace as a person addresses it — never the opaque id.",
+          "description": "The workspace as a person NAMES it — the recorded address name, and the opaque id only\nwhere nothing on this machine still names it. Deliberately NOT the uniform\n[`WorkspaceRef`]: a workspace whose session is gone has no knowable host, and half an\naddress is worse than the name a person would recognize.",
           "type": "string"
         }
       },

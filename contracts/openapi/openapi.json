@@ -2706,12 +2706,16 @@
           "title": {
             "type": "string"
           },
-          "workspace_address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names\nWHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed\nor the address does not validate. **INFERRED** (additive-only)."
+          "workspace": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceRef",
+                "description": "The workspace this proposal was opened in, as a person addresses it. Absent when neither\nthis installation's session nor the best-effort `me` read could name it. **INFERRED**\n(additive-only)."
+              }
+            ]
           }
         }
       },
@@ -2947,12 +2951,16 @@
             "type": "string",
             "description": "The new commit (the shipped `version_id`)."
           },
-          "workspace_address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names\nWHERE these bytes landed. Read from the same best-effort `me` the lines below come from;\nabsent when that read failed or the address does not validate. **INFERRED**\n(additive-only)."
+          "workspace": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceRef",
+                "description": "The workspace this publish reached, as a person addresses it — how the receipt names\nWHERE these bytes landed. Absent when neither this installation's session nor the\nbest-effort `me` read could name it. **INFERRED** (additive-only)."
+              }
+            ]
           }
         }
       },
@@ -3130,12 +3138,16 @@
           "skill_id": {
             "type": "string"
           },
-          "workspace_address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The workspace's ADDRESS (`<host>/<name>`) — the receipt names where the pointer moved.\n**INFERRED** (additive-only)."
+          "workspace": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceRef",
+                "description": "The workspace this revert reached, as a person addresses it — the receipt names where the\npointer moved. **INFERRED** (additive-only)."
+              }
+            ]
           }
         }
       },
@@ -3207,6 +3219,17 @@
           "proposal": {
             "type": "string",
             "description": "`<skill>@<version_id>` of the reviewed proposal."
+          },
+          "workspace": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceRef",
+                "description": "The workspace this verdict reached, as a person addresses it. Absent when no session on\nthis installation names it. **INFERRED** (additive-only)."
+              }
+            ]
           }
         }
       },
@@ -4537,6 +4560,24 @@
               "null"
             ],
             "description": "`true` when the caller's OWN pick (a self-assignment) delivers it."
+          }
+        }
+      },
+      "WorkspaceRef": {
+        "type": "object",
+        "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+        "required": [
+          "host",
+          "name"
+        ],
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id."
           }
         }
       }

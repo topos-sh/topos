@@ -471,9 +471,9 @@ pub(crate) fn publish_describe(
     // The `<host>/<workspace>` handle the describe's header names the destination by — the
     // LANE's own record first (always the full host/workspace pair), the network read's answer
     // only as the fallback: the two receipts must spell one workspace one way.
-    let workspace_address = Some(format!("{}/{}", lane.host, lane.workspace_name))
-        .filter(|_| !lane.host.is_empty())
-        .or_else(|| me.as_ref().and_then(|m| workspace_handle(&m.address)));
+    let workspace = lane
+        .workspace_ref()
+        .or_else(|| workspace_ref_of_me(me.as_ref().map(|m| m.address.as_str())));
     let undo = undo_is_restorative(followed, gate)
         .then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
     // The predicted-conflict preview: when this copy is BEHIND the last-known observed `current`
@@ -549,7 +549,7 @@ pub(crate) fn publish_describe(
         skill_id: id.into_string(),
         workspace_id,
         workspace_display_name: me.map(|m| m.display_name),
-        workspace_address,
+        workspace,
         bundle_digest: digest_hex,
         placements,
         from_placement,
@@ -1386,6 +1386,15 @@ fn workspace_handle(address: &str) -> Option<String> {
     Some(handle.to_owned())
 }
 
+/// The uniform `workspace` field from a membership describe's ADDRESS — the fallback for a receipt
+/// whose session record could not name the workspace. It goes through [`workspace_handle`], so a
+/// malformed address answers `None` here exactly as it composes no line elsewhere; an address with
+/// no workspace segment (a single-workspace deployment) has no name to carry and answers `None`
+/// too — the session is what knows it there.
+fn workspace_ref_of_me(address: Option<&str>) -> Option<topos_types::results::WorkspaceRef> {
+    super::workspace_ref_of_handle(&workspace_handle(address?)?)
+}
+
 /// Whether `authority` is hostname-shaped: a non-empty host of hostname bytes, with any port
 /// digits only. The shared half of the address parses — a malformed authority composes no line.
 fn valid_authority(authority: &str) -> bool {
@@ -1662,14 +1671,7 @@ fn map_outcome(
     let address = || directory.me(&rec.workspace_id).ok().map(|m| m.address);
     // The lane session's OWN record of the workspace address — the local fallback that keeps an
     // applied receipt naming its workspace even when the post-write read does not answer.
-    let session_address = || {
-        crate::sessions::read_sessions(ctx.fs, &ctx.layout)
-            .ok()?
-            .sessions
-            .iter()
-            .find(|s| s.workspace_id == rec.workspace_id)
-            .map(|s| format!("{}/{}", s.host, s.workspace_name))
-    };
+    let session_ref = || super::workspace_ref(ctx, &rec.workspace_id);
     match receipt.outcome() {
         TerminalOutcome::Ok => {
             // A direct publish moved `current` — advance the local state (read-your-writes).
@@ -1708,8 +1710,7 @@ fn map_outcome(
             let placement_missing =
                 (placement_outcome.as_deref() == Some("channel_not_found")).then(target_channel);
             let address = address();
-            let workspace_address =
-                session_address().or_else(|| address.as_deref().and_then(workspace_handle));
+            let workspace = session_ref().or_else(|| workspace_ref_of_me(address.as_deref()));
             let share_line = address
                 .as_deref()
                 .map(|a| format!("{a}/skills/{skill_name}"));
@@ -1750,7 +1751,7 @@ fn map_outcome(
                 // The kind the catalog now records for this bundle, replayed from the op record —
                 // so a WAL retry's receipt says exactly what the first attempt's said.
                 kind: rec.bundle_kind.clone(),
-                workspace_address,
+                workspace,
                 share_line,
                 undo,
                 from_placement,
@@ -1774,8 +1775,7 @@ fn map_outcome(
             // it: `current` never moved, so there is no prior state to restore — the author's
             // escape is `review <handle> --withdraw`, which the renderer names.
             let address = address();
-            let workspace_address =
-                session_address().or_else(|| address.as_deref().and_then(workspace_handle));
+            let workspace = session_ref().or_else(|| workspace_ref_of_me(address.as_deref()));
             let share_line = address
                 .as_deref()
                 .map(|a| format!("{a}/skills/{skill_name}"));
@@ -1799,7 +1799,7 @@ fn map_outcome(
                 converted_from: None,
                 rewrite_pending: None,
                 rewrite_skipped: None,
-                workspace_address,
+                workspace,
                 share_line,
                 from_placement,
                 from_machine: disclosure.from_machine,

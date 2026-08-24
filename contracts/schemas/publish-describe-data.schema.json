@@ -140,11 +140,15 @@
         "null"
       ]
     },
-    "workspace_address": {
-      "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the describe names\nWHERE these bytes would land. Derived from the same server-supplied address the share line\nreads; absent when that read failed or the address does not validate (the copy then falls\nback to the display name rather than printing a broken address). **INFERRED**\n(additive-only).",
-      "type": [
-        "string",
-        "null"
+    "workspace": {
+      "description": "The workspace these bytes would land in, as a person addresses it — how the describe names\nthe destination. Absent when neither this installation's session nor the server-supplied\naddress could name it (the copy then falls back to the display name rather than printing a\nbroken address). **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceRef"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "workspace_display_name": {
@@ -232,6 +236,24 @@
       "required": [
         "folder",
         "machine"
+      ]
+    },
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
       ]
     }
   }

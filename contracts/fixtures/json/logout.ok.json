@@ -4,7 +4,10 @@
   "ok": true,
   "data": {
     "ended": [
-      "acme"
+      {
+        "host": "topos.sh",
+        "name": "acme"
+      }
     ],
     "server_revoked": true
   },

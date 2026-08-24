@@ -53,17 +53,17 @@
           "description": "Whether `current` has moved past the proposal's base (a stale proposal needs a re-propose).",
           "type": "boolean"
         },
-        "workspace_id": {
-          "type": "string"
+        "workspace": {
+          "description": "The workspace this proposal lives in, as a person addresses it (the inbox groups by it).",
+          "$ref": "#/$defs/WorkspaceRef"
         },
-        "workspace_name": {
-          "description": "The workspace's address name (the inbox groups by it).",
+        "workspace_id": {
           "type": "string"
         }
       },
       "required": [
         "workspace_id",
-        "workspace_name",
+        "workspace",
         "skill",
         "proposal",
         "proposer",
@@ -71,6 +71,24 @@
         "base_version_id",
         "created_at",
         "stale"
+      ]
+    },
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
       ]
     }
   }

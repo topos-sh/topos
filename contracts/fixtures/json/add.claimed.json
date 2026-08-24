@@ -16,7 +16,11 @@
     "skill_id": "topos_t00",
     "source": "topos.sh/ideamotive/coolify-deploy",
     "tracked": true,
-    "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
+    "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5",
+    "workspace": {
+      "host": "topos.sh",
+      "name": "ideamotive"
+    }
   },
   "warnings": [],
   "next_actions": []

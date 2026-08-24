@@ -96,7 +96,9 @@ pub(crate) use inventory::ScopeView;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListOutcome, ListRequest, list_with};
 pub(crate) use log::{LogConnectors, log};
-pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
+pub(crate) use login::{
+    LoginConnectors, host_of, login as session_login, logout as session_logout,
+};
 #[cfg(test)]
 pub(crate) use manifest_edit::AddScope;
 pub(crate) use manifest_edit::{
@@ -691,6 +693,45 @@ fn skills_named_scoped(
     // Deterministic across same-name skills.
     matches.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     Ok(matches)
+}
+
+/// THE UNIFORM `workspace` FIELD every `--json` payload names a workspace with, resolved from the
+/// one local place that holds both halves of the address: this installation's sessions. A verb
+/// that knows only the opaque id asks here, and a workspace no session names honestly answers
+/// `None` rather than a half-address.
+pub(crate) fn workspace_ref(
+    ctx: &Ctx<'_>,
+    workspace_id: &str,
+) -> Option<topos_types::results::WorkspaceRef> {
+    crate::sessions::read_sessions(ctx.fs, &ctx.layout)
+        .ok()?
+        .sessions
+        .iter()
+        .find(|s| s.workspace_id == workspace_id)
+        .map(session_workspace_ref)
+}
+
+/// The same field from a session already in hand.
+pub(crate) fn session_workspace_ref(
+    s: &crate::sessions::Session,
+) -> topos_types::results::WorkspaceRef {
+    topos_types::results::WorkspaceRef {
+        host: s.host.clone(),
+        name: s.workspace_name.clone(),
+    }
+}
+
+/// The same field read out of a `<host>/<name>` HANDLE — the server-supplied address, for the
+/// verbs that learn their workspace from a `me` read rather than from a session. Anything that is
+/// not exactly two non-empty segments is no address, and answers `None`.
+pub(crate) fn workspace_ref_of_handle(handle: &str) -> Option<topos_types::results::WorkspaceRef> {
+    let (host, name) = handle.split_once('/')?;
+    (!host.is_empty() && !name.is_empty() && !name.contains('/')).then(|| {
+        topos_types::results::WorkspaceRef {
+            host: host.to_owned(),
+            name: name.to_owned(),
+        }
+    })
 }
 
 /// The workspace a FOLLOWED skill lives in (its expected signed-pointer scope), from the follow-state —

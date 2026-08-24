@@ -5,16 +5,47 @@
   "type": "object",
   "properties": {
     "address": {
-      "description": "The workspace address teammates paste to join.",
+      "description": "The workspace's JOIN LINK — the URL teammates paste, as the server spells it (a scheme and,\nin a multi-workspace deployment, the name segment). Not the `<host>/<name>` address below:\nthis one is what a person opens.",
       "type": "string"
     },
     "changed": {
       "description": "Always `false` — a bare read sends nothing and changes nothing.",
       "type": "boolean"
+    },
+    "workspace": {
+      "description": "The workspace they would join, as a person addresses it. Absent when this installation\nholds no session naming it. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
     "address",
     "changed"
-  ]
+  ],
+  "$defs": {
+    "WorkspaceRef": {
+      "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host the workspace lives on (`topos.sh`, `topos.example.com:3000`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name — the slug, never the display name and never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "name"
+      ]
+    }
+  }
 }

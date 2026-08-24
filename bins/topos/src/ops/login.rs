@@ -89,7 +89,9 @@ impl LoginTarget {
 }
 
 /// The manifest-grammar HOST half of an origin / API base (`https://topos.sh/api` → `topos.sh`).
-fn host_of(url: &str) -> String {
+/// The login receipt's own fallback reads it too: a login still awaiting its approval knows the
+/// SERVER but not yet the workspace, and the lead line names the server the way an address does.
+pub(crate) fn host_of(url: &str) -> String {
     url.trim_start_matches("https://")
         .trim_start_matches("http://")
         .split('/')
@@ -287,12 +289,16 @@ pub(crate) fn login(
 fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
     LoginData {
         workspace_id: String::new(),
-        host: if wal.host.is_empty() {
-            host_of(&wal.base_url)
-        } else {
-            wal.host.clone()
-        },
-        name: wal.preselect.clone(),
+        // A bare login has NOT chosen a workspace yet — the approval does. The preselect names
+        // one only when the person typed an address, and then the pair is knowable.
+        workspace: (!wal.preselect.is_empty()).then(|| topos_types::results::WorkspaceRef {
+            host: if wal.host.is_empty() {
+                host_of(&wal.base_url)
+            } else {
+                wal.host.clone()
+            },
+            name: wal.preselect.clone(),
+        }),
         display_name: None,
         server: Some(wal.base_url.clone()),
         session_id: None,
@@ -616,8 +622,7 @@ fn connected_data(
 ) -> LoginData {
     LoginData {
         workspace_id: session.workspace_id.clone(),
-        host: session.host.clone(),
-        name: session.workspace_name.clone(),
+        workspace: Some(crate::ops::session_workspace_ref(session)),
         display_name: Some(session.display_name.clone()),
         server: Some(session.base_url.clone()),
         session_id: Some(session.session_id.clone()),
@@ -839,7 +844,7 @@ pub(crate) fn logout(
             server_revoked = false;
         }
         sessions::remove_session(ctx.fs, &ctx.layout, &s.host, &s.workspace_id)?;
-        ended.push(s.workspace_name.clone());
+        ended.push(crate::ops::session_workspace_ref(s));
     }
     Ok(LogoutData {
         ended,
@@ -1354,7 +1359,14 @@ mod tests {
                 let start = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
                 assert!(start.pending.is_some());
                 assert_eq!(start.session_status, "awaiting-approval");
-                assert_eq!(start.host, "topos.example.com");
+                assert_eq!(
+                    start
+                        .workspace
+                        .as_ref()
+                        .expect("the address named one")
+                        .host,
+                    "topos.example.com"
+                );
                 assert_eq!(
                     rig.enroll.starts.borrow().as_slice(),
                     &[(Some("eng".to_owned()), false)]
@@ -1371,8 +1383,9 @@ mod tests {
                 assert!(done.pending.is_none());
                 assert_eq!(done.session_status, "active");
                 assert_eq!(done.workspace_id, "w_eng");
+                let ws = done.workspace.as_ref().expect("a live session names one");
                 assert_eq!(
-                    (done.host.as_str(), done.name.as_str()),
+                    (ws.host.as_str(), ws.name.as_str()),
                     ("topos.example.com", "eng")
                 );
                 assert_eq!(done.delivered, Some(0));
@@ -1479,8 +1492,17 @@ mod tests {
                     start.pending.is_some(),
                     "bare login is legal — no WAL needed"
                 );
-                assert_eq!(start.name, "", "no workspace is named before the browser");
-                assert_eq!(start.host, "topos.sh", "the default server");
+                assert!(
+                    start.workspace.is_none(),
+                    "no workspace is named before the browser"
+                );
+                // With no workspace to name, the API base the card re-rooted onto is the only
+                // thing the pending receipt knows about where this login is going.
+                assert_eq!(
+                    start.server.as_deref(),
+                    Some("https://topos.example.com/api"),
+                    "the receipt carries the server it is dialing"
+                );
                 // NOTHING is preselected: the chooser is the browser's, not the CLI's.
                 assert_eq!(rig.enroll.starts.borrow().as_slice(), &[(None, false)]);
                 let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
@@ -1503,8 +1525,9 @@ mod tests {
                 let next = login(ctx, connectors, Some("other.example.com/ops"), false).unwrap();
                 // THE LATEST COMMAND WINS: the receipt that prints is the new login's.
                 assert!(next.pending.is_some());
+                let ws = next.workspace.as_ref().expect("the address named one");
                 assert_eq!(
-                    (next.host.as_str(), next.name.as_str()),
+                    (ws.host.as_str(), ws.name.as_str()),
                     ("other.example.com", "ops")
                 );
                 let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
@@ -1547,7 +1570,11 @@ mod tests {
                     let next =
                         login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
                     assert!(next.pending.is_some(), "{tag}");
-                    assert_eq!(next.name, "ops", "{tag}");
+                    assert_eq!(
+                        next.workspace.as_ref().expect("the address named one").name,
+                        "ops",
+                        "{tag}"
+                    );
                     let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
                     assert_eq!(wal.preselect, "ops", "{tag}");
                     assert_eq!(
@@ -1608,7 +1635,10 @@ mod tests {
                 assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
                 let next = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
                 assert!(next.pending.is_some());
-                assert_eq!(next.name, "ops");
+                assert_eq!(
+                    next.workspace.as_ref().expect("the address named one").name,
+                    "ops"
+                );
             });
             assert!(
                 sessions::read_sessions(ctx.fs, &ctx.layout)
@@ -2147,8 +2177,13 @@ mod tests {
                 let fake = fake.clone();
                 move |_b: &str, _c: &str| -> Box<dyn GovernanceSource> { Box::new(fake.clone()) }
             };
+            // The receipt names the ended sessions as workspace refs; these assertions have always
+            // compared the address NAME.
+            let ended = |d: &LogoutData| -> Vec<String> {
+                d.ended.iter().map(|w| w.name.clone()).collect()
+            };
             let out = logout(ctx, &revoke, Some("acme"), false).unwrap();
-            assert_eq!(out.ended, vec!["acme"]);
+            assert_eq!(ended(&out), vec!["acme"]);
             assert!(out.server_revoked);
             assert_eq!(fake.calls.borrow().len(), 1);
             let left = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
@@ -2165,7 +2200,7 @@ mod tests {
                 move |_b: &str, _c: &str| -> Box<dyn GovernanceSource> { Box::new(failing.clone()) }
             };
             let out = logout(ctx, &revoke2, None, true).unwrap();
-            assert_eq!(out.ended, vec!["beta"]);
+            assert_eq!(ended(&out), vec!["beta"]);
             assert!(!out.server_revoked);
 
             // The uniform 404 is REVOKED-EQUIVALENT (already ended server-side) — never a
@@ -2189,7 +2224,7 @@ mod tests {
             let revoke3 =
                 move |_b: &str, _c: &str| -> Box<dyn GovernanceSource> { Box::new(GoneRevoke) };
             let out = logout(ctx, &revoke3, Some("gamma"), false).unwrap();
-            assert_eq!(out.ended, vec!["gamma"]);
+            assert_eq!(ended(&out), vec!["gamma"]);
             assert!(
                 out.server_revoked,
                 "the uniform 404 = already gone = revoked"
