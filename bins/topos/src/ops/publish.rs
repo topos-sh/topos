@@ -2143,7 +2143,13 @@ fn map_outcome(
                 from_disclosure(picked, disclosure.cross_from.clone());
             Ok(PublishOutcome::Proposed(Box::new(ProposeData {
                 proposal: format!("{skill_name}@{}", rec.candidate_commit),
-                base_version_id: lock.base_commit.clone(),
+                // The base a reviewer reads the candidate against is the version it PARENTS
+                // on — the live current it was built over, which for a copy carried forward
+                // is not the version this store applied. Read from the committed candidate
+                // itself (the store holds it before any send, and on a replay), so a resumed
+                // op reports the same base the first attempt did.
+                base_version_id: candidate_parent(sp, &rec.candidate_commit)
+                    .unwrap_or_else(|| lock.base_commit.clone()),
                 title: skill_name.to_owned(),
                 body: None,
                 added: None,
@@ -2177,6 +2183,15 @@ fn map_outcome(
         // verbatim, not flattened to a generic transport error.
         _ => Err(contribute::plane_terminal(receipt)),
     }
+}
+
+/// The first parent of a candidate this store committed — the version a publish or proposal
+/// was built over. `None` when the candidate is not in the store (never for an op built here)
+/// or has no parent (a genesis).
+fn candidate_parent(sp: &sidecar::SkillPaths, candidate: &str) -> Option<String> {
+    let store = Store::open(&sp.store).ok()?;
+    let node = store.read_commit_meta(parse_hex32(candidate).ok()?).ok()?;
+    node.parents.first().map(|p| to_hex(p))
 }
 
 /// The wire error code on a DENIED (for the agent to branch on); never a secret.
