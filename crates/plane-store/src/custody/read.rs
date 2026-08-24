@@ -3,14 +3,23 @@
 //! is served (verify-on-read); corruption is an [`AuthorityError::Integrity`] alarm, never a
 //! not-found. There is no read-by-bare-hash path anywhere: an object is served only through a
 //! bundle whose live (non-purged) version reaches it.
+//!
+//! History answers from POSTGRES (`log` walks version rows; parents/author/message are columns);
+//! the store is consulted only where a file listing or byte payload is needed (the version
+//! skeleton's commit/tree objects, the blobs). A row that predates the object-store import (NULL
+//! commit locator/message) fails CLOSED with a typed error naming `topos-plane import-local`.
 
-use topos_core::digest::FileMode;
-use topos_gitstore::{LargeObjectStore, Store};
+use topos_core::digest::{self, FileMode};
+use topos_gitstore::codec;
 
-use crate::authority::{Authority, run_blocking};
-use crate::db::Location;
+use crate::authority::Authority;
 use crate::error::{AuthorityError, Result};
 use crate::id::{BundleId, CommitId, ObjectId, WorkspaceId};
+use crate::lifecycle::PreImportRow;
+
+/// The deepest tree nesting the store walk follows — matches the codec's build bound, so a
+/// version deep enough to be refused here could never have been encoded.
+const MAX_TREE_DEPTH: usize = 64;
 
 /// A bundle's `current` pointer, ready to serve: the pointed version, the CAS generation, the move
 /// attribution + time, and the pointed version's consent digest.
@@ -59,7 +68,7 @@ pub struct WorkspaceStorage {
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub version_id: CommitId,
-    /// The commit message (from the git commit frame).
+    /// The commit message (the version row's recorded frame message).
     pub message: String,
     /// The attribution recorded on the version row (`author_display`).
     pub author_display: String,
@@ -109,44 +118,38 @@ pub(crate) async fn read_object(
 ) -> Result<Vec<u8>> {
     // Step one (async DB): the reachability witness — some live version of THIS bundle reaches the
     // object. The borrow on the database is released before the store read below.
-    let Some(witness) = authority.db().object_witness(ws, bundle, object_id).await? else {
+    if authority
+        .db()
+        .object_witness(ws, bundle, object_id)
+        .await?
+        .is_none()
+    {
         return Err(AuthorityError::NotFound);
-    };
+    }
 
-    // Step two: fetch + verify the bytes from the store the database records, dispatching on
-    // `location`. The verify-on-read byte fetch runs on the blocking pool; the non-`Send` gix
-    // `Store` opens + drops inside the closure.
-    let dispatch = authority.db().object_dispatch(ws, object_id).await?;
-    let git_dir = authority.workspace_git_dir(ws);
-    let large = authority.large_store(ws);
-    let fetched = run_blocking(move || match dispatch {
-        // Offloaded: fetch from the large store (its `get` re-verifies sha256 == object_id).
-        Some((Location::LargeLocal, _)) => {
-            large.get(object_id.0).map_err(AuthorityError::integrity)
-        }
-        // Git-resident: read the loose object DIRECTLY by its locator and re-verify the content id — NOT a
-        // whole-version-tree walk, which would fault on an offloaded sibling's absent git object in a mixed
-        // bundle before reaching the requested blob.
-        Some((Location::Git, git_oid)) => Store::open(&git_dir)
-            .map_err(AuthorityError::integrity)?
-            .read_git_blob_verified(git_oid)
-            .map_err(AuthorityError::integrity)
-            .and_then(|(bytes, content_sha256)| {
-                if content_sha256 == object_id.0 {
-                    Ok(bytes)
+    // Step two: fetch + verify the bytes from the store by the locator the database records. A
+    // present row always carries one (`git_oid` is written in the same CAS that flips `present`);
+    // no live row means the object was reclaimed between the witness and here — the re-check below
+    // sorts legitimate reclaim from corruption.
+    let fetched = match authority.db().object_dispatch(ws, object_id).await? {
+        None => Err(AuthorityError::integrity(NoLivePresence)),
+        Some(git_oid) => match authority.store().get_loose(ws, &git_oid).await? {
+            None => Err(AuthorityError::integrity(LooseObjectMissing)),
+            Some(zlib) => {
+                // Verify-on-read is two gates: the frame must hash to the locator that named it,
+                // and the payload must hash to the CONTENT id the caller asked for.
+                let (kind, payload) =
+                    codec::decode_loose(&zlib, git_oid).map_err(AuthorityError::integrity)?;
+                if !matches!(kind, codec::ObjectKind::Blob) {
+                    Err(AuthorityError::integrity(GitLocatorMismatch))
+                } else if digest::sha256(&payload) == object_id.0 {
+                    Ok(payload)
                 } else {
                     Err(AuthorityError::integrity(GitLocatorMismatch))
                 }
-            }),
-        // No live presence row: fall back to the witness version's tree walk (safe: an all-git
-        // version). A reclaimed object also lands here, because `object_dispatch` filters
-        // `status = 'present'`; the re-check below catches that case.
-        None => Store::open(&git_dir)
-            .map_err(AuthorityError::integrity)?
-            .read_object_in_version(witness.0, object_id.0)
-            .map_err(AuthorityError::integrity),
-    })
-    .await;
+            }
+        },
+    };
 
     // Re-check-on-miss (the read-time TOCTOU guard). The witness above and this fetch are two steps;
     // between them a purge can tombstone the version (and a GC reclaim its unique bytes). On a
@@ -168,7 +171,8 @@ pub(crate) async fn read_object(
 /// Every workspace's stored byte total, ordered by workspace id (deterministic). Counts `present`
 /// rows ONLY — `deleting`/`absent`/`unavailable` bytes are not custody the product should bill or
 /// display (they are either mid-reclaim, already gone, or denylisted forever). A workspace holding
-/// no present object is absent from the list.
+/// no present object is absent from the list. The figure is RAW file bytes (the size recorded at
+/// install) — never compressed store bytes, and never the version skeleton.
 pub(crate) async fn storage_stats(authority: &Authority) -> Result<Vec<WorkspaceStorage>> {
     Ok(authority
         .db()
@@ -183,7 +187,9 @@ pub(crate) async fn storage_stats(authority: &Authority) -> Result<Vec<Workspace
 }
 
 /// Read a version's metadata + file listing (no blob bytes). A purged version reads NotFound — its
-/// bytes are gone by decision; the log still lists the row.
+/// bytes are gone by decision; the log still lists the row. Parents/author/message come from the
+/// VERSION ROW; the file listing walks the version's skeleton (commit → trees) in the store and
+/// joins each leaf's locator back to its content id over the present rows.
 pub(crate) async fn read_version(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -202,46 +208,40 @@ pub(crate) async fn read_version(
         .read_bundle_digest(ws, bundle, version)
         .await?
         .ok_or_else(|| AuthorityError::integrity(MissingVersionDigest))?;
+    // Pre-import rows fail closed, naming the cure.
+    let (git_commit_oid, message) = match (row.git_commit_oid, row.message) {
+        (Some(oid), Some(message)) => (oid, message),
+        _ => return Err(AuthorityError::integrity(PreImportRow)),
+    };
 
-    // The version's structure comes FIRST, from a blocking-pool store section (the non-`Send` gix
-    // `Store` opens + drops inside the closure); THEN the presence rows are queried for exactly
-    // those tree leaves, so the DB read scales with the requested version, never the workspace's
-    // lifetime object count.
-    let git_dir = authority.workspace_git_dir(ws);
-    let version_bytes = version.0;
-    let (node, leaves) = run_blocking(move || {
-        let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
-        let node = store
-            .read_commit_meta(version_bytes)
-            .map_err(AuthorityError::integrity)?;
-        let leaves = store
-            .read_tree_structure(version_bytes)
-            .map_err(AuthorityError::integrity)?;
-        Ok((node, leaves))
-    })
-    .await?;
-    let leaf_oids: Vec<[u8; 20]> = leaves.iter().map(|l| l.git_oid).collect();
+    // The version's structure: GET the commit object, then walk its trees — each object verified
+    // against the id that named it — THEN the presence rows are queried for exactly those tree
+    // leaves, so the DB read scales with the requested version, never the workspace's lifetime
+    // object count.
+    let commit = read_commit(authority, ws, git_commit_oid).await?;
+    let leaves = walk_tree_leaves(authority, ws, commit.tree_oid).await?;
+    let leaf_oids: Vec<[u8; 20]> = leaves.iter().map(|(_, _, oid)| *oid).collect();
     let by_git_oid = authority.db().objects_by_git_oids(ws, &leaf_oids).await?;
 
     let mut files = Vec::with_capacity(leaves.len());
-    for leaf in leaves {
+    for (path, mode, git_oid) in leaves {
         // Each tree-entry git OID joins to its content id over the workspace's PRESENT rows. A leaf with no
         // present row is a bookkeeping/store divergence.
         let object_id = by_git_oid
-            .get(&leaf.git_oid)
+            .get(&git_oid)
             .copied()
             .ok_or_else(|| AuthorityError::integrity(VersionObjectMissing))?;
         files.push(VersionFile {
-            path: leaf.path,
-            mode: leaf.mode,
+            path,
+            mode,
             object_id,
         });
     }
     Ok(VersionMeta {
-        version_id: node.version_id,
-        parents: node.parents,
-        author: node.author,
-        message: node.message,
+        version_id: version.0,
+        parents: row.first_parent.into_iter().map(|p| p.0).collect(),
+        author: row.author_display,
+        message,
         bundle_digest,
         created_at_ms: row.created_at_ms,
         files,
@@ -249,9 +249,9 @@ pub(crate) async fn read_version(
 }
 
 /// The first-parent commit chain from `current`, capped — version ids + messages + attributions +
-/// timestamps (what a log/review surface renders). The chain walks the git commit frames (which
-/// hold the parent links + messages) and joins each hop to its version row for the display facts;
-/// a purged version stays listed with its purge stamp.
+/// timestamps (what a log/review surface renders). Answered from Postgres alone: the chain walks
+/// the persisted `first_parent` column and each row carries its message; a purged version stays
+/// listed with its purge stamp. A pre-import hop (NULL message) fails closed naming the cure.
 pub(crate) async fn log(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -261,52 +261,99 @@ pub(crate) async fn log(
     let Some(pointer) = authority.db().read_pointer(ws, bundle).await? else {
         return Err(AuthorityError::NotFound);
     };
-
-    // Walk the first-parent chain in ONE blocking-pool section (each hop is a small commit-frame
-    // read; the non-`Send` gix `Store` never crosses an await).
-    let git_dir = authority.workspace_git_dir(ws);
-    let head = pointer.version_id.0;
-    let hops: Vec<([u8; 32], String)> = run_blocking(move || {
-        let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
-        let mut hops = Vec::new();
-        let mut cursor = Some(head);
-        while let Some(id) = cursor {
-            if hops.len() >= limit {
-                break;
-            }
-            let node = store
-                .read_commit_meta(id)
-                .map_err(AuthorityError::integrity)?;
-            cursor = node.parents.first().copied();
-            hops.push((id, node.message));
-        }
-        Ok(hops)
-    })
-    .await?;
-
-    // One batched join to the version rows for the display facts. A hop with no row is a
-    // cross-bundle stray (the shared per-workspace repo can hold another bundle's commits) — that
-    // would be a lineage corruption for a first-parent chain, so surface it.
-    let ids: Vec<CommitId> = hops.iter().map(|(id, _)| CommitId(*id)).collect();
-    let rows = authority.db().read_version_rows(ws, bundle, &ids).await?;
+    let hops = authority
+        .db()
+        .log_chain(ws, bundle, pointer.version_id, limit)
+        .await?;
     hops.into_iter()
-        .map(|(id, message)| {
-            let row = rows
-                .get(&CommitId(id))
-                .ok_or_else(|| AuthorityError::integrity(LogHopWithoutRow))?;
+        .map(|hop| {
+            let message = hop
+                .message
+                .ok_or_else(|| AuthorityError::integrity(PreImportRow))?;
             Ok(LogEntry {
-                version_id: CommitId(id),
+                version_id: hop.version_id,
                 message,
-                author_display: row.author_display.clone(),
-                created_at_ms: row.created_at_ms,
-                purged_at_ms: row.purged_at_ms,
+                author_display: hop.author_display,
+                created_at_ms: hop.created_at_ms,
+                purged_at_ms: hop.purged_at_ms,
             })
         })
         .collect()
 }
 
+/// GET + decode one commit object by its locator (frame verified against the locator).
+pub(crate) async fn read_commit(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    git_commit_oid: [u8; 20],
+) -> Result<codec::CommitMeta> {
+    let zlib = authority
+        .store()
+        .get_loose(ws, &git_commit_oid)
+        .await?
+        .ok_or_else(|| AuthorityError::integrity(LooseObjectMissing))?;
+    let (kind, payload) =
+        codec::decode_loose(&zlib, git_commit_oid).map_err(AuthorityError::integrity)?;
+    if !matches!(kind, codec::ObjectKind::Commit) {
+        return Err(AuthorityError::integrity(GitLocatorMismatch));
+    }
+    codec::decode_commit(&payload).map_err(AuthorityError::integrity)
+}
+
+/// Walk a version's tree skeleton in the store, yielding every file leaf's
+/// `(path, mode, git_oid)` — no blob is read. Iterative (an explicit stack) with the same nesting
+/// bound the codec's builder applies; every tree object is verified against the id that named it.
+pub(crate) async fn walk_tree_leaves(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    root_tree_oid: [u8; 20],
+) -> Result<Vec<(String, FileMode, [u8; 20])>> {
+    let mut leaves = Vec::new();
+    let mut stack: Vec<(String, [u8; 20], usize)> = vec![(String::new(), root_tree_oid, 0)];
+    while let Some((prefix, tree_oid, depth)) = stack.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(AuthorityError::integrity(TreeTooDeep));
+        }
+        let zlib = authority
+            .store()
+            .get_loose(ws, &tree_oid)
+            .await?
+            .ok_or_else(|| AuthorityError::integrity(LooseObjectMissing))?;
+        let (kind, payload) =
+            codec::decode_loose(&zlib, tree_oid).map_err(AuthorityError::integrity)?;
+        if !matches!(kind, codec::ObjectKind::Tree) {
+            return Err(AuthorityError::integrity(GitLocatorMismatch));
+        }
+        for child in codec::decode_tree(&payload).map_err(AuthorityError::integrity)? {
+            match child {
+                codec::TreeChild::Subtree { name, git_oid } => {
+                    let path = join_path(&prefix, &name);
+                    stack.push((path, git_oid, depth + 1));
+                }
+                codec::TreeChild::File {
+                    name,
+                    mode,
+                    git_oid,
+                } => {
+                    let path = join_path(&prefix, &name);
+                    leaves.push((path, mode, git_oid));
+                }
+            }
+        }
+    }
+    Ok(leaves)
+}
+
+fn join_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
-#[error("a present object's git locator does not resolve to its content id")]
+#[error("a present object's locator does not resolve to its content id")]
 struct GitLocatorMismatch;
 
 #[derive(Debug, thiserror::Error)]
@@ -322,5 +369,13 @@ struct MissingVersionDigest;
 struct VersionObjectMissing;
 
 #[derive(Debug, thiserror::Error)]
-#[error("a first-parent log hop has no version row in this bundle")]
-struct LogHopWithoutRow;
+#[error("a reachable object has no live presence row")]
+struct NoLivePresence;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a recorded loose object is missing from the store")]
+struct LooseObjectMissing;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a stored tree nests deeper than the codec could have written")]
+struct TreeTooDeep;

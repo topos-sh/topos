@@ -40,8 +40,14 @@ impl Fixture {
         let dir = std::env::temp_dir().join(format!("topos-tp-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create fixture dir");
-        let authority = Authority::from_pool(pool, &dir.join("stores"), &dir.join("large"))
-            .expect("open authority");
+        let authority = Authority::from_pool(
+            pool,
+            &plane_store::StoreConfig::Local {
+                root: dir.join("stores"),
+            },
+            &dir.join("staging"),
+        )
+        .expect("open authority");
         let mut state = PlaneState::new(Arc::new(authority));
         if armed {
             state = state.with_internal_token(TOKEN);

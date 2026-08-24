@@ -32,10 +32,50 @@ pub struct PlaneConfig {
     /// `?sslmode=require` for a managed / BYO database reached over the network). The schema is
     /// migrated on open.
     pub database_url: String,
-    /// The per-workspace git-object store root (created if absent).
-    pub git_root: PathBuf,
-    /// The per-workspace large-object store root (created if absent).
-    pub large_root: PathBuf,
+    /// Which object store holds the bundle bytes.
+    pub store: StoreBackend,
+    /// The EPHEMERAL upload-staging root (created if absent; no volume required — losing it on a
+    /// container replacement loses only in-flight uploads, which clients replay).
+    pub staging_root: PathBuf,
+}
+
+/// The object-store backend, as plain config data (the leak-free twin of the authority crate's
+/// store config).
+#[derive(Debug, Clone)]
+pub enum StoreBackend {
+    /// A local directory (the self-host default). Reuses the pre-object-store git root: keys are
+    /// the exact bare-repo loose shape, so an existing volume's objects are already in place.
+    Local { root: PathBuf },
+    /// Any S3-compatible endpoint (R2, MinIO, AWS). `region` is `"auto"` for R2.
+    S3 {
+        endpoint: String,
+        bucket: String,
+        access_key_id: String,
+        secret_access_key: String,
+        region: String,
+    },
+}
+
+impl StoreBackend {
+    /// The authority crate's config twin (crate-internal — the leak-free boundary holds).
+    pub(crate) fn to_store_config(&self) -> plane_store::StoreConfig {
+        match self {
+            StoreBackend::Local { root } => plane_store::StoreConfig::Local { root: root.clone() },
+            StoreBackend::S3 {
+                endpoint,
+                bucket,
+                access_key_id,
+                secret_access_key,
+                region,
+            } => plane_store::StoreConfig::S3 {
+                endpoint: endpoint.clone(),
+                bucket: bucket.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                region: region.clone(),
+            },
+        }
+    }
 }
 
 /// The Postgres pool tuning, read from the environment (the one place the vault reads
@@ -78,17 +118,17 @@ impl PlaneState {
 
     /// Open a serving [`PlaneState`] over Postgres from a leak-free [`PlaneConfig`] — the
     /// **single** construction path the OSS bin (and any composition) uses. Builds the storage
-    /// [`Authority`] (the db + git + large stores) internally, so the caller never names a
-    /// `plane_store` type.
+    /// [`Authority`] (the db + the object store + the ephemeral staging root) internally, so the
+    /// caller never names a `plane_store` type.
     ///
     /// # Errors
-    /// Returns an [`anyhow::Error`] if a store root cannot be created or the database cannot be
-    /// opened or migrated.
+    /// Returns an [`anyhow::Error`] if the store cannot be opened, the staging root cannot be
+    /// created, or the database cannot be opened or migrated.
     pub async fn open(cfg: PlaneConfig) -> anyhow::Result<PlaneState> {
         let authority = Authority::open_with_pool(
             &cfg.database_url,
-            &cfg.git_root,
-            &cfg.large_root,
+            &cfg.store.to_store_config(),
+            &cfg.staging_root,
             pool_config_from_env(),
         )
         .await

@@ -362,7 +362,7 @@ async fn a_two_parent_frame_never_becomes_a_version_so_approve_cannot_promote_it
         &w,
         &op_id,
         merge_id,
-        v2.bundle_digest,
+        [0u8; 20],
         &[],
         &[v2.version_id, v1.version_id],
         &[],

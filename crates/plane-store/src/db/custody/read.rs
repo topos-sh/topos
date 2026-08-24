@@ -1,17 +1,30 @@
 //! The custody pool reads — the pointer record, version rows, reachability probes, and the log
 //! joins. Autocommit reads at the pool's default isolation; nothing here writes.
 
-use std::collections::HashMap;
-
 use crate::db::Db;
 use crate::db::custody::lifecycle::reparse_workspace;
 use crate::db::custody::pointer::{PointerRow, parse_stored_version};
 use crate::error::{AuthorityError, Result};
 use crate::id::{BundleId, CommitId, ObjectId, WorkspaceId};
 
-/// One version row's display facts (the log/read joins).
+/// One version row's display facts (the log/read joins). `first_parent`/`git_commit_oid`/`message`
+/// ride along for the metadata read; the two de-git columns are `None` on a pre-import row.
 #[derive(Debug, Clone)]
 pub(crate) struct VersionRow {
+    pub author_display: String,
+    pub created_at_ms: i64,
+    pub purged_at_ms: Option<i64>,
+    pub first_parent: Option<CommitId>,
+    pub git_commit_oid: Option<[u8; 20]>,
+    pub message: Option<String>,
+}
+
+/// One hop of the pure-Postgres first-parent log walk.
+#[derive(Debug, Clone)]
+pub(crate) struct LogHop {
+    pub version_id: CommitId,
+    /// `None` on a pre-import row — the read surface fails closed naming `import-local`.
+    pub message: Option<String>,
     pub author_display: String,
     pub created_at_ms: i64,
     pub purged_at_ms: Option<i64>,
@@ -61,7 +74,10 @@ impl Db {
         let row = sqlx::query!(
             r#"SELECT author_display AS "author_display!",
                       (extract(epoch FROM created_at) * 1000.0)::bigint AS "created_at_ms!",
-                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS "purged_at_ms"
+                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS "purged_at_ms",
+                      first_parent,
+                      git_commit_oid AS "git_commit_oid: Vec<u8>",
+                      message
                FROM version WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3"#,
             ws_s,
             b_s,
@@ -70,49 +86,101 @@ impl Db {
         .fetch_optional(self.pool())
         .await
         .map_err(AuthorityError::internal)?;
-        Ok(row.map(|r| VersionRow {
-            author_display: r.author_display,
-            created_at_ms: r.created_at_ms,
-            purged_at_ms: r.purged_at_ms,
-        }))
+        row.map(|r| {
+            Ok(VersionRow {
+                author_display: r.author_display,
+                created_at_ms: r.created_at_ms,
+                purged_at_ms: r.purged_at_ms,
+                first_parent: r
+                    .first_parent
+                    .as_deref()
+                    .map(parse_stored_version)
+                    .transpose()?,
+                git_commit_oid: r.git_commit_oid.map(commit_oid_from_row).transpose()?,
+                message: r.message,
+            })
+        })
+        .transpose()
     }
 
-    /// The display facts of MANY versions of one bundle at once (the log's one batched join),
-    /// keyed by version id.
-    pub(crate) async fn read_version_rows(
+    /// A version row's recorded git commit locator. `None` = no such version row;
+    /// `Some(None)` = a pre-import row (the caller fails closed naming `import-local`).
+    pub(crate) async fn version_git_commit_oid(
         &self,
         ws: &WorkspaceId,
         bundle: &BundleId,
-        versions: &[CommitId],
-    ) -> Result<HashMap<CommitId, VersionRow>> {
+        version: CommitId,
+    ) -> Result<Option<Option<[u8; 20]>>> {
         let ws_s = ws.as_str();
         let b_s = bundle.as_str();
-        let ids: Vec<String> = versions.iter().map(CommitId::to_hex).collect();
-        let rows = sqlx::query!(
-            r#"SELECT version_id AS "version_id!", author_display AS "author_display!",
-                      (extract(epoch FROM created_at) * 1000.0)::bigint AS "created_at_ms!",
-                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS "purged_at_ms"
-               FROM version
-               WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = ANY($3)"#,
+        let v_s = version.to_hex();
+        let row = sqlx::query!(
+            r#"SELECT git_commit_oid AS "git_commit_oid: Vec<u8>"
+               FROM version WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3"#,
             ws_s,
             b_s,
-            &ids,
+            v_s,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        row.map(|r| r.git_commit_oid.map(commit_oid_from_row).transpose())
+            .transpose()
+    }
+
+    /// The first-parent chain from `head`, capped at `limit` — ONE recursive query over the
+    /// persisted `first_parent` column (history is a list; the linearity fence made the column the
+    /// whole parent set). Rows come back newest-first. A chain hop that leaves the bundle simply
+    /// ends the walk (the recursive join binds workspace AND bundle).
+    pub(crate) async fn log_chain(
+        &self,
+        ws: &WorkspaceId,
+        bundle: &BundleId,
+        head: CommitId,
+        limit: usize,
+    ) -> Result<Vec<LogHop>> {
+        let ws_s = ws.as_str();
+        let b_s = bundle.as_str();
+        let head_s = head.to_hex();
+        let cap = i64::try_from(limit).map_err(AuthorityError::internal)?;
+        let rows = sqlx::query!(
+            r#"WITH RECURSIVE chain AS (
+                   SELECT version_id, first_parent, message, author_display, created_at, purged_at,
+                          1::bigint AS depth
+                   FROM version
+                   WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3
+                 UNION ALL
+                   SELECT v.version_id, v.first_parent, v.message, v.author_display, v.created_at,
+                          v.purged_at, chain.depth + 1
+                   FROM version v
+                   JOIN chain ON v.version_id = chain.first_parent
+                   WHERE v.workspace_id = $1 AND v.bundle_id = $2 AND chain.depth < $4
+               )
+               SELECT version_id AS "version_id!", message,
+                      author_display AS "author_display!",
+                      (extract(epoch FROM created_at) * 1000.0)::bigint AS "created_at_ms!",
+                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS "purged_at_ms",
+                      depth AS "depth!"
+               FROM chain ORDER BY depth"#,
+            ws_s,
+            b_s,
+            head_s,
+            cap,
         )
         .fetch_all(self.pool())
         .await
         .map_err(AuthorityError::internal)?;
-        let mut map = HashMap::with_capacity(rows.len());
-        for r in rows {
-            map.insert(
-                parse_stored_version(&r.version_id)?,
-                VersionRow {
+        rows.into_iter()
+            .map(|r| {
+                Ok(LogHop {
+                    version_id: parse_stored_version(&r.version_id)?,
+                    message: r.message,
                     author_display: r.author_display,
                     created_at_ms: r.created_at_ms,
                     purged_at_ms: r.purged_at_ms,
-                },
-            );
-        }
-        Ok(map)
+                })
+            })
+            .collect()
     }
 
     /// The consent digest recorded for a version. `None` when the version has no digest row (an
@@ -224,6 +292,18 @@ impl Db {
     }
 }
 
+/// Convert a stored 20-byte commit-locator BYTEA into an array, or an integrity fault on a bad
+/// width (the CHECK constraint forbids it, so this only fires on corruption).
+fn commit_oid_from_row(bytes: Vec<u8>) -> Result<[u8; 20]> {
+    bytes
+        .try_into()
+        .map_err(|_| AuthorityError::integrity(BadStoredCommitOid))
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("stored bundle digest is not 64 lowercase hex characters")]
 struct BadStoredDigest;
+
+#[derive(Debug, thiserror::Error)]
+#[error("stored git commit locator is not 20 bytes")]
+struct BadStoredCommitOid;

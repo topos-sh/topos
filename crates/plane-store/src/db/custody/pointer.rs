@@ -63,6 +63,11 @@ pub(crate) struct VersionFacts<'a> {
     pub object_ids: &'a [ObjectId],
     /// The ingest op whose committed lease roots the objects (checked live inside the transaction).
     pub op_id: &'a OpId,
+    /// The store locator of the version's commit object (put by `migrate_finish` immediately
+    /// before this transaction).
+    pub git_commit_oid: &'a [u8; 20],
+    /// The commit frame's message, recorded verbatim (log/metadata answer from this column).
+    pub message: &'a str,
 }
 
 impl Db {
@@ -269,12 +274,15 @@ async fn commit_version_txn(
         }
 
         // The version row: version_id = commit_id (a version IS its commit today; the schema carries
-        // both columns so the identities could ever diverge without a schema change). first_parent
-        // is persisted so the promote path can fence lineage without re-reading the commit frame.
+        // both columns so the identities could ever diverge without a schema change — NOT the git
+        // OID, which is the separate `git_commit_oid` locator). first_parent is persisted so the
+        // promote path can fence lineage without re-reading the commit frame; the locator + message
+        // are persisted so every read answers from Postgres + the store, refs nowhere.
         let parent_hex = facts.parent.map(|p| p.to_hex());
+        let commit_oid = facts.git_commit_oid.as_slice();
         sqlx::query!(
-            "INSERT INTO version (workspace_id, bundle_id, version_id, commit_id, first_parent, author_display, created_at) \
-             VALUES ($1, $2, $3, $3, $4, $5, to_timestamp($6::double precision / 1000.0)) \
+            "INSERT INTO version (workspace_id, bundle_id, version_id, commit_id, first_parent, author_display, created_at, git_commit_oid, message) \
+             VALUES ($1, $2, $3, $3, $4, $5, to_timestamp($6::double precision / 1000.0), $7, $8) \
              ON CONFLICT (workspace_id, bundle_id, version_id) DO NOTHING",
             ws_s,
             b_s,
@@ -282,6 +290,8 @@ async fn commit_version_txn(
             parent_hex.as_deref(),
             facts.attribution,
             now as f64,
+            commit_oid,
+            facts.message,
         )
         .execute(&mut **tx)
         .await
@@ -306,6 +316,24 @@ async fn commit_version_txn(
             b_s,
             v_hex,
             &oids,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+    } else {
+        // Dedup self-heal: an identical candidate re-committed onto a PRE-IMPORT row (NULL
+        // locator/message) fills both — "new writes always fill both" includes a write that lands
+        // on an old row. COALESCE keeps an already-filled row byte-identical.
+        let commit_oid = facts.git_commit_oid.as_slice();
+        sqlx::query!(
+            "UPDATE version SET git_commit_oid = COALESCE(git_commit_oid, $4), \
+                 message = COALESCE(message, $5) \
+             WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3",
+            ws_s,
+            b_s,
+            v_hex,
+            commit_oid,
+            facts.message,
         )
         .execute(&mut **tx)
         .await

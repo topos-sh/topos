@@ -118,9 +118,10 @@ async fn the_log_walks_the_first_parent_chain_capped(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn offloaded_blobs_keep_identity_and_verify_on_read(pool: PgPool) {
-    // A 1-byte threshold routes EVERY file blob to the large-object store.
-    let fx = Fixture::with_large_limits(pool, "offload", 1, 100 << 20);
+async fn stored_objects_land_at_the_bare_repo_loose_shape(pool: PgPool) {
+    // Every blob is one zlib loose object at `<ws>/objects/<aa>/<38-hex>` — the exact bare-repo
+    // path shape, byte-for-byte git-compatible. The LOCAL backend makes that literal on disk.
+    let fx = Fixture::new(pool, "loose-shape");
     let (w, b) = (ws("w1"), bundle("b1"));
 
     let (version, _) = fx
@@ -128,15 +129,14 @@ async fn offloaded_blobs_keep_identity_and_verify_on_read(pool: PgPool) {
         .publish(
             &w,
             &b,
-            candidate("GUIDE.md", b"offloaded bytes", None),
+            candidate("GUIDE.md", b"loose bytes", None),
             None,
             NOW,
         )
         .await
         .expect("genesis");
 
-    // Identity is placement-independent: the version id equals the kernel derivation regardless of
-    // which store holds the bytes.
+    // Identity is the kernel's, storage-shape-independent.
     let expected = topos_core::identity::commit_id(&topos_core::identity::Commit {
         parents: &[],
         tree: version.bundle_digest,
@@ -146,13 +146,21 @@ async fn offloaded_blobs_keep_identity_and_verify_on_read(pool: PgPool) {
     .expect("kernel id");
     assert_eq!(version.version_id.0, expected);
 
-    // The read dispatches to the large store and re-verifies.
+    // The blob's loose file sits at its git OID key and decodes back to the raw bytes.
+    let blob_oid = topos_gitstore::codec::blob_git_oid(b"loose bytes").expect("oid");
+    let loose = std::fs::read(fx.loose_path("w1", &blob_oid)).expect("loose blob file on disk");
+    let (kind, payload) =
+        topos_gitstore::codec::decode_loose(&loose, blob_oid).expect("git-compatible frame");
+    assert!(matches!(kind, topos_gitstore::codec::ObjectKind::Blob));
+    assert_eq!(payload, b"loose bytes");
+
+    // The read serves + re-verifies through the same store.
     assert_eq!(
         fx.authority
-            .read_object(&w, &b, object_id(b"offloaded bytes"))
+            .read_object(&w, &b, object_id(b"loose bytes"))
             .await
-            .expect("offloaded read"),
-        b"offloaded bytes"
+            .expect("read"),
+        b"loose bytes"
     );
     // The version metadata lists the leaf with its content id (no bytes).
     let meta = fx
@@ -160,12 +168,14 @@ async fn offloaded_blobs_keep_identity_and_verify_on_read(pool: PgPool) {
         .read_version(&w, &b, version.version_id)
         .await
         .expect("meta");
-    assert_eq!(meta.files[0].object_id, object_id(b"offloaded bytes").0);
+    assert_eq!(meta.files[0].object_id, object_id(b"loose bytes").0);
+    assert_eq!(meta.message, "test: candidate");
+    assert_eq!(meta.author, "Alice (test)");
 }
 
 #[sqlx::test]
 async fn the_reject_cap_refuses_oversize_blobs_at_ingest(pool: PgPool) {
-    let fx = Fixture::with_large_limits(pool, "cap", 1, 4);
+    let fx = Fixture::with_reject_cap(pool, "cap", 4);
     let (w, b) = (ws("w1"), bundle("b1"));
     let err = fx
         .authority

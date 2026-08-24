@@ -3,6 +3,7 @@
 
 pub(crate) mod commit;
 pub(crate) mod gc;
+pub(crate) mod import;
 pub(crate) mod lifecycle;
 pub(crate) mod read;
 pub(crate) mod upload;

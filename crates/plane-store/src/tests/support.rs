@@ -25,34 +25,46 @@ impl Fixture {
         Self::build(pool, tag, None)
     }
 
-    /// A fixture with an overridden size-routing threshold + reject cap — for the offload tests,
-    /// which force placement (a tiny threshold routes ordinary test bytes to the large store).
-    pub(crate) fn with_large_limits(
-        pool: PgPool,
-        tag: &str,
-        threshold: u64,
-        reject_cap: u64,
-    ) -> Self {
-        Self::build(pool, tag, Some((threshold, reject_cap)))
+    /// A fixture with an overridden per-blob reject cap — for the cap-refusal tests.
+    pub(crate) fn with_reject_cap(pool: PgPool, tag: &str, reject_cap: u64) -> Self {
+        Self::build(pool, tag, Some(reject_cap))
     }
 
-    fn build(pool: PgPool, tag: &str, limits: Option<(u64, u64)>) -> Self {
+    fn build(pool: PgPool, tag: &str, reject_cap: Option<u64>) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("topos-ps-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create fixture dir");
-        let mut authority = Authority::from_pool(pool, &dir.join("stores"), &dir.join("large"))
-            .expect("open authority");
-        if let Some((threshold, reject_cap)) = limits {
-            authority = authority.with_large_limits(threshold, reject_cap);
+        let mut authority = Authority::from_pool(
+            pool,
+            &crate::StoreConfig::Local {
+                root: dir.join("stores"),
+            },
+            &dir.join("staging"),
+        )
+        .expect("open authority");
+        if let Some(reject_cap) = reject_cap {
+            authority = authority.with_reject_cap(reject_cap);
         }
         Self { dir, authority }
     }
 
-    /// The fixture's temp root (for tests that reach into the physical stores).
+    /// The fixture's temp root (for tests that reach into the physical store).
     pub(crate) fn dir(&self) -> &PathBuf {
         &self.dir
+    }
+
+    /// The on-disk path of one loose object in the fixture's LOCAL store — the exact bare-repo
+    /// loose shape under `stores/<ws>/objects/…` (tests that assert physical presence/absence).
+    pub(crate) fn loose_path(&self, ws: &str, git_oid: &[u8; 20]) -> PathBuf {
+        let hex = crate::store::hex_lower(git_oid);
+        self.dir
+            .join("stores")
+            .join(ws)
+            .join("objects")
+            .join(&hex[..2])
+            .join(&hex[2..])
     }
 }
 

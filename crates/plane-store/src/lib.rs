@@ -47,11 +47,13 @@ mod custody;
 mod db;
 mod error;
 mod id;
+mod store;
 
 #[cfg(test)]
 mod tests;
 
 // Internal path forwarding — the crate names these modules at the root.
+pub use custody::import::{ImportReport, ImportWorkspaceReport};
 pub(crate) use custody::{commit, gc, lifecycle, read, upload};
 
 pub use authority::{Authority, DEFAULT_LOG_LIMIT, PoolConfig};
@@ -59,6 +61,7 @@ pub use commit::{BundleDeleteReport, CommittedVersion, PointerState, PurgeReport
 pub use error::{AuthorityError, LivePointer, Result};
 pub use id::{BundleId, CommitId, IdError, ObjectId, WorkspaceId};
 pub use read::{CurrentInfo, LogEntry, VersionFile, VersionMeta, WorkspaceStorage};
+pub use store::StoreConfig;
 pub use upload::{CandidateUpload, UploadedFile};
 
 /// The embedded Postgres migration set, exposed for out-of-crate test harnesses (the loopback e2e

@@ -6,6 +6,7 @@
 //!   purge and the bundle/workspace row reclaims.
 //! - [`read`]      — the pool reads (the pointer record, version rows, reachability, the log joins).
 
+pub(crate) mod import;
 pub(crate) mod lifecycle;
 pub(crate) mod pointer;
 pub(crate) mod read;

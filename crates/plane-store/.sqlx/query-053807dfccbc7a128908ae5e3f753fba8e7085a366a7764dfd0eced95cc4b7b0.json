@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT git_oid AS \"git_oid: Vec<u8>\" FROM object_presence\n               WHERE workspace_id = $1 AND object_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "git_oid: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "053807dfccbc7a128908ae5e3f753fba8e7085a366a7764dfd0eced95cc4b7b0"
+}

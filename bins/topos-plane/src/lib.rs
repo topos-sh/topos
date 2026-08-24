@@ -21,6 +21,7 @@
 //!   serves (the `routes::door` contract stubs); the internal custody lane stays out of the
 //!   committed contract.
 
+mod import;
 mod maintenance;
 mod router;
 mod routes;
@@ -33,7 +34,8 @@ pub mod openapi;
 #[cfg(test)]
 mod tests;
 
+pub use import::import_local_main;
 pub use maintenance::{MaintenancePass, run_maintenance_pass, spawn_maintenance};
 pub use openapi::openapi;
 pub use router::router;
-pub use state::{PlaneConfig, PlaneState};
+pub use state::{PlaneConfig, PlaneState, StoreBackend};

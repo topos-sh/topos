@@ -2756,6 +2756,7 @@ fn check_arch() -> Result<()> {
             "utoipa-gen",
             "schemars",
             "schemars_derive",
+            "object_store",
         ],
     )?;
     // The kernel stays pure: no wire DTOs, no async/IO/storage/HTTP crates, no diff/merge engines — only
@@ -2773,6 +2774,7 @@ fn check_arch() -> Result<()> {
             "reqwest",
             "ureq",
             "hyper",
+            "object_store",
         ],
     )?;
     // The test-only `test-fixtures` feature must never be enabled in a production build: a downstream cloud
@@ -2785,27 +2787,45 @@ fn check_arch() -> Result<()> {
     assert_test_fixtures_off("topos", "topos")?;
     // The leaf crates stay lean: no async runtime, no HTTP stack, no SQL — and the two pure-port leaves
     // carry no git mechanics either (`topos-gitstore` IS the git mechanics crate, so `gix` is its point).
+    // `topos-gitstore`'s role rule is "no network / no async / no SQL" — `std::fs` stays (the
+    // client's per-bundle repos live on it); the in-memory codec adds no I/O edge.
     // These are `--all-features` checks: no feature of a leaf may smuggle a heavy edge in.
     assert_excludes(
         "topos-types",
-        &["tokio", "axum", "sqlx", "ureq", "hyper", "gix"],
+        &[
+            "tokio",
+            "axum",
+            "sqlx",
+            "ureq",
+            "hyper",
+            "gix",
+            "object_store",
+        ],
     )?;
     assert_excludes(
         "topos-harness",
-        &["tokio", "axum", "sqlx", "ureq", "hyper", "gix"],
+        &[
+            "tokio",
+            "axum",
+            "sqlx",
+            "ureq",
+            "hyper",
+            "gix",
+            "object_store",
+        ],
     )?;
     assert_excludes(
         "topos-gitstore",
-        &["tokio", "axum", "sqlx", "ureq", "hyper"],
+        &["tokio", "axum", "sqlx", "ureq", "hyper", "object_store"],
     )?;
     // The vault is pure byte custody: the identity-era stacks cannot even be NAMED by its graph —
-    // no OIDC/OAuth client, no HTTP client, no mailer (all `--all-features` checks; the features
-    // that once gated them are deleted outright). (`hmac`/`zeroize` stay resolvable only as sqlx's
-    // own SCRAM/TLS internals — the vault code names neither.)
-    assert_excludes(
-        "topos-plane",
-        &["oauth2", "openidconnect", "reqwest", "lettre"],
-    )?;
+    // no OIDC/OAuth client, no mailer (all `--all-features` checks; the features that once gated
+    // them are deleted outright). `reqwest` is NO LONGER excluded here: it is `object_store`'s S3
+    // transport, reached only through the store seam plane-store owns — the ownership assertions
+    // above keep `object_store` (and that transport) out of every other crate's tree.
+    // (`hmac`/`zeroize` stay resolvable only as sqlx's own SCRAM/TLS internals — the vault code
+    // names neither.)
+    assert_excludes("topos-plane", &["oauth2", "openidconnect", "lettre"])?;
     // plane-store shed the credential-mint machinery with the directory: no op-id UUIDs, no
     // signer, no mailer, no OAuth/OIDC client. (`base64`/`hmac` stay resolvable only as sqlx's own
     // wire internals — the vault code names neither.)
@@ -2905,10 +2925,17 @@ const IDENTITY_STEMS: [&str; 10] = [
 ///   field (constant plumbing bytes, never a person);
 /// - the pool applies the Postgres `idle_in_transaction_session_timeout` GUC — a server-defined
 ///   identifier ("session" here is a database connection, not a login).
-const IDENTITY_ALLOWLIST: [(&str, &str); 5] = [
+const IDENTITY_ALLOWLIST: [(&str, &str); 7] = [
     ("crates/topos-gitstore/src/store.rs", "email"),
     (
         "crates/topos-gitstore/src/store.rs",
+        "topos_committer_email",
+    ),
+    // The in-memory codec writes the SAME constant committer signature the repo-backed store
+    // does (git's signature format requires the email field — plumbing bytes, never a person).
+    ("crates/topos-gitstore/src/codec.rs", "email"),
+    (
+        "crates/topos-gitstore/src/codec.rs",
         "topos_committer_email",
     ),
     ("crates/topos-gitstore/src/tests.rs", "email"),
