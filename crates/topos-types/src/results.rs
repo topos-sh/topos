@@ -121,7 +121,10 @@ pub struct WorkspaceSyncReport {
 /// One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value
 /// enum* (`PullAction`) is INFERRED.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PullSkill {
     pub skill: String,
     /// The workspace this followed skill lives in, or `None` for a targeted go-back / local-only pull that
@@ -203,7 +206,10 @@ pub struct PullSkill {
 /// delivering here — the loss an `update` receipt leads with, so a deliberate narrowing is never
 /// quieter than the install that preceded it. **INFERRED** (additive).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct Narrowing {
     /// Where the bundle STILL delivers, as the receipt spells it. Never empty: a row reaching
     /// nothing is not a narrowing, and the rows already say that in their own words.
@@ -228,7 +234,10 @@ pub struct Narrowing {
 /// outcome is a deliberate change that ships with a release — never a value a running client is
 /// expected to tolerate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum TargetOutcome {
     /// Nothing was there and this run wrote it — the target's FIRST materialization here.
@@ -298,7 +307,10 @@ impl TargetOutcome {
 /// config ENTRY, projected onto [the one outcome vocabulary](TargetOutcome). **INFERRED**
 /// (additive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct McpAgentState {
     /// The harness registry slug (e.g. `claude-code`, `cursor`).
     pub agent: String,
@@ -318,7 +330,10 @@ pub struct McpAgentState {
 /// reads it, where this bundle's copy lives there, and what the run left. `target` is a config
 /// file for a config-placed (`mcp`) bundle and a folder for a skill. **INFERRED** (additive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct Surface {
     /// The harness registry slug that reads it (e.g. `opencode`). EMPTY where the destination
     /// names no single harness — a folder several agents share.
@@ -361,7 +376,10 @@ pub enum MergePreviewVerdict {
 /// What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the
 /// semantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PullAction {
     /// State ① — already current; nothing to do.
@@ -413,7 +431,10 @@ pub enum PullAction {
 /// fields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),
 /// not this exact shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct MergeReport {
     /// The three-way base (the draft's fork point).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
@@ -472,7 +493,10 @@ pub struct MergeReport {
 /// wording landed, so a receipt must never speak for both at once. **INFERRED** (additive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub enum MergeResolution {
     /// The workbench was left alone: the three-way merge, settled on this person's side wherever
     /// the two sides collided, with everything else the team changed taken (`git merge -X ours`).
@@ -486,7 +510,10 @@ pub enum MergeResolution {
 /// what lets a re-disclosure tell per-folder truth: a merge can stand for days while a narrowed
 /// reset takes one copy and the person keeps working in another. **INFERRED** (additive).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct ConflictPlacement {
     /// The folder, as a receipt spells it (`~`-abbreviated display path).
     pub dir: String,
@@ -497,7 +524,10 @@ pub struct ConflictPlacement {
 /// What a folder holds while a merge stands (see [`ConflictPlacement`]). **INFERRED** (additive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub enum ConflictHolds {
     /// This person's own version — the draft the merge stopped on. Every folder reads this the
     /// moment a merge stops, because a conflict writes to none of them.
@@ -516,7 +546,10 @@ pub enum ConflictHolds {
 
 /// One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct ConflictPathReport {
     pub path: String,
     pub kind: crate::persisted::ConflictPathKind,
@@ -2094,6 +2127,18 @@ pub struct RevertData {
     /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_lock: Option<ProjectLock>,
+    /// The copy in the scope the command stood in, AFTER the revert: the same row `topos update
+    /// <skill>` prints — the converge a landed revert runs on that one bundle, so the folder the
+    /// command stood beside holds the restored content (a copy with unpublished edits gets the
+    /// update's own draft/conflict handling, said on the row). Absent when the converge could
+    /// not run (`copy_fault` says why). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<PullSkill>,
+    /// Why the standing scope's copy was NOT converged after the revert landed — the remote half
+    /// stands; this names the local fault and the update that finishes the job. The project lock
+    /// is not advanced past a copy that does not hold the version. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_fault: Option<String>,
 }
 
 /// The cwd project's `topos.lock` beside a pointer move this machine made (a landed publish, a

@@ -8,7 +8,10 @@
 //! Team-only — the local go-back is `pull <skill>@<hash>`.
 //!
 //! The verb acts on the scope you stand in, like every other: the bundle resolves in the cwd
-//! chain's project stores first, then the machine's (`-g` names the machine outright).
+//! chain's project stores first, then the machine's (`-g` names the machine outright). Once the
+//! move lands, the copy in THAT scope is converged onto the restored content — the same converge
+//! `topos update <skill>` runs, on the one bundle — so the folder beside the command holds what
+//! the team now runs, and a project's `topos.lock` never records a version its copy does not hold.
 
 use topos_core::digest::to_hex;
 use topos_core::identity::{self, Commit};
@@ -17,7 +20,9 @@ use topos_types::results::{RevertData, RevertDescribeData};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
-use super::reconcile::SessionConnect;
+use super::reconcile::{
+    ForgeCadence, LockMode, ManifestUpdateOpts, SessionConnect, UpdateScope, manifest_update,
+};
 use super::{
     StoreScope, VersionRef, resolve_followed_skill_in_scope, resolve_version_ref, workspace_of,
 };
@@ -47,8 +52,9 @@ pub(crate) enum RevertOutcome {
     /// good's bytes ALREADY equal current's — nothing to move. Bare says "nothing would change";
     /// `--yes` acknowledges it (a typed success). No forward commit, no POST either way.
     NoOp(RevertDescribeData),
-    /// The forward move landed (`--yes`, or a WAL replay resuming an in-flight revert).
-    Applied(RevertData),
+    /// The forward move landed (`--yes`, or a WAL replay resuming an in-flight revert). Boxed:
+    /// the receipt carries the converged copy's whole update row, many times the describe's size.
+    Applied(Box<RevertData>),
 }
 
 /// Move `current` forward to the GOOD version named by `--to`, two-phase. A bare invocation DESCRIBES
@@ -111,7 +117,7 @@ pub(crate) fn revert(
     let name = lock.name;
     let workspace_id = workspace_of(ctx, id.as_str())?;
     let sp = ctx.layout.published(&id);
-    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
+    let guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
     // The SESSION lane: the skill's own workspace names the session whose credential signs — and,
     // for a short `--to`, the session whose credential reads the workspace's history. Sessions
@@ -265,7 +271,71 @@ pub(crate) fn revert(
 
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
     let workspace = crate::ops::session_workspace_ref(lane_session);
-    map_outcome(ctx, &sp, &rec, &receipt, &name, &good_hex, &workspace).map(RevertOutcome::Applied)
+    let landing = Landing {
+        outer_ctx,
+        connectors,
+        scope,
+        guard,
+    };
+    map_outcome(
+        ctx, &sp, &rec, &receipt, &name, &good_hex, &workspace, landing,
+    )
+    .map(|data| RevertOutcome::Applied(Box::new(data)))
+}
+
+/// What a LANDED revert needs beyond the store it acted in: the machine-level ctx (its roots
+/// name the project whose lock moves), the session seam the converge exchanges through, the
+/// scope the converge drives, and the per-skill lock — held through the store's own advance,
+/// released before the converge takes it again.
+struct Landing<'a, 'c> {
+    outer_ctx: &'a Ctx<'c>,
+    connectors: &'a RevertConnectors<'a>,
+    scope: StoreScope,
+    guard: crate::fs_seam::LockGuard,
+}
+
+/// Converge the standing scope's copy of `name` onto the version the revert just made current —
+/// the same converge `topos update <name>` runs, on the one bundle (a targeted, non-quiet update:
+/// the lock re-resolves, notices are not acked, no forge is dialed). `Ok(row)` is the row that
+/// update printed for the bundle; `Err(why)` names the local fault when the converge could not
+/// run or could not carry the bundle, and the command that finishes the job.
+fn converge_copy(
+    ctx: &Ctx<'_>,
+    connectors: &RevertConnectors<'_>,
+    name: &str,
+    scope: StoreScope,
+) -> Result<topos_types::results::PullSkill, String> {
+    let g = if scope == StoreScope::Machine {
+        " -g"
+    } else {
+        ""
+    };
+    let finish = format!("`topos update{g} {name}` converges it");
+    let opts = ManifestUpdateOpts {
+        targets: vec![name.to_owned()],
+        ack_notices: false,
+        rebuild: false,
+        scope: match scope {
+            StoreScope::Here => UpdateScope::Here,
+            StoreScope::Machine => UpdateScope::Machine,
+        },
+        forge: ForgeCadence::Scheduled,
+        lock: LockMode::Update,
+    };
+    match manifest_update(ctx, connectors.session, None, &opts) {
+        Ok(out) => match out.data.skills.iter().find(|r| r.skill == name) {
+            Some(row) => Ok(row.clone()),
+            None => {
+                let why = out
+                    .warnings
+                    .first()
+                    .map(|m| m.text.clone())
+                    .unwrap_or_else(|| "the update carried no row for it".to_owned());
+                Err(format!("{why} — {finish}"))
+            }
+        },
+        Err(e) => Err(format!("{} — {finish}", crate::render::safe_message(&e))),
+    }
 }
 
 /// The 64-hex version ids the WORKSPACE holds for this bundle — the same list `topos log` prints
@@ -284,6 +354,7 @@ fn workspace_version_ids(
         .unwrap_or_default()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn map_outcome(
     ctx: &Ctx<'_>,
     sp: &sidecar::SkillPaths,
@@ -292,6 +363,7 @@ fn map_outcome(
     name: &str,
     good_hex: &str,
     workspace: &topos_types::results::WorkspaceRef,
+    landing: Landing<'_, '_>,
 ) -> Result<RevertData, ClientError> {
     match receipt.outcome() {
         TerminalOutcome::Ok => {
@@ -299,6 +371,33 @@ fn map_outcome(
                 ClientError::Corrupt("an OK revert carried no current pointer".into())
             })?;
             let new_gen = contribute::apply_light_advance(ctx, sp, rec, record)?;
+            // THE REMOTE HALF HAS LANDED. The copy beside the command follows, like a `git
+            // revert` updating the working tree: the converge `update <name>` runs, on this
+            // one bundle, in the scope the command stood in — the store's own lock released
+            // first, since the converge takes it again. A copy with unpublished edits gets the
+            // update's own draft/conflict handling, said on its row.
+            drop(landing.guard);
+            let (copy, copy_fault) =
+                match converge_copy(landing.outer_ctx, landing.connectors, name, landing.scope) {
+                    Ok(row) => (Some(row), None),
+                    Err(why) => (None, Some(why)),
+                };
+            // The cwd project's lock moves with the revert (the converge above already wrote it
+            // for a project the command stood in; a pinned row is disclosed as held) — but never
+            // past a copy the converge could not bring to the version: the lock records what the
+            // checkout runs, and a failed converge leaves both for the update it names.
+            let project_lock = copy_fault
+                .is_none()
+                .then(|| {
+                    crate::ops::advance_project_lock(
+                        landing.outer_ctx,
+                        name,
+                        &rec.candidate_commit,
+                        &workspace.host,
+                        &workspace.name,
+                    )
+                })
+                .flatten();
             Ok(RevertData {
                 skill_id: rec.skill_id.clone(),
                 workspace: Some(workspace.clone()),
@@ -306,15 +405,9 @@ fn map_outcome(
                 reverted_to: good_hex.to_owned(),
                 new_version_id: rec.candidate_commit.clone(),
                 current_generation: new_gen,
-                // The cwd project's lock moves with the revert: the forward commit is the new
-                // current, and the checkout the command stood in runs it at its next update.
-                project_lock: crate::ops::advance_project_lock(
-                    ctx,
-                    name,
-                    &rec.candidate_commit,
-                    &workspace.host,
-                    &workspace.name,
-                ),
+                project_lock,
+                copy,
+                copy_fault,
             })
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {

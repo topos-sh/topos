@@ -323,7 +323,10 @@ pub enum ConcludedExit {
 
 /// Why a merge could not be applied cleanly. **INFERRED value set.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictReason {
     /// A genuine three-way merge with at least one unresolved path.
@@ -342,7 +345,10 @@ pub struct ConflictPath {
 
 /// How a single path conflicts. **INFERRED value set.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictPathKind {
     /// A textual three-way overlap — diff3 markers were written at the path.

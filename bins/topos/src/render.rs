@@ -3968,6 +3968,38 @@ pub(crate) fn revert_tty(data: &RevertData) -> String {
         s.push_str(&format!(" in {}", ws.address()));
     }
     s.push_str(" — nothing was deleted; move current forward again to redo.");
+    // The copy in the scope the command stood in, after the converge a landed revert runs on it
+    // — the row `topos update` would print, led by whose copy it is. The two outcomes a revert
+    // itself makes ordinary are spelled for a cold reader; the draft outcomes (merged,
+    // conflicted) keep the update's own sentences, commands included.
+    if let Some(copy) = &data.copy {
+        let whose = match copy.scope.as_deref() {
+            Some("person") => "your machine-wide copy",
+            _ => "this project's copy",
+        };
+        let held = data.project_lock.as_ref().is_some_and(|l| l.held);
+        let (line, extra) = match copy.action {
+            topos_types::results::PullAction::FastForwarded => (
+                "fast-forwarded to the restored content".to_owned(),
+                Vec::new(),
+            ),
+            topos_types::results::PullAction::UpToDate if held => (
+                "stays at the version this project pins".to_owned(),
+                Vec::new(),
+            ),
+            topos_types::results::PullAction::UpToDate => {
+                ("already holds the restored content".to_owned(), Vec::new())
+            }
+            _ => pull_row(copy, &PullReceiptScope::read(copy.scope.as_deref())),
+        };
+        s.push_str(&format!("\n{whose}: {line}"));
+        for detail in extra {
+            s.push_str(&format!("\n  {detail}"));
+        }
+    }
+    if let Some(fault) = &data.copy_fault {
+        s.push_str(&format!("\nyour copy here was not updated: {fault}"));
+    }
     // The cwd project's lock beside the revert: moved with it (the checkout runs the restored
     // version at its next update), or held by the manifest's pin.
     if let Some(lock) = &data.project_lock {
@@ -6098,6 +6130,88 @@ mod tests {
             draft: false,
             narrowed: None,
         }
+    }
+
+    /// A landed revert's receipt says what the copy beside the command did — the converge a
+    /// landed revert runs on it — and never advances a lock past a copy that did not converge.
+    #[test]
+    fn a_landed_revert_names_the_standing_copys_outcome_and_the_lock() {
+        use topos_types::results::{ProjectLock, RevertData, WorkspaceRef};
+        let base = RevertData {
+            skill_id: "s_1".to_owned(),
+            workspace: Some(WorkspaceRef {
+                host: "topos.sh".to_owned(),
+                name: "acme".to_owned(),
+            }),
+            name: "truth-spine".to_owned(),
+            reverted_to: format!("3a1f0b62c0de{}", "0".repeat(52)),
+            new_version_id: format!("fed180d80b8a{}", "0".repeat(52)),
+            current_generation: 4,
+            project_lock: None,
+            copy: None,
+            copy_fault: None,
+        };
+        // A project copy fast-forwarded, its lock moved.
+        let mut project = row("truth-spine", PullAction::FastForwarded);
+        project.scope = Some("project /repo".to_owned());
+        let landed = super::revert_tty(&RevertData {
+            copy: Some(project),
+            project_lock: Some(ProjectLock {
+                file: "/repo/topos.lock".to_owned(),
+                version: format!("fed180d80b8a{}", "0".repeat(52)),
+                held: false,
+            }),
+            ..base.clone()
+        });
+        assert_eq!(
+            landed,
+            "Reverted truth-spine to 3a1f0b62c0de as forward commit fed180d80b8a in \
+             topos.sh/acme — nothing was deleted; move current forward again to redo.\n\
+             this project's copy: fast-forwarded to the restored content\n\
+             this project's topos.lock now records truth-spine@fed180d80b8a — commit it"
+        );
+        // A machine-wide copy that already held the bytes.
+        let mut machine = row("truth-spine", PullAction::UpToDate);
+        machine.scope = Some("person".to_owned());
+        let landed = super::revert_tty(&RevertData {
+            copy: Some(machine.clone()),
+            ..base.clone()
+        });
+        assert!(
+            landed.ends_with("\nyour machine-wide copy: already holds the restored content"),
+            "{landed}"
+        );
+        // A pinned project row: the copy stays where the pin says, and the lock is held.
+        let mut pinned = machine;
+        pinned.scope = Some("project /repo".to_owned());
+        let landed = super::revert_tty(&RevertData {
+            copy: Some(pinned),
+            project_lock: Some(ProjectLock {
+                file: "/repo/topos.lock".to_owned(),
+                version: format!("3a1f0b62c0de{}", "0".repeat(52)),
+                held: true,
+            }),
+            ..base.clone()
+        });
+        assert!(
+            landed.contains("\nthis project's copy: stays at the version this project pins\n"),
+            "{landed}"
+        );
+        assert!(landed.contains("its topos.lock stays there"), "{landed}");
+        // The converge could not run: the fault is said with its fix, and no lock line follows.
+        let landed = super::revert_tty(&RevertData {
+            copy_fault: Some(
+                "could not reach topos.sh — `topos update truth-spine` converges it".to_owned(),
+            ),
+            ..base
+        });
+        assert!(
+            landed.ends_with(
+                "\nyour copy here was not updated: could not reach topos.sh — `topos update \
+                 truth-spine` converges it"
+            ),
+            "{landed}"
+        );
     }
 
     fn merge_report(clean: bool, conflicts: Vec<ConflictPathReport>) -> MergeReport {

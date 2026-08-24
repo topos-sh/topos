@@ -433,6 +433,37 @@ export interface components {
             version?: string | null;
             workspace?: string | null;
         };
+        /**
+         * @description What a folder holds while a merge stands (see [`ConflictPlacement`]). **INFERRED** (additive).
+         * @enum {string}
+         */
+        ConflictHolds: "yours" | "theirs" | "marked_up" | "newer_edits";
+        /**
+         * @description How a single path conflicts. **INFERRED value set.**
+         * @enum {string}
+         */
+        ConflictPathKind: "content" | "binary_content" | "modify_delete" | "delete_modify" | "add_add" | "mode_mode" | "oversize";
+        /** @description One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary. */
+        ConflictPathReport: {
+            kind: components["schemas"]["ConflictPathKind"];
+            path: string;
+        };
+        /**
+         * @description One folder a stopped merge's bundle sits in, and what that folder holds RIGHT NOW. The pair is
+         *     what lets a re-disclosure tell per-folder truth: a merge can stand for days while a narrowed
+         *     reset takes one copy and the person keeps working in another. **INFERRED** (additive).
+         */
+        ConflictPlacement: {
+            /** @description The folder, as a receipt spells it (`~`-abbreviated display path). */
+            dir: string;
+            /** @description What is in it. */
+            holds: components["schemas"]["ConflictHolds"];
+        };
+        /**
+         * @description Why a merge could not be applied cleanly. **INFERRED value set.**
+         * @enum {string}
+         */
+        ConflictReason: "three_way" | "no_base";
         CurrentRecord: {
             /** Format: int64 */
             generation: number;
@@ -659,6 +690,80 @@ export interface components {
             workspace: components["schemas"]["DeviceAuthWorkspace"];
         };
         /**
+         * @description One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation — its
+         *     config ENTRY, projected onto [the one outcome vocabulary](TargetOutcome). **INFERRED**
+         *     (additive).
+         */
+        McpAgentState: {
+            /** @description The harness registry slug (e.g. `claude-code`, `cursor`). */
+            agent: string;
+            /**
+             * @description The config file the entry lives in (the `list <name>` deep dive shows it; receipts omit
+             *     it).
+             */
+            file?: string | null;
+            /**
+             * @description A short human-readable qualifier (why not-supported / how a change goes live), when one
+             *     exists.
+             */
+            note?: string | null;
+            /** @description What this bundle's entry in that agent's config looks like after the run. */
+            state: components["schemas"]["TargetOutcome"];
+        };
+        /**
+         * @description The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED
+         *     fields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),
+         *     not this exact shape.
+         */
+        MergeReport: {
+            /** @description The three-way base (the draft's fork point). */
+            base_version_id: string;
+            /** @description Whether the merge was clean (`true` → draft-on-current, publishable) or blocked (`false`). */
+            clean: boolean;
+            /** @description The conflicting paths when `clean` is `false` — the agent's resolution checklist. */
+            conflicts?: components["schemas"]["ConflictPathReport"][];
+            /**
+             * @description Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,
+             *     never a folder an agent reads. A hand resolution left there is what `update <skill>
+             *     --keep-mine` commits. Display path (`~`-abbreviated). Absent for a clean merge.
+             *     **INFERRED** (additive).
+             */
+            copy_dir?: string | null;
+            /** @description For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other. */
+            drop_diff?: string | null;
+            /**
+             * @description Every folder this bundle sits in while the merge stands, each with WHAT IS IN IT — read
+             *     from the folder itself, never assumed. A conflict writes to no folder, so the whole set
+             *     reads `yours` the moment it stops; a copy taken by a narrowed reset, or edited on after the
+             *     stop, says so instead. Folders that are gone (or unreadable) are absent: an unverifiable
+             *     folder must never become a claim. Empty for a clean merge (which rewrites its placements).
+             *     **INFERRED** (additive).
+             */
+            placements?: components["schemas"]["ConflictPlacement"][];
+            reason?: null | components["schemas"]["ConflictReason"];
+            resolved?: null | components["schemas"]["MergeResolution"];
+            /** @description The merged/conflict tree's `bundle_digest`. */
+            result_digest: string;
+            /** @description The forward 1-parent commit carrying the merged (or conflict-marked) tree. */
+            result_version_id: string;
+            /** @description `current` (theirs) the draft was merged onto. */
+            theirs_version_id: string;
+            /**
+             * @description The paths a `keep_mine` resolution TOOK from the team — every file whose committed content
+             *     or mode differs from this person's own draft, including ones the team deleted. Sorted by raw
+             *     path bytes. Empty when the resolution changed nothing of theirs, and always empty for a
+             *     `by_hand` resolution (that tree is the person's own, wholesale — nothing in it is claimable
+             *     as taken from the team). **INFERRED** (additive).
+             */
+            took?: string[];
+        };
+        /**
+         * @description How `--keep-mine` finished a stopped merge — the two paths say different things about whose
+         *     wording landed, so a receipt must never speak for both at once. **INFERRED** (additive).
+         * @enum {string}
+         */
+        MergeResolution: "keep_mine" | "by_hand";
+        /**
          * @description One message: the machine-readable code (when the producer has one), what kind of thing it is,
          *     and the ONE sentence a person reads. `text` never carries the code — a code is a lookup key,
          *     not prose, and the TTY prints `text` alone.
@@ -680,6 +785,20 @@ export interface components {
          * @enum {string}
          */
         MessageKind: "failure" | "decision" | "advisory" | "disclosure";
+        /**
+         * @description A row edit that stopped demanding some of a bundle's surfaces while the bundle itself keeps
+         *     delivering here — the loss an `update` receipt leads with, so a deliberate narrowing is never
+         *     quieter than the install that preceded it. **INFERRED** (additive).
+         */
+        Narrowing: {
+            /** @description The surfaces this run retired — one line each under the lead. */
+            from: components["schemas"]["Surface"][];
+            /**
+             * @description Where the bundle STILL delivers, as the receipt spells it. Never empty: a row reaching
+             *     nothing is not a narrowing, and the rows already say that in their own words.
+             */
+            still: string[];
+        };
         /**
          * @description A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
          *     branch on the known set and still pass through unknowns. The three safety fields are ADDITIVE
@@ -1036,6 +1155,103 @@ export interface components {
             workspace_id: string;
         };
         /**
+         * @description What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the
+         *     semantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.
+         * @enum {string}
+         */
+        PullAction: "up_to_date" | "fast_forwarded" | "installed" | "updated" | "removed" | "merged" | "conflicted" | "draft_synced" | "held" | "withdrawn" | "released";
+        /**
+         * @description One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value
+         *     enum* (`PullAction`) is INFERRED.
+         */
+        PullSkill: {
+            action: components["schemas"]["PullAction"];
+            /**
+             * Format: int64
+             * @description Highest generation actually materialized to disk.
+             */
+            applied: number;
+            /**
+             * @description The DESTINATIONS this row's action touched: the skill folders an `installed` row landed in
+             *     (or a `removed` row uninstalled), or the config files a config-placed (`mcp`) bundle's
+             *     entries live in. Display paths — abbreviated to `~` under the user's home. Empty (and
+             *     omitted) for actions that moved no destination. **INFERRED** (additive).
+             */
+            destinations?: string[];
+            /**
+             * @description The workspace-QUALIFIED display name a receipt leads with (`@<ws>/<name>` when the host is
+             *     this machine's one connected host, else `<host>/<ws>/<name>`). Absent for non-workspace
+             *     sources, which read by their plain `skill` name. **INFERRED** (additive).
+             */
+            display?: string | null;
+            /**
+             * @description Whether this bundle carries LOCAL EDITS that are not shared — the same fact `list` prints
+             *     as `(draft)` and `status` counts as `drafts ahead`.
+             *
+             *     Delivery had nothing to do for such a row, so its action is `up_to_date` — and a summary
+             *     built from actions alone then announced "all up to date" about the very bundles `list` and
+             *     `status` were calling drafts. The three surfaces disagreed about one machine. Carried here
+             *     so the receipt can say both true things at once: nothing was owed, and something of yours
+             *     is still unshared. **INFERRED** (additive).
+             */
+            draft?: boolean;
+            /**
+             * @description Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold
+             *     the server entry and how. Empty (and omitted) for file-bundle skills. **INFERRED**
+             *     (additive).
+             */
+            harnesses?: components["schemas"]["McpAgentState"][];
+            /**
+             * @description Locally-EDITED copies a `removed` row kept in place instead of uninstalling (the person's
+             *     own work is never deleted by ending delivery) — their display paths, `~`-abbreviated.
+             *     **INFERRED** (additive).
+             */
+            kept?: string[];
+            /**
+             * @description The catalog bundle kind (`"mcp"` for a config-placed MCP-server bundle). Absent ⇒ an
+             *     ordinary skill. Carried so a receipt can name what it reconciled instead of calling every
+             *     row a skill — a state a row with no engaged agent could not otherwise report. **INFERRED**
+             *     (additive).
+             */
+            kind?: string | null;
+            merge?: null | components["schemas"]["MergeReport"];
+            narrowed?: null | components["schemas"]["Narrowing"];
+            /**
+             * @description The fact a row states BESIDE its action: the whole thing a `released` row prints (why the
+             *     record resolved and where its files stand now — two lines, the second the folders, which a
+             *     human renderer indents under the first), or — on any other action — the one line naming
+             *     the folders this run also wrote that the action's own column does not name (a healed folder
+             *     that rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh
+             *     install). Absent when the action says everything. **INFERRED** (additive).
+             */
+            note?: string | null;
+            /**
+             * Format: int64
+             * @description The generation the plane most recently served — the sync target.
+             */
+            observed: number;
+            /**
+             * @description The SCOPE this row reconciled in — `"person"` for the home dirs, or the project
+             *     directory's path for an in-checkout delivery. The receipt sections rows by it. Absent on
+             *     rows predating the field. **INFERRED** (additive).
+             */
+            scope?: string | null;
+            skill: string;
+            /**
+             * Format: int32
+             * @description How many OTHER agent folders a settled local draft was copied onto this run (a
+             *     `draft_synced` row's count). Absent when the run synced nothing. **INFERRED** (additive).
+             */
+            synced_placements?: number | null;
+            /**
+             * @description The workspace this followed skill lives in, or `None` for a targeted go-back / local-only pull that
+             *     has no follow entry. A pulled skill is normally followed (so `Some`), but `pull <skill>@<hash>` on an
+             *     unfollowed copy has none — `Option` keeps that honest and stays symmetric with [`SkillEntry`]. Names
+             *     the workspace so a session-start sweep does not show two same-named skills indistinguishably.
+             */
+            workspace_id?: string | null;
+        };
+        /**
          * @description The ONE canonical receipt across all outcomes — the durable idempotency record (present even
          *     on failures): one stable receipt per op, identical on retry.
          */
@@ -1093,6 +1309,13 @@ export interface components {
          *     never a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
          */
         RevertData: {
+            copy?: null | components["schemas"]["PullSkill"];
+            /**
+             * @description Why the standing scope's copy was NOT converged after the revert landed — the remote half
+             *     stands; this names the local fault and the update that finishes the job. The project lock
+             *     is not advanced past a copy that does not hold the version. **INFERRED** (additive-only).
+             */
+            copy_fault?: string | null;
             /** Format: int64 */
             current_generation: number;
             /**
@@ -1209,6 +1432,45 @@ export interface components {
             /** @description Why, in the server's words (display text, e.g. `already invited recently`). */
             reason: string;
         };
+        /**
+         * @description ONE SURFACE a run answered for, in the vocabulary both target shapes share: the agent that
+         *     reads it, where this bundle's copy lives there, and what the run left. `target` is a config
+         *     file for a config-placed (`mcp`) bundle and a folder for a skill. **INFERRED** (additive).
+         */
+        Surface: {
+            /**
+             * @description The harness registry slug that reads it (e.g. `opencode`). EMPTY where the destination
+             *     names no single harness — a folder several agents share.
+             */
+            agent: string;
+            /** @description The short qualifier the outcome carries (why a surface was not placed), when one exists. */
+            note?: string | null;
+            state: components["schemas"]["TargetOutcome"];
+            /**
+             * @description The config file or folder the copy lives in, as a receipt spells it. Absent where nothing
+             *     stands and there is no target to name.
+             */
+            target?: string | null;
+        };
+        /**
+         * @description **THE ONE OUTCOME VOCABULARY** — what a single managed TARGET looks like after a run.
+         *
+         *     A bundle's bytes reach a machine as one of two target shapes: a placement DIRECTORY the bundle
+         *     owns, or an ENTRY it owns inside a config file. They are the same question asked twice ("what
+         *     does the thing topos owns look like now?"), and they used to answer in two unrelated word sets
+         *     — dirs through the row's action, entries through a free-form per-agent string that a reader
+         *     had to know by heart. Both now project onto THIS set, and both render from
+         *     [`TargetOutcome::word`], so one outcome cannot be called two things.
+         *
+         *     Every variant is DERIVED, never chosen at a render site: from the drift vocabulary the
+         *     ownership record is scanned into (absent / clean / modified / foreign / unscannable) plus the
+         *     one bit the record cannot hold — whether this run WROTE the target. **INFERRED**, and the value
+         *     set is CLOSED: every consumer matches it exhaustively and there is no unknown arm, so a new
+         *     outcome is a deliberate change that ships with a release — never a value a running client is
+         *     expected to tolerate.
+         * @enum {string}
+         */
+        TargetOutcome: "created" | "refreshed" | "current" | "drifted" | "conflicting" | "unprovable" | "removed" | "not-supported";
         /**
          * @description The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.
          * @enum {string}

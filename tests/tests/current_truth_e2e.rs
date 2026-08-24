@@ -3,18 +3,21 @@
 //!
 //! The scenario a by-hand journey reproduced twice: an author publishes a new version from inside
 //! a project, undoes it with the `topos revert … --to` line the receipt printed, and then looks at
-//! the copy still sitting in the project. That copy equals the version the revert just undid —
+//! a copy the revert did not stand beside. That copy equals the version the revert just undid —
 //! and every verb that decides "matches current" must decide against the workspace's LIVE
 //! `current`, never the sidecar's cached notion of it:
 //!
 //! - `publish` previews a forward publish of the copy's content, names which version `current`
 //!   is (the revert), and — applied — mints a new version whose content equals the undone one,
 //!   with `log` showing every hop;
-//! - `diff` shows the real difference against the live current;
-//! - `update` on the copy fast-forwards (an unmodified copy is a clean tree) AND says which
+//! - `diff` shows the real difference against the live current — exactly it, each path once;
+//! - `update` on such a copy fast-forwards (an unmodified copy is a clean tree) AND says which
 //!   version it replaced, with the `revert --to` that brings it back;
 //! - a publish from inside a project advances that project's `topos.lock` (a commit moves
-//!   `HEAD`), so `list` shows the bundle current rather than `[behind]`.
+//!   `HEAD`), so `list` shows the bundle current rather than `[behind]`;
+//! - a revert acts on the scope it stands in — a project copy needs no machine-wide twin — and,
+//!   like `git revert` updating the working tree, converges THAT scope's copy onto the restored
+//!   content before its lock records the version.
 //!
 //! Like the store suite this drives the REAL CLI BINARY as a subprocess over fake `$HOME`s — the
 //! placement dirs resolve against the environment, so only a real process proves what landed
@@ -448,23 +451,27 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
         "{tty}"
     );
 
-    // ── 2. the undo, exactly as printed ─────────────────────────────────────────────────────────
-    let reverted = run_undo(&author, &project, &undo);
+    // ── 2. the undo, exactly as printed — from OUTSIDE the project ──────────────────────────────
+    // A revert converges the copy in the scope it stands in. Run from the machine's own folder,
+    // it stands beside the machine-wide copy (still at v1's bytes: never updated to v2), which
+    // fast-forwards onto the restored content; the project's copy and lock are not its business.
+    let reverted = run_undo(&author, author.root(), &undo);
     let restored = reverted["new_version_id"]
         .as_str()
         .expect("the forward-revert commit")
         .to_owned();
     assert_ne!(restored, v1);
     assert_ne!(restored, v2);
-    // A revert from inside the project moves its lock too: the forward commit is the new current.
-    assert!(
-        reverted["project_lock"]["file"]
-            .as_str()
-            .is_some_and(|p| p.ends_with("topos.lock")),
-        "{reverted}"
+    assert_eq!(reverted["copy"]["action"], "fast_forwarded", "{reverted}");
+    assert_eq!(reverted["copy"]["scope"], "person", "{reverted}");
+    assert!(reverted.get("copy_fault").is_none(), "{reverted}");
+    assert!(reverted.get("project_lock").is_none(), "{reverted}");
+    assert_converged(
+        &author,
+        &v1_files(&nonce),
+        "the machine-wide copy holds the restored content",
     );
-    assert_eq!(reverted["project_lock"]["version"], restored, "{reverted}");
-    assert_eq!(locked_version(&project).as_deref(), Some(restored.as_str()));
+    assert_eq!(locked_version(&project).as_deref(), Some(v2.as_str()));
 
     // The project copy still holds v2's bytes — the version the revert just undid. Nothing here
     // touched it, and the sidecar's cache still calls v2 current.
@@ -633,7 +640,7 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn an_update_over_an_undone_copy_fast_forwards_and_names_what_it_replaced() {
+fn a_project_revert_converges_its_copy_and_another_machine_names_what_it_replaced() {
     let nonce = format!("undone-{}", std::process::id());
     let stack = start_stack("current-truth-update");
     let owner = stack.claim_owner(OWNER_EMAIL);
@@ -647,21 +654,56 @@ fn an_update_over_an_undone_copy_fast_forwards_and_names_what_it_replaced() {
         .as_str()
         .expect("the undo line")
         .to_owned();
+
+    // A second machine takes v2 before the revert.
+    let dev_browser = stack.add_member("dev@acme.test", "member");
+    let dev = Machine::new("undone-dev");
+    login(&stack, &dev, &dev_browser);
+    dev.run(&["update", "--json"])
+        .data("the second machine's first sweep");
+    assert_converged(&dev, &v2_files(&nonce), "the second machine holds v2");
+
+    // ── the revert, from inside the project ─────────────────────────────────────────────────────
+    // `git revert` updates the working tree; so does this. The project's copy holds the
+    // restored bytes when the receipt prints, its lock records the forward commit — and never
+    // a version the copy does not hold — and `list` shows the bundle current, not `[behind]`.
     let reverted = run_undo(&author, &project, &undo);
     let restored = reverted["new_version_id"]
         .as_str()
         .expect("the forward-revert commit")
         .to_owned();
+    assert_eq!(reverted["copy"]["action"], "fast_forwarded", "{reverted}");
+    assert!(reverted.get("copy_fault").is_none(), "{reverted}");
+    assert_eq!(reverted["project_lock"]["version"], restored, "{reverted}");
+    assert!(reverted["project_lock"].get("held").is_none(), "{reverted}");
     assert_eq!(
         placed(&copy),
-        expected(&v2_files(&nonce)),
-        "the copy still holds v2"
+        expected(&v1_files(&nonce)),
+        "the project copy holds the restored bytes"
     );
+    assert_eq!(locked_version(&project).as_deref(), Some(restored.as_str()));
+    let listed = author
+        .run_in(&project, &["list", "--json"])
+        .data("the project listing after the revert");
+    let entry = listed["scopes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|sc| sc["rows"].as_array().cloned().unwrap_or_default())
+        .find(|e| e["skill"] == BUNDLE)
+        .unwrap_or_else(|| panic!("the project lists the bundle: {listed}"));
+    assert_eq!(entry["version_id"], restored, "{entry}");
+    assert_ne!(entry["status"], "behind", "{entry}");
+    // Said in the same words on the terminal — a second revert to the same bytes is a no-op,
+    // so the wording is read off a fresh preview's apply, run for real.
+    let tty = author.run_in(&project, &["update", BUNDLE]).stdout;
+    assert!(tty.contains("all up to date"), "{tty}");
 
-    // The docs' recovery: `topos update` there. An unmodified copy is a clean tree, so it
-    // fast-forwards — and the receipt discloses the version it replaced with the way back.
-    let updated = author
-        .run_in(&project, &["update", BUNDLE, "--json"])
+    // ── the other machine: an unmodified copy of the undone version fast-forwards ───────────────
+    // …and the receipt discloses the version it replaced with the way back — spelled short, the
+    // way every listing prints a version.
+    let updated = dev
+        .run(&["update", BUNDLE, "--json"])
         .data("the update over the undone copy");
     let swept = row(&updated, BUNDLE);
     assert_eq!(swept["action"], "fast_forwarded", "{updated}");
@@ -675,31 +717,39 @@ fn an_update_over_an_undone_copy_fast_forwards_and_names_what_it_replaced() {
         ),
         "{updated}"
     );
-    assert_eq!(
-        placed(&copy),
-        expected(&v1_files(&nonce)),
-        "the copy now holds the restored bytes"
+    assert_converged(
+        &dev,
+        &v1_files(&nonce),
+        "the copy now holds the restored bytes",
     );
-    let tty = author.run_in(&project, &["update", BUNDLE]).stdout;
-    assert!(tty.contains("all up to date"), "{tty}");
 
-    // …and the way back it named works, exactly as printed (the full id: `revert` resolves a
-    // prefix against the MACHINE store's history, which never held this project-published
-    // version): v2's content is current again.
-    let back = author
-        .run_in(
-            &project,
-            &["revert", BUNDLE, "--to", &v2, "--yes", "--json"],
-        )
-        .data("the revert the receipt named");
+    // …and the way back it named works, exactly as printed, from the author's project: `--to`
+    // resolves against the workspace's history in the scope the command stands in, the project
+    // copy converges onto v2's content, and the lock follows.
+    let way_back = swept["note"]
+        .as_str()
+        .and_then(|n| n.split("stays in history: ").nth(1))
+        .expect("the note carries the way back")
+        .to_owned();
+    let back = run_undo(&author, &project, &way_back);
     assert_eq!(back["reverted_to"], v2, "{back}");
-    let again = author
-        .run_in(&project, &["update", BUNDLE, "--json"])
+    let back_version = back["new_version_id"]
+        .as_str()
+        .expect("the second forward commit")
+        .to_owned();
+    assert_eq!(back["copy"]["action"], "fast_forwarded", "{back}");
+    assert_eq!(placed(&copy), expected(&v2_files(&nonce)));
+    assert_eq!(
+        locked_version(&project).as_deref(),
+        Some(back_version.as_str())
+    );
+    // A revert of the revert undoes the restored version in turn on the other machine — its
+    // copy held it, unmodified — so that receipt names IT as the version replaced (the same
+    // rule, one hop later).
+    let again = dev
+        .run(&["update", BUNDLE, "--json"])
         .data("the update after the way back");
     assert_eq!(row(&again, BUNDLE)["action"], "fast_forwarded", "{again}");
-    assert_eq!(placed(&copy), expected(&v2_files(&nonce)));
-    // A revert of the revert undoes the restored version in turn — the copy held it, unmodified
-    // — so this receipt names IT as the version replaced (the same rule, one hop later).
     assert!(
         row(&again, BUNDLE)["note"]
             .as_str()
@@ -708,6 +758,11 @@ fn an_update_over_an_undone_copy_fast_forwards_and_names_what_it_replaced() {
                 &restored[..12]
             ))),
         "{again}"
+    );
+    assert_converged(
+        &dev,
+        &v2_files(&nonce),
+        "the other machine follows the way back",
     );
 }
 
@@ -798,8 +853,8 @@ fn a_revert_from_a_project_needs_no_machine_wide_copy() {
         .refusal("a machine-scope revert over an untracked bundle");
     assert_eq!(refused["error"]["code"], "NO_SUCH_SKILL", "{refused}");
 
-    // Applied from the checkout: the team moves back, and the checkout's lock records the
-    // forward commit.
+    // Applied from the checkout: the team moves back, THIS copy converges onto the restored
+    // content, and the checkout's lock records the forward commit.
     let reverted = reviewer
         .run_in(
             &checkout,
@@ -811,7 +866,9 @@ fn a_revert_from_a_project_needs_no_machine_wide_copy() {
         .as_str()
         .expect("the forward-revert commit")
         .to_owned();
+    assert_eq!(reverted["copy"]["action"], "fast_forwarded", "{reverted}");
     assert_eq!(reverted["project_lock"]["version"], restored, "{reverted}");
+    assert_eq!(placed(&theirs), expected(&v1_files(&nonce)));
     assert_eq!(
         locked_version(&checkout).as_deref(),
         Some(restored.as_str())
