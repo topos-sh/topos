@@ -17,6 +17,10 @@
 //! catalog kind has — a machine whose workspace is GONE still heals a deleted config file from the
 //! document it was last given.
 //!
+//! A second arc follows the COMMITTED LOCK: the catalog moves on, and a fresh checkout still
+//! receives the revision its `topos.lock` names — fetched by id over the same real HTTP — with
+//! `topos update` the one thing that moves both halves.
+//!
 //! Like the conflict suite, this one drives the REAL CLI BINARY (`target/<profile>/topos`) as a
 //! subprocess rather than the in-process fixture rig: `add --kind mcp`, the per-scope config
 //! converge and the harness detection all resolve against `$HOME` / `$TOPOS_HOME`, so only a real
@@ -1008,4 +1012,136 @@ fn the_connected_server_loop_across_six_agents() {
             path.display()
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// The LOCK arc — what a committed `topos.lock` is worth for a connection, over the same stack.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/// The second address the catalog moves to mid-arc — the whole point of the assertions below is
+/// which of the two a checkout receives.
+const SERVER_URL_V2: &str = "https://knowledge-mcp.v2.api.aws.example";
+
+/// Publish a SECOND revision of the shared catalog server and promote it — the catalog moving on
+/// while a project's lock stays where it was. Written as rows because the promotion door is
+/// staff's, and this suite is about what a MACHINE then receives.
+fn promote_second_revision(stack: &Stack) -> String {
+    let server_id = stack
+        .text_witness(&format!(
+            "SELECT id FROM web.mcp_server WHERE name = '{REGISTRY_NAME}' AND workspace_id IS NULL"
+        ))
+        .expect("the shared catalog server");
+    let document = json!({
+        "name": REGISTRY_NAME,
+        "description": "AWS knowledge, at a second address.",
+        "remotes": [{ "type": "streamable-http", "url": SERVER_URL_V2 }],
+        "_meta": { "sh.topos/auth": "none" },
+    });
+    let revision = stack
+        .text_witness(&format!(
+            "INSERT INTO web.mcp_server_revision
+               (id, server_id, seq, document, transport, url, published_at, published_by)
+             VALUES ('mcpr_' || md5('knowledge-v2'), '{server_id}',
+                     (SELECT max(seq) + 1 FROM web.mcp_server_revision WHERE server_id = '{server_id}'),
+                     '{document}'::jsonb, 'streamable-http', '{SERVER_URL_V2}', now(), 'e2e-harness')
+             RETURNING id"
+        ))
+        .expect("the second revision lands");
+    stack
+        .text_witness(&format!(
+            "UPDATE web.mcp_server SET current_revision_id = '{revision}'
+             WHERE id = '{server_id}' RETURNING id"
+        ))
+        .expect("the pointer moves");
+    revision
+}
+
+/// A checkout: a git-shaped dir holding the two committed files, exactly as a clone would.
+fn checkout(at: &Path, manifest: &str, lock: &str) -> PathBuf {
+    std::fs::create_dir_all(at.join(".git")).expect("a git-shaped checkout");
+    std::fs::write(at.join("topos.toml"), manifest).expect("the committed manifest");
+    std::fs::write(at.join("topos.lock"), lock).expect("the committed lock");
+    at.to_path_buf()
+}
+
+/// **A COMMITTED LOCK NAMES THE REVISION A CHECKOUT RECEIVES.** The catalog moves on; the project
+/// does not — until somebody runs `topos update` and commits the diff. The whole chain is real
+/// here: the binary asks the web app for ONE STORED REVISION by id, and what lands in the agent's
+/// config is the document that revision holds, not the one the catalog serves today.
+#[test]
+fn a_committed_lock_installs_the_mcp_revision_it_names() {
+    let stack = start_stack("mcp-lock");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    // ── the author: share the server from inside a project, and commit what it resolved to ──────
+    let author = Install::new("mcp-lock-author");
+    login(&stack, &author, &owner);
+    settle_trigger_registration(&author);
+    let proj = author
+        .root()
+        .canonicalize()
+        .expect("canonical root")
+        .join("api");
+    std::fs::create_dir_all(proj.join(".git")).expect("a git-shaped project");
+    author.run(&proj, &["init", "--json"]).data("init");
+    let added = author
+        .run(&proj, &["add", "--kind", "mcp", REGISTRY_NAME, "--json"])
+        .data("add --kind mcp");
+    assert_eq!(added["name"], BUNDLE, "{added}");
+    author.run(&proj, &["install", "--json"]).data("install");
+
+    let rev1 = resolved_revision(&stack);
+    let manifest = read(&proj.join("topos.toml"));
+    let lock = read(&proj.join("topos.lock"));
+    assert!(
+        lock.contains(&format!("[mcp.{BUNDLE}]")) && lock.contains(&rev1),
+        "the lock records the revision the connection resolved to:\n{lock}"
+    );
+
+    // ── the catalog moves on ────────────────────────────────────────────────────────────────────
+    let rev2 = promote_second_revision(&stack);
+    assert_ne!(rev1, rev2);
+    assert_eq!(resolved_revision(&stack), rev2, "the connection follows it");
+
+    // ── the teammate: a FRESH checkout of the committed pair, installed frozen ───────────────────
+    let dev = Install::new("mcp-lock-dev");
+    login(&stack, &dev, &owner);
+    settle_trigger_registration(&dev);
+    let clone = checkout(
+        &dev.root()
+            .canonicalize()
+            .expect("canonical root")
+            .join("api"),
+        &manifest,
+        &lock,
+    );
+    let frozen = dev.run(&clone, &["install", "--frozen", "--json"]);
+    assert_eq!(
+        frozen.code, 0,
+        "the locked revision is served, so CI installs it: {} {}",
+        frozen.stdout, frozen.stderr
+    );
+    let placed = read(&clone.join(".mcp.json"));
+    assert!(
+        placed.contains(SERVER_URL) && !placed.contains(SERVER_URL_V2),
+        "the checkout receives the document its lock names, not today's:\n{placed}"
+    );
+    assert_eq!(
+        read(&clone.join("topos.lock")),
+        lock,
+        "an install never moves a lock entry"
+    );
+
+    // ── `topos update` is what moves it — both halves, together ─────────────────────────────────
+    dev.run(&clone, &["update", "--json"]).data("update");
+    let placed = read(&clone.join(".mcp.json"));
+    assert!(
+        placed.contains(SERVER_URL_V2) && !placed.contains(SERVER_URL),
+        "update takes the served revision:\n{placed}"
+    );
+    let moved = read(&clone.join("topos.lock"));
+    assert!(
+        moved.contains(&rev2) && !moved.contains(&rev1),
+        "…and rewrites the lock to it:\n{moved}"
+    );
 }
