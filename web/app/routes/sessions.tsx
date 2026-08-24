@@ -17,6 +17,7 @@ import {
   workspaceSessions,
 } from "@/lib/db/queries.sessions.server";
 import { workspaceServiceSessions } from "@/lib/db/queries.tokens.server";
+import { sessionCounts } from "@/lib/session-counts";
 import { useWsPath } from "@/lib/ws-path";
 
 export function meta({ params }: { params: { ws?: string } }) {
@@ -167,33 +168,34 @@ function ActionReceipt({ status }: { status: string }) {
 }
 
 function SessionsMeta({ view }: { view: WorkspaceSessions }) {
-  // An EXPIRED session's credential no longer resolves — it is not a live machine, so it never
-  // counts as active (the guard already refuses it; the page must agree).
-  const count = view.sessions.filter((s) => s.status === "active" && !s.expired).length;
-  const expired = view.sessions.filter((s) => s.status === "active" && s.expired).length;
-  const pending = view.sessions.filter((s) => s.status === "pending").length;
-  const stale = view.sessions.filter(
-    (s) => s.status === "active" && !s.expired && s.freshness === "stale",
-  ).length;
+  // The buckets PARTITION the rows (app/lib/session-counts.ts), so the header always adds up to
+  // the list underneath — each number named by the same word its rows' chips carry.
+  const counts = sessionCounts(view.sessions);
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <span>{count === 1 ? "1 active session" : `${count} active sessions`}</span>
-      {pending > 0 && (
+      <span>{counts.active === 1 ? "1 active session" : `${counts.active} active sessions`}</span>
+      {counts.pending > 0 && (
         <>
           <span aria-hidden="true">·</span>
-          <span>{pending === 1 ? "1 pending" : `${pending} pending`}</span>
+          <span>{counts.pending === 1 ? "1 pending" : `${counts.pending} pending`}</span>
         </>
       )}
-      {stale > 0 && (
+      {counts.stale > 0 && (
         <>
           <span aria-hidden="true">·</span>
-          <span>{stale === 1 ? "1 stale" : `${stale} stale`}</span>
+          <span>{counts.stale === 1 ? "1 stale" : `${counts.stale} stale`}</span>
         </>
       )}
-      {expired > 0 && (
+      {counts.neverReported > 0 && (
         <>
           <span aria-hidden="true">·</span>
-          <span>{expired === 1 ? "1 expired" : `${expired} expired`}</span>
+          <span>{counts.neverReported} never reported</span>
+        </>
+      )}
+      {counts.expired > 0 && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span>{counts.expired === 1 ? "1 expired" : `${counts.expired} expired`}</span>
         </>
       )}
     </div>
