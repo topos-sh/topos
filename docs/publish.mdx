@@ -9,9 +9,9 @@ topos publish pr-describe
 topos publish pr-describe --yes
 ```
 
-The bare run is a preview — it names the channel the skill lands in, whether review is required,
-and the exact apply command, and changes nothing. `--yes` applies it, as a new skill or as a new
-version of one already shared. What you point it at:
+The bare run is a preview — it counts what changes, names the channel the skill lands in and
+whether review is required, and hands you the exact apply command; it changes nothing. `--yes`
+applies it, as a new skill or as a new version of one already shared. What you point it at:
 
 | Target | Meaning |
 |---|---|
@@ -99,11 +99,18 @@ Publishing a copy that already matches the published version is not an error —
 `already published — your copy matches current` and stops. If the edits are in your other copy, it
 says which command shares them.
 
+"Current" is what the workspace serves, read fresh on every publish and every `topos diff` — never
+what this machine last saw. So if your copy equals an older version than current (you published,
+then someone reverted, say), it is not "already published": the preview says which version current
+is, and `--yes` publishes your copy's content forward as a new version on top of it. Re-publishing
+older content is an ordinary act; `topos log` keeps every hop, and the receipt's `undo:` line puts
+the team back.
+
 ## If it refuses
 
 | Refusal | Fix |
 |---|---|
-| Your copy is behind the team | `topos update <skill>`, then publish again |
+| Your copy has edits and the team published a newer version since | `topos update <skill>` merges theirs into yours — nothing of yours is overwritten — then publish again. (A copy you did not edit is never refused for being older: it publishes forward, and the preview names the version it lands on.) |
 | `--to` names the workspace | `--to` takes a **channel**: `--to backend` |
 | No such channel | Create it in the browser first |
 | Not logged in | `topos login <workspace-address>` |
