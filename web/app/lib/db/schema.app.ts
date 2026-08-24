@@ -173,7 +173,7 @@ export const cliSession = webSchema.table(
     id: text("id").primaryKey(),
     workspaceId: text("workspace_id").notNull(),
     userId: text("user_id").notNull(),
-    /** The installation's self-reported label ("topos CLI (hostname)") — display only. */
+    /** The installation's self-reported label ("topos CLI · user@hostname") — display only. */
     displayName: text("display_name").notNull(),
     /** SHA-256 of the one bearer credential; the plaintext is delivered once and never stored. */
     credentialSha256: bytea("credential_sha256").notNull().unique(),
