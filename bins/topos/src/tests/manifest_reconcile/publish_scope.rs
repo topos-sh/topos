@@ -784,6 +784,107 @@ fn an_unmodified_copy_of_an_older_version_carries_forward_over_the_live_current(
     );
 }
 
+/// A send that drops mid-flight — the op MAY have landed, so the WAL keeps it for a replay.
+struct DroppedPublish;
+impl crate::plane::ContributeSource for DroppedPublish {
+    fn publish(
+        &self,
+        _b: topos_types::requests::PublishRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        Err(ClientError::Plane(
+            "the connection dropped mid-send".to_owned(),
+        ))
+    }
+    fn propose(
+        &self,
+        _b: topos_types::requests::ProposeRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("this flow publishes")
+    }
+    fn revert(
+        &self,
+        _b: topos_types::requests::RevertRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("this flow publishes")
+    }
+    fn review(
+        &self,
+        _b: topos_types::requests::ReviewRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("this flow publishes")
+    }
+}
+
+/// A forward publish whose first send DROPPED resumes from the WAL — and the resumed receipt
+/// says what the first attempt's would have: the undo names the LIVE current the op was built
+/// over (never the older version the local lock still names, which would be a no-op), and the
+/// base line names both versions. The facts ride the record; nothing is re-classified.
+#[test]
+fn a_resumed_forward_publish_prints_the_undo_naming_the_live_current() {
+    let rig = Rig::new("pubscope-forward-resume");
+    rig.seed_session();
+    let mine = one_file(b"# deploy\n");
+    let restored = revert_shaped(b"# deploy\nthe version the revert restored\n");
+    let seams = publish_seams_with(&mine, &[&restored]);
+    let (proj, _machine_dir, _project_dir) = both_scopes(
+        "pubscope-forward-resume-repo",
+        &rig,
+        &seams.plane,
+        &seams.dir,
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    seams
+        .plane
+        .serves(vec![delivered_at("s_deploy", "deploy", &restored, 2)]);
+
+    // The first attempt: the send drops after the op is on the WAL.
+    let dropped = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(seams.plane.clone()),
+        directory: Box::new(seams.dir.clone()),
+        contribute: Box::new(DroppedPublish),
+        governance: Box::new(NoGovernance),
+    };
+    let err = ops::publish(
+        &ctx,
+        Some(&dropped),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+        None,
+        &ops::Selection::default(),
+        ops::StoreScope::Here,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ClientError::Plane(_)), "{err:?}");
+
+    // The replay lands, and the receipt is the one the first attempt owed.
+    let data = landed(publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap());
+    assert_eq!(
+        data.undo.as_deref(),
+        Some(format!("topos revert deploy --to {}", &hex(&restored.id)[..12]).as_str()),
+        "{data:?}"
+    );
+    let rep = data
+        .republish
+        .clone()
+        .expect("the resumed receipt names the base");
+    assert_eq!(rep.current_version_id, hex(&restored.id));
+    assert_eq!(rep.current_message.as_deref(), Some("topos: revert"));
+    assert_eq!(rep.copy_version_id, hex(&mine.id));
+    assert_eq!(rep.new_version_id, data.version_id);
+    let tty = crate::render::publish_tty(&data);
+    assert!(
+        tty.contains(&format!(
+            "current was {} (\"topos: revert\"); your copy equaled {}",
+            &hex(&restored.id)[..12],
+            &hex(&mine.id)[..12]
+        )),
+        "{tty}"
+    );
+}
+
 /// A PROPOSAL of a copy carried forward is built over the live current, and its receipt names
 /// THAT as the base a reviewer reads it against — never the older version this store applied.
 #[test]

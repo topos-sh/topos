@@ -1452,6 +1452,24 @@ fn enrolled_publish(
                     ),
                 });
             }
+            // The receipt's live facts, RECOVERED from the record rather than re-read: the
+            // live current this op was built over (the undo's target) and — for a copy carried
+            // forward — the older version it equalled. Re-reading would classify a copy whose
+            // publish may already have landed, and the lock still names the older version.
+            if let Some(base) = &pending.base_version {
+                undo_base = base.clone();
+                if let Some(copy) = &pending.republished_version {
+                    republish = Some(Republish {
+                        current_version_id: base.clone(),
+                        current_message: parse_hex32(base)
+                            .ok()
+                            .and_then(|c| Store::open(&sp.store).ok()?.read_commit_meta(c).ok())
+                            .map(|node| node.message),
+                        copy_version_id: copy.clone(),
+                        new_version_id: pending.candidate_commit.clone(),
+                    });
+                }
+            }
             pending
         }
         None => {
@@ -1511,6 +1529,7 @@ fn enrolled_publish(
             if let Some(l) = &live {
                 undo_base = l.hex.clone();
             }
+            let mut republished_version: Option<String> = None;
             if let (Standing::Forward(mut rep), Some(l), Some(b)) = (standing, &live, &base) {
                 // The forward commit parents on a version this store may never have fetched (a
                 // revert made elsewhere) — backfill it so the local history links up and the
@@ -1521,6 +1540,7 @@ fn enrolled_publish(
                     .ok()
                     .map(|node| node.message);
                 rep.new_version_id = predicted_version_id(ctx, b, scanned.bundle_digest, message)?;
+                republished_version = Some(rep.copy_version_id.clone());
                 republish = Some(rep);
             }
             build_publish_op(
@@ -1536,6 +1556,7 @@ fn enrolled_publish(
                 message,
                 bundle_kind.tag(),
                 base.as_ref(),
+                republished_version.as_deref(),
             )?
         }
     };
@@ -1910,6 +1931,7 @@ fn build_publish_op(
     message: Option<&str>,
     bundle_kind: Option<String>,
     base: Option<&PublishBase>,
+    republished_version: Option<&str>,
 ) -> Result<OpRecord, ClientError> {
     // The commit message: `-m <message>` when given (folded into `commit_id`, so it changes the version
     // identity), else the default. It also rides the local store commit, so a WAL replay re-renders the
@@ -1984,6 +2006,11 @@ fn build_publish_op(
         // did (`contribute::run_write` reads it back onto `PublishRequest`/`ProposeRequest`) —
         // the catalog can never learn a different answer from a retry than from the original.
         bundle_kind,
+        // The live current this op was built over, and the older version the copy equalled
+        // when it is carried forward — persisted so a resumed send prints the same receipt
+        // (the undo names the live current; the base line names both versions).
+        base_version: base.map(|b| to_hex(&b.parent)),
+        republished_version: republished_version.map(str::to_owned),
         last_receipt: None,
     })
 }
