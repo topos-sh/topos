@@ -40,6 +40,7 @@ mod merge;
 mod read;
 mod store;
 
+pub mod codec;
 pub mod largeobj;
 
 #[cfg(test)]

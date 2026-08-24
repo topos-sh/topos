@@ -73,6 +73,10 @@ pub enum VerifyError {
     /// absent from the object database, i.e. corruption): this is a clean "not in this tree" answer.
     #[error("the requested object is not present in this version")]
     ObjectNotInVersion,
+    /// A loose object's decompressed bytes do not hash to the id that named it — at-rest
+    /// corruption or substitution, caught by the codec's verify-on-decode.
+    #[error("a loose object's bytes do not match the id that named it")]
+    IdMismatch,
     /// The stored commit/tree could not be decoded into the expected shape.
     #[error("a stored object is malformed: {0}")]
     Malformed(String),

@@ -1361,3 +1361,268 @@ fn write_tree_rejects_a_dotgit_component_like_the_high_level_editor() {
             .is_ok()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The in-memory codec: byte/OID parity with the repo-backed store, and its decode defenses.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The zlib loose bytes of one object in a bare repo, read straight off the disk layout.
+fn loose_bytes(store_dir: &std::path::Path, oid: [u8; 20]) -> Vec<u8> {
+    let hex = crate::store::hex_lower(&oid);
+    std::fs::read(store_dir.join("objects").join(&hex[0..2]).join(&hex[2..]))
+        .expect("loose object file")
+}
+
+#[test]
+fn codec_blob_oid_and_frame_match_the_repo_store() {
+    let scratch = Scratch::new("codec-blob");
+    let store = Store::init(&scratch.0).expect("init");
+    let bytes: &[u8] = b"# a skill\nwith bytes \x00\xff\n";
+    let th = store
+        .write_bundle(&[ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes,
+        }])
+        .expect("write_bundle");
+    let leaves = {
+        let vid = genesis_version_id(th.bundle_digest);
+        store
+            .commit(vid, &[], &th, AUTHOR, MESSAGE)
+            .expect("commit");
+        store.read_tree_structure(vid).expect("structure")
+    };
+    let repo_blob_oid = leaves[0].git_oid;
+
+    // The pure hash and the full frame agree with what the repo wrote.
+    assert_eq!(
+        crate::codec::blob_git_oid(bytes).expect("oid"),
+        repo_blob_oid
+    );
+    let encoded = crate::codec::encode_blob(bytes).expect("encode");
+    assert_eq!(encoded.git_oid, repo_blob_oid);
+
+    // The repo's own loose file decodes through the codec to the identical payload; and the
+    // codec's own frame decodes too (compression levels may differ — the OID + payload are the
+    // identity, and both verify).
+    let (kind, payload) =
+        crate::codec::decode_loose(&loose_bytes(&scratch.0, repo_blob_oid), repo_blob_oid)
+            .expect("decode repo frame");
+    assert!(matches!(kind, crate::codec::ObjectKind::Blob));
+    assert_eq!(payload, bytes);
+    let (kind, payload) =
+        crate::codec::decode_loose(&encoded.zlib_bytes, encoded.git_oid).expect("decode own frame");
+    assert!(matches!(kind, crate::codec::ObjectKind::Blob));
+    assert_eq!(payload, bytes);
+}
+
+#[test]
+fn codec_tree_and_commit_oids_match_the_repo_store_including_nesting_and_a_parent() {
+    let scratch = Scratch::new("codec-parity");
+    let store = Store::init(&scratch.0).expect("init");
+    let files = [
+        ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"skill",
+        },
+        ImportFile {
+            path: "scripts/run.sh",
+            mode: FileMode::Executable,
+            bytes: b"#!/bin/sh\n",
+        },
+        ImportFile {
+            path: "scripts/deep/notes.txt",
+            mode: FileMode::Regular,
+            bytes: b"notes",
+        },
+        // Sorts AFTER the `scripts` tree in git tree order ('/' rule) — pins the codec's ordering.
+        ImportFile {
+            path: "scripts.md",
+            mode: FileMode::Regular,
+            bytes: b"about",
+        },
+    ];
+    let (genesis_vid, _) = commit_genesis(&store, &files);
+    let genesis_commit_oid = store
+        .resolve_version(&genesis_vid)
+        .expect("resolve")
+        .expect("present");
+    let leaves = store.read_tree_structure(genesis_vid).expect("structure");
+
+    // The codec's tree build over the SAME (path, mode, blob-oid) leaves lands on the repo's root
+    // tree OID (read out of the commit object), and its commit frame lands on the repo's commit OID.
+    let entries: Vec<(&str, FileMode, [u8; 20])> = leaves
+        .iter()
+        .map(|l| (l.path.as_str(), l.mode, l.git_oid))
+        .collect();
+    let tree = crate::codec::encode_tree(&entries).expect("encode_tree");
+    let commit_meta = crate::codec::decode_commit(
+        &crate::codec::decode_loose(
+            &loose_bytes(&scratch.0, {
+                let mut a = [0u8; 20];
+                a.copy_from_slice(genesis_commit_oid.as_slice());
+                a
+            }),
+            {
+                let mut a = [0u8; 20];
+                a.copy_from_slice(genesis_commit_oid.as_slice());
+                a
+            },
+        )
+        .expect("decode commit frame")
+        .1,
+    )
+    .expect("decode commit");
+    assert_eq!(tree.root_oid, commit_meta.tree_oid, "root tree OID parity");
+    assert_eq!(commit_meta.author, AUTHOR);
+    assert_eq!(commit_meta.message, MESSAGE);
+    assert!(commit_meta.parent_commit_oids.is_empty());
+
+    let encoded_commit =
+        crate::codec::encode_commit(tree.root_oid, &[], AUTHOR, MESSAGE).expect("encode_commit");
+    assert_eq!(
+        encoded_commit.git_oid,
+        {
+            let mut a = [0u8; 20];
+            a.copy_from_slice(genesis_commit_oid.as_slice());
+            a
+        },
+        "commit OID parity (fixed frame, epoch-zero time)"
+    );
+
+    // Every codec-encoded tree object matches the repo's loose object byte-for-byte at payload level.
+    for obj in &tree.objects {
+        let repo_frame = loose_bytes(&scratch.0, obj.git_oid);
+        let (_, repo_payload) =
+            crate::codec::decode_loose(&repo_frame, obj.git_oid).expect("repo tree decodes");
+        let (_, own_payload) =
+            crate::codec::decode_loose(&obj.zlib_bytes, obj.git_oid).expect("own tree decodes");
+        assert_eq!(repo_payload, own_payload);
+    }
+
+    // A CHILD commit with a parent: parity again, with the parent's git OID in the frame.
+    let th2 = store
+        .write_bundle(&[ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"skill v2",
+        }])
+        .expect("write_bundle v2");
+    let vid2 = identity::commit_id(&Commit {
+        parents: &[genesis_vid],
+        tree: th2.bundle_digest,
+        author: AUTHOR,
+        message: MESSAGE,
+    })
+    .expect("commit_id");
+    store
+        .commit(vid2, &[genesis_vid], &th2, AUTHOR, MESSAGE)
+        .expect("commit v2");
+    let repo_commit2 = store
+        .resolve_version(&vid2)
+        .expect("resolve")
+        .expect("present");
+    let leaves2 = store.read_tree_structure(vid2).expect("structure");
+    let entries2: Vec<(&str, FileMode, [u8; 20])> = leaves2
+        .iter()
+        .map(|l| (l.path.as_str(), l.mode, l.git_oid))
+        .collect();
+    let tree2 = crate::codec::encode_tree(&entries2).expect("encode_tree v2");
+    let parent_oid = {
+        let mut a = [0u8; 20];
+        a.copy_from_slice(genesis_commit_oid.as_slice());
+        a
+    };
+    let encoded2 = crate::codec::encode_commit(tree2.root_oid, &[parent_oid], AUTHOR, MESSAGE)
+        .expect("encode_commit v2");
+    assert_eq!(encoded2.git_oid.as_slice(), repo_commit2.as_slice());
+}
+
+#[test]
+fn codec_decode_tree_walks_the_encoded_structure() {
+    let entries: Vec<(&str, FileMode, [u8; 20])> = vec![
+        ("a/b/c.txt", FileMode::Regular, [1u8; 20]),
+        ("a/run.sh", FileMode::Executable, [2u8; 20]),
+        ("top.md", FileMode::Regular, [3u8; 20]),
+    ];
+    let tree = crate::codec::encode_tree(&entries).expect("encode");
+    // Walk from the root, materializing (path, mode, oid) leaves.
+    let by_oid: std::collections::HashMap<[u8; 20], &crate::codec::LooseObject> =
+        tree.objects.iter().map(|o| (o.git_oid, o)).collect();
+    let mut leaves = Vec::new();
+    let mut stack = vec![(String::new(), tree.root_oid)];
+    while let Some((prefix, oid)) = stack.pop() {
+        let obj = by_oid.get(&oid).expect("tree object present");
+        let (kind, payload) =
+            crate::codec::decode_loose(&obj.zlib_bytes, obj.git_oid).expect("decode");
+        assert!(matches!(kind, crate::codec::ObjectKind::Tree));
+        for child in crate::codec::decode_tree(&payload).expect("decode_tree") {
+            match child {
+                crate::codec::TreeChild::Subtree { name, git_oid } => {
+                    let path = if prefix.is_empty() {
+                        name
+                    } else {
+                        format!("{prefix}/{name}")
+                    };
+                    stack.push((path, git_oid));
+                }
+                crate::codec::TreeChild::File {
+                    name,
+                    mode,
+                    git_oid,
+                } => {
+                    let path = if prefix.is_empty() {
+                        name
+                    } else {
+                        format!("{prefix}/{name}")
+                    };
+                    leaves.push((path, mode, git_oid));
+                }
+            }
+        }
+    }
+    leaves.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        leaves,
+        vec![
+            ("a/b/c.txt".to_owned(), FileMode::Regular, [1u8; 20]),
+            ("a/run.sh".to_owned(), FileMode::Executable, [2u8; 20]),
+            ("top.md".to_owned(), FileMode::Regular, [3u8; 20]),
+        ]
+    );
+}
+
+#[test]
+fn codec_rejects_bad_components_collisions_and_corruption() {
+    // `.git` and separators are refused exactly as the repo-backed editor refuses them.
+    assert!(matches!(
+        crate::codec::encode_tree(&[(".git/hook", FileMode::Regular, [1u8; 20])]),
+        Err(crate::GitstoreError::RejectPath(_))
+    ));
+    // A file/directory path collision is refused, never silently dropped.
+    assert!(matches!(
+        crate::codec::encode_tree(&[
+            ("a", FileMode::Regular, [1u8; 20]),
+            ("a/b", FileMode::Regular, [2u8; 20]),
+        ]),
+        Err(crate::GitstoreError::RejectPath(_))
+    ));
+    // A flipped byte in the compressed frame fails typed — never returned as authentic.
+    let good = crate::codec::encode_blob(b"payload").expect("encode");
+    let mut evil = good.zlib_bytes.clone();
+    let last = evil.len() - 1;
+    evil[last] ^= 0xff;
+    assert!(crate::codec::decode_loose(&evil, good.git_oid).is_err());
+    // The right bytes under the WRONG id fail IdMismatch.
+    let other = crate::codec::encode_blob(b"other").expect("encode");
+    assert!(matches!(
+        crate::codec::decode_loose(&good.zlib_bytes, other.git_oid),
+        Err(VerifyError::IdMismatch)
+    ));
+    // Garbage is malformed, not a panic.
+    assert!(matches!(
+        crate::codec::decode_loose(b"not zlib at all", good.git_oid),
+        Err(VerifyError::Malformed(_))
+    ));
+}
