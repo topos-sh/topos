@@ -164,6 +164,10 @@
             "$ref": "#/$defs/AttentionCount"
           }
         },
+        "builtin_in_place": {
+          "description": "Whether the BUILT-IN `topos` bundle has copies on this machine (machine scope only). It\nships with the binary and no manifest row asks for it, so a panel reading only manifest\nrows said nothing was demanded machine-wide while `topos list -g` showed the bundle right\nthere. **Additive.**",
+          "type": "boolean"
+        },
         "manifest": {
           "description": "The governing manifest file; `None` = no machine-wide file — nothing is demanded\nmachine-wide (`topos login` writes a feed row on this machine's first connection to a\nworkspace).",
           "type": [

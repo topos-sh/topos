@@ -288,6 +288,73 @@ fn the_detail_files_are_force_synced_and_go_with_the_opt_out() {
     }
 }
 
+/// **`topos add topos` SAYS WHAT IT DID.** Every other `add` answer names the file it recorded
+/// into; this one used to say "Restored the built-in `topos` skill on this machine" and name
+/// nothing at all, leaving a person holding a receipt for an act with no visible trace — and
+/// `topos status -g` one command later said nothing was demanded machine-wide. The receipt now
+/// names the folders that took a copy and why no manifest line appeared.
+#[test]
+fn the_builtin_restores_receipt_names_the_folders_and_why_there_is_no_manifest_line() {
+    let rig = Rig::new("restore-receipt");
+    rig.detect(".cline");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+
+    // THE FIRST PLACEMENT — bytes moved, and the folder they moved into is named.
+    let sync = ops::restore_builtin(&ctx).unwrap();
+    let folders = crate::ops::builtin_placement_dirs(&ctx).unwrap();
+    assert!(sync.changed && !folders.is_empty(), "the restore places");
+    let data = serde_json::json!({
+        "restored": true,
+        "changed": sync.changed,
+        "folders": folders.clone(),
+    });
+    let text = crate::render::builtin_add_tty(&data);
+    assert!(
+        text.starts_with("Placed the built-in topos bundle on this machine:\n  "),
+        "{text}"
+    );
+    for folder in &folders {
+        assert!(text.contains(folder.trim_start_matches('/')), "{text}");
+    }
+    assert!(
+        text.ends_with(
+            "No manifest line records it — the bundle ships with the topos \
+             binary.\nundo: topos remove topos --yes"
+        ),
+        "{text}"
+    );
+    // The dead copy is gone: it called the bundle a skill and named nothing.
+    assert!(!text.contains("Restored the built-in"), "{text}");
+
+    // A SECOND RUN changes nothing, and says that instead of claiming a placement.
+    let sync = ops::restore_builtin(&ctx).unwrap();
+    assert!(!sync.changed, "an already-placed built-in just re-syncs");
+    let text = crate::render::builtin_add_tty(&serde_json::json!({
+        "restored": true,
+        "changed": false,
+        "folders": folders,
+    }));
+    assert!(
+        text.starts_with("The built-in topos bundle is already in place:\n  "),
+        "{text}"
+    );
+
+    // NOTHING TOOK A COPY: no folder is named, no undo is offered for a copy that is not there,
+    // and the receipt never claims a placement the filesystem does not bear out.
+    let text = crate::render::builtin_add_tty(&serde_json::json!({
+        "restored": true,
+        "changed": true,
+        "folders": Vec::<String>::new(),
+    }));
+    assert_eq!(
+        text,
+        "No agent folder on this machine took a copy of the built-in topos bundle.\nNo manifest \
+         line records it — the bundle ships with the topos binary."
+    );
+}
+
 /// **A state doc written by another binary still loads.** `state/builtin.json` is durable and
 /// carries the ONE thing a person decided — the opt-out — so a file holding keys this shape no
 /// longer has must read as the opt-out it recorded, never as a parse failure that bricks the sweep.

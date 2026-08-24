@@ -2659,6 +2659,12 @@ pub struct StatusScope {
     /// resolves it. Only non-zero counts appear; empty = nothing pending.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attention: Vec<AttentionCount>,
+    /// Whether the BUILT-IN `topos` bundle has copies on this machine (machine scope only). It
+    /// ships with the binary and no manifest row asks for it, so a panel reading only manifest
+    /// rows said nothing was demanded machine-wide while `topos list -g` showed the bundle right
+    /// there. **Additive.**
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub builtin_in_place: bool,
 }
 
 /// One attention count in a [`StatusScope`] / [`StatusScopeSummary`]. **INFERRED**
