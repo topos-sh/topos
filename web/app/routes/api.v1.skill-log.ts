@@ -2,6 +2,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
+import { authorDisplayMap, displayAuthor } from "@/lib/db/queries.custody.server";
 import { laneLogOf } from "@/lib/db/queries.lane.server";
 import { custodyLog } from "@/lib/plane/reads.server";
 
@@ -22,6 +23,14 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   }
   const { identity, proposals } = decorated;
   const log = await custodyLog(actor.workspaceId, identity.bundleId);
+  // A version's recorded author is the MACHINE that signed it — the commit frame's author is
+  // part of the version's identity and can never be rewritten. Who that machine publishes as is
+  // this tier's own record, so the author is resolved to a person on the way out; a machine this
+  // workspace has never seen publish keeps the id it signed with.
+  const people = await authorDisplayMap(
+    actor,
+    log.ok ? log.data.versions.map((v) => v.author_display) : [],
+  );
   const iso = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
   return Response.json(
     {
@@ -38,7 +47,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
             // WHEN it was committed, in the same field and units a `pull` event carries — the
             // custody row has always recorded it, and nothing downstream could show it.
             at: v.created_at_ms,
-            author: v.author_display,
+            author: displayAuthor(v.author_display, people),
             message: v.message,
             current: index === 0,
             ...(v.purged_at_ms === undefined ? {} : { purged_at: v.purged_at_ms }),

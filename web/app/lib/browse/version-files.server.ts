@@ -1,4 +1,5 @@
 import type { MemberActor } from "@/lib/auth/guards.server";
+import { authorDisplayMap, displayAuthor } from "@/lib/db/queries.custody.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
 import { MAX_BLOB_BYTES } from "@/lib/diff/model";
 import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.server";
@@ -15,6 +16,12 @@ import { buildListing, docFileOf, type ListingEntry } from "@/lib/view/tree";
 export interface VersionFilesData {
   /** The version's immutable metadata; null when the vault had no readable version for this id. */
   version: CustodyVersionMeta | null;
+  /**
+   * WHO to show as the author: the person behind the machine that signed this version, or —
+   * when nothing here names that machine — the id the version was signed with, verbatim. The
+   * recorded `version.author` is untouched: it is part of the version's identity.
+   */
+  authorDisplay: string;
   /** `buildListing(version.files)`, computed here so the component stays pure. */
   entries: ListingEntry[];
   /** Sanitized GFM HTML for the front-page doc, or undefined when there's nothing to preview. */
@@ -42,10 +49,14 @@ export async function loadVersionFilesData(
   const ws = actor.workspaceId;
   const meta = await custodyVersionMeta(ws, skillId, versionId);
   if (!meta.ok) {
-    return { version: null, entries: [], docTooLarge: false };
+    return { version: null, authorDisplay: "", entries: [], docTooLarge: false };
   }
   const version = meta.data;
   const entries = buildListing(version.files);
+  const authorDisplay = displayAuthor(
+    version.author,
+    await authorDisplayMap(actor, [version.author]),
+  );
 
   const doc = docFileOf(version.files);
   let docHtml: string | undefined;
@@ -61,5 +72,5 @@ export async function loadVersionFilesData(
     }
   }
 
-  return { version, entries, docHtml, docName, docTooLarge };
+  return { version, authorDisplay, entries, docHtml, docName, docTooLarge };
 }

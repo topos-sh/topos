@@ -25,6 +25,7 @@ export function VersionFiles({
   skill,
   versionId,
   version,
+  authorDisplay,
   entries,
   currentChip = false,
   docHtml,
@@ -35,6 +36,8 @@ export function VersionFiles({
   versionId: string;
   /** The version's immutable metadata; null when the server had no readable version for this id. */
   version: CustodyVersionMeta | null;
+  /** Who to show as the author — the person behind the signing machine, else its id verbatim. */
+  authorDisplay: string;
   /** `buildListing(version.files)`, computed by the loader. */
   entries: readonly ListingEntry[];
   currentChip?: boolean;
@@ -57,7 +60,7 @@ export function VersionFiles({
     <div className="space-y-6">
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="font-mono text-faint text-xs">{version.author}</span>
+          <span className="font-mono text-faint text-xs">{authorDisplay}</span>
           {currentChip && <Chip tone="accent">current</Chip>}
           <span className="min-w-0 flex-1 truncate text-dim text-sm">
             {firstLine(version.message)}

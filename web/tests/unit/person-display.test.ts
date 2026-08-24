@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { personDisplay } from "@/lib/person-display";
+import { personAttribution, personDisplay } from "@/lib/person-display";
 import {
   asMember,
   bootWorkspace,
@@ -27,6 +27,18 @@ describe("personDisplay (the pure rule)", () => {
     expect(personDisplay("   ", "ada@example.com")).toBe("ada@example.com");
     expect(personDisplay(null, "ada@example.com")).toBe("ada@example.com");
     expect(personDisplay(undefined, "ada@example.com")).toBe("ada@example.com");
+  });
+});
+
+describe("personAttribution (a person as a commit author reads)", () => {
+  it("writes the git-shaped author line", () => {
+    expect(personAttribution("Robert", "robert@topos.sh")).toBe("Robert <robert@topos.sh>");
+  });
+
+  it("is the address alone when there is no name — never the address twice", () => {
+    for (const blank of ["", "   ", null, undefined]) {
+      expect(personAttribution(blank, "ada@example.com")).toBe("ada@example.com");
+    }
   });
 });
 

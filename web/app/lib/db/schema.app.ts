@@ -1242,6 +1242,43 @@ export const proposalComment = webSchema.table(
   ],
 );
 
+// ── Who a machine's commit-author id belongs to ─────────────────────────────────────────────
+
+/**
+ * WHICH PERSON A MACHINE PUBLISHES AS — the display-time key for a version's recorded author.
+ *
+ * A version's author is part of its identity: the client derives the version id from
+ * `(parents, tree, author, message)` and verifies the server landed exactly that id, so what
+ * the commit frame carries is the machine's own `d_…` id and can never be rewritten into a
+ * person's name — not at publish time, and certainly not afterwards. But the session that sent
+ * the candidate DOES know the person, so the app writes that pairing down here and resolves it
+ * when it renders. The stored history is untouched; only the reading of it changes.
+ *
+ * One row per (workspace, machine). It outlives the session that taught it — a person logging a
+ * machine out does not un-author their versions — and dies with the workspace or the person.
+ * A machine that has not published since this table existed simply has no row, and its versions
+ * keep showing the id they were signed with.
+ */
+export const deviceOwner = webSchema.table(
+  "device_owner",
+  {
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    /** The commit-author string the client signs with: `d_` + 32 hex. */
+    deviceId: text("device_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.deviceId] }),
+    index("device_owner_user_idx").on(table.userId),
+  ],
+);
+
 // ── Audit + idempotency ──────────────────────────────────────────────────────────────────────
 
 /**

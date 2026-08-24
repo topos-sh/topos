@@ -61,7 +61,9 @@ caller.
   baseline everyone-row is unassignable at the data layer), upstream provenance
   (`bundle_upstream`/`version_upstream`), the MCP SERVER CATALOG (`mcp_server` +
   `mcp_server_revision` + `bundle_mcp` — see the MCP lane below), notices, proposals + comments,
-  op receipts, `audit_event`, `mail_event`.
+  op receipts, `device_owner` (which PERSON a machine publishes as — a version's author is part of
+  its identity and is never rewritten, so who signed it is resolved at render time from what the
+  publishing session knew), `audit_event`, `mail_event`.
 - **The DAL** (`app/lib/db/queries*.server.ts`) is the one sanctioned door to `web` AND the
   read-only `plane` custody mirror. Every function REQUIRES a branded actor as its first
   argument; mutating ops emit their audit row in the SAME transaction. One named exception: the
@@ -121,11 +123,15 @@ caller.
   only; reserved slugs (`app/topos-web/segments.ts` ∪ composition's list) refuse byte-identically
   to taken names.
 - **Faces + the card:** workspace root / channel / skill / MCP server are each ONE route under
-  `face-shell.tsx`. A non-browser document fetch gets the CONSTANT protocol card
-  (`card.server.ts`, byte-identical on every path; `api_base_url` = this origin's `/api`). Bundle
-  and channel faces are members-only — anonymous/non-member gets the house 404,
-  existence-blind. Uniform miss surface: the root ErrorBoundary → `error-screen.tsx` (no
-  `error.data`, path, or stack).
+  `face-shell.tsx`. EVERY face is members-only — anonymous/non-member gets the house 404,
+  existence-blind; the one page a signed-out browser still renders is the workspace root in
+  SINGLE tenancy, where it is the install's landing page rather than a workspace address. A
+  non-browser document fetch gets the CONSTANT protocol card (`card.server.ts`, byte-identical on
+  every path; `api_base_url` = this origin's `/api`), wearing the STATUS the routed page answered
+  — so a terminal reads 404 exactly where a browser does. Its JSON face is the one exception and
+  is always 200: that card is the login handshake (`topos login <a workspace URL>` reads
+  `api_base_url` out of it), not a representation of a page. Uniform miss surface: the root
+  ErrorBoundary → `error-screen.tsx` (no `error.data`, path, or stack).
 - **ONE RECORD PER KIND** (`app/lib/bundle-base.ts` — `BUNDLE_KINDS`): everything the product
   knows about a kind of bundle, written once. Base · noun · section label · route param · its own
   way in · where its WEB CREATION PAGE rests when no channel is picked · whether its bytes face a
@@ -146,7 +152,9 @@ caller.
   module (`app/lib/docs/content.generated.server.ts`) by `scripts/gen-docs.mjs` (own
   remark/rehype chain; closed component set; nav.json must match disk; the CLI reference page
   splices the generated `docs/cli.md`). Edit the MDX → `bun run gen:docs` → commit; `check:docs`
-  fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index.
+  fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index. A docs
+  PAGE path fetched with a non-HTML `Accept` answers with that same markdown (the entry serves it
+  ahead of the card) — a curl of the documentation reads the documentation.
 - **The MCP lane — a CATALOG, not bytes:** a `kind: 'mcp'` bundle holds no files. It NAMES a
   server (`web.bundle_mcp`, one connection per server per workspace, unique-enforced), the server
   holds its version history (`web.mcp_server` + `mcp_server_revision`, append-only), and delivery
