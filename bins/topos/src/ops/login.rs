@@ -627,10 +627,11 @@ fn connected_data(
         server: Some(session.base_url.clone()),
         session_id: Some(session.session_id.clone()),
         session_status: status.to_owned(),
-        assigned: snapshot.map(|s| s.skills.len() as u64),
-        assigned_names: snapshot
-            .map(|s| s.skills.iter().map(|d| d.name.clone()).collect())
-            .unwrap_or_default(),
+        // BOTH LISTS. The delivery answer keeps connected servers apart from file bundles because
+        // the two reconcile through different engines — but a person is assigned BUNDLES, and
+        // counting only the file half told someone assigned six that they had two.
+        assigned: snapshot.map(|s| (s.skills.len() + s.mcp_servers.len()) as u64),
+        assigned_names: snapshot.map(assigned_names).unwrap_or_default(),
         pending: None,
         currency,
         triggers: Vec::new(),
@@ -639,6 +640,18 @@ fn connected_data(
         feed_row_added: extras.feed_row_added,
         undo: extras.undo,
     }
+}
+
+/// Every bundle the workspace assigns this person, named — the file bundles then the connected
+/// servers, in the order the delivery answer carries its two lists. A revoked revision still
+/// counts: it is still delivered here, just disclosed.
+fn assigned_names(snapshot: &DeliverySnapshot) -> Vec<String> {
+    snapshot
+        .skills
+        .iter()
+        .map(|d| d.name.clone())
+        .chain(snapshot.mcp_servers.iter().map(|m| m.name.clone()))
+        .collect()
 }
 
 /// The signed-in person's display identity, read over the session's own directory lane —
@@ -1107,6 +1120,9 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeDelivery {
         names: Vec<String>,
+        /// The connected servers the workspace assigns — the delivery answer's OTHER list, which
+        /// the acceptance disclosure has to count too.
+        servers: Vec<String>,
         not_found: bool,
         pending: bool,
         calls: Rc<RefCell<usize>>,
@@ -1118,7 +1134,21 @@ mod tests {
                 return Err(PlaneError::NotFound);
             }
             Ok(DeliverySnapshot {
-                mcp_servers: Vec::new(),
+                mcp_servers: self
+                    .servers
+                    .iter()
+                    .map(|n| crate::plane::DeliveryMcpServer {
+                        skill_id: format!("ms_{n}"),
+                        name: n.clone(),
+                        revision_id: format!("mcpr_{n}"),
+                        document: Vec::new(),
+                        pinned: false,
+                        revoked: false,
+                        via_channels: Vec::new(),
+                        assigned_by: None,
+                        picked: false,
+                    })
+                    .collect(),
                 skills: self
                     .names
                     .iter()
@@ -1303,6 +1333,12 @@ mod tests {
 
         fn delivering(mut self, names: &[&str]) -> Self {
             self.delivery.names = names.iter().map(|n| (*n).to_owned()).collect();
+            self
+        }
+
+        /// The connected servers this workspace assigns, beside the file bundles.
+        fn serving(mut self, names: &[&str]) -> Self {
+            self.delivery.servers = names.iter().map(|n| (*n).to_owned()).collect();
             self
         }
 
@@ -1654,15 +1690,20 @@ mod tests {
         let home = scratch("connected");
         with_ctx(&home, |ctx| {
             seed_session(ctx, "w_eng", "eng");
-            let rig = Rig::new(Vec::new()).delivering(&["deploy", "code-review"]);
+            // BOTH KINDS on one feed: two file bundles and one connected server. A person is
+            // assigned bundles, not two separate inventories — the disclosure counts what the
+            // workspace actually gives them.
+            let rig = Rig::new(Vec::new())
+                .delivering(&["deploy", "code-review"])
+                .serving(&["linear"]);
             rig.with(|connectors| {
                 let out = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
                 assert!(out.pending.is_none(), "no browser, no flow");
                 assert_eq!(out.session_status, "active");
                 assert_eq!(out.workspace_id, "w_eng");
                 // A LIVE count, read now — the receipt states what the session adopts today.
-                assert_eq!(out.assigned, Some(2));
-                assert_eq!(out.assigned_names, vec!["deploy", "code-review"]);
+                assert_eq!(out.assigned, Some(3));
+                assert_eq!(out.assigned_names, vec!["deploy", "code-review", "linear"]);
                 // ASSIGNED, not delivered. Login mints the session and reads the feed; the first
                 // exchange that puts bytes on this machine is `topos update`, and `status` run
                 // immediately after this login still says there has been no delivery yet. The
