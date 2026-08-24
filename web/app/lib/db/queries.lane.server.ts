@@ -1090,7 +1090,9 @@ function laneMcpEntryOf(r: Record<string, unknown>): LaneMcpIndexEntry {
  *    own document read is, because the rules can tighten between a publish and a read.
  */
 export async function laneMcpRevision(
-  actor: { readonly workspaceId: string },
+  // The BRANDED read actor, never a bare `{ workspaceId }`: only a guard mints one, and the
+  // brand is what proves the caller passed through it.
+  actor: ReadActor,
   bundleId: string,
   revisionId: string,
 ): Promise<LaneMcpIndexEntry | null> {
