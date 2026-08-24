@@ -21,6 +21,17 @@ pub(crate) struct ImportLiveVersion {
     pub author_display: String,
 }
 
+/// A version row's pre-import facts, read by ref name BEFORE its backfill: the identity anchors
+/// plus whether the row is purged (a purged version's blobs may be gone, so its ref is taken on
+/// its word; a live one is verified to IDENTITY before its locator is written).
+#[derive(Debug, Clone)]
+pub(crate) struct ImportVersionFacts {
+    pub bundle_id: String,
+    pub first_parent: Option<String>,
+    pub author_display: String,
+    pub purged: bool,
+}
+
 /// What one version backfill did.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BackfillOutcome {
@@ -77,6 +88,48 @@ impl Db {
     ) -> Result<BackfillOutcome> {
         run_serializable!(self, tx, {
             import_backfill_txn(&mut tx, ws, version_hex, git_commit_oid, message).await
+        })
+    }
+
+    /// The pre-import facts of one version row (`None` when no row carries this id — a stray
+    /// ref, inert: the row is the serving truth).
+    pub(crate) async fn import_version_facts(
+        &self,
+        ws: &WorkspaceId,
+        version_hex: &str,
+    ) -> Result<Option<ImportVersionFacts>> {
+        let ws_s = ws.as_str();
+        let row = sqlx::query!(
+            r#"SELECT bundle_id AS "bundle_id!", first_parent,
+                      author_display AS "author_display!",
+                      (purged_at IS NOT NULL) AS "purged!"
+               FROM version WHERE workspace_id = $1 AND version_id = $2"#,
+            ws_s,
+            version_hex,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(row.map(|r| ImportVersionFacts {
+            bundle_id: r.bundle_id,
+            first_parent: r.first_parent,
+            author_display: r.author_display,
+            purged: r.purged,
+        }))
+    }
+
+    /// Overwrite a row's locator + message with a ref's PROVEN commit — the rerun's repair of a
+    /// row an earlier, failed run left pointing elsewhere. Only ever called after the ref's
+    /// commit rebuilt this version's identity out of the store.
+    pub(crate) async fn import_repair_locator(
+        &self,
+        ws: &WorkspaceId,
+        version_hex: &str,
+        git_commit_oid: &[u8; 20],
+        message: &str,
+    ) -> Result<()> {
+        run_serializable!(self, tx, {
+            import_repair_txn(&mut tx, ws, version_hex, git_commit_oid, message).await
         })
     }
 
@@ -283,6 +336,29 @@ async fn import_backfill_txn(
         updated,
         conflicted,
     })
+}
+
+async fn import_repair_txn(
+    tx: &mut Transaction<'_, Postgres>,
+    ws: &WorkspaceId,
+    version_hex: &str,
+    git_commit_oid: &[u8; 20],
+    message: &str,
+) -> Result<()> {
+    let ws_s = ws.as_str();
+    let oid = git_commit_oid.as_slice();
+    sqlx::query!(
+        "UPDATE version SET git_commit_oid = $3, message = $4 \
+         WHERE workspace_id = $1 AND version_id = $2",
+        ws_s,
+        version_hex,
+        oid,
+        message,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
