@@ -288,7 +288,13 @@ fn map_outcome(
                 current_generation: new_gen,
                 // The cwd project's lock moves with the revert: the forward commit is the new
                 // current, and the checkout the command stood in runs it at its next update.
-                project_lock: crate::ops::advance_project_lock(ctx, name, &rec.candidate_commit),
+                project_lock: crate::ops::advance_project_lock(
+                    ctx,
+                    name,
+                    &rec.candidate_commit,
+                    &workspace.host,
+                    &workspace.name,
+                ),
             })
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {

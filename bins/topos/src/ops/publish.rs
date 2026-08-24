@@ -1580,8 +1580,13 @@ fn enrolled_publish(
             );
             // The cwd project's lock moves with the publish (a commit moves `HEAD`) — read from
             // the OUTER ctx, whose roots name the directory the command stood in.
-            data.project_lock =
-                super::advance_project_lock(outer_ctx, &lock.name, &rec.candidate_commit);
+            data.project_lock = super::advance_project_lock(
+                outer_ctx,
+                &lock.name,
+                &rec.candidate_commit,
+                &lane.host,
+                &lane.workspace_name,
+            );
             match super::rewrite_to_governed(
                 outer_ctx,
                 &lock.name,
