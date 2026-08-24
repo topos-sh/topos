@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT bundle_id AS \"bundle_id!\", version_id AS \"version_id!\",\n                      git_commit_oid AS \"git_commit_oid!: Vec<u8>\"\n               FROM version\n               WHERE workspace_id = $1 AND purged_at IS NULL AND git_commit_oid IS NOT NULL\n               ORDER BY bundle_id, version_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bundle_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "version_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "git_commit_oid!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "cabc0ae8fe421ab1b6b6debf8531d8e4ff84d7ac3196e660b34c4bbaea634587"
+}

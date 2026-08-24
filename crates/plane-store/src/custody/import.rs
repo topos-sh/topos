@@ -326,6 +326,21 @@ async fn import_workspace(
         ));
     }
 
+    // 5. DEEP verification — existence is not integrity. Walk every non-purged version's skeleton
+    // (the commit and each tree object DECODE, which verifies them against the id that named
+    // them), require a present row for every leaf, and decode every live blob once, re-hashing
+    // its payload to the row's content id — so the very first post-cutover read can never be the
+    // discovery of source-side corruption the import waved through.
+    let mut verified_blobs: std::collections::BTreeSet<[u8; 20]> =
+        std::collections::BTreeSet::new();
+    for (bundle, version_hex, commit_oid) in authority.db().import_live_versions(ws).await? {
+        if let Err(e) = deep_verify_version(authority, ws, commit_oid, &mut verified_blobs).await {
+            failures.push(format!(
+                "{name}: version {bundle}/{version_hex} fails deep verification: {e}"
+            ));
+        }
+    }
+
     Ok(ImportWorkspaceReport {
         workspace_id: name,
         loose_copied,
@@ -333,6 +348,40 @@ async fn import_workspace(
         large_orphans,
         versions_backfilled,
     })
+}
+
+/// Deep-verify one version against the STORE: decode its commit, walk its trees (each object
+/// verified against its id by the codec), require a present row for every leaf, and decode each
+/// not-yet-verified blob, re-hashing the payload to the row's content id.
+async fn deep_verify_version(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    commit_oid: [u8; 20],
+    verified_blobs: &mut std::collections::BTreeSet<[u8; 20]>,
+) -> Result<()> {
+    let commit = crate::read::read_commit(authority, ws, commit_oid).await?;
+    let leaves = crate::read::walk_tree_leaves(authority, ws, commit.tree_oid).await?;
+    let leaf_oids: Vec<[u8; 20]> = leaves.iter().map(|(_, _, oid)| *oid).collect();
+    let by_git_oid = authority.db().objects_by_git_oids(ws, &leaf_oids).await?;
+    for (path, _, git_oid) in leaves {
+        let Some(object_id) = by_git_oid.get(&git_oid).copied() else {
+            return Err(AuthorityError::integrity(LeafWithoutPresentRow { path }));
+        };
+        if !verified_blobs.insert(git_oid) {
+            continue; // already decoded through another version
+        }
+        let Some(zlib) = authority.store().get_loose(ws, &git_oid).await? else {
+            return Err(AuthorityError::integrity(LeafBytesMissing { path }));
+        };
+        let (kind, payload) =
+            codec::decode_loose(&zlib, git_oid).map_err(AuthorityError::integrity)?;
+        if !matches!(kind, codec::ObjectKind::Blob)
+            || topos_core::digest::sha256(&payload) != object_id
+        {
+            return Err(AuthorityError::integrity(LeafContentMismatch { path }));
+        }
+    }
+    Ok(())
 }
 
 /// A dir's entries (empty for a missing dir — import is resumable over partial layouts).
@@ -380,3 +429,21 @@ struct BadHex;
 #[derive(Debug, thiserror::Error)]
 #[error("a version ref resolves to a non-commit object")]
 struct NotACommit;
+
+#[derive(Debug, thiserror::Error)]
+#[error("tree leaf {path:?} has no present object row")]
+struct LeafWithoutPresentRow {
+    path: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("tree leaf {path:?}'s blob is missing from the store")]
+struct LeafBytesMissing {
+    path: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("tree leaf {path:?}'s blob does not decode to its recorded content id")]
+struct LeafContentMismatch {
+    path: String,
+}

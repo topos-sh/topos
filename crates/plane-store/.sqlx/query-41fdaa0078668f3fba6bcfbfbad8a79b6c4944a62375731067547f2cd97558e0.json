@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE chain AS (\n                   SELECT version_id, first_parent, message, author_display, created_at, purged_at,\n                          1::bigint AS depth\n                   FROM version\n                   WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3\n                 UNION ALL\n                   SELECT v.version_id, v.first_parent, v.message, v.author_display, v.created_at,\n                          v.purged_at, chain.depth + 1\n                   FROM version v\n                   JOIN chain ON v.version_id = chain.first_parent\n                   WHERE v.workspace_id = $1 AND v.bundle_id = $2 AND chain.depth < $4\n               )\n               SELECT version_id AS \"version_id!\", message,\n                      author_display AS \"author_display!\",\n                      (extract(epoch FROM created_at) * 1000.0)::bigint AS \"created_at_ms!\",\n                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS \"purged_at_ms\",\n                      first_parent,\n                      depth AS \"depth!\"\n               FROM chain ORDER BY depth",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "author_display!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at_ms!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "purged_at_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "first_parent",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "depth!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "41fdaa0078668f3fba6bcfbfbad8a79b6c4944a62375731067547f2cd97558e0"
+}
