@@ -137,11 +137,13 @@ describe("the workspace ROOT face (dashboard) — signed-in strangers see no exi
     expect(real).toEqual(unknown);
   });
 
-  it("an ANONYMOUS browser gets the constant teaser on real and unknown slugs alike", async () => {
+  it("an ANONYMOUS browser gets the SAME 404 on real and unknown slugs alike", async () => {
+    // A workspace address is members-only in every face. A signed-out visitor is refused before
+    // anything is read, so the refusal cannot depend on whether the slug names a workspace.
     session = null;
     const real = await probe("acme");
     const unknown = await probe("no-such-team");
-    expect(real.status).toBe(200);
+    expect(real.status).toBe(404);
     expect(real).toEqual(unknown);
   });
 });

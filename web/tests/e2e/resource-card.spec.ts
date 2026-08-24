@@ -8,12 +8,18 @@ import { gotoSettled, signIn } from "./sign-in";
  * no-existence-oracle promise. WORKSPACE_ADDRESS ("team") is the boot-minted workspace whose
  * claimed OWNER is the suite's default identity; a made-up address stands in for "nonexistent".
  *
- * The invariant under test: a non-browser fetcher gets ONE constant protocol card on every path
- * — real, nonexistent, or deep garbage, the origin root included — byte-for-byte identical, so
- * nothing about the response reveals whether the path names anything. An anonymous browser gets
- * the constant teaser/landing ONLY at the workspace root; a skill or channel face is members-only,
- * so a signed-out browser gets the uniform house 404 there — indistinguishable from a mistyped
- * path, and byte-identical whether the name is real or invented. A member gets the canonical page.
+ * The invariant under test: a non-browser fetcher gets ONE constant protocol card BODY on every
+ * path — real, nonexistent, or deep garbage, the origin root included — byte-for-byte identical,
+ * so nothing about the response reveals whether the path names anything. Its STATUS is the one
+ * the page underneath answered with, so a terminal reads 404 exactly where a browser does; the
+ * machine (JSON) card is the exception and stays 200 everywhere, because it is the first contact
+ * of the login handshake rather than a representation of a page.
+ *
+ * In a browser every workspace-scoped face is members-only, so a signed-out visitor gets the
+ * uniform house 404 — indistinguishable from a mistyped path, byte-identical whether the name is
+ * real or invented. This suite runs SINGLE tenancy, where the origin root is the install's own
+ * landing page (not a workspace address) and keeps rendering for anyone. A member gets the
+ * canonical page.
  */
 
 const NONEXISTENT = "no-such-workspace-zzz";
@@ -81,9 +87,12 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
     expect(real.headers()["x-robots-tag"]).toContain("noindex");
   });
 
-  test("curl (*/*): a real and a nonexistent address return the SAME markdown card", async ({
+  test("curl (*/*): a real and a nonexistent address return the SAME markdown card, at the SAME 404", async ({
     request,
   }) => {
+    // Single-tenant grammar: the ORIGIN is the workspace address, so a `/<slug>` path names
+    // nothing — and a terminal now reads the same 404 a browser does there, over the card body
+    // that still teaches `topos login`.
     const real = await request.get(`/${WORKSPACE_ADDRESS}`, {
       headers: { accept: "*/*" },
       maxRedirects: 0,
@@ -92,8 +101,8 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
       headers: { accept: "*/*" },
       maxRedirects: 0,
     });
-    expect(real.status()).toBe(200);
-    expect(missing.status()).toBe(200);
+    expect(real.status()).toBe(404);
+    expect(missing.status()).toBe(404);
     expect(real.headers()["content-type"]).toContain("text/plain");
 
     const textReal = await real.text();
@@ -101,6 +110,30 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
     expect(textReal).toContain(TEASER_MARKER);
     expect(textReal).toContain("topos login");
     expect(textReal).not.toContain(WS_DISPLAY_NAME);
+  });
+
+  test("curl (*/*): the members-only skill face answers 404 with the same card — real and missing names alike", async ({
+    request,
+  }) => {
+    const real = await request.get(`/skills/card-face-runbook`, {
+      headers: { accept: "*/*" },
+      maxRedirects: 0,
+    });
+    const missing = await request.get(`/skills/no-such-skill-zzz`, {
+      headers: { accept: "*/*" },
+      maxRedirects: 0,
+    });
+    expect(real.status()).toBe(404);
+    expect(missing.status()).toBe(404);
+    expect(await real.text()).toBe(await missing.text());
+  });
+
+  test("curl (*/*) at `/` still reads 200 — the origin root is a page that exists", async ({
+    request,
+  }) => {
+    const root = await request.get("/", { headers: { accept: "*/*" }, maxRedirects: 0 });
+    expect(root.status()).toBe(200);
+    expect(await root.text()).toContain(TEASER_MARKER);
   });
 
   test("browser (text/html): slug-shaped paths answer the SAME house 404, no name leak", async ({
@@ -196,6 +229,8 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
       headers: { accept: "application/json" },
       maxRedirects: 0,
     });
+    // The MACHINE card is 200 at every address, missing ones included: it is the login
+    // handshake, and a client reads a non-200 there as "that is not a topos server".
     expect(deep.status()).toBe(200);
     // The unmatched-path fallback serves the SAME constant card the resource addresses do.
     const deepBody = await deep.text();

@@ -6,11 +6,10 @@ import { relativeTime } from "@/components/format";
 import { LandingPage } from "@/components/landing/landing-page";
 import { AddressBlock } from "@/components/members/address-block";
 import { OnboardingChecklist, type OnboardingState } from "@/components/onboarding-checklist";
-import { ResourcePage } from "@/components/resource-page";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
-import { actorFromSession, memberInScope } from "@/lib/auth/guards.server";
+import { actorFromSession, memberInScope, notFound } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { BUNDLE_KINDS, baseForKind, bundlePath, kindEntry } from "@/lib/bundle-base";
 import { theWorkspace } from "@/lib/db/identity.server";
@@ -35,16 +34,21 @@ export const meta: MetaFunction<typeof loader> = ({ loaderData }) => {
       },
     ];
   }
-  return [{ title: "A Topos resource address" }];
+  // No loader data: this face refused (the house 404). One constant title, path-blind.
+  return [{ title: "Topos" }];
 };
 
 /**
  * The workspace ROOT face — resource address and canonical dashboard as ONE route (`/` in single
- * tenancy, `/:ws` in multi). Per-request admission, same table as the retired resource-* routes:
- *  - a non-browser DOCUMENT fetch gets the CONSTANT protocol card (the server entry, before this
- *    loader runs — no existence signal leaks);
- *  - an anonymous browser gets the constant teaser — the LANDING page in single tenancy (with the
- *    first-run claim band while unclaimed), the constant resource teaser in multi;
+ * tenancy, `/:ws` in multi). Per-request admission:
+ *  - a non-browser DOCUMENT fetch gets the CONSTANT protocol card (the server entry, wearing
+ *    whatever status this loader answered with — no existence signal leaks either way);
+ *  - in MULTI tenancy an anonymous browser gets the house 404, the same answer every other
+ *    workspace-scoped face already gave it: a workspace is members-only, and a page that says
+ *    "200, here is how to log in" about every slug anyone types says nothing true;
+ *  - in SINGLE tenancy this route IS the origin index, so an anonymous browser gets the LANDING
+ *    page (with the first-run claim band while unclaimed) — there is no `/<workspace>` URL to
+ *    refuse, and the install's front door is not a workspace face;
  *  - a signed-in member gets the dashboard WITH the app chrome (face-shell);
  *  - anyone else — a signed-in non-member, an unknown multi slug — the house 404.
  */
@@ -52,11 +56,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const session = await getAuth().api.getSession({ headers: request.headers });
   const actor = actorFromSession(session);
   if (actor === null) {
-    // Anonymous browser: the constant teaser. In single tenancy the origin root IS the landing
-    // page, with the one sessionless boolean probe — has this install been claimed yet.
+    // Anonymous browser at a `/<workspace>` address: the house 404, indistinguishable from a
+    // mistyped slug and identical to what the skill and channel faces already answer. Nothing is
+    // read first, so the refusal is existence-blind by construction.
     if (composition.tenancy === "multi") {
-      return { face: "teaser" as const };
+      notFound();
     }
+    // Single tenancy: the origin root IS the landing page, with the one sessionless boolean
+    // probe — has this install been claimed yet.
+
     const workspace = await theWorkspace();
     const awaitingOwner = workspace === null || workspace.claimedAt === null;
     const origin = (serverEnv().TOPOS_PUBLIC_URL ?? new URL(request.url).origin).replace(
@@ -109,14 +117,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 export default function WorkspaceDashboard() {
   const data = useLoaderData<typeof loader>();
   if (data.face === "landing") {
-    // The landing face exists only in SINGLE tenancy (the multi anonymous view is the teaser
-    // above), so the CTAs must not promise workspace creation — there is none to reach.
+    // The landing face exists only in SINGLE tenancy (a multi anonymous visitor met the 404),
+    // so the CTAs must not promise workspace creation — there is none to reach.
     return (
       <LandingPage awaitingOwner={data.awaitingOwner} setupLine={data.setupLine} tenancy="single" />
     );
-  }
-  if (data.face === "teaser") {
-    return <ResourcePage />;
   }
   return <DashboardPage {...data} />;
 }

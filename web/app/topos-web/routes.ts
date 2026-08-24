@@ -41,8 +41,8 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
 
   // The four shareable FACES (workspace root · a skill · an MCP server · a channel): resource
   // address and canonical page are ONE route. They mount under face-shell.tsx (no login bounce —
-  // anonymous is a valid state that renders the constant teaser). In single mode the workspace
-  // root is the origin index; in multi it is `/:ws`.
+  // anonymous is a valid state, and each face decides its own answer to it). In single mode the
+  // workspace root is the origin index; in multi it is `/:ws`.
   //
   // A skill and an MCP server are the SAME page module under TWO bases: the kind decides which
   // one addresses a given bundle, and each mount fences itself (app/lib/bundle-base.server.ts).
