@@ -1553,18 +1553,18 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         // `--untracked`: each tracked scope is ONE summary line (never invisible, never dumped).
         let machine_alone = data.scopes.len() == 1;
         for scope in &data.scopes {
-            let skills = scope.rows.len() as u64;
+            let bundles = scope.rows.len() as u64;
             let line = if scope.scope == "project" {
                 format!(
                     "{} tracked in this folder — `topos list`",
-                    counted(skills, "skill")
+                    counted(bundles, "bundle")
                 )
             } else if machine_alone {
-                format!("{} machine-wide — `topos list`", counted(skills, "skill"))
+                format!("{} machine-wide — `topos list`", counted(bundles, "bundle"))
             } else {
                 format!(
                     "{} machine-wide — `topos list -g`",
-                    counted(skills, "skill")
+                    counted(bundles, "bundle")
                 )
             };
             s.push_str(&line);
@@ -1616,7 +1616,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
                 s.push_str(&format!(
                     "    {} — {}{adopted}\n",
                     c.name,
-                    counted(c.skills, "skill")
+                    counted(c.skills, "bundle")
                 ));
             }
         }
@@ -1637,7 +1637,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         };
         s.push_str(&format!(
             "{} machine-wide{updates} — `{}`\n",
-            counted(m.skills, "skill"),
+            counted(m.skills, "bundle"),
             m.command
         ));
     }
@@ -7991,7 +7991,7 @@ mod tests {
         assert!(!text.contains("fresh@000000"), "{text}");
         // EXACTLY one summary line each, ending in the backticked command.
         assert!(
-            text.contains("2 skills machine-wide, 1 update pending — `topos list -g`"),
+            text.contains("2 bundles machine-wide, 1 update pending — `topos list -g`"),
             "{text}"
         );
         assert!(
@@ -9124,11 +9124,11 @@ mod tests {
         let text = list_tty(&out);
         // One summary line per tracked scope — nothing invisible beside the listing.
         assert!(
-            text.contains("0 skills tracked in this folder — `topos list`"),
+            text.contains("0 bundles tracked in this folder — `topos list`"),
             "{text}"
         );
         assert!(
-            text.contains("0 skills machine-wide — `topos list -g`"),
+            text.contains("0 bundles machine-wide — `topos list -g`"),
             "{text}"
         );
         // The full listing, grouped by folder: the readers ride the FOLDER line (every installed
@@ -9207,10 +9207,10 @@ mod tests {
         assert!(text.contains("topos.sh/acme:"), "{text}");
         // Channels: the count + the adopting file when a manifest row adopts one.
         assert!(
-            text.contains("backend — 3 skills  (adopted in ~/.topos/topos.toml)"),
+            text.contains("backend — 3 bundles  (adopted in ~/.topos/topos.toml)"),
             "{text}"
         );
-        assert!(text.contains("everyone — 5 skills"), "{text}");
+        assert!(text.contains("everyone — 5 bundles"), "{text}");
         // The four adoption markers, each honest about the way forward.
         assert!(
             text.contains("deploy@abababababab  skill  (adopted here)  2 open proposal(s)"),
