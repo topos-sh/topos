@@ -711,7 +711,7 @@ fn a_project_revert_converges_its_copy_and_another_machine_names_what_it_replace
         swept["note"],
         format!(
             "replaced your copy (= version {v2s}) with current {now} — {v2s} stays in history: \
-             topos revert {BUNDLE} --to {v2}",
+             topos revert {BUNDLE} --to {v2s}",
             v2s = &v2[..12],
             now = &restored[..12]
         ),

@@ -145,6 +145,8 @@ fn a_fast_forward_that_undoes_the_held_version_says_so_and_names_the_way_back() 
     let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(row.action, PullAction::FastForwarded);
+    // The way back is spelled SHORT — the way every listing prints a version, and the form
+    // `revert --to` resolves against the workspace's history in the scope it stands in.
     let full = to_hex(&v1.id);
     let (was, now) = (&full[..12], &to_hex(&restored.id)[..12]);
     assert_eq!(
@@ -152,7 +154,7 @@ fn a_fast_forward_that_undoes_the_held_version_says_so_and_names_the_way_back() 
         Some(
             format!(
                 "replaced your copy (= version {was}) with current {now} — {was} stays in \
-                 history: topos revert {name} --to {full}"
+                 history: topos revert {name} --to {was}"
             )
             .as_str()
         ),
