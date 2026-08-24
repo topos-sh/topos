@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT bundle_id AS \"bundle_id!\", first_parent,\n                      author_display AS \"author_display!\",\n                      (purged_at IS NOT NULL) AS \"purged!\"\n               FROM version WHERE workspace_id = $1 AND version_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bundle_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "first_parent",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "author_display!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "purged!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "3d9f2e55602f06c1a68ba6ecbf9703e2ef6cf92b23ce0edd704e1fcd49f79fa7"
+}

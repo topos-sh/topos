@@ -11,8 +11,13 @@
 //!    loose layout (so flipping the backend back to local stays a valid rollback at all times),
 //!    then flip the row's `location`;
 //! 3. walk `refs/topos/versions/*` + the commit objects to BACKFILL `git_commit_oid` and
-//!    `message` into version rows (upsert; a row already backfilled to a DIFFERENT locator fails
-//!    loudly);
+//!    `message` into version rows. A LIVE version's ref is verified to IDENTITY (step 4's
+//!    recompute) BEFORE its locator is written, so a swapped or substituted ref never poisons
+//!    the row — it is a named failure and the row stays unbackfilled. On a rerun, a row that
+//!    already holds a DIFFERENT locator is REPAIRED to the ref's commit once that commit has
+//!    rebuilt the version's identity (the divergent locator is what an earlier, failed run
+//!    left behind); a purged row's ref is taken on its word (its blobs may be gone), so a
+//!    divergent purged row still refuses loudly;
 //! 4. verify completeness — EVERY version row (purged included: the log walks them) carries a
 //!    non-NULL locator whose commit object exists in the store; every reachable blob's loose
 //!    object exists; no live row still reads a pre-import location — then verify IDENTITY for
@@ -247,7 +252,11 @@ async fn import_workspace(
 
     // 3. Refs → version-row backfill. The commit object was copied in step 1 (or is already at
     // its key in place), so its message reads from the STORE — what the serving reads will see.
+    // A live version's ref is proven to IDENTITY before its locator is written (the blob-level
+    // decodes are shared with step 4 through `verified_blobs`).
     let mut versions_backfilled = 0;
+    let mut verified_blobs: std::collections::BTreeSet<[u8; 20]> =
+        std::collections::BTreeSet::new();
     let refs_dir = repo_dir.join("refs").join("topos").join("versions");
     if refs_dir.exists() {
         for ref_file in list_dir(&refs_dir)? {
@@ -282,21 +291,60 @@ async fn import_workspace(
                 Ok(meta) => meta.message,
                 Err(e) => {
                     failures.push(format!(
-                        "{name}: ref {version_hex}'s commit object is undecodable ({e}) — not \
-                         backfilled"
+                        "{name}: ref {version_hex}'s commit object is undecodable ({}) — not \
+                         backfilled",
+                        chain(&e)
                     ));
                     continue;
                 }
             };
+            let Some(facts) = authority
+                .db()
+                .import_version_facts(ws, &version_hex)
+                .await?
+            else {
+                continue; // a ref no version row names: inert (the row is the serving truth)
+            };
+            if !facts.purged {
+                // Proven to identity BEFORE the row is touched: a swapped or substituted ref is a
+                // named failure that leaves the row unbackfilled, never a poisoned locator.
+                let candidate = crate::db::custody::import::ImportLiveVersion {
+                    bundle_id: facts.bundle_id.clone(),
+                    version_id: version_hex.clone(),
+                    git_commit_oid: commit_oid,
+                    first_parent: facts.first_parent.clone(),
+                    author_display: facts.author_display.clone(),
+                };
+                if let Err(e) =
+                    deep_verify_version(authority, ws, &candidate, &mut verified_blobs).await
+                {
+                    failures.push(format!(
+                        "{name}: ref {version_hex}'s commit {commit_hex} does not rebuild the \
+                         version ({}) — not backfilled",
+                        chain(&e)
+                    ));
+                    continue;
+                }
+            }
             let outcome = authority
                 .db()
                 .import_backfill_version(ws, &version_hex, &commit_oid, &message)
                 .await?;
             if outcome.conflicted {
-                failures.push(format!(
-                    "{name}: version {version_hex} is already backfilled to a DIFFERENT commit \
-                     locator — refusing to overwrite"
-                ));
+                if facts.purged {
+                    failures.push(format!(
+                        "{name}: version {version_hex} is already backfilled to a DIFFERENT \
+                         commit locator — refusing to overwrite"
+                    ));
+                } else {
+                    // The ref's commit is PROVEN to be this version; the row's differing locator
+                    // is what an earlier, failed run left behind. The rerun repairs it.
+                    authority
+                        .db()
+                        .import_repair_locator(ws, &version_hex, &commit_oid, &message)
+                        .await?;
+                    versions_backfilled += 1;
+                }
             }
             versions_backfilled += usize::try_from(outcome.updated).unwrap_or(usize::MAX);
         }
@@ -343,13 +391,13 @@ async fn import_workspace(
     // them), require a present row for every leaf, and decode every live blob once, re-hashing
     // its payload to the row's content id — so the very first post-cutover read can never be the
     // discovery of source-side corruption the import waved through.
-    let mut verified_blobs: std::collections::BTreeSet<[u8; 20]> =
-        std::collections::BTreeSet::new();
     for live in authority.db().import_live_versions(ws).await? {
         if let Err(e) = deep_verify_version(authority, ws, &live, &mut verified_blobs).await {
             failures.push(format!(
-                "{name}: version {}/{} fails deep verification: {e}",
-                live.bundle_id, live.version_id
+                "{name}: version {}/{} fails deep verification: {}",
+                live.bundle_id,
+                live.version_id,
+                chain(&e)
             ));
         }
     }
@@ -429,6 +477,19 @@ async fn deep_verify_version(
         return Err(AuthorityError::integrity(IdentityMismatch));
     }
     Ok(())
+}
+
+/// An error's Display with its source chain joined — a failure line names the CAUSE (the typed
+/// integrity reason), not only the `AuthorityError` envelope.
+fn chain(e: &AuthorityError) -> String {
+    let mut out = e.to_string();
+    let mut cur = std::error::Error::source(e);
+    while let Some(source) = cur {
+        out.push_str(": ");
+        out.push_str(&source.to_string());
+        cur = source.source();
+    }
+    out
 }
 
 /// Write one framed loose object into the OLD git root's layout

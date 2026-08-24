@@ -443,10 +443,11 @@ async fn a_swapped_ref_fails_the_identity_verification(pool: PgPool) {
 
     // The corruption: va's ref now points at vb's commit — a DIFFERENT, internally-valid commit.
     let refs = layout.git_root().join("w1/refs/topos/versions");
+    let va_commit = std::fs::read_to_string(refs.join(&va.version_hex)).expect("va ref");
     let vb_commit = std::fs::read_to_string(refs.join(&vb.version_hex)).expect("vb ref");
-    std::fs::write(refs.join(&va.version_hex), vb_commit).expect("swap");
+    std::fs::write(refs.join(&va.version_hex), &vb_commit).expect("swap");
 
-    let authority = layout.authority(pool);
+    let authority = layout.authority(pool.clone());
     let report = authority
         .import_local(&layout.git_root(), &layout.large_root())
         .await
@@ -459,10 +460,118 @@ async fn a_swapped_ref_fails_the_identity_verification(pool: PgPool) {
         report
             .failures
             .iter()
-            .any(|f| f.contains(&va.version_hex) && f.contains("deep verification")),
-        "the failure names the swapped version: {:?}",
+            .any(|f| f.contains(&va.version_hex) && f.contains("DIFFERENT version id")),
+        "the failure names the swapped version AND the typed cause: {:?}",
         report.failures
     );
+    // The bad ref never touched the row: no poisoned locator to clean up by hand.
+    assert_eq!(
+        locator_hex(&pool, "w1", &va.version_hex).await,
+        None,
+        "a failed identity check leaves the row unbackfilled"
+    );
+
+    // The cure the docs name — fix the ref, rerun — is the whole cure.
+    std::fs::write(refs.join(&va.version_hex), &va_commit).expect("restore");
+    let rerun = authority
+        .import_local(&layout.git_root(), &layout.large_root())
+        .await
+        .expect("rerun runs");
+    assert!(rerun.passed(), "failures: {:?}", rerun.failures);
+    assert_eq!(
+        locator_hex(&pool, "w1", &va.version_hex).await.as_deref(),
+        Some(va_commit.trim())
+    );
+}
+
+#[sqlx::test]
+async fn a_poisoned_row_is_repaired_by_a_rerun_from_a_proven_ref(pool: PgPool) {
+    let layout = OldLayout::new("repair");
+    let ws_repo = layout.git_root().join("w1");
+    let q = layout.dir.join("q");
+    let va = seed_version(
+        &ws_repo,
+        &q.join("opA"),
+        &[("A.md", FileMode::Regular, b"alpha\n".as_slice())],
+        None,
+        "mA",
+        &[],
+    );
+    let vb = seed_version(
+        &ws_repo,
+        &q.join("opB"),
+        &[("B.md", FileMode::Regular, b"beta\n".as_slice())],
+        None,
+        "mB",
+        &[],
+    );
+    seed_rows(&pool, "w1", "b1", &va, None, &[("A.md", "git")], false).await;
+    seed_rows(&pool, "w1", "b1", &vb, None, &[("B.md", "git")], false).await;
+    seed_pointer(&pool, "w1", "b1", &vb, 1).await;
+    let refs = layout.git_root().join("w1/refs/topos/versions");
+    let va_commit = std::fs::read_to_string(refs.join(&va.version_hex)).expect("va ref");
+    let vb_commit = std::fs::read_to_string(refs.join(&vb.version_hex)).expect("vb ref");
+
+    let authority = layout.authority(pool.clone());
+    let first = authority
+        .import_local(&layout.git_root(), &layout.large_root())
+        .await
+        .expect("import runs");
+    assert!(first.passed(), "failures: {:?}", first.failures);
+
+    // What an earlier, failed run could have left behind: va's row pointing at vb's commit with
+    // vb's message — a poisoned locator the ref (correct all along) disagrees with.
+    sqlx::query(
+        "UPDATE version SET git_commit_oid = decode($3, 'hex'), message = 'poison' \
+         WHERE workspace_id = $1 AND version_id = $2",
+    )
+    .bind("w1")
+    .bind(&va.version_hex)
+    .bind(vb_commit.trim())
+    .execute(&pool)
+    .await
+    .expect("poison");
+
+    let rerun = authority
+        .import_local(&layout.git_root(), &layout.large_root())
+        .await
+        .expect("rerun runs");
+    assert!(rerun.passed(), "failures: {:?}", rerun.failures);
+    assert_eq!(
+        rerun.workspaces[0].versions_backfilled, 1,
+        "the repair counts"
+    );
+    assert_eq!(
+        locator_hex(&pool, "w1", &va.version_hex).await.as_deref(),
+        Some(va_commit.trim()),
+        "the proven ref wins over the poisoned locator"
+    );
+    let message: Option<String> = sqlx::query_scalar(
+        "SELECT message FROM version WHERE workspace_id = $1 AND version_id = $2",
+    )
+    .bind("w1")
+    .bind(&va.version_hex)
+    .fetch_one(&pool)
+    .await
+    .expect("row");
+    assert_eq!(
+        message.as_deref(),
+        Some("mA"),
+        "the message is the ref's commit's"
+    );
+}
+
+/// A row's commit locator as lowercase hex (`None` when unbackfilled).
+async fn locator_hex(pool: &PgPool, ws: &str, version_hex: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT encode(git_commit_oid, 'hex') FROM version \
+         WHERE workspace_id = $1 AND version_id = $2",
+    )
+    .bind(ws)
+    .bind(version_hex)
+    .fetch_one(pool)
+    .await
+    .expect("row")
 }
 
 #[sqlx::test]
