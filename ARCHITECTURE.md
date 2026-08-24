@@ -171,13 +171,20 @@ The system keeps its state in three places.
 - **The app's `web` schema** (Postgres) — identity and the whole directory: people, seats, CLI sessions,
   invitations, the catalog, channels, assignments and declines, upstream provenance, proposals, notices, receipts, and the
   audit trail. Reached only through the data-access layer, keyed by `user.id`.
-- **The vault's `plane` schema** (Postgres) — custody only: the content-addressed version index, the
-  `current` pointer, and the upload/object-lifecycle bookkeeping. Raw SQL and raw git reads are private to
-  `plane-store`, so no code outside it can run an unbound query or read a bare object.
-- **A git object store + a size-routed large-object store** — content-addressed bundle bytes on the vault's
-  disk, verified on read (re-hashed to their id) and managed by the lifecycle fence above; larger blobs are
-  offloaded to the local filesystem beside the git store. (An S3-compatible remote backend is planned and
-  additive.)
+- **The vault's `plane` schema** (Postgres) — every custody DECISION: the content-addressed version index
+  (with each version's commit locator + message), the `current` pointer, and the upload/object-lifecycle
+  bookkeeping. Raw SQL and raw object reads are private to `plane-store`, so no code outside it can run an
+  unbound query or read a bare object.
+- **One object store** — every bundle byte, as immutable zlib **loose git objects** keyed by their own git
+  OID at the exact bare-repo path shape (`<workspace>/objects/<aa>/<38-hex>`): file blobs (framed as git
+  blobs), and each version's tree/commit skeleton. Two backends behind one seam: a **local directory**
+  (the self-host default — over the same root the pre-object-store repos used, so existing objects are
+  already at their keys) and any **S3-compatible** endpoint. Writes are plain idempotent puts (keys are
+  content-addressed, so a re-put is self-healing); only GC and workspace deletion delete, under a
+  single-attempt, hard-bounded protocol that can never outlive its ownership token; every byte is
+  re-verified against the id that named it on read. The vault itself is **stateless**: Postgres + the
+  store are its whole durable state (upload staging is an ephemeral local dir, safe to lose on any
+  container replacement).
 
 ## Contracts (generated, never hand-written)
 

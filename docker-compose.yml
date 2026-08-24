@@ -162,9 +162,22 @@ services:
       # lane. REQUIRED, with no default: the same value the web app gets below, and compose
       # refuses to parse this file until `.env` carries it.
       TOPOS_PLANE_INTERNAL_TOKEN: "${TOPOS_INTERNAL_TOKEN:?generate one with: openssl rand -hex 32 — set it in .env (cp .env.example .env)}"
+      # The object store. Default `local` = the plane-data volume below, zero extra config. Set
+      # `s3` (+ the TOPOS_PLANE_S3_* variables in .env) to keep the bytes on any S3-compatible
+      # bucket instead — the vault is then stateless over Postgres + the bucket, and the volume
+      # is unused. Switching an existing deployment runs `topos-plane import-local` first (docs:
+      # /docs/self-host, "The object store").
+      TOPOS_PLANE_STORE: ${TOPOS_PLANE_STORE:-local}
+      TOPOS_PLANE_S3_ENDPOINT: ${TOPOS_PLANE_S3_ENDPOINT:-}
+      TOPOS_PLANE_S3_BUCKET: ${TOPOS_PLANE_S3_BUCKET:-}
+      TOPOS_PLANE_S3_ACCESS_KEY_ID: ${TOPOS_PLANE_S3_ACCESS_KEY_ID:-}
+      TOPOS_PLANE_S3_SECRET_ACCESS_KEY: ${TOPOS_PLANE_S3_SECRET_ACCESS_KEY:-}
+      TOPOS_PLANE_S3_REGION: ${TOPOS_PLANE_S3_REGION:-auto}
     volumes:
-      # The git-object + large-object stores. Snapshot these BEFORE the database (see the
-      # README's backup order).
+      # The local object store (the default backend; unused when TOPOS_PLANE_STORE=s3). Objects
+      # are immutable and content-addressed and the database records a version only after its
+      # bytes are stored, so snapshot order against the database cannot corrupt anything (skew is
+      # loud or harmless — see the docs' Backups section).
       - plane-data:/data
 
   gateway:

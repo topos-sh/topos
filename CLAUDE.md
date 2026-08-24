@@ -18,7 +18,7 @@ trust. Two motions: **distribute** (publish → every subscribed agent updates s
 ## Map — read the CLAUDE.md in the folder you're working in
 
 - `crates/` — the five library crates: `topos-types` (wire DTOs), `topos-core` (the pure trust
-  kernel), `topos-gitstore` (git object mechanics + the large-object store), `topos-harness` (the
+  kernel), `topos-gitstore` (git object mechanics + the in-memory loose-object codec), `topos-harness` (the
   harness-adapter port + impls), `plane-store` (the vault's byte-custody boundary).
 - `bins/` — the two Rust programs (each a lib + a thin bin).
 - `web/` — the product web app.
@@ -54,7 +54,7 @@ forbidden workspace-wide.
 topos-types  ◄── the app libs + every fixture (the shared WIRE DTOs; NOT a dep of topos-core)
 topos-core   the PURE trust kernel — no I/O, no traits, no clock/RNG. Owns digest, consent, the sync
    ▲   ▲     transition, diff3 policy, the content-addressed commit-id derivation. Tested in-crate.
-   │   ├── topos-gitstore ──► topos-core   (gix object mechanics; the large-object store)
+   │   ├── topos-gitstore ──► topos-core   (gix object mechanics; the loose-object codec)
    │   └── topos-harness  ──► topos-core, topos-types   (the one client-side port; the harness impls)
    │
 plane-store  ──► topos-core, topos-types, topos-gitstore   (the vault's byte-custody boundary)
@@ -63,8 +63,9 @@ topos        ──► topos-core, topos-types, topos-gitstore, topos-harness   
               └── NO edge to plane-store / sqlx   ◄── architectural layering
 ```
 
-Heavy-dependency placement is enforced by `cargo xtask check-arch`: `sqlx` in `plane-store` only,
-`axum` in the vault, `ureq` as the client's blocking transport, mail in the web app alone.
+Heavy-dependency placement is enforced by `cargo xtask check-arch`: `sqlx` AND `object_store` (the
+vault's byte backend — a local dir or any S3-compatible bucket) in `plane-store`/`topos-plane`
+only, `axum` in the vault, `ureq` as the client's blocking transport, mail in the web app alone.
 
 ## Principles that constrain this code
 

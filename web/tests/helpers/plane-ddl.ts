@@ -5,8 +5,8 @@ import { Client, type ClientConfig } from "pg";
 
 /**
  * The ONE plane-DDL applier the unit suite uses. It applies the vault's IN-REPO SQL migrations
- * (`crates/plane-store/migrations/*.sql` — the single source of truth; no vendoring, currently
- * the one custody migration), so a test database gets the REAL custody DDL the app's read-only
+ * (`crates/plane-store/migrations/*.sql` — the single source of truth; no vendoring; every
+ * migration, in filename order), so a test database gets the REAL custody DDL the app's read-only
  * mirror (schema.custody.ts) and delivery joins run against.
  *
  * Ordering facts the applier encodes:

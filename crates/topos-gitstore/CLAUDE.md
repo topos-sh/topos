@@ -1,9 +1,11 @@
-# `topos-gitstore` — the gix object mechanics + the large-object store
+# `topos-gitstore` — the gix object mechanics + the in-memory loose-object codec
 
 The shared dumb byte layer over `gix`: object read/write, a recursive byte-oriented tree render,
-and the sha256-id ↔ git-OID mapping carried as a ref name (git OIDs are SHA-1, an internal detail;
-the version id is always our own sha256). Path-parameterized and **bundle-generic** — one bare
-repo per bundle for the client, one per workspace for the plane; it never asks what a bundle is.
+the sha256-id ↔ git-OID mapping carried as a ref name (git OIDs are SHA-1, an internal detail;
+the version id is always our own sha256), and the PURE in-memory codec the vault stores its
+objects with. Role rule: **no network, no async, no SQL** — `std::fs` stays (the CLIENT keeps one
+bare repo per bundle; the vault holds no repo at all). Bundle-generic — it never asks what a
+bundle is.
 
 **Re-verifies bytes → expected sha256 on every read** (never trusts gix's object id). Holds **no
 access control** and **no policy**; it never fsyncs on the client path — it *names* the durability
@@ -29,19 +31,19 @@ set for the client to sync, so the client owns the fault-injectable seam.
   diff3 execution over `diffy` (pinned exact; conflict bytes are a consent artifact locked by a
   golden), diff3-style markers lengthened until unique, non-UTF-8 never line-merged, size caps
   checked before allocation. Bytes are never normalized.
-- **The lifecycle-fence primitives (`fence.rs`)** — the dumb byte ops the plane's GC fence drives:
-  `stage` (quarantine), `install_object_durable`, `commit_durable` (tree from already-installed
-  ids via the low-level plumbing editor, so an offloaded blob's `(path,mode,git_oid)` is carried
-  without its bytes entering git), `delete_loose_object`, `read_staged_blob`, `object_exists`.
-  These are self-durable and return the path set they synced.
+- **The lifecycle-fence primitives (`fence.rs`)** — the dumb byte ops a repo-backed fence drives
+  (client-side today): `stage` (quarantine), `install_object_durable`, `commit_durable`,
+  `delete_loose_object`, `read_staged_blob`, `object_exists`. Self-durable; return the synced
+  path set.
 
-## The large-object store
+## The in-memory codec (`codec.rs`)
 
-`LocalLargeStore` behind the `LargeObjectStore` trait: content-addressed `put`/`get`/`exists`/
-`delete` keyed by `blob_id = sha256(bytes)`, sharded finals + same-filesystem tmp staging,
-crash-safe two-phase install, verify-on-read. One store per workspace (`large_root/<ws>/`) —
-isolation is the path; routing + `location` dispatch live in `plane-store`. An S3-compatible
-remote backend would be a second impl of this trait.
+Pure encode/decode of git loose objects WITHOUT a repository — what the vault frames its store
+objects with: `encode_blob`/`blob_git_oid`, `encode_tree` (nested paths → subtree objects, git
+tree order, the same component validation as the repo-backed editor), `encode_commit` (the SAME
+reproducible frame `Store::commit` writes — fixed committer, epoch-zero time — parity pinned by
+test), and `decode_loose`/`decode_commit`/`decode_tree` with verify-on-decode (a frame that does
+not hash to the id that named it is refused typed).
 
-Dependencies: `gix` (plumbing-only), `imara-diff`, `diffy` (pinned exact), `topos-core`,
-`thiserror`.
+Dependencies: `gix` (plumbing-only), `flate2` (the codec's zlib), `imara-diff`, `diffy` (pinned
+exact), `topos-core`, `thiserror`.
