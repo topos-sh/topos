@@ -3062,7 +3062,7 @@ fn reconcile_thing<'a>(
                 ));
                 // The BUNDLE is what could not be carried forward, so the bundle is what the
                 // summary counts. Pushing only a line left a one-row failing sweep printing
-                // "Checked 0 skills" and exiting 1 — a receipt that reported nothing wrong beside
+                // "Checked 0 bundles" and exiting 1 — a receipt that reported nothing wrong beside
                 // a status that said something was.
                 sweep
                     .failed_bundles

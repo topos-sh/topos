@@ -4296,17 +4296,18 @@ pub(crate) fn pull_tty(
     }
 
     // The summary counts every BUNDLE the sweep attempted — the ones it could not carry forward,
-    // and the ones waiting on an answer — and names them by what they ARE: a sweep that
-    // reconciled an MCP server counts bundles, because calling that row a skill is simply false.
-    // All-skills stays the ordinary word.
+    // and the ones waiting on an answer — and names them BUNDLES, always. The word used to
+    // depend on what happened to ride along: an all-skills run said `skills`, and the same
+    // command on the same machine said `bundles` the day an MCP server joined. One receipt
+    // cannot teach two words for one thing, and `bundle` is the one the rest of the CLI uses.
     //
     // `failed` is the count of BUNDLES that failed, never of warning LINES. Those are not the
     // same number and never were: a scope-level fault (an unavailable lock, an unreadable custody
     // document) is one line about no bundle at all, and two lines can be about one bundle. Counting
-    // lines invented bundles that do not exist and then reported them failed — `Checked 3 skills:
+    // lines invented bundles that do not exist and then reported them failed — `Checked 3 bundles:
     // 2 already up to date, 1 failed` over a machine holding two.
     let total = primary.len() + failed + unplaced + decisions.len();
-    let noun = managed_noun(&data.skills, total, unplaced > 0);
+    let counted_total = counted(total as u64, "bundle");
     tally.failed = failed;
     tally.not_placed = unplaced;
     tally.waiting += decisions.len();
@@ -4316,9 +4317,9 @@ pub(crate) fn pull_tty(
         && narrowings.is_empty()
         && unplaced == 0
     {
-        out.push_str(&format!("Checked {total} {noun}: all up to date."));
+        out.push_str(&format!("Checked {counted_total}: all up to date."));
     } else {
-        out.push_str(&format!("Checked {total} {noun}"));
+        out.push_str(&format!("Checked {counted_total}"));
         let parts = tally.parts();
         if !parts.is_empty() {
             out.push_str(&format!(": {}", parts.join(", ")));
@@ -4439,25 +4440,6 @@ impl PullTally {
             + self.not_placed
             + self.failed
             + self.drafts_ahead
-    }
-}
-
-/// The noun a receipt counts its rows in. `skill` while every row IS one — the word a person
-/// reads most and the one the rest of the CLI uses — and the generic `bundle` the moment a row of
-/// another kind rode along, because one summary cannot call a server a skill and stay true.
-///
-/// `other_kinds` is the same question asked of what the rows CANNOT answer: a bundle that reached
-/// no agent has no row on this receipt (it stands down), so `Checked 1 skill: 1 not placed` was a
-/// summary calling an MCP server a skill precisely on the run where nothing else named it.
-fn managed_noun(skills: &[PullSkill], total: usize, other_kinds: bool) -> &'static str {
-    match (
-        other_kinds || skills.iter().any(|s| s.kind.is_some()),
-        total == 1,
-    ) {
-        (true, true) => "bundle",
-        (true, false) => "bundles",
-        (false, true) => "skill",
-        (false, false) => "skills",
     }
 }
 
@@ -6748,7 +6730,7 @@ mod tests {
         // row prints — 2 + 1 + 1 + 1 = the 5 the line opens with.
         assert!(
             out.contains(
-                "Checked 5 skills: 2 updated, 1 already up to date, 1 waiting on you, 1 held."
+                "Checked 5 bundles: 2 updated, 1 already up to date, 1 waiting on you, 1 held."
             ),
             "{out}"
         );
@@ -7003,16 +6985,35 @@ mod tests {
         );
     }
 
-    /// ONE SUMMARY, TRUE FOR EVERY ROW IT COUNTS. A sweep whose rows are all skills says so —
-    /// the ordinary word. The moment a bundle of another kind rides along, the count switches to
-    /// the generic noun, because "1 managed skill" is simply false about an MCP server.
+    /// ONE SUMMARY, ONE WORD. The receipt counts BUNDLES whatever its rows turn out to be. The
+    /// word used to depend on what rode along — an all-skills sweep said `skills`, and the same
+    /// command on the same machine said `bundles` the day an MCP server joined the feed. One
+    /// receipt cannot teach two words for one thing, and `bundle` is the one the rest of the CLI
+    /// uses; "1 managed skill" was false about a server either way.
     #[test]
-    fn the_summary_stops_calling_a_server_a_skill() {
+    fn the_summary_counts_bundles_whatever_the_rows_are() {
         let server = |name: &str| {
             let mut r = row(name, PullAction::UpToDate);
             r.kind = Some("mcp".to_owned());
             r
         };
+        // ALL SKILLS — the case that used to read `skills`.
+        let only_skills = PullData {
+            skills: vec![
+                row("deploy", PullAction::UpToDate),
+                row("code-review", PullAction::UpToDate),
+            ],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
+            scope: None,
+        };
+        assert_eq!(
+            pull_tty(&only_skills, &[], &[], &[], &[], 0, 0),
+            "Checked 2 bundles: all up to date."
+        );
         let only_a_server = PullData {
             skills: vec![server("weather")],
             proposals_awaiting: 0,
@@ -7027,7 +7028,7 @@ mod tests {
             "Checked 1 bundle: all up to date."
         );
 
-        // Mixed: one word has to cover both, and the generic one does.
+        // Mixed — the same word, which is the whole point: the noun never moves under a person.
         let mixed = PullData {
             skills: vec![row("deploy", PullAction::UpToDate), server("weather")],
             proposals_awaiting: 0,
@@ -7305,7 +7306,7 @@ mod tests {
         };
         assert_eq!(
             pull_tty(&clean, &[], &[], &[], &[], 0, 0),
-            "Checked 2 skills: all up to date."
+            "Checked 2 bundles: all up to date."
         );
         // Nothing followed at all.
         let empty = PullData {
@@ -7334,7 +7335,7 @@ mod tests {
         );
         assert!(!out.contains("IO_ERROR"), "no code reaches the TTY: {out}");
         assert!(
-            out.contains("Checked 3 skills: 2 already up to date, 1 failed."),
+            out.contains("Checked 3 bundles: 2 already up to date, 1 failed."),
             "{out}"
         );
         // A DISCLOSURE prints beside them and is counted by neither half of the summary — an
@@ -7363,7 +7364,7 @@ mod tests {
         let out = pull_tty(&clean, &[], &[], &advisories, &[], 0, 0);
         assert!(out.contains("warning: \"linear\" (person):"), "{out}");
         assert!(!out.contains("MCP_DEST_UNKNOWN"), "{out}");
-        assert!(out.contains("Checked 2 skills: all up to date."), "{out}");
+        assert!(out.contains("Checked 2 bundles: all up to date."), "{out}");
         assert!(!out.contains("failed"), "{out}");
     }
 
@@ -7417,7 +7418,7 @@ mod tests {
         let out = pull_tty(&with_rows, &[], &[], &[], &[], 0, 0);
         assert!(
             out.ends_with(
-                "Checked 1 skill: all up to date.\n\
+                "Checked 1 bundle: all up to date.\n\
                  Newly detected agents:\n\
                  \x20 cursor: active (session start)\n\
                  \x20 openclaw: couldn't register — `topos update` still works"
@@ -7431,7 +7432,7 @@ mod tests {
         };
         assert_eq!(
             pull_tty(&none, &[], &[], &[], &[], 0, 0),
-            "Checked 1 skill: all up to date."
+            "Checked 1 bundle: all up to date."
         );
     }
 
@@ -7464,7 +7465,7 @@ mod tests {
              coolify-deploy   updated (2 folders)\n\
              \x20   project/.agents/skills/coolify-deploy\n\
              \x20   project/.claude/skills/coolify-deploy\n\
-             Checked 2 skills: 1 updated, 1 already up to date.\n\
+             Checked 2 bundles: 1 updated, 1 already up to date.\n\
              1 bundle behind machine-wide — `topos update -g` updates it."
         );
     }
@@ -7489,7 +7490,7 @@ mod tests {
             pull_tty(&data, &[], &[], &[], &[], 0, 0),
             "updated project (~/Forward/labs/topos_test)\n\
              coolify-deploy   updated (project/.claude/skills/coolify-deploy)\n\
-             Checked 1 skill: 1 updated."
+             Checked 1 bundle: 1 updated."
         );
     }
 
@@ -7517,7 +7518,7 @@ mod tests {
              coolify-deploy   updated (2 folders)\n\
              \x20   ~/.agents/skills/coolify-deploy\n\
              \x20   ~/.claude/skills/coolify-deploy\n\
-             Checked 1 skill: 1 updated."
+             Checked 1 bundle: 1 updated."
         );
     }
 
@@ -7546,7 +7547,7 @@ mod tests {
             "updated project (~/Forward/labs/topos_test)\n\
              + coolify-deploy   installed (project/.claude/skills/coolify-deploy)\n\
              \x20   also updated project/.agents/skills/coolify-deploy\n\
-             Checked 1 skill: 1 installed."
+             Checked 1 bundle: 1 installed."
         );
     }
 
@@ -7586,7 +7587,7 @@ mod tests {
                 ],
                 &[]
             ),
-            "Checked 2 skills: 1 updated, 1 already up to date."
+            "Checked 2 bundles: 1 updated, 1 already up to date."
         );
         assert_eq!(
             summary(
@@ -7598,7 +7599,7 @@ mod tests {
                 ],
                 &[]
             ),
-            "Checked 4 skills: 1 installed, 1 updated, 1 removed, 1 already up to date."
+            "Checked 4 bundles: 1 installed, 1 updated, 1 removed, 1 already up to date."
         );
         assert_eq!(
             summary(
@@ -7611,7 +7612,7 @@ mod tests {
                     "s_docs: a filesystem operation failed.".to_owned()
                 )]
             ),
-            "Checked 3 skills: 1 updated, 1 already up to date, 1 failed."
+            "Checked 3 bundles: 1 updated, 1 already up to date, 1 failed."
         );
         assert_eq!(
             summary(
@@ -7621,7 +7622,7 @@ mod tests {
                 ],
                 &[]
             ),
-            "Checked 2 skills: all up to date."
+            "Checked 2 bundles: all up to date."
         );
         // A non-skill kind riding along still switches the noun — and the counts stay explicit.
         let mut server = row("weather", PullAction::UpToDate);
@@ -7643,7 +7644,7 @@ mod tests {
                 vec![drafted.clone(), row("style", PullAction::UpToDate)],
                 &[]
             ),
-            "Checked 2 skills: 1 already up to date, 1 draft ahead."
+            "Checked 2 bundles: 1 already up to date, 1 draft ahead."
         );
         // The compact "all up to date" shortcut cannot fire over a draft — it was the sentence
         // that did the contradicting.
@@ -7666,7 +7667,7 @@ mod tests {
             "{whole}"
         );
         assert!(
-            whole.ends_with("Checked 1 skill: 1 draft ahead."),
+            whole.ends_with("Checked 1 bundle: 1 draft ahead."),
             "{whole}"
         );
         // Plural reads as a person would say it.
@@ -7674,7 +7675,7 @@ mod tests {
         d2.draft = true;
         assert_eq!(
             summary(vec![drafted, d2], &[]),
-            "Checked 2 skills: 2 drafts ahead."
+            "Checked 2 bundles: 2 drafts ahead."
         );
 
         // A WARNING IS NOT A BUNDLE. A scope-level fault — an unavailable lock, an unreadable
@@ -7699,7 +7700,7 @@ mod tests {
                 ],
                 0,
             ),
-            "Checked 2 skills: 1 updated, 1 already up to date.",
+            "Checked 2 bundles: 1 updated, 1 already up to date.",
             "two scope-level lines are still printed, and counted as nothing"
         );
         // Two lines about ONE wedged bundle count that bundle once.
@@ -7718,7 +7719,7 @@ mod tests {
                 ],
                 1,
             ),
-            "Checked 2 skills: 1 already up to date, 1 failed."
+            "Checked 2 bundles: 1 already up to date, 1 failed."
         );
     }
 
@@ -8888,7 +8889,7 @@ mod tests {
              \x20   take the team's version instead, dropping yours:\n\
              \x20     topos update coolify-deploy --reset\n\
              \x20   you cannot publish this skill until you pick one\n\
-             Checked 1 skill: 1 waiting on you."
+             Checked 1 bundle: 1 waiting on you."
         );
 
         // The machine-wide set: `~/` paths stand as they are, and both exits carry `-g` — the
@@ -8914,7 +8915,7 @@ mod tests {
              \x20   take the team's version instead, dropping yours:\n\
              \x20     topos update -g coolify-deploy --reset\n\
              \x20   you cannot publish this skill until you pick one\n\
-             Checked 1 skill: 1 waiting on you."
+             Checked 1 bundle: 1 waiting on you."
         );
 
         // Several untouched folders are counted and then spelled out — a number is not a place a
@@ -9079,7 +9080,7 @@ mod tests {
              legacy-deploy   acme stopped sharing this — topos will not update it any more\n\
              \x20   the files stay where they are, and are yours to keep or delete: \
              ~/.claude/skills/legacy-deploy\n\
-             Checked 1 skill: 1 no longer shared."
+             Checked 1 bundle: 1 no longer shared."
         );
 
         // Several folders: the same sentence, one folder per line beneath it. And the
@@ -9115,7 +9116,7 @@ mod tests {
              \x20     ~/.codex/skills/frontend-design\n\
              deploy                  its only copy, /private/tmp/deploy, no longer exists — \
              nothing left to manage\n\
-             Checked 2 skills: 2 no longer shared."
+             Checked 2 bundles: 2 no longer shared."
         );
     }
 

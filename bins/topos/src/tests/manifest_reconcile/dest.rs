@@ -235,7 +235,7 @@ fn a_hand_narrowed_skill_row_leads_the_receipt_with_the_copies_it_retired() {
     // AND THE SUMMARY AGREES WITH IT: a bundle the lead just said still delivers is `narrowed`,
     // never `removed` — the count and the three lines above it cannot contradict each other.
     assert!(
-        receipt.contains("Checked 1 skill: 1 narrowed."),
+        receipt.contains("Checked 1 bundle: 1 narrowed."),
         "{receipt}"
     );
 }
