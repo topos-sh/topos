@@ -11,7 +11,7 @@
 //! An UN-ENROLLED publish is refused typed — enrollment is `topos login <workspace-address>` (the
 //! device-authorization flow), and workspaces are born server-side, never from a publish.
 
-use topos_core::digest::to_hex;
+use topos_core::digest::{FileMode, to_hex};
 use topos_core::identity::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
 use topos_types::persisted::{ConflictState, Lock, OpKind, OpRecord, PlacementMap, SyncState};
@@ -19,7 +19,8 @@ use topos_types::results::{AddedNote, ProposeData, PublishData};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use topos_types::results::{
-    PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult, ScopeDraft,
+    ChangeSummary, PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult,
+    Republish, ScopeDraft,
 };
 
 use super::contribute::{self, PUBLISH_MESSAGE};
@@ -30,7 +31,7 @@ use super::{
 };
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::plane::WriteReceipt;
+use crate::plane::{PlaneError, PointerFetch, WriteReceipt};
 use crate::source::{self, SourceSpec};
 use crate::{doc, op_wal, scan, sidecar};
 
@@ -56,10 +57,12 @@ fn origin_to_wire(
 /// the protection gate's downgrade), or there was nothing to ship.
 #[derive(Debug)]
 pub(crate) enum PublishOutcome {
-    /// A direct publish moved `current` to the draft.
-    Published(PublishData),
-    /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
-    Proposed(ProposeData),
+    /// A direct publish moved `current` to the draft (boxed: the receipt is the widest payload
+    /// the verb yields, and the enum should not be sized by it).
+    Published(Box<PublishData>),
+    /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move. Boxed like the
+    /// landed receipt, for the same reason.
+    Proposed(Box<ProposeData>),
     /// The copy already matches `current` — a SUCCESS with nothing to ship. The converged state is
     /// what the command asked for, so it is reported, never refused.
     NoChanges(PublishNoChangesData),
@@ -262,6 +265,7 @@ pub(crate) fn publish_describe(
     propose: bool,
     channel: Option<&str>,
     workspace: Option<&str>,
+    message: Option<&str>,
     sel: &super::Selection,
     scope: super::StoreScope,
 ) -> Result<PublishPreview, ClientError> {
@@ -331,12 +335,6 @@ pub(crate) fn publish_describe(
             global,
         });
     }
-    // Its neighbour: a copy that does not include the served `current` (the ordinary behind state).
-    // Shipping from here would land bytes with the team's change nowhere inside, and the plane's own
-    // lineage fence refuses it anyway. The DESCRIBE refuses too, and refuses FIRST — a preview of a
-    // publish the apply will refuse is two steps to reach one answer.
-    behind_guard(ctx, &sp, &skill_name, propose, global)?;
-
     // Scan the live draft ONCE → the byte-exact digest the apply would ship; the optional `@<digest>` pin
     // gates it here too (refuse on mismatch), so a describe never previews bytes the apply would refuse.
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
@@ -379,12 +377,13 @@ pub(crate) fn publish_describe(
     // files at all, so a publish naming one is refused there — one gate, where the bundle lives.
     let bundle_kind = crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill();
 
-    // A skill has a `current` to be identical TO when it is FOLLOWED (the bytes this client holds are
-    // `lock.bundle_digest`) OR it has ever been published from here (`sync.observed != GENESIS` — a
-    // successful publish advances `observed` past GENESIS, read-your-writes). In either case an unchanged
-    // draft is a no-op. A never-published GENESIS skill (`observed == GENESIS`, no follow entry) stays
-    // exempt: its `lock.bundle_digest` already equals the adopted draft digest by construction, so its
-    // first publish must NOT be refused. `follow_entry`/`followed` are also read below for the gate.
+    // THE SERVER'S CURRENT IS THE TRUTH. A bundle HAS a current when it is FOLLOWED or has ever
+    // been published from here (`sync.observed != GENESIS` — a landed publish advances `observed`
+    // past GENESIS); a never-published local skill has none, and its first publish is the genesis
+    // shape. The copy is classified against the LIVE current — read from the server here, not
+    // the sidecar's cached notion of it: a revert run from another store (or another machine)
+    // moves `current` without touching this cache, and a describe that answered "already
+    // published" against the cache was lying about `current`.
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
     let follow_entry = ctx
@@ -394,24 +393,42 @@ pub(crate) fn publish_describe(
         .find(|(fid, _)| fid == id.as_str())
         .map(|(_, fc)| fc);
     let followed = follow_entry.is_some();
-    if (followed || sync.observed != GENESIS) && digest_hex == lock.bundle_digest {
-        return Ok(PublishPreview::NoChanges(no_changes(
-            skill_name,
-            other_draft,
-        )));
+    let live = if followed || sync.observed != GENESIS {
+        Some(live_or_cached(ctx, &lane, &sp, id.as_str(), &lock, &sync)?)
+    } else {
+        None
+    };
+    let standing = standing(live.as_ref(), &lock, &digest_hex);
+    match &standing {
+        Standing::Matches => {
+            return Ok(PublishPreview::NoChanges(no_changes(
+                skill_name,
+                other_draft,
+            )));
+        }
+        // An EDITED copy behind the live current: the apply would refuse (the plane's lineage
+        // fence), so the describe refuses FIRST — a preview of a publish the apply will refuse is
+        // two steps to reach one answer. A proposal moves no pointer and is exempt.
+        Standing::Behind if !propose => {
+            return Err(ClientError::PublishBehind {
+                skill: skill_name.clone(),
+                global,
+            });
+        }
+        _ => {}
     }
 
     // The gate the plane will apply: a reviewed bundle (or an explicit `--propose`) becomes a proposal;
     // an open one lands directly. Protection is a SERVER fact that can move after this device's last sync
     // (an owner runs `protect <skill> reviewed` — or loosens it back to `open`), so the sidecar's cached
     // `review_required` — stamped at the last delivery reconcile — can misreport the gate in EITHER
-    // direction. Read the FRESH protection the delivery carries per skill (a read, after the local scan —
-    // the describe still mutates nothing) and prefer it, so the consent shown matches the act the apply
-    // performs; an offline/failed read falls back to the cached value, so the describe keeps working
-    // offline. A genesis (unfollowed) skill has no server protection — its first publish keeps the
-    // no-gate path.
+    // direction. The live read above carries the FRESH protection per delivered skill; a bundle the
+    // delivery does not name falls back to the cached value. A genesis (unfollowed) skill has no server
+    // protection — its first publish keeps the no-gate path.
     let review_required = match &follow_entry {
-        Some(fc) => fresh_review_required_via(&*lane.transports.plane, &workspace_id, id.as_str())
+        Some(fc) => live
+            .as_ref()
+            .and_then(|l| l.review_required)
             .unwrap_or(fc.review_required),
         None => false,
     };
@@ -421,9 +438,8 @@ pub(crate) fn publish_describe(
         PublishGate::Lands
     };
 
-    // GENESIS = no published `current` exists — the same signal the no-op guard above keys on
-    // (never followed AND never published from here). It decides the default placement below.
-    let genesis = !followed && sync.observed == GENESIS;
+    // GENESIS = no published `current` exists. It decides the default placement below.
+    let genesis = matches!(standing, Standing::Genesis);
 
     // Network reads AFTER the local scan: the workspace address (the share line).
     let directory: &dyn crate::plane::DirectorySource = &*lane.transports.directory;
@@ -474,21 +490,23 @@ pub(crate) fn publish_describe(
     let workspace = lane
         .workspace_ref()
         .or_else(|| workspace_ref_of_me(me.as_ref().map(|m| m.address.as_str())));
+    // The undo names the version `current` holds NOW — the live one, which is what a landed
+    // publish would move away from.
+    let undo_base = live
+        .as_ref()
+        .map_or(lock.base_commit.as_str(), |l| l.hex.as_str());
     let undo = undo_is_restorative(followed, gate)
-        .then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
-    // The predicted-conflict preview: when this copy is BEHIND the last-known observed `current`
-    // (the apply would refuse with a locally-detected CONFLICT — pull to rebase first), dry-run the
-    // three-way merge of the draft onto that current PURELY from bytes already on this machine: the
-    // draft was scanned above, the base renders from the sidecar store, and the observed version's
-    // bytes are present iff a prior sweep fetched them. Anything missing ⇒ NO preview (absent =
-    // unknown) — the describe gains no network call for it, per the describe contract.
-    let merge_preview = (sync.applied != sync.observed)
-        .then(|| {
+        .then(|| format!("topos revert {skill_name} --to {undo_base}"));
+    // The predicted-conflict preview: a PROPOSAL from an edited copy BEHIND the live current (the
+    // direct publish refused above) dry-runs the three-way merge of the draft onto that current
+    // PURELY from bytes already on this machine: the draft was scanned above, the base renders
+    // from the sidecar store, and the live version's bytes are present iff a prior sweep fetched
+    // them. Anything missing ⇒ NO preview (absent = unknown).
+    let merge_preview = match (&standing, &live) {
+        (Standing::Behind, Some(l)) => (|| {
             let store = Store::open(&sp.store).ok()?;
-            let theirs_commit = parse_hex32(&sync.observed_version_id).ok()?;
-            let theirs_digest =
-                sync_engine::store_bundle_digest_opt(&store, theirs_commit).ok()??;
-            let theirs = store.render_verified(theirs_commit, theirs_digest).ok()?;
+            let theirs_digest = sync_engine::store_bundle_digest_opt(&store, l.commit).ok()??;
+            let theirs = store.render_verified(l.commit, theirs_digest).ok()?;
             let base = store
                 .render_verified(
                     parse_hex32(&lock.base_commit).ok()?,
@@ -498,8 +516,9 @@ pub(crate) fn publish_describe(
             Some(super::merge_resolve::preview_merge(
                 &base, &scanned, &theirs,
             ))
-        })
-        .flatten();
+        })(),
+        _ => None,
+    };
     let origin_note = match doc::read_doc::<add::OriginDoc>(ctx.fs, &sp.origin)? {
         Some(o) => {
             let mut note = format!(
@@ -544,6 +563,30 @@ pub(crate) fn publish_describe(
     // `topos diff` there prints nothing at all, and a `review:` line pointing at an empty answer is
     // worse than no line.
     let review = (!genesis).then(|| review_command(&skill_name, from_machine, picked.as_ref()));
+    // What this publish CHANGES, counted against the live current (a genesis counts every file
+    // as new), and — for a copy equal to an older version — which version `current` is, spelled
+    // with the version the apply would mint from this very preimage.
+    let (current_files, current_message) = match &live {
+        Some(l) => current_bundle_files(ctx, &sp, id.as_str(), l)?,
+        None => (Vec::new(), None),
+    };
+    let changes = Some(change_summary(&current_files, &scanned));
+    let republish = match standing {
+        Standing::Forward(mut rep) => {
+            if let Some(l) = &live {
+                let base = PublishBase {
+                    parent: l.commit,
+                    expected: l.generation,
+                };
+                rep.new_version_id =
+                    predicted_version_id(ctx, &base, scanned.bundle_digest, message)?;
+            }
+            rep.current_message = current_message;
+            Some(rep)
+        }
+        _ => None,
+    };
+    let lands_in = lands_in(placement_target.as_deref(), live.as_ref());
     Ok(PublishPreview::Describe(Box::new(PublishDescribeData {
         skill: skill_name,
         skill_id: id.into_string(),
@@ -572,7 +615,317 @@ pub(crate) fn publish_describe(
         reference: transfer_reference,
         converted_from: transfer_from,
         kind: bundle_kind.tag(),
+        republish,
+        changes,
+        lands_in,
     })))
+}
+
+/// The workspace's LIVE `current` for a bundle — read from the server on every publish decision,
+/// never from the sidecar's cached notion of it. The cache is what this machine last saw; a
+/// `revert` run from another store (or another machine) moves `current` without touching it, and
+/// a publish that decided "already published" against the cache was lying about `current`.
+struct LiveCurrent {
+    commit: [u8; 32],
+    hex: String,
+    generation: u64,
+    digest_hex: String,
+    /// The channels currently carrying the bundle, when the delivery named them.
+    via_channels: Vec<String>,
+    /// The bundle's fresh protection, when the delivery named it.
+    review_required: Option<bool>,
+}
+
+/// Where the copy stands against the live `current` — the ONE classification both halves of the
+/// verb decide from, so the preview and the apply answer alike.
+enum Standing {
+    /// No server `current` exists: the first publish of a bundle authored here.
+    Genesis,
+    /// The copy is byte-identical to the live `current` — already published.
+    Matches,
+    /// The copy is a draft on the live `current` (its base IS that version).
+    Draft,
+    /// The copy EQUALS an older version than the live `current`: an unmodified copy of a version
+    /// a later move (a revert, a teammate's publish) superseded. Its content is carried forward
+    /// as a new version parented on the live `current` — re-publishing old content is legitimate
+    /// (a commit can restate an earlier tree); the reader is owed which version `current` is.
+    Forward(Republish),
+    /// The copy carries EDITS and its base is not the live `current`: a publish would land bytes
+    /// with the team's newer version nowhere inside them, and the plane's lineage fence refuses
+    /// it anyway. `topos update` merges first.
+    Behind,
+}
+
+/// The version a publish parents on, and the generation the plane's compare-and-swap expects.
+/// `None` is the genesis shape (a zero-parent commit at generation 0).
+struct PublishBase {
+    parent: [u8; 32],
+    expected: u64,
+}
+
+/// One file of a version, in the shape the preview's change count compares.
+struct BundleFile {
+    path: String,
+    mode: FileMode,
+    bytes: Vec<u8>,
+}
+
+/// Read the live `current` for `skill_id` from the workspace: the delivery snapshot first (the
+/// same read the update sweep drives from — it names the version, its generation, its digest,
+/// and the channels carrying it), then the pointer itself for a bundle the delivery does not
+/// name (a followed-but-excluded copy). `Ok(None)` = the workspace serves no current for it.
+///
+/// # Errors
+/// [`ClientError::Plane`] on a transport fault — a publish decided against a current this run
+/// could not read would be exactly the lie this read exists to prevent; nothing is published.
+fn read_live_current(
+    ctx: &Ctx<'_>,
+    lane: &super::WriteLane,
+    sp: &sidecar::SkillPaths,
+    skill_id: &str,
+    name: &str,
+) -> Result<Option<LiveCurrent>, ClientError> {
+    let refuse = |m: String| {
+        ClientError::Plane(format!(
+            "could not read the current version of '{name}' from {}/{}: {m} — nothing was \
+             published; retry",
+            lane.host, lane.workspace_name
+        ))
+    };
+    // Bind the bundle to the lane's workspace on the read transport FIRST: every per-skill read
+    // below and after (the pointer, a version's bytes for the change count or the forward
+    // commit's backfill) answers "not served" for an unbound skill — and a brand-new arrival, or
+    // a bundle only a checkout delivers, is not in the cache the transport seeds from.
+    ctx.plane.bind_skill(&lane.workspace_id, skill_id);
+    match lane.transports.plane.fetch_delivery(&lane.workspace_id) {
+        Ok(snapshot) => {
+            if let Some(s) = snapshot.skills.into_iter().find(|s| s.skill_id == skill_id) {
+                return Ok(Some(LiveCurrent {
+                    commit: s.version_id,
+                    hex: to_hex(&s.version_id),
+                    generation: s.generation,
+                    digest_hex: to_hex(&s.bundle_digest),
+                    via_channels: s.via_channels,
+                    review_required: Some(s.review_required),
+                }));
+            }
+        }
+        Err(PlaneError::NotFound) => {}
+        Err(PlaneError::UpdateRequired { min }) => return Err(ClientError::UpdateRequired { min }),
+        Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m)) => {
+            return Err(refuse(m));
+        }
+    }
+    // The delivery does not name it — ask for the pointer itself.
+    match ctx.plane.get_current(skill_id, None) {
+        Ok(PointerFetch::Record(rec)) => {
+            let commit = sync_engine::scoped_version_id(&rec, skill_id, &lane.workspace_id)
+                .ok_or_else(|| {
+                    ClientError::WireInvalid(
+                        "the current pointer is scoped to a different workspace/skill".to_owned(),
+                    )
+                })?;
+            // The digest: from the store when this machine holds the version, else from the
+            // verified bytes themselves.
+            let store = Store::open(&sp.store)?;
+            let digest = match sync_engine::store_bundle_digest_opt(&store, commit)? {
+                Some(d) => d,
+                None => contribute::fetch_verified_bundle(ctx, skill_id, commit)?.0,
+            };
+            Ok(Some(LiveCurrent {
+                commit,
+                hex: to_hex(&commit),
+                generation: rec.record.generation,
+                digest_hex: to_hex(&digest),
+                via_channels: Vec::new(),
+                review_required: None,
+            }))
+        }
+        Ok(PointerFetch::NotModified) => Err(ClientError::Corrupt(
+            "an unconditional current read returned not-modified".to_owned(),
+        )),
+        Err(PlaneError::NotFound) => Ok(None),
+        Err(PlaneError::UpdateRequired { min }) => Err(ClientError::UpdateRequired { min }),
+        Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m)) => {
+            Err(refuse(m))
+        }
+    }
+}
+
+/// [`read_live_current`] for a bundle that HAS a current (followed, or published from here). The
+/// ONE place the sidecar's cached notion still stands: when the server names NO current for the
+/// bundle on either read (the workspace serves it to this login no longer, or names it under
+/// another record). A decision made there cannot claim "already published" against a newer
+/// version — the server just said there is none it can see — and the plane's compare-and-swap
+/// still fences the write, so a stale base ends in a typed CONFLICT, never a silent replace.
+fn live_or_cached(
+    ctx: &Ctx<'_>,
+    lane: &super::WriteLane,
+    sp: &sidecar::SkillPaths,
+    skill_id: &str,
+    lock: &Lock,
+    sync: &SyncState,
+) -> Result<LiveCurrent, ClientError> {
+    if let Some(live) = read_live_current(ctx, lane, sp, skill_id, &lock.name)? {
+        return Ok(live);
+    }
+    let commit = parse_hex32(&sync.observed_version_id)?;
+    // The observed version's digest: the lock's when it IS the applied base, else the store's
+    // when the version is held here — and otherwise unknown, which classifies as nothing (an
+    // empty digest matches no copy, so "already published" is never claimed on a guess).
+    let digest_hex = if sync.observed_version_id == lock.base_commit {
+        lock.bundle_digest.clone()
+    } else {
+        let store = Store::open(&sp.store)?;
+        sync_engine::store_bundle_digest_opt(&store, commit)?
+            .map(|d| to_hex(&d))
+            .unwrap_or_default()
+    };
+    Ok(LiveCurrent {
+        commit,
+        hex: sync.observed_version_id.clone(),
+        generation: sync.observed,
+        digest_hex,
+        via_channels: Vec::new(),
+        review_required: None,
+    })
+}
+
+/// Classify the scanned copy (`digest_hex`) against the live `current` and the version this
+/// store applied (`lock`). `live` is `None` only for a genesis bundle (the caller reads it for
+/// every bundle that has a current).
+fn standing(live: Option<&LiveCurrent>, lock: &Lock, digest_hex: &str) -> Standing {
+    let Some(l) = live else {
+        return Standing::Genesis;
+    };
+    if digest_hex == l.digest_hex {
+        return Standing::Matches;
+    }
+    if l.hex == lock.base_commit {
+        return Standing::Draft;
+    }
+    if digest_hex == lock.bundle_digest {
+        return Standing::Forward(Republish {
+            current_version_id: l.hex.clone(),
+            current_message: None,
+            copy_version_id: lock.base_commit.clone(),
+            new_version_id: String::new(),
+        });
+    }
+    Standing::Behind
+}
+
+/// The live current's files + its history line: from this store when the version is held here,
+/// else fetched and re-verified (the same bytes that reproduce the id are the bytes compared).
+fn current_bundle_files(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    skill_id: &str,
+    live: &LiveCurrent,
+) -> Result<(Vec<BundleFile>, Option<String>), ClientError> {
+    let store = Store::open(&sp.store)?;
+    if let Some(digest) = sync_engine::store_bundle_digest_opt(&store, live.commit)? {
+        let bundle = store.render_verified(live.commit, digest)?;
+        let message = store
+            .read_commit_meta(live.commit)
+            .ok()
+            .map(|node| node.message);
+        return Ok((
+            bundle
+                .files
+                .into_iter()
+                .map(|f| BundleFile {
+                    path: f.path,
+                    mode: f.mode,
+                    bytes: f.bytes,
+                })
+                .collect(),
+            message,
+        ));
+    }
+    let (_, fetched) = contribute::fetch_verified_bundle(ctx, skill_id, live.commit)?;
+    Ok((
+        fetched
+            .files
+            .into_iter()
+            .map(|f| BundleFile {
+                path: f.path,
+                mode: f.mode,
+                bytes: f.bytes,
+            })
+            .collect(),
+        Some(fetched.message),
+    ))
+}
+
+/// Count what `draft` changes against `current`, per file: added, removed, changed in content or
+/// mode — and, of those, the files that become executable. A genesis publish counts against
+/// nothing, so every file is added.
+fn change_summary(current: &[BundleFile], draft: &scan::ScannedBundle) -> ChangeSummary {
+    use std::collections::{BTreeMap, BTreeSet};
+    let base: BTreeMap<&str, (FileMode, &[u8])> = current
+        .iter()
+        .map(|f| (f.path.as_str(), (f.mode, f.bytes.as_slice())))
+        .collect();
+    let mut out = ChangeSummary::default();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for f in &draft.files {
+        seen.insert(f.path.as_str());
+        let exec = f.mode == FileMode::Executable;
+        match base.get(f.path.as_str()) {
+            None => {
+                out.files += 1;
+                out.added += 1;
+                if exec {
+                    out.executable += 1;
+                }
+            }
+            Some((mode, bytes)) => {
+                if *mode != f.mode || *bytes != f.bytes.as_slice() {
+                    out.files += 1;
+                    if exec && *mode != FileMode::Executable {
+                        out.executable += 1;
+                    }
+                }
+            }
+        }
+    }
+    out.removed = base.keys().filter(|p| !seen.contains(*p)).count() as u64;
+    out.files += out.removed;
+    out
+}
+
+/// The channels the published version reaches: the placement this apply makes (`--to`, or the
+/// genesis default) first, then the channels already carrying the bundle.
+fn lands_in(placement_target: Option<&str>, live: Option<&LiveCurrent>) -> Vec<String> {
+    let mut out: Vec<String> = placement_target.map(str::to_owned).into_iter().collect();
+    if let Some(l) = live {
+        for c in &l.via_channels {
+            if !out.contains(c) {
+                out.push(c.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The version id a forward publish MINTS — the same preimage the apply commits (parent = the
+/// live current, tree = the copy's digest, author = this device, message = `-m` or the default),
+/// so the preview names the version the receipt will.
+fn predicted_version_id(
+    ctx: &Ctx<'_>,
+    base: &PublishBase,
+    digest: [u8; 32],
+    message: Option<&str>,
+) -> Result<String, ClientError> {
+    let id = identity::commit_id(&Commit {
+        parents: &[base.parent],
+        tree: digest,
+        author: &ctx.device_id,
+        message: message.unwrap_or(PUBLISH_MESSAGE),
+    })
+    .map_err(|_| ClientError::Corrupt("commit id preimage".to_owned()))?;
+    Ok(to_hex(&id))
 }
 
 /// The already-published answer: nothing to ship, and — when the edits are in the OTHER scope's
@@ -674,26 +1027,6 @@ fn pick_copy(
 /// copies left alone — populated when the folder was a CHOICE: a `--dest` among several edited
 /// copies, or (through `cross_scope`) a copy in a scope other than the one the command stands in.
 ///
-/// The version the CWD project's `topos.lock` holds this bundle at, when it is not the one just
-/// shipped — the repo keeps running its locked version until someone runs `topos update` there,
-/// and the receipt says so the first time rather than letting the author wonder.
-fn project_locked_behind(ctx: &Ctx<'_>, name: &str, shipped: &str) -> Option<String> {
-    let roots = ctx.roots.as_ref()?;
-    let cwd = roots.cwd.clone()?;
-    let dir = crate::manifest::scopes::nearest_manifest_dir(ctx.fs, &cwd, Some(&roots.home))?;
-    let bytes = ctx
-        .fs
-        .read_opt(&dir.join(crate::manifest::lock::LOCK_FILE))
-        .ok()??;
-    let doc = crate::manifest::lock::LockDoc::parse(&String::from_utf8_lossy(&bytes)).ok()?;
-    let locked = doc.skills.get(name)?.version.clone()?;
-    (locked != shipped).then_some(locked)
-}
-
-/// The two disclosure fields a publish carries — the folder shipped FROM and the other edited
-/// copies left alone — populated when the folder was a CHOICE: a `--dest` among several edited
-/// copies, or (through `cross_scope`) a copy in a scope other than the one the command stands in.
-///
 /// With a single edited copy in the standing scope there is nothing to say: that copy IS the draft,
 /// a `--dest` naming it asks for exactly what a bare publish would do, and a `from …` line would
 /// name a folder the reader never had to choose between.
@@ -705,26 +1038,6 @@ fn from_disclosure(
         Some(p) => (Some(p.spelling.display.clone()), p.others_edited.clone()),
         None => (cross_scope, Vec::new()),
     }
-}
-
-/// The server's FRESH per-skill protection for the describe's gate, read over the session lane's delivery
-/// transport — the delivery read carries it (each delivered skill's re-resolved `review_required`
-/// posture). It is the authoritative answer the apply will see, unlike the sidecar's cached follow-state,
-/// which is stamped at the last delivery reconcile and can lie in EITHER direction after an owner tightens
-/// or loosens `protect`. `None` on an offline/failed read or a skill the delivery does not name (a
-/// followed-but-excluded copy) — the caller falls back to the cached value, so the describe still works
-/// offline.
-fn fresh_review_required_via(
-    delivery: &dyn crate::plane::DeliverySource,
-    workspace_id: &str,
-    skill_id: &str,
-) -> Option<bool> {
-    let snapshot = delivery.fetch_delivery(workspace_id).ok()?;
-    snapshot
-        .skills
-        .into_iter()
-        .find(|s| s.skill_id == skill_id)
-        .map(|s| s.review_required)
 }
 
 /// Resolve `source_str` (the target minus any `@<digest>` pin) to a TRACKED skill NAME the rest of the
@@ -990,10 +1303,6 @@ fn enrolled_publish(
             global,
         });
     }
-    // Its neighbour: this copy does not include the served `current`. Refused here, before the
-    // transport is built and before a byte of the draft is scanned — the same answer the describe gave.
-    behind_guard(ctx, &sp, skill_name, propose, global)?;
-
     let transport: &dyn crate::plane::ContributeSource = &*lane.transports.contribute;
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
@@ -1048,6 +1357,13 @@ fn enrolled_publish(
         .followed()
         .into_iter()
         .any(|(fid, _)| fid == id.as_str());
+    let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
+        .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
+    // The receipt's two live facts: the version the undo puts the team back on (the live current
+    // this publish moves away from), and — for a copy equal to an older version — which version
+    // `current` was. Both settle in the fresh-op arm; a WAL replay keeps the cached base.
+    let mut undo_base = lock.base_commit.clone();
+    let mut republish: Option<Republish> = None;
 
     // Resume a crashed prior publish/propose for this skill (replay the SAME op_id) before minting a new
     // one — the plane returns the byte-identical receipt, so there is no double-advance / duplicate commit.
@@ -1080,44 +1396,90 @@ fn enrolled_publish(
             }
             pending
         }
-        None => match build_publish_op(
-            ctx,
-            &sp,
-            id.as_str(),
-            &lock,
-            &workspace_id,
-            propose,
-            channel,
-            &scanned,
-            scanned.bundle_digest,
-            message,
-            bundle_kind.tag(),
-            global,
-        )? {
-            Some(rec) => rec,
-            // NO-CHANGE means an earlier publish of these bytes already LANDED — the retry a
-            // failed local rewrite asks for resolves here, so the pending governance rewrite is
-            // re-attempted (idempotent: with no matching path line it is a no-op) BEFORE the
-            // already-published answer is returned.
-            None => {
-                let dirs: Vec<std::path::PathBuf> = map
-                    .placements
-                    .iter()
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                let _ = super::rewrite_to_governed(
-                    outer_ctx,
-                    &lock.name,
-                    &lane.host,
-                    &lane.workspace_name,
-                    &dirs,
-                );
-                return Ok(PublishOutcome::NoChanges(no_changes(
-                    lock.name.clone(),
-                    other_draft,
-                )));
+        None => {
+            // THE SERVER'S CURRENT IS THE TRUTH (see the describe's twin): the copy is classified
+            // against the live current, read here, never against the cache.
+            let live = if followed || sync.observed != GENESIS {
+                Some(live_or_cached(ctx, &lane, &sp, id.as_str(), &lock, &sync)?)
+            } else {
+                None
+            };
+            let standing = standing(live.as_ref(), &lock, &digest_hex);
+            let base = match (&standing, &live) {
+                // The copy IS the live current — an earlier publish of these bytes already LANDED
+                // (the retry a failed local rewrite asks for resolves here), so the pending
+                // governance rewrite is re-attempted (idempotent: with no matching path line it is
+                // a no-op) BEFORE the already-published answer is returned.
+                (Standing::Matches, _) => {
+                    let dirs: Vec<std::path::PathBuf> = map
+                        .placements
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    let _ = super::rewrite_to_governed(
+                        outer_ctx,
+                        &lock.name,
+                        &lane.host,
+                        &lane.workspace_name,
+                        &dirs,
+                    );
+                    return Ok(PublishOutcome::NoChanges(no_changes(
+                        lock.name.clone(),
+                        other_draft,
+                    )));
+                }
+                // An EDITED copy behind the live current: the plane's lineage fence would refuse
+                // it; refused here, typed, with the one command that merges first.
+                (Standing::Behind, _) if !propose => {
+                    return Err(ClientError::PublishBehind {
+                        skill: skill_name.to_owned(),
+                        global,
+                    });
+                }
+                // A PROPOSAL from behind moves no pointer and meets no fence: it stays built on
+                // the version this copy applied — a reviewer decides.
+                (Standing::Behind, Some(_)) => Some(PublishBase {
+                    parent: parse_hex32(&lock.base_commit)?,
+                    expected: sync.observed,
+                }),
+                (Standing::Genesis, _) | (_, None) => None,
+                // A draft on the live current, or an older version carried forward: both parent
+                // on the live current, and the plane's compare-and-swap expects ITS generation.
+                (Standing::Draft | Standing::Forward(_), Some(l)) => Some(PublishBase {
+                    parent: l.commit,
+                    expected: l.generation,
+                }),
+            };
+            if let Some(l) = &live {
+                undo_base = l.hex.clone();
             }
-        },
+            if let (Standing::Forward(mut rep), Some(l), Some(b)) = (standing, &live, &base) {
+                // The forward commit parents on a version this store may never have fetched (a
+                // revert made elsewhere) — backfill it so the local history links up and the
+                // authoring commit's strict parent check holds; its history line rides the receipt.
+                sync_engine::prefetch_version(ctx, &id, &l.hex)?;
+                rep.current_message = Store::open(&sp.store)?
+                    .read_commit_meta(l.commit)
+                    .ok()
+                    .map(|node| node.message);
+                rep.new_version_id = predicted_version_id(ctx, b, scanned.bundle_digest, message)?;
+                republish = Some(rep);
+            }
+            build_publish_op(
+                ctx,
+                &sp,
+                id.as_str(),
+                &lock,
+                &workspace_id,
+                propose,
+                channel,
+                &scanned,
+                scanned.bundle_digest,
+                message,
+                bundle_kind.tag(),
+                base.as_ref(),
+            )?
+        }
     };
 
     let receipt = contribute::run_write(ctx, transport, &sp, &rec, None)?;
@@ -1140,6 +1502,8 @@ fn enrolled_publish(
         followed,
         picked.as_ref(),
         &disclosure,
+        &undo_base,
+        republish,
     )?;
     // GOVERNANCE TRANSFER, by default: a landed publish — OR an opened proposal (`--propose`,
     // the reviewed-bundle downgrade) — of a bundle some manifest referenced as a LOCAL PATH
@@ -1445,70 +1809,15 @@ fn is_full_digest(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Whether this copy does NOT include the served `current`: the served generation has not been
-/// materialized here, so anything published from these bytes would land with the team's newer version
-/// nowhere inside it.
-///
-/// A GENESIS bundle is exempt by construction — its baseline is laid with `applied == observed`, so a
-/// never-published local skill's first publish never reads as behind.
-fn is_behind(sync: &SyncState) -> bool {
-    sync.applied != sync.observed
-}
-
-/// The behind guard both publish preflights run, beside the `conflict.json` one.
-///
-/// It is the SAME precondition the op builder has always enforced ([`build_publish_op`]) and the plane's
-/// own lineage fence: a candidate whose first parent is not the version `current` names is refused
-/// server-side, so this is that refusal caught locally, one step earlier and for free. Hoisting it to the
-/// preflight is what lets the DESCRIBE answer it too — previewing a publish the apply would refuse is two
-/// steps to reach one answer.
-///
-/// **`--propose` is exempt**, and that exemption is the point rather than a hole: a proposal moves no
-/// pointer, so no fence applies to it and nothing of the team's can be replaced by it. Refusing it would
-/// block the one act a behind copy can always safely take — asking the team to look.
-///
-/// `global` is the RESOLVED store's scope, handed in by the caller rather than re-derived from
-/// `ctx` — the one command this refusal offers (`topos update[ -g] <skill>`) must drive the copy
-/// the publish resolved, and a publish standing in a checkout routinely resolves the machine's.
-///
-/// # Errors
-/// [`ClientError::PublishBehind`] naming the skill; [`ClientError::Corrupt`] when `sync.json` is missing.
-fn behind_guard(
-    ctx: &Ctx<'_>,
-    sp: &sidecar::SkillPaths,
-    skill: &str,
-    propose: bool,
-    global: bool,
-) -> Result<(), ClientError> {
-    let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
-        .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
-    if !propose && is_behind(&sync) {
-        return Err(ClientError::PublishBehind {
-            skill: skill.to_owned(),
-            global,
-        });
-    }
-    Ok(())
-}
-
 /// Build the fresh op from the already-scanned draft (`scanned` / `digest` were computed + gated in
-/// `enrolled_publish`): precondition the state, compute the byte-identical `(commit_id, bundle_digest)`,
-/// commit the candidate into the local store (renderable for a replay + local history), and assemble the
-/// [`OpRecord`] (the WAL write itself happens in `run_write`). Runs ONLY in the fresh-op arm of
-/// `enrolled_publish`'s WAL match — a crashed pending op replays untouched, so this is the right place for
-/// the no-op refusal (a settled-but-unacked publish must still replay to its byte-identical receipt).
-///
-/// `Ok(None)` = there is NOTHING to ship: the draft is byte-identical to the published `current` (a
-/// published skill only — a genesis skill's first publish is never a no-op). The caller reports the
-/// converged state as the success it is.
-///
-/// `global` is the RESOLVED store's scope, passed in for the same reason [`behind_guard`] takes it:
-/// the behind refusal names the copy the publish acts on, which is not always the copy the reader
-/// is standing next to.
+/// `enrolled_publish`, and `base` is the version it parents on — the LIVE current the caller read,
+/// or `None` for the genesis shape). Computes the byte-identical `(commit_id, bundle_digest)`,
+/// commits the candidate into the local store (renderable for a replay + local history), and
+/// assembles the [`OpRecord`] (the WAL write itself happens in `run_write`). Runs ONLY in the
+/// fresh-op arm of `enrolled_publish`'s WAL match — a crashed pending op replays untouched.
 ///
 /// # Errors
-/// [`ClientError::Conflict`] if the local state is behind (a newer `current` not yet applied — pull to
-/// rebase); a store / scan failure otherwise.
+/// A store / scan failure; [`ClientError::Corrupt`] on a commit-id preimage fault.
 #[allow(clippy::too_many_arguments)]
 fn build_publish_op(
     ctx: &Ctx<'_>,
@@ -1522,49 +1831,19 @@ fn build_publish_op(
     digest: [u8; 32],
     message: Option<&str>,
     bundle_kind: Option<String>,
-    global: bool,
-) -> Result<Option<OpRecord>, ClientError> {
+    base: Option<&PublishBase>,
+) -> Result<OpRecord, ClientError> {
     // The commit message: `-m <message>` when given (folded into `commit_id`, so it changes the version
     // identity), else the default. It also rides the local store commit, so a WAL replay re-renders the
     // byte-identical candidate (`render_candidate` reads the message back from the store).
     let commit_message = message.unwrap_or(PUBLISH_MESSAGE);
-    let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
-        .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
-
-    // Be current before publishing: a behind state (a newer `current` not yet applied) would build a
-    // candidate whose first parent is not the pointed version, which the plane's lineage fence refuses
-    // — surface it as a locally-detected refusal (update to rebase), never a confusing server DENIED.
-    // The preflight already answered this for both entry points; the check stands here as the op
-    // builder's own precondition, so a future caller that reaches it another way still cannot mint an
-    // op the plane will reject. A PROPOSAL moves no pointer and meets no fence, so it is exempt here
-    // exactly as it is in [`behind_guard`] — the two must not disagree, or a described proposal would
-    // die at the op builder.
-    if !propose && is_behind(&sync) {
-        return Err(ClientError::PublishBehind {
-            skill: lock.name.clone(),
-            global,
-        });
-    }
-
     let digest_hex = to_hex(&digest);
 
-    // The no-op (the apply-path twin of the describe's guard): once a publish has advanced `observed`
-    // past GENESIS, a draft byte-identical to `current` (`lock.bundle_digest`) has nothing to ship — mint
-    // no op rather than an empty version parented on the last. Placed AFTER the behind-check (a stale base
-    // must surface as CONFLICT, not a no-op) and only in this fresh-op arm (a crashed op still replays).
-    // A never-published GENESIS skill (`observed == GENESIS`) is exempt: its `lock.bundle_digest` equals the
-    // adopted draft by construction, so its first publish is never a no-op. This also covers an
-    // identical-bytes `--propose` (both kinds flow through here), matching the describe.
-    if sync.observed != GENESIS && digest_hex == lock.bundle_digest {
-        return Ok(None);
-    }
-
     // Genesis (no `current` yet) is a zero-parent commit at generation 0; a normal publish parents on
-    // `current`.
-    let (parents, expected): (Vec<[u8; 32]>, u64) = if sync.observed == GENESIS {
-        (Vec::new(), GENESIS)
-    } else {
-        (vec![parse_hex32(&lock.base_commit)?], sync.observed)
+    // the live current.
+    let (parents, expected): (Vec<[u8; 32]>, u64) = match base {
+        None => (Vec::new(), GENESIS),
+        Some(b) => (vec![b.parent], b.expected),
     };
 
     // The byte-identical id the plane re-derives (I-COMMIT-PARITY): author = the device id, message = the
@@ -1604,7 +1883,7 @@ fn build_publish_op(
         .ok()
         .flatten()
         .map(|o| origin_to_wire(&o.origin));
-    Ok(Some(OpRecord {
+    Ok(OpRecord {
         schema_version: PERSISTED_SCHEMA_VERSION,
         upstream,
         op_id,
@@ -1628,7 +1907,7 @@ fn build_publish_op(
         // the catalog can never learn a different answer from a retry than from the original.
         bundle_kind,
         last_receipt: None,
-    }))
+    })
 }
 
 /// What a publish's SCOPE choice owes the receipt: the folder it shipped from when that folder was
@@ -1663,6 +1942,8 @@ fn map_outcome(
     followed: bool,
     picked: Option<&super::dest_select::SelectedCopy>,
     disclosure: &ScopeDisclosure,
+    undo_base: &str,
+    republish: Option<Republish>,
 ) -> Result<PublishOutcome, ClientError> {
     // Both landed shapes name their destination from the workspace's own ADDRESS — ONE
     // best-effort read, AFTER the write; a failure just leaves the lines off, it never fails a
@@ -1717,22 +1998,20 @@ fn map_outcome(
             // The teammate handoff — the members' deep link above 404s for a non-member, so
             // recruiting a teammate takes this join line instead.
             let invite_line = address.as_deref().and_then(teammate_invite_line);
-            // The base commit is named SHORT here — `revert --to` resolves a unique prefix of 8+
-            // chars, so the receipt hands back the same 12-char spelling every other surface prints.
+            // The version the undo restores is the LIVE current this publish moved away from —
+            // named SHORT: `revert --to` resolves a unique prefix of 8+ chars, so the receipt
+            // hands back the same 12-char spelling every other surface prints.
             let undo = landed_undo_is_restorative(followed, rec.expected_generation).then(|| {
                 format!(
                     "topos revert {skill_name} --to {}",
-                    crate::render::short(&lock.base_commit)
+                    crate::render::short(undo_base)
                 )
             });
             let (from_placement, other_edited) =
                 from_disclosure(picked, disclosure.cross_from.clone());
-            Ok(PublishOutcome::Published(PublishData {
-                project_locked_version: project_locked_behind(
-                    ctx,
-                    skill_name,
-                    &rec.candidate_commit,
-                ),
+            Ok(PublishOutcome::Published(Box::new(PublishData {
+                project_lock: None,
+                republish,
                 skill_id: rec.skill_id.clone(),
                 name: skill_name.to_owned(),
                 version_id: rec.candidate_commit.clone(),
@@ -1758,7 +2037,7 @@ fn map_outcome(
                 from_machine: disclosure.from_machine,
                 other_scope_draft: disclosure.other_draft.clone(),
                 other_edited,
-            }))
+            })))
         }
         TerminalOutcome::NeedsReview => {
             // The `--to` placement applies on the proposal arm too — its outcome rides the
@@ -1784,7 +2063,7 @@ fn map_outcome(
             // describe predicted and the landed receipt states.
             let (from_placement, other_edited) =
                 from_disclosure(picked, disclosure.cross_from.clone());
-            Ok(PublishOutcome::Proposed(ProposeData {
+            Ok(PublishOutcome::Proposed(Box::new(ProposeData {
                 proposal: format!("{skill_name}@{}", rec.candidate_commit),
                 base_version_id: lock.base_commit.clone(),
                 title: skill_name.to_owned(),
@@ -1805,7 +2084,7 @@ fn map_outcome(
                 from_machine: disclosure.from_machine,
                 other_scope_draft: disclosure.other_draft.clone(),
                 other_edited,
-            }))
+            })))
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
             skill: skill_name.to_owned(),

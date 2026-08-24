@@ -873,7 +873,7 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
     )
     .unwrap();
     let data = match outcome {
-        ops::PublishOutcome::Published(d) => d,
+        ops::PublishOutcome::Published(d) => *d,
         other => panic!("the publish LANDED: {other:?}"),
     };
     let pending = data
@@ -1011,7 +1011,7 @@ fn a_landed_publish_leaves_its_own_version_current_before_any_sweep() {
     )
     .unwrap();
     let data = match outcome {
-        ops::PublishOutcome::Published(d) => d,
+        ops::PublishOutcome::Published(d) => *d,
         other => panic!("the publish LANDED: {other:?}"),
     };
     assert_ne!(data.version_id, base, "the publish minted a new version");
@@ -1109,7 +1109,7 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
     )
     .unwrap();
     let data = match outcome {
-        ops::PublishOutcome::Published(d) => d,
+        ops::PublishOutcome::Published(d) => *d,
         other => panic!("the publish LANDED: {other:?}"),
     };
     assert!(
@@ -1213,7 +1213,7 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
     )
     .unwrap();
     let data = match outcome {
-        ops::PublishOutcome::Published(d) => d,
+        ops::PublishOutcome::Published(d) => *d,
         other => panic!("the publish LANDED: {other:?}"),
     };
     let skipped = data

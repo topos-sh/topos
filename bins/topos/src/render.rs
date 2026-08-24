@@ -3497,17 +3497,12 @@ pub(crate) fn publish_describe_tty(
     if let Some(kind) = &data.kind {
         s.push_str(&format!("\n  kind: {kind}"));
     }
-    // The gate, as the sentence it means for the person running the command — not the protection
-    // level's name.
-    let gate = match data.gate {
-        PublishGate::Lands => {
-            "No review required — it becomes immediately published in the workspace."
-        }
-        PublishGate::Proposal => {
-            "Review required — will require approval by a reviewer after publishing."
-        }
-    };
-    s.push_str(&format!("\n  {gate}"));
+    // A copy that EQUALS an older version than the live current: which version `current` is,
+    // and what the apply does with the copy — stated before anything else about the ship, because
+    // it is the one surprise this preview can carry.
+    if let Some(rep) = &data.republish {
+        s.push_str(&format!("\n  {}", republish_line(rep, false)));
+    }
     // What happens to the copies this publish does NOT ship: nothing. Each keeps its bytes and
     // becomes an ordinary draft ahead of the version about to land — the same shape a teammate's
     // publish leaves behind — so the reader knows the other folder is not being chosen against.
@@ -3525,15 +3520,6 @@ pub(crate) fn publish_describe_tty(
     }
     if data.is_revert {
         s.push_str("\n  this restores earlier bytes (a revert), shipped through the same gate");
-    }
-    if !data.placements.is_empty() {
-        s.push_str(&format!(
-            "\n  places into channel: {}",
-            data.placements.join(", ")
-        ));
-        if let Some(note) = &data.placement_note {
-            s.push_str(&format!(" — {note}"));
-        }
     }
     // A behind copy reaches the describe only on the `--propose` arm (the behind guard refuses the
     // direct one first), and a proposal from behind is fine — a reviewer decides. What they are
@@ -3563,11 +3549,108 @@ pub(crate) fn publish_describe_tty(
     if let Some(review) = &data.review {
         s.push_str(&format!("\nreview: {review}"));
     }
-    s.push_str(&format!(
-        "\nNothing has changed yet — apply with:\n  {}",
-        argv_line(yes_argv)
-    ));
+    s.push('\n');
+    s.push_str(&preview_apply_line(data, yes_argv));
     s
+}
+
+/// The publish preview's closing line — what a cold reader standing on real edits needs from a
+/// preview, in one sentence each: that nothing happened, what the change is (counted against the
+/// live current), where it lands and whether review gates it, and the exact apply. ("Nothing has
+/// changed yet" read as "no diff" to that reader.)
+fn preview_apply_line(
+    data: &topos_types::results::PublishDescribeData,
+    yes_argv: &[String],
+) -> String {
+    use topos_types::results::PublishGate;
+    let counts = data
+        .changes
+        .as_ref()
+        .map(|c| format!(" {}", change_phrase(c)))
+        .unwrap_or_default();
+    let lands = if data.lands_in.is_empty() {
+        // The catalog alone: the address the describe's header names, and no channel.
+        let ws = data
+            .workspace
+            .as_ref()
+            .map(|w| w.address())
+            .or_else(|| data.workspace_display_name.clone())
+            .unwrap_or_else(|| data.workspace_id.clone());
+        format!("Lands in {ws} (no channel)")
+    } else {
+        format!("Lands in {}", data.lands_in.join(", "))
+    };
+    let note = data
+        .placement_note
+        .as_ref()
+        .map(|n| format!(" ({n})"))
+        .unwrap_or_default();
+    let gate = match data.gate {
+        PublishGate::Lands => "no review required",
+        PublishGate::Proposal => "review required — opens a proposal",
+    };
+    format!(
+        "Preview only — nothing published.{counts} {lands}{note}, {gate}. Apply: {}",
+        argv_line(yes_argv)
+    )
+}
+
+/// The change count as a phrase: `4 files changed (2 added, 1 executable)`, or — against no
+/// current at all — `7 files, all new (1 executable)`. Zero parts are left out.
+fn change_phrase(c: &topos_types::results::ChangeSummary) -> String {
+    let files = |n: u64| {
+        if n == 1 {
+            "1 file".to_owned()
+        } else {
+            format!("{n} files")
+        }
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let all_new = c.files > 0 && c.added == c.files;
+    if !all_new && c.added > 0 {
+        parts.push(format!("{} added", c.added));
+    }
+    if c.removed > 0 {
+        parts.push(format!("{} removed", c.removed));
+    }
+    if c.executable > 0 {
+        parts.push(format!("{} executable", c.executable));
+    }
+    let detail = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    };
+    if all_new {
+        format!("{}, all new{detail}.", files(c.files))
+    } else {
+        format!("{} changed{detail}.", files(c.files))
+    }
+}
+
+/// The one line both publish surfaces print for a copy that equals an OLDER version than the
+/// live current — the preview in the present tense, the receipt in the past. Versions are named
+/// short (the same 12-char spelling every surface prints; `revert --to` resolves it).
+fn republish_line(rep: &topos_types::results::Republish, landed: bool) -> String {
+    let message = rep
+        .current_message
+        .as_ref()
+        .map(|m| format!(" (\"{m}\")"))
+        .unwrap_or_default();
+    let current = short(&rep.current_version_id);
+    let copy = short(&rep.copy_version_id);
+    let new = short(&rep.new_version_id);
+    if landed {
+        format!(
+            "current was {current}{message}; your copy equaled {copy} — published {copy}'s \
+             content forward as {new}"
+        )
+    } else {
+        format!(
+            "current is {current}{message}; your copy equals {copy} — publishing {copy}'s \
+             content forward as {new}"
+        )
+    }
 }
 
 /// The OTHER scope's copy, in the words the same-scope sentence uses ([`other_copies_clause`]) plus
@@ -3706,14 +3789,19 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
             other_scope_clause(other, &data.name, false)
         ));
     }
-    // The cwd project keeps running its LOCKED version until someone updates it there — said
-    // once, on the receipt, so the author never wonders why the repo did not move.
-    if let Some(locked) = &data.project_locked_version {
+    // A copy that EQUALLED an older version than the live current: the receipt names which
+    // version `current` was, so nobody reads "Published" as "your edits landed" over a copy that
+    // restated an earlier version — the same fact the preview stated, in the past tense.
+    if let Some(rep) = &data.republish {
+        out.push_str(&format!("\n{}", republish_line(rep, true)));
+    }
+    // The cwd project's lock MOVED with this publish (a commit moves `HEAD`): the checkout runs
+    // the new version at once, and the file it records that in wants committing.
+    if data.project_lock.is_some() {
         out.push_str(&format!(
-            "\nthis project is locked to {}@{} — `topos update {}` takes your change here",
+            "\nthis project's topos.lock now records {}@{} — commit it",
             data.name,
-            short(locked),
-            data.name
+            short(&data.version_id)
         ));
     }
     // The KIND the catalog now records — stated because it is what decides how every receiving
@@ -3866,6 +3954,15 @@ pub(crate) fn revert_tty(data: &RevertData) -> String {
         s.push_str(&format!(" in {}", ws.address()));
     }
     s.push_str(" — nothing was deleted; move current forward again to redo.");
+    // The cwd project's lock MOVED with the revert: the checkout runs the restored version at
+    // its next update, and the file it records that in wants committing.
+    if data.project_lock.is_some() {
+        s.push_str(&format!(
+            "\nthis project's topos.lock now records {}@{} — commit it",
+            data.name,
+            short(&data.new_version_id)
+        ));
+    }
     s
 }
 
@@ -6027,7 +6124,8 @@ mod tests {
             from_machine: false,
             other_scope_draft: None,
             other_edited: Vec::new(),
-            project_locked_version: None,
+            project_lock: None,
+            republish: None,
         }
     }
 
@@ -6067,6 +6165,14 @@ mod tests {
             reference: None,
             converted_from: None,
             kind: None,
+            republish: None,
+            changes: Some(topos_types::results::ChangeSummary {
+                files: 4,
+                added: 2,
+                removed: 0,
+                executable: 1,
+            }),
+            lands_in: vec!["everyone".to_owned()],
         }
     }
 
@@ -6084,17 +6190,123 @@ mod tests {
         // stated as the sentence it means for the person about to run `--yes`.
         assert_eq!(
             super::publish_describe_tty(&describing(PublishGate::Lands), &yes_argv()),
-            "Publish 'coolify-deploy' to topos.sh/ideamotive:\n  No review required — it becomes \
-             immediately published in the workspace.\nreview: topos diff \
-             coolify-deploy\nNothing has changed yet — apply with:\n  topos publish \
+            "Publish 'coolify-deploy' to topos.sh/ideamotive:\nreview: topos diff \
+             coolify-deploy\nPreview only — nothing published. 4 files changed (2 added, 1 \
+             executable). Lands in everyone, no review required. Apply: topos publish \
              coolify-deploy --yes"
         );
         assert_eq!(
             super::publish_describe_tty(&describing(PublishGate::Proposal), &yes_argv()),
-            "Publish 'coolify-deploy' to topos.sh/ideamotive:\n  Review required — will require \
-             approval by a reviewer after publishing.\nreview: topos diff \
-             coolify-deploy\nNothing has changed yet — apply with:\n  topos publish \
-             coolify-deploy --yes"
+            "Publish 'coolify-deploy' to topos.sh/ideamotive:\nreview: topos diff \
+             coolify-deploy\nPreview only — nothing published. 4 files changed (2 added, 1 \
+             executable). Lands in everyone, review required — opens a proposal. Apply: topos \
+             publish coolify-deploy --yes"
+        );
+    }
+
+    /// The preview's closing line, as a cold reader standing on real edits reads it: it says
+    /// nothing happened (never "nothing has changed", which read as "no diff"), counts the change
+    /// against the live current, names the channel and the gate, and hands over the apply.
+    #[test]
+    fn the_preview_line_counts_the_change_names_the_channel_and_the_gate() {
+        use topos_types::results::{ChangeSummary, PublishGate};
+        let mut d = describing(PublishGate::Lands);
+        d.skill = "r2-smoke".to_owned();
+        let yes = typed(&["topos", "publish", "r2-smoke", "--yes"]);
+        assert_eq!(
+            super::preview_apply_line(&d, &yes),
+            "Preview only — nothing published. 4 files changed (2 added, 1 executable). Lands in \
+             everyone, no review required. Apply: topos publish r2-smoke --yes"
+        );
+        // A brand-new bundle counts against nothing: every file is new.
+        d.changes = Some(ChangeSummary {
+            files: 7,
+            added: 7,
+            removed: 0,
+            executable: 1,
+        });
+        d.gate = PublishGate::Proposal;
+        d.lands_in = vec!["everyone".to_owned(), "backend".to_owned()];
+        assert_eq!(
+            super::preview_apply_line(&d, &yes),
+            "Preview only — nothing published. 7 files, all new (1 executable). Lands in \
+             everyone, backend, review required — opens a proposal. Apply: topos publish \
+             r2-smoke --yes"
+        );
+        // One changed file, nothing added or removed: no parenthetical at all. A bundle in the
+        // catalog alone names the workspace and says there is no channel; a curated placement
+        // note rides the channel it qualifies.
+        d.changes = Some(ChangeSummary {
+            files: 1,
+            added: 0,
+            removed: 1,
+            executable: 0,
+        });
+        d.gate = PublishGate::Lands;
+        d.lands_in = Vec::new();
+        assert_eq!(
+            super::preview_apply_line(&d, &yes),
+            "Preview only — nothing published. 1 file changed (1 removed). Lands in \
+             topos.sh/ideamotive (no channel), no review required. Apply: topos publish \
+             r2-smoke --yes"
+        );
+        d.lands_in = vec!["everyone".to_owned()];
+        d.placement_note =
+            Some("curated: lands catalog-only; a curator places it afterwards".to_owned());
+        assert!(
+            super::preview_apply_line(&d, &yes).contains(
+                "Lands in everyone (curated: lands catalog-only; a curator places it \
+                 afterwards), no review required."
+            ),
+            "{}",
+            super::preview_apply_line(&d, &yes)
+        );
+    }
+
+    /// A copy that equals an OLDER version than the live current: both surfaces name which
+    /// version `current` is and what the publish does with the copy — the preview ahead of the
+    /// act, the receipt after it.
+    #[test]
+    fn a_republish_names_the_live_current_and_the_version_carried_forward() {
+        use topos_types::results::{PublishGate, Republish};
+        let rep = Republish {
+            current_version_id: format!("234b25b0a7af{}", "0".repeat(52)),
+            current_message: Some("topos: revert".to_owned()),
+            copy_version_id: format!("2d450876464a{}", "0".repeat(52)),
+            new_version_id: format!("8432cca436b8{}", "0".repeat(52)),
+        };
+        let mut d = describing(PublishGate::Lands);
+        d.republish = Some(rep.clone());
+        let preview = super::publish_describe_tty(&d, &yes_argv());
+        assert!(
+            preview.contains(
+                "\n  current is 234b25b0a7af (\"topos: revert\"); your copy equals 2d450876464a — \
+                 publishing 2d450876464a's content forward as 8432cca436b8\n"
+            ),
+            "{preview}"
+        );
+        let landed = publish_tty(&PublishData {
+            version_id: rep.new_version_id.clone(),
+            republish: Some(rep),
+            ..published()
+        });
+        assert!(
+            landed.contains(
+                "\ncurrent was 234b25b0a7af (\"topos: revert\"); your copy equaled 2d450876464a — \
+                 published 2d450876464a's content forward as 8432cca436b8"
+            ),
+            "{landed}"
+        );
+        // The project lock moved with the publish: said once, with the file to commit.
+        let locked = publish_tty(&PublishData {
+            project_lock: Some("/repo/topos.lock".to_owned()),
+            ..published()
+        });
+        assert!(
+            locked.contains(
+                "\nthis project's topos.lock now records coolify-deploy@fed180d80b8a — commit it"
+            ),
+            "{locked}"
         );
     }
 
@@ -6224,11 +6436,11 @@ mod tests {
         assert_eq!(
             super::publish_describe_tty(&described, &yes),
             "Publish 'coolify-deploy' to topos.sh/ideamotive:\n  from \
-             project/.agents/skills/coolify-deploy (1 of 2 edited copies)\n  No review required — \
-             it becomes immediately published in the workspace.\n  your other copy in \
+             project/.agents/skills/coolify-deploy (1 of 2 edited copies)\n  your other copy in \
              project/.claude/skills/coolify-deploy keeps its edits — it becomes a draft ahead of \
              this version.\nreview: topos diff coolify-deploy --dest \
-             .agents/skills\nNothing has changed yet — apply with:\n  topos publish \
+             .agents/skills\nPreview only — nothing published. 4 files changed (2 added, 1 \
+             executable). Lands in everyone, no review required. Apply: topos publish \
              coolify-deploy --dest .agents/skills --yes"
         );
 

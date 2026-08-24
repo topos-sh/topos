@@ -286,6 +286,7 @@ fn map_outcome(
                 reverted_to: good_hex.to_owned(),
                 new_version_id: rec.candidate_commit.clone(),
                 current_generation: new_gen,
+                project_lock: None,
             })
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {

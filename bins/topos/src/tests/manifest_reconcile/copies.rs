@@ -1132,7 +1132,7 @@ fn zz_a_per_copy_publish_leaves_the_other_copy_alone_and_resolves_the_freeze() {
     let outcome = publish(&ops::Selection::one(None, Some("~/.agents/skills")))
         .expect("the named copy publishes");
     let data = match outcome {
-        ops::PublishOutcome::Published(d) => d,
+        ops::PublishOutcome::Published(d) => *d,
         other => panic!("the publish LANDED: {other:?}"),
     };
     assert_eq!(

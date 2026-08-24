@@ -65,6 +65,12 @@ what only a cross-crate composed run can prove.
   same-named folder, the placement ladder lands `<name>-<workspace>` beside it, and the claim
   retires that duplicate (the receipt names it) while the claimed folder converges on the next
   sweep with the local edit intact.
+- **`tests/current_truth_e2e.rs`** — CURRENT IS THE SERVER'S: an author publishes from inside a
+  project, undoes it with the receipt's own `undo:` line, and the copy left in the project (the
+  undone version's bytes) is then read by every verb against the workspace's LIVE current — `diff`
+  shows the real difference, `publish` previews and mints a forward publish naming which version
+  current is (the revert), `log` shows every hop, and a fresh machine converges on the carried-
+  forward content. Binary-driven over fake `$HOME`s like the store suite.
 - **`tests/uniform_e2e.rs`** — the NON-ORACLE discipline over real HTTP: byte-identical uniform
   404s across foreign/never-existed workspaces, wrong paths, garbage credentials; the
   `session_approval` knob's born-pending lane (exactly two typed answers until approval).

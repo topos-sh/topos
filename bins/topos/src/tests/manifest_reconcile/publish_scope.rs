@@ -11,6 +11,11 @@ use crate::sessions::Session;
 
 use super::rig::*;
 
+/// A 32-byte id as the 64-hex spelling every surface prints.
+fn hex(b: &[u8; 32]) -> String {
+    topos_core::digest::to_hex(b)
+}
+
 // =================================================================================================
 // PUBLISH SCOPE — which copy of a two-scope bundle a publish ships, and what it says about the one
 // it left. The fixture is the live shape: the machine's feed row and a checkout's own row deliver
@@ -65,11 +70,55 @@ struct PublishSeams {
     dir: FakeDirectory,
 }
 fn publish_seams(v: &Version) -> PublishSeams {
+    publish_seams_with(v, &[])
+}
+
+/// [`publish_seams`] whose plane can also FETCH `later` versions — the ones a test moves the live
+/// current onto after the sweep converged on `v`.
+fn publish_seams_with(v: &Version, later: &[&Version]) -> PublishSeams {
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log).with_version("s_deploy", v);
+    let mut plane = FakePlane::new(log).with_version("s_deploy", v);
+    for l in later {
+        plane = plane.with_version("s_deploy", l);
+    }
     plane.serves(vec![delivered("s_deploy", "deploy", v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", v)], Vec::new());
     PublishSeams { plane, dir }
+}
+
+/// A version carrying `body` under the history line a server-side revert writes — the shape a
+/// live current takes after `topos revert` moved it past this machine's own publish.
+fn revert_shaped(body: &[u8]) -> Version {
+    use crate::plane::{FetchedFile, FetchedVersion};
+    use topos_core::digest::{self, FileMode, ManifestEntry};
+    use topos_core::identity::Commit;
+    let entries = vec![ManifestEntry {
+        path: "SKILL.md".to_owned(),
+        mode: FileMode::Regular,
+        content_sha256: digest::sha256(body),
+    }];
+    let tree = digest::bundle_digest(&entries).unwrap();
+    let id = topos_core::identity::commit_id(&Commit {
+        parents: &[],
+        tree,
+        author: "d_rev",
+        message: "topos: revert",
+    })
+    .unwrap();
+    Version {
+        id,
+        digest: tree,
+        fetched: FetchedVersion {
+            parents: Vec::new(),
+            author: "d_rev".into(),
+            message: "topos: revert".into(),
+            files: vec![FetchedFile {
+                path: "SKILL.md".to_owned(),
+                mode: FileMode::Regular,
+                bytes: body.to_vec(),
+            }],
+        },
+    }
 }
 
 /// `topos publish deploy [-g] --yes` through the real op, over the shared seams.
@@ -133,6 +182,7 @@ fn describe_at(
         false,
         None,
         None,
+        None,
         &ops::Selection::default(),
         scope,
     )
@@ -140,7 +190,7 @@ fn describe_at(
 
 fn landed(outcome: ops::PublishOutcome) -> topos_types::results::PublishData {
     match outcome {
-        ops::PublishOutcome::Published(d) => d,
+        ops::PublishOutcome::Published(d) => *d,
         other => panic!("the publish LANDED: {other:?}"),
     }
 }
@@ -601,28 +651,27 @@ fn two_bundles_sharing_a_name_never_bind_across_scopes() {
     assert!(!receipt.contains("machine copy"), "{receipt}");
 }
 
-/// A copy BEHIND the served current is refused, and the one command the refusal offers must drive
-/// THE COPY THAT REFUSED. `-g` from inside a checkout resolves the machine store, so its refusal
-/// spells `-g` too — offered bare, the update would run the project's copy and the publish would
-/// refuse all over again.
+/// An EDITED copy BEHIND the live current is refused, and the one command the refusal offers must
+/// drive THE COPY THAT REFUSED. `-g` from inside a checkout resolves the machine store, so its
+/// refusal spells `-g` too — offered bare, the update would run the project's copy and the publish
+/// would refuse all over again. "Behind" is decided against the SERVER's current (the team
+/// published a newer version after this machine's last sweep), never against the cache.
 #[test]
 fn a_behind_copy_refuses_in_the_scope_the_flag_resolved() {
     let rig = Rig::new("pubscope-behind");
     rig.seed_session();
     let v = one_file(b"# deploy\n");
-    let seams = publish_seams(&v);
+    let newer = one_file(b"# deploy\nthe team's newer line\n");
+    let seams = publish_seams_with(&v, &[&newer]);
     let (proj, machine_dir, _project_dir) =
         both_scopes("pubscope-behind-repo", &rig, &seams.plane, &seams.dir);
     let ctx = rig.ctx_at(Some(&proj.0));
     std::fs::write(machine_dir.join("SKILL.md"), b"# deploy\nmachine edit\n").unwrap();
 
-    // The MACHINE store alone learns of a newer current it has not applied.
-    let sp = rig.layout().published(&sid("s_deploy"));
-    let mut sync: topos_types::persisted::SyncState =
-        crate::doc::read_doc(&rig.fs, &sp.sync).unwrap().unwrap();
-    sync.observed = sync.applied + 1;
-    sync.observed_version_id = "b".repeat(64);
-    crate::doc::write_doc(&rig.fs, &sp.sync, &sync).unwrap();
+    // The team's current moves on; no sweep has run here since.
+    seams
+        .plane
+        .serves(vec![delivered_at("s_deploy", "deploy", &newer, 2)]);
 
     let refusals = [
         publish_at(&ctx, &seams, ops::StoreScope::Machine).unwrap_err(),
@@ -642,6 +691,131 @@ fn a_behind_copy_refuses_in_the_scope_the_flag_resolved() {
             crate::render::err_tty(err)
         );
     }
+}
+
+/// THE SERVER'S CURRENT IS THE TRUTH. A revert (run from another store, or another machine)
+/// moves `current` without touching this store's cache. An unmodified copy then EQUALS an older
+/// version than the live current, and a publish of it is an ordinary publish: the copy's content
+/// goes forward as a new version parented on the live current — the preview and the receipt name
+/// which version `current` is, and the version they name is the one the apply mints. What it must
+/// never say is "already published — your copy matches current".
+#[test]
+fn an_unmodified_copy_of_an_older_version_carries_forward_over_the_live_current() {
+    let rig = Rig::new("pubscope-forward");
+    rig.seed_session();
+    let mine = one_file(b"# deploy\n");
+    let restored = revert_shaped(b"# deploy\nthe version the revert restored\n");
+    let seams = publish_seams_with(&mine, &[&restored]);
+    let (proj, _machine_dir, project_dir) =
+        both_scopes("pubscope-forward-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    assert_eq!(
+        std::fs::read(project_dir.join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+        "the copy is unmodified — it equals the version this store applied"
+    );
+
+    // A revert moved the team's current past this machine's version; the cache never saw it.
+    seams
+        .plane
+        .serves(vec![delivered_at("s_deploy", "deploy", &restored, 2)]);
+
+    let ops::PublishPreview::Describe(preview) =
+        describe_at(&ctx, &seams, ops::StoreScope::Here).unwrap()
+    else {
+        panic!("a copy that differs from the live current previews a publish")
+    };
+    let predicted = preview
+        .republish
+        .clone()
+        .expect("the preview names the live current and the version carried forward");
+    assert_eq!(predicted.current_version_id, hex(&restored.id));
+    assert_eq!(predicted.current_message.as_deref(), Some("topos: revert"));
+    assert_eq!(predicted.copy_version_id, hex(&mine.id));
+    // The counts are against the LIVE current, and the undo names it.
+    assert_eq!(
+        preview
+            .changes
+            .as_ref()
+            .map(|c| (c.files, c.added, c.removed)),
+        Some((1, 0, 0))
+    );
+    assert_eq!(
+        preview.undo.as_deref(),
+        Some(format!("topos revert deploy --to {}", hex(&restored.id)).as_str())
+    );
+    let tty = crate::render::publish_describe_tty(&preview, &["topos".into(), "publish".into()]);
+    assert!(
+        tty.contains(&format!(
+            "current is {} (\"topos: revert\"); your copy equals {} — publishing {}'s content \
+             forward as {}",
+            &hex(&restored.id)[..12],
+            &hex(&mine.id)[..12],
+            &hex(&mine.id)[..12],
+            &predicted.new_version_id[..12]
+        )),
+        "{tty}"
+    );
+
+    let data = landed(publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap());
+    // The new version parents on the LIVE current and carries the copy's bytes — the very id the
+    // preview predicted.
+    let expected = topos_core::identity::commit_id(&topos_core::identity::Commit {
+        parents: &[restored.id],
+        tree: mine.digest,
+        author: &ctx.device_id,
+        message: "topos: publish",
+    })
+    .unwrap();
+    assert_eq!(data.version_id, hex(&expected));
+    assert_eq!(data.version_id, predicted.new_version_id);
+    assert_eq!(data.bundle_digest, hex(&mine.digest));
+    let landed_rep = data
+        .republish
+        .as_ref()
+        .expect("the receipt names the base too");
+    assert_eq!(landed_rep.current_version_id, hex(&restored.id));
+    assert_eq!(landed_rep.current_message.as_deref(), Some("topos: revert"));
+    assert_eq!(landed_rep.copy_version_id, hex(&mine.id));
+    assert_eq!(landed_rep.new_version_id, data.version_id);
+    assert_eq!(
+        data.undo.as_deref(),
+        Some(format!("topos revert deploy --to {}", &hex(&restored.id)[..12]).as_str())
+    );
+}
+
+/// The other half of the same truth: a copy whose BYTES equal the live current is already
+/// published, whatever the cache's lock says — the sweep just has not caught up.
+#[test]
+fn a_copy_equal_to_the_live_current_is_already_published_whatever_the_cache_says() {
+    let rig = Rig::new("pubscope-live-match");
+    rig.seed_session();
+    let mine = one_file(b"# deploy\n");
+    let restored = revert_shaped(b"# deploy\nrestored\n");
+    let seams = publish_seams_with(&mine, &[&restored]);
+    let (proj, _machine_dir, project_dir) =
+        both_scopes("pubscope-live-match-repo", &rig, &seams.plane, &seams.dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    seams
+        .plane
+        .serves(vec![delivered_at("s_deploy", "deploy", &restored, 2)]);
+    // The person edits the copy to exactly what the team now runs.
+    std::fs::write(project_dir.join("SKILL.md"), b"# deploy\nrestored\n").unwrap();
+
+    assert!(
+        matches!(
+            describe_at(&ctx, &seams, ops::StoreScope::Here).unwrap(),
+            ops::PublishPreview::NoChanges(_)
+        ),
+        "the preview says already published"
+    );
+    assert!(
+        matches!(
+            publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap(),
+            ops::PublishOutcome::NoChanges(_)
+        ),
+        "and so does the apply"
+    );
 }
 
 /// The SAME edit made in both scopes is ONE edit. This publish carries those bytes, the other copy
@@ -701,6 +875,7 @@ fn a_genesis_publish_offers_no_read_of_an_empty_diff() {
         None,
         "fresh",
         false,
+        None,
         None,
         None,
         &ops::Selection::default(),

@@ -9,6 +9,17 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "changes": {
+      "description": "What the draft changes against the live `current`, counted per file. A GENESIS publish\ncounts every file as added (there is no current to count against). **INFERRED**\n(additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChangeSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "converted_from": {
       "description": "The local-path spelling the manifest carries today (what the transfer would replace).\n**INFERRED** (additive-only).",
       "type": [
@@ -48,6 +59,13 @@
         "string",
         "null"
       ]
+    },
+    "lands_in": {
+      "description": "The channels the published version reaches: the `--to` target (or `everyone` for a\nbrand-new bundle) plus the channels that already carry the bundle. Empty when the bundle\nsits in the catalog alone. **INFERRED** (additive-only).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "manifest": {
       "description": "The PREDICTED governance transfer: the manifest whose local-path line the apply would\nrewrite to the governed workspace reference. Absent when no manifest references the bundle\nby path. **INFERRED** (additive-only).",
@@ -113,6 +131,17 @@
         "null"
       ]
     },
+    "republish": {
+      "description": "Present when the copy EQUALS an older version than the workspace's live `current`: the\napply would carry that version's content forward as a new version, and the preview says\nwhich version stands as `current` now. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Republish"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "review": {
       "description": "The whole `topos diff …` command that reads the exact copy this publish would ship —\nspelled for the folder and the scope that resolved, so it is runnable as printed. Absent on\na GENESIS publish: there is no earlier version for a diff to be against, so the command\nwould print nothing. **INFERRED** (additive-only).",
       "type": [
@@ -171,6 +200,42 @@
     "is_revert"
   ],
   "$defs": {
+    "ChangeSummary": {
+      "description": "A publish preview's per-file count of what the draft changes against the live `current`.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "added": {
+          "description": "Files the draft adds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "executable": {
+          "description": "Files that are executable in the draft and were not (added executable, or the bit flipped).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "files": {
+          "description": "Every file that differs: added, removed, or changed in content or mode.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "removed": {
+          "description": "Files the draft removes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "files",
+        "added",
+        "removed",
+        "executable"
+      ]
+    },
     "MergePreview": {
       "description": "The predicted verdict of a three-way merge that has NOT been run against the placements — a pure\nin-memory dry run of the same kernel plan + per-file diff3 the real resolution executes. Never a\npromise: the authoritative outcome is the resolution's own [`MergeReport`]. **INFERRED** (additive).",
       "type": "object",
@@ -218,6 +283,39 @@
           "type": "string",
           "const": "proposal"
         }
+      ]
+    },
+    "Republish": {
+      "description": "A publish that ships an OLDER version's content forward: the copy equalled `copy_version_id`,\nthe workspace's live `current` was `current_version_id`, and the apply mints a new version\nparented on that current with the copy's bytes. Re-publishing old content is an ordinary act\n(a commit can restate an earlier tree); what the reader is owed is which version `current` is.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "copy_version_id": {
+          "description": "The older version the copy's bytes equal — the version being carried forward.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "current_message": {
+          "description": "That version's history line (`topos: revert`, or the message its publish carried), when\nthe server named it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_version_id": {
+          "description": "The workspace's live `current` at the time of the publish.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "new_version_id": {
+          "description": "The version the forward publish mints (predicted on the preview from the same preimage\nthe apply commits; the landed id on the receipt).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "current_version_id",
+        "copy_version_id",
+        "new_version_id"
       ]
     },
     "ScopeDraft": {
