@@ -34,8 +34,12 @@
 //! does (a newer topos may know more kinds); a newer `schema` refuses toward `topos self-update`.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use toml_edit::{DocumentMut, Item, Value};
+
+use crate::error::ClientError;
+use crate::fs_seam::FsOps;
 
 /// The lock format this build reads and writes.
 const SCHEMA: i64 = 1;
@@ -228,6 +232,41 @@ impl LockDoc {
     }
 }
 
+/// Move ONE workspace-bundle entry of the lock at `dir` to `version` — the way a commit moves
+/// `HEAD`: a publish (or a revert) from inside this project makes the new version the one the
+/// project runs, and the lock says so at once rather than after a separate `topos update`.
+/// Touches nothing else in the file (the serialization is deterministic, so the diff is that one
+/// line). `Ok(false)` when there is no lock, no entry for `name`, or the entry records a repo
+/// commit rather than a workspace version — nothing to move.
+///
+/// # Errors
+/// A lock that does not parse (typed, naming the file), or a read/write fault.
+pub(crate) fn advance_entry(
+    fs: &dyn FsOps,
+    dir: &Path,
+    name: &str,
+    version: &str,
+) -> Result<bool, ClientError> {
+    let path = dir.join(LOCK_FILE);
+    let Some(bytes) = fs.read_opt(&path)? else {
+        return Ok(false);
+    };
+    let mut doc = LockDoc::parse(&String::from_utf8_lossy(&bytes))
+        .map_err(|e| ClientError::InvalidArgument(format!("{}: {}", path.display(), e.message)))?;
+    let Some(entry) = doc.skills.get_mut(name) else {
+        return Ok(false);
+    };
+    if entry.version.is_none() {
+        return Ok(false);
+    }
+    if entry.version.as_deref() == Some(version) {
+        return Ok(true);
+    }
+    entry.version = Some(version.to_owned());
+    crate::atomic::atomic_write(fs, &path, doc.serialize().as_bytes())?;
+    Ok(true)
+}
+
 /// Spell a block name: bare where TOML allows it, quoted otherwise.
 fn quoted(name: &str) -> String {
     let bare = !name.is_empty()
@@ -267,6 +306,53 @@ mod tests {
 
     fn digest() -> String {
         "0123456789abcdef".repeat(4)
+    }
+
+    /// A publish (or a revert) from inside a project moves the lock's entry the way a commit
+    /// moves `HEAD`: that one line, nothing else — and only a workspace-version entry that
+    /// exists.
+    #[test]
+    fn a_pointer_move_advances_exactly_one_entry() {
+        let fs = crate::fs_seam::RealFs;
+        let dir = std::env::temp_dir().join(format!(
+            "topos-lock-advance-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No lock at all: nothing to move.
+        assert!(!advance_entry(&fs, &dir, "deploy-checklist", &"a".repeat(64)).unwrap());
+
+        let doc = sample();
+        std::fs::write(dir.join(LOCK_FILE), doc.serialize()).unwrap();
+        let before = std::fs::read_to_string(dir.join(LOCK_FILE)).unwrap();
+
+        // An entry the lock does not carry, and a repo-commit entry: untouched, file byte-same.
+        assert!(!advance_entry(&fs, &dir, "unknown", &"a".repeat(64)).unwrap());
+        assert!(!advance_entry(&fs, &dir, "find-skills", &"a".repeat(64)).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(LOCK_FILE)).unwrap(),
+            before
+        );
+
+        // The workspace-version entry moves; every other line stands.
+        assert!(advance_entry(&fs, &dir, "deploy-checklist", &"a".repeat(64)).unwrap());
+        let after = LockDoc::parse(&std::fs::read_to_string(dir.join(LOCK_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            after.skills["deploy-checklist"].version.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        let mut expected = doc.clone();
+        expected.skills.get_mut("deploy-checklist").unwrap().version = Some("a".repeat(64));
+        assert_eq!(after, expected);
+        // Already there: reported as standing, nothing rewritten.
+        let text = std::fs::read_to_string(dir.join(LOCK_FILE)).unwrap();
+        assert!(advance_entry(&fs, &dir, "deploy-checklist", &"a".repeat(64)).unwrap());
+        assert_eq!(std::fs::read_to_string(dir.join(LOCK_FILE)).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn sample() -> LockDoc {

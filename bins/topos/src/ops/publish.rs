@@ -1523,6 +1523,21 @@ fn enrolled_publish(
     // idempotently by the next `update` or publish re-run.
     match &mut outcome {
         PublishOutcome::Published(data) => {
+            // The publish IS the new served current: the MACHINE's delivery cache says so, or
+            // `list` reads the copy as `[behind]` until the next sweep. The cache is one document
+            // in the machine store — the OUTER ctx's layout (`$TOPOS_HOME`-aware), which a ctx
+            // re-pointed at a project store cannot derive. Best-effort like every cache write.
+            let _ = crate::sync_status::record_served(
+                outer_ctx.fs,
+                &outer_ctx.layout,
+                &lane.workspace_id,
+                id.as_str(),
+                &rec.candidate_commit,
+            );
+            // The cwd project's lock moves with the publish (a commit moves `HEAD`) — read from
+            // the OUTER ctx, whose roots name the directory the command stood in.
+            data.project_lock =
+                super::advance_project_lock(outer_ctx, &lock.name, &rec.candidate_commit);
             match super::rewrite_to_governed(
                 outer_ctx,
                 &lock.name,

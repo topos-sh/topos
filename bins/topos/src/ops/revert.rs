@@ -286,7 +286,9 @@ fn map_outcome(
                 reverted_to: good_hex.to_owned(),
                 new_version_id: rec.candidate_commit.clone(),
                 current_generation: new_gen,
-                project_lock: None,
+                // The cwd project's lock moves with the revert: the forward commit is the new
+                // current, and the checkout the command stood in runs it at its next update.
+                project_lock: crate::ops::advance_project_lock(ctx, name, &rec.candidate_commit),
             })
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {

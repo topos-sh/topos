@@ -377,6 +377,35 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
         undo.starts_with(&format!("topos revert {BUNDLE} --to ")) && undo.contains(&v1[..12]),
         "the undo restores v1: {undo}"
     );
+    // The project's lock moved with the publish (a commit moves `HEAD`): the checkout runs v2
+    // now, the receipt says which file to commit, and `list` shows the bundle current — never
+    // `[behind]` until a separate update.
+    assert!(
+        v2_receipt["project_lock"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("topos.lock")),
+        "{v2_receipt}"
+    );
+    assert_eq!(locked_version(&project).as_deref(), Some(v2.as_str()));
+    let listed = author
+        .run_in(&project, &["list", "--json"])
+        .data("the project listing after the publish");
+    let entry = listed["scopes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|sc| sc["rows"].as_array().cloned().unwrap_or_default())
+        .find(|e| e["skill"] == BUNDLE)
+        .unwrap_or_else(|| panic!("the project lists the bundle: {listed}"));
+    assert_eq!(entry["version_id"], v2, "{entry}");
+    assert_ne!(entry["status"], "behind", "{entry}");
+    let tty = author
+        .run_in(&project, &["publish", BUNDLE, "--yes"])
+        .stdout;
+    assert!(
+        tty.contains(&format!("'{BUNDLE}' is already published")),
+        "{tty}"
+    );
 
     // ── 2. the undo, exactly as printed ─────────────────────────────────────────────────────────
     let reverted = run_undo(&author, &project, &undo);
@@ -386,6 +415,14 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
         .to_owned();
     assert_ne!(restored, v1);
     assert_ne!(restored, v2);
+    // A revert from inside the project moves its lock too: the forward commit is the new current.
+    assert!(
+        reverted["project_lock"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("topos.lock")),
+        "{reverted}"
+    );
+    assert_eq!(locked_version(&project).as_deref(), Some(restored.as_str()));
 
     // The project copy still holds v2's bytes — the version the revert just undid. Nothing here
     // touched it, and the sidecar's cache still calls v2 current.
@@ -477,6 +514,11 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
         again["undo"],
         format!("topos revert {BUNDLE} --to {}", &restored[..12]),
         "{again}"
+    );
+    assert_eq!(
+        locked_version(&project).as_deref(),
+        Some(v3.as_str()),
+        "the lock follows the forward publish too"
     );
     // And now the copy IS current — a republish says so, truthfully this time.
     let settled = author
