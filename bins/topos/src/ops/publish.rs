@@ -467,16 +467,15 @@ pub(crate) fn publish_describe(
     // plain placement line — same as the share read, the describe keeps working offline.
     // (A `--to` naming a channel absent from the index was already refused above — publish
     // never silently mints a channel.)
-    let placement_note = placement_target
-        .as_ref()
-        .is_some_and(|target| {
-            me.as_ref().is_some_and(|m| m.role == "member")
-                && directory
-                    .channels_index(&workspace_id)
-                    .ok()
-                    .and_then(|ix| ix.channels.into_iter().find(|c| &c.name == target))
-                    .is_some_and(|c| c.mode == "curated")
-        })
+    let placement_withheld = placement_target.as_ref().is_some_and(|target| {
+        me.as_ref().is_some_and(|m| m.role == "member")
+            && directory
+                .channels_index(&workspace_id)
+                .ok()
+                .and_then(|ix| ix.channels.into_iter().find(|c| &c.name == target))
+                .is_some_and(|c| c.mode == "curated")
+    });
+    let placement_note = placement_withheld
         .then(|| "curated: lands catalog-only; a curator places it afterwards".to_owned());
     let share_line = me
         .as_ref()
@@ -586,7 +585,11 @@ pub(crate) fn publish_describe(
         }
         _ => None,
     };
-    let lands_in = lands_in(placement_target.as_deref(), live.as_ref());
+    let lands_in = lands_in(
+        placement_target.as_deref(),
+        placement_withheld,
+        live.as_ref(),
+    );
     Ok(PublishPreview::Describe(Box::new(PublishDescribeData {
         skill: skill_name,
         skill_id: id.into_string(),
@@ -939,10 +942,21 @@ fn change_summary(current: &[BundleFile], draft: &scan::ScannedBundle) -> Change
     out
 }
 
-/// The channels the published version reaches: the placement this apply makes (`--to`, or the
-/// genesis default) first, then the channels already carrying the bundle.
-fn lands_in(placement_target: Option<&str>, live: Option<&LiveCurrent>) -> Vec<String> {
-    let mut out: Vec<String> = placement_target.map(str::to_owned).into_iter().collect();
+/// The channels the published version REACHES: the placement this apply makes (`--to`, or the
+/// genesis default) first — unless the channel index predicts it WITHHELD (a curated channel
+/// against a member: the reference is not placed, a curator does that afterwards) — then the
+/// channels already carrying the bundle. A withheld target is named by the preview's own
+/// clause, never listed as reached.
+fn lands_in(
+    placement_target: Option<&str>,
+    withheld: bool,
+    live: Option<&LiveCurrent>,
+) -> Vec<String> {
+    let mut out: Vec<String> = placement_target
+        .filter(|_| !withheld)
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
     if let Some(l) = live {
         for c in &l.via_channels {
             if !out.contains(c) {
@@ -2182,6 +2196,35 @@ mod tests {
         GENESIS, landed_undo_is_restorative, server_origin, teammate_invite_line,
         undo_is_restorative, workspace_handle,
     };
+
+    /// The channels a version REACHES: a target the channel index predicts withheld (curated,
+    /// against a member) is never listed among them — the preview's own clause names it as the
+    /// curator's to place — while the channels already carrying the bundle always are.
+    #[test]
+    fn a_withheld_target_is_not_a_channel_the_version_reaches() {
+        let live = super::LiveCurrent {
+            commit: [0; 32],
+            hex: "0".repeat(64),
+            generation: 3,
+            digest_hex: "1".repeat(64),
+            via_channels: vec!["everyone".to_owned()],
+            review_required: None,
+        };
+        assert_eq!(
+            super::lands_in(Some("backend"), false, Some(&live)),
+            vec!["backend".to_owned(), "everyone".to_owned()]
+        );
+        assert_eq!(
+            super::lands_in(Some("backend"), true, Some(&live)),
+            vec!["everyone".to_owned()]
+        );
+        assert!(super::lands_in(Some("everyone"), true, None).is_empty());
+        // The same channel named twice is one channel.
+        assert_eq!(
+            super::lands_in(Some("everyone"), false, Some(&live)),
+            vec!["everyone".to_owned()]
+        );
+    }
 
     #[test]
     fn a_workspace_is_named_by_its_address_not_its_scheme() {
