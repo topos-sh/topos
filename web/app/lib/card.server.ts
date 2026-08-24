@@ -15,6 +15,18 @@ import { apiBase } from "@/lib/plane/public-base.server";
  * gets `null` — the route renders its own HTML page, which must be equally constant for an
  * anonymous caller.
  *
+ * The markdown card carries the STATUS the page underneath answered with, so a path that is a
+ * miss in a browser is a miss in a terminal too: `curl` used to read `HTTP 200` on every URL a
+ * workspace address could be spelled, which said "this exists" about paths that do not. The
+ * body is unchanged — the card is what an agent needs at a workspace address either way — and
+ * it stays byte-identical between a real name and an invented one, because the page underneath
+ * is existence-blind in the first place.
+ *
+ * The JSON face is the exception, and deliberately: it is not a representation of a page, it is
+ * the FIRST CONTACT of the login handshake. `topos login <a workspace URL>` reads `api_base_url`
+ * out of it, and every released client treats a non-200 there as "that is not a topos server"
+ * — so the machine card answers 200 at every address, as it always has.
+ *
  * The version pair is the client's half of the compatibility interval, readable BEFORE a login
  * commits to a server: what this build is, and the oldest topos it still speaks to. Both are
  * constants of the deployment, disclose nothing about who or what it holds, and are already
@@ -77,8 +89,12 @@ const CARD_HEADERS = {
  * The card response for a non-browser fetcher, or `null` for a browser (the caller renders its
  * page). Byte-identical for every path: the ONLY input that shapes the body is this
  * deployment's own API base — the origin's `/api` mount, where this app serves the device lane.
+ *
+ * `pageStatus` is what the routed page answered (200 for a page the caller may have, 404 for
+ * every miss and every members-only face a signed-out visitor asked for). The markdown card
+ * wears it; the machine card is always 200 — see the module doc for why.
  */
-export function cardResponse(request: Request): Response | null {
+export function cardResponse(request: Request, pageStatus = 200): Response | null {
   const face = cardFace(request);
   if (face === "html") {
     return null;
@@ -96,6 +112,7 @@ export function cardResponse(request: Request): Response | null {
     );
   }
   return new Response(cardMarkdown(), {
+    status: pageStatus,
     headers: { ...CARD_HEADERS, "content-type": "text/plain; charset=utf-8" },
   });
 }

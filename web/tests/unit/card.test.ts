@@ -143,4 +143,26 @@ describe("cardResponse — the served card", () => {
     expect(textA).not.toContain("real-workspace");
     expect(textA).not.toContain("made/up");
   });
+
+  it("the markdown card wears the routed page's status — a miss reads 404 in a terminal too", async () => {
+    const miss = cardResponse(req("/no-such-workspace", "*/*"), 404) as Response;
+    expect(miss.status).toBe(404);
+    // Same BODY as a card served over a page that exists: the status is what changed, and it is
+    // the page's own verdict, so it can carry no signal the browser face does not already give.
+    const hit = cardResponse(req("/a-real-workspace", "*/*"), 200) as Response;
+    expect(await miss.text()).toBe(await hit.text());
+  });
+
+  it("the JSON card stays 200 at a missing address — it is the login handshake, not a page", async () => {
+    // `topos login <a workspace URL>` reads api_base_url out of this, and every released client
+    // reads a non-200 as "that is not a topos server".
+    const miss = cardResponse(req("/no-such-workspace", "application/json"), 404) as Response;
+    expect(miss.status).toBe(200);
+    const hit = cardResponse(req("/a-real-workspace", "application/json"), 200) as Response;
+    expect(await miss.text()).toBe(await hit.text());
+  });
+
+  it("defaults to 200 when no page status is given", () => {
+    expect((cardResponse(req("/x", "*/*")) as Response).status).toBe(200);
+  });
 });

@@ -171,7 +171,11 @@ export default async function handleRequest(
     return docs;
   }
 
-  const card = cardResponse(request);
+  // The card wears the status the routed page answered with (`responseStatusCode` is the
+  // router's own verdict — the loaders have already run by the time this render entry is
+  // called), so a terminal reads 404 exactly where a browser does. The machine (JSON) face
+  // stays 200: it is the login handshake, not a page.
+  const card = cardResponse(request, responseStatusCode);
   if (card) {
     return card;
   }
