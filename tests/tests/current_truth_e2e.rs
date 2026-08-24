@@ -336,6 +336,36 @@ fn author_publishes_v1(
     (project, copy, v1)
 }
 
+/// What a unified diff body says about each file: `(path, "modified" | "added" | "deleted")`,
+/// in print order, one row per section the diff printed — a path printed twice shows up twice.
+fn diff_entries(body: &str) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    let mut lines = body.lines().peekable();
+    while let Some(line) = lines.next() {
+        if let Some(rest) = line.strip_prefix("Binary files a/") {
+            let path = rest.split(" and b/").next().unwrap_or_default();
+            out.push((path.to_owned(), "modified"));
+        } else if let Some(old) = line.strip_prefix("--- ") {
+            let new = lines
+                .next()
+                .and_then(|l| l.strip_prefix("+++ "))
+                .unwrap_or_else(|| panic!("a `---` header is followed by `+++`: {body}"));
+            let kind = match (old, new) {
+                ("/dev/null", _) => "added",
+                (_, "/dev/null") => "deleted",
+                _ => "modified",
+            };
+            let named = if old == "/dev/null" { new } else { old };
+            let path = named
+                .strip_prefix("a/")
+                .or_else(|| named.strip_prefix("b/"))
+                .unwrap_or(named);
+            out.push((path.to_owned(), kind));
+        }
+    }
+    out
+}
+
 /// Run the exact `undo:` line a receipt printed (`topos revert <name> --to <version>`), applied.
 fn run_undo(machine: &Machine, cwd: &Path, undo: &str) -> Value {
     let mut argv: Vec<&str> = undo.split_whitespace().collect();
@@ -446,6 +476,28 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
     assert!(
         body.contains("+- this is v2") && body.contains("docs/deeper/hop.md"),
         "the copy's v2 content shows as the difference: {body}"
+    );
+    // EXACTLY the real difference, each path once. The live current is fetched from the
+    // workspace, whose file order is its tree walk's, not the scan's — walked against the sorted
+    // copy, every unchanged nested file used to print as an addition AND a deletion, and a
+    // changed one twice. v2 changes three files: one edited, two added.
+    let mut entries = diff_entries(body);
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec![
+            ("docs/deeper/hop.md".to_owned(), "added"),
+            ("docs/reference.md".to_owned(), "modified"),
+            ("scripts/check.sh".to_owned(), "added"),
+        ],
+        "{body}"
+    );
+    let tty = author.run_in(&project, &["diff", BUNDLE]).stdout;
+    let mut on_tty = diff_entries(&tty);
+    on_tty.sort();
+    assert_eq!(
+        on_tty, entries,
+        "the terminal prints the same three sections: {tty}"
     );
 
     // ── 4. `publish` previews a FORWARD publish, naming which version current is ────────────────

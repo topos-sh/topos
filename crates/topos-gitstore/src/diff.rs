@@ -40,8 +40,9 @@ pub struct FileDiffSection {
     pub text: String,
 }
 
-/// Render a unified diff of two bundles, each sorted by raw path bytes. Files only in `base` are
-/// deletions; files only in `draft` are additions; common files with differing bytes **or mode** are shown.
+/// Render a unified diff of two bundles. Files only in `base` are deletions; files only in `draft`
+/// are additions; common files with differing bytes **or mode** are shown. Each side is taken in
+/// ANY order — the walk sorts both by raw path bytes itself (see [`unified_diff_sections`]).
 pub fn unified_diff(base: &[DiffFile<'_>], draft: &[DiffFile<'_>]) -> String {
     unified_diff_sections(base, draft)
         .into_iter()
@@ -51,10 +52,20 @@ pub fn unified_diff(base: &[DiffFile<'_>], draft: &[DiffFile<'_>]) -> String {
 
 /// [`unified_diff`], split per changed file — the same walk, the same bytes, one section per file
 /// (files with no rendered output are skipped, exactly as the concatenated form omits them).
+///
+/// The walk is a merge over the two sides, so it needs both in ONE order — and it establishes
+/// that order itself rather than trusting its callers to. A scanned draft arrives sorted by raw
+/// path bytes, but a version fetched from the plane arrives in the server's tree-walk order
+/// (blobs before subtrees, nested dirs last-in-first-out), and walking that against a sorted
+/// draft paired nothing up: every unchanged nested file printed as an addition AND a deletion,
+/// and a changed one printed twice. Sorting here is what makes each path appear once, as
+/// exactly what it is.
 pub fn unified_diff_sections(
     base: &[DiffFile<'_>],
     draft: &[DiffFile<'_>],
 ) -> Vec<FileDiffSection> {
+    let (base, draft) = (sorted_by_path(base), sorted_by_path(draft));
+    let (base, draft) = (base.as_slice(), draft.as_slice());
     let mut out = Vec::new();
     let mut push = |path: &str, text: String| {
         if !text.is_empty() {
@@ -94,6 +105,15 @@ pub fn unified_diff_sections(
         }
     }
     out
+}
+
+/// The files in raw-path-byte order — the one order the merge walk pairs paths up in. A stable
+/// sort, so two entries under one path (an input that would never verify) keep their arrival
+/// order rather than flipping between runs.
+fn sorted_by_path<'a>(files: &[DiffFile<'a>]) -> Vec<DiffFile<'a>> {
+    let mut sorted = files.to_vec();
+    sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    sorted
 }
 
 fn file_diff(path: &str, old: Option<DiffFile<'_>>, new: Option<DiffFile<'_>>) -> String {
@@ -389,6 +409,54 @@ mod tests {
         let paths: Vec<&str> = sections.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, vec!["a.md", "bin", "gone.txt", "new.txt", "run.sh"]);
         assert!(sections.iter().all(|s| !s.text.is_empty()));
+    }
+
+    #[test]
+    fn an_unsorted_side_still_pairs_every_path_once() {
+        // A version fetched from the plane arrives in the server's tree-walk order — blobs of a
+        // tree before its subtrees, and subtrees last-in-first-out — against a draft the scan
+        // sorted by raw path bytes. The walk used to trust both orders and paired nothing up:
+        // every unchanged nested file printed as an addition AND a deletion, and a changed one
+        // printed twice. The real difference is two edited files; that, and nothing else, is what
+        // must come out, each path once.
+        let base = [
+            f("README.md", FileMode::Regular, b"nonce: old\n"),
+            f("nonce.txt", FileMode::Regular, b"old\n"),
+            f("reference/deep/notes.md", FileMode::Regular, b"notes\n"),
+            f(
+                "reference/deep/deeper/hop2.md",
+                FileMode::Regular,
+                b"hop2\n",
+            ),
+            f("bin/run.sh", FileMode::Executable, b"#!/bin/sh\n"),
+            f("assets/big.bin", FileMode::Regular, &[0xff, 0x00, 0x01]),
+        ];
+        let draft = [
+            f("README.md", FileMode::Regular, b"nonce: new\n"),
+            f("assets/big.bin", FileMode::Regular, &[0xff, 0x00, 0x01]),
+            f("bin/run.sh", FileMode::Executable, b"#!/bin/sh\n"),
+            f("nonce.txt", FileMode::Regular, b"new\n"),
+            f(
+                "reference/deep/deeper/hop2.md",
+                FileMode::Regular,
+                b"hop2\n",
+            ),
+            f("reference/deep/notes.md", FileMode::Regular, b"notes\n"),
+        ];
+        let sections = unified_diff_sections(&base, &draft);
+        let paths: Vec<&str> = sections.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, vec!["README.md", "nonce.txt"], "{sections:?}");
+        let out = unified_diff(&base, &draft);
+        assert!(
+            !out.contains("/dev/null"),
+            "no addition or deletion at all:\n{out}"
+        );
+        assert!(
+            !out.contains("Binary files"),
+            "the unchanged blob is silent:\n{out}"
+        );
+        // The same answer whichever side is unsorted — and the same as with both sorted.
+        assert_eq!(unified_diff(&draft, &base).matches("--- a/").count(), 2);
     }
 
     #[test]
