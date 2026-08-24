@@ -12,6 +12,7 @@ import { backfillMcpConnectionsAtBoot } from "@/lib/db/mcp-backfill.server";
 import { syncMcpCatalogAtBoot } from "@/lib/db/mcp-catalog-sync.server";
 import { runMigrations } from "@/lib/db/migrate.server";
 import { armUpstreamChecker } from "@/lib/db/upstream.server";
+import { docsNegotiatedMarkdown } from "@/lib/docs/docs.server";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
 
 /**
@@ -162,6 +163,14 @@ export default async function handleRequest(
   // poisons every client-side navigation into a carded route: the router cannot decode a
   // markdown card, and the miss surfaces as the root boundary's bogus 500. Served before the
   // migration gate on purpose — the card is constant and needs no database.
+  // THE DOCUMENTATION ANSWERS FIRST. `/docs` is a public page, not a resource address: a
+  // terminal's `Accept: */*` must read the prose, not be told how to log in. Only a path that
+  // names a real page is taken here; everything else falls through to the card below.
+  const docs = docsNegotiatedMarkdown(request);
+  if (docs) {
+    return docs;
+  }
+
   const card = cardResponse(request);
   if (card) {
     return card;

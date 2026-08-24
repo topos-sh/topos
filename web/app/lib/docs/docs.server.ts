@@ -1,3 +1,4 @@
+import { cardFace } from "@/lib/card.server";
 import { DOCS_NAV, DOCS_ORDER, DOCS_PAGES } from "./content.generated.server";
 import type { DocsNeighbour, DocsPage, DocsPageView, DocsSidebarGroup } from "./model";
 
@@ -6,9 +7,11 @@ import type { DocsNeighbour, DocsPage, DocsPageView, DocsSidebarGroup } from "./
  * committed generated module — no filesystem, no database, no request-time compilation — so a
  * docs page costs the same as any static asset and the running image needs no `docs/` directory.
  *
- * Path shape decides the face, the way it does everywhere else in this app: `/docs/<id>` renders
- * the page, `/docs/<id>.md` serves the same page as plain markdown for an agent that fetched the
- * URL, and `/docs/llms.txt` indexes the set. No content negotiation, no guessing.
+ * A docs page has ONE body in two dresses, and BOTH ways of asking for the plain one work:
+ * `/docs/<id>.md` is the twin an agent can link to and paste around, and a fetch of the PAGE
+ * path itself with any non-HTML `Accept` gets the same markdown (`docsNegotiatedMarkdown`) —
+ * `curl https://topos.sh/docs/quickstart` reads the documentation, not the app's protocol card.
+ * A browser (an `Accept` naming `text/html`) is untouched and renders the page.
  */
 
 /** The docs mount — origin-rooted in BOTH tenancy modes (it describes the deployment). */
@@ -99,9 +102,8 @@ export function docsLlmsTxt(origin: string): string {
     for (const id of group.pages) {
       const page = DOCS_PAGES[id];
       if (page !== undefined) {
-        // The MARKDOWN twin, deliberately: this index exists for machines, and a non-browser
-        // fetch of the page path gets the app's constant protocol card, not the documentation.
-        // The `.md` routes are resource routes, so they answer with the prose itself.
+        // The MARKDOWN twin, deliberately: this index exists for machines, and the `.md` path
+        // says what it serves in the URL — one address whose answer never depends on a header.
         lines.push(`- [${page.title}](${base}${docsMarkdownPath(id)}): ${page.description}`);
       }
     }
@@ -113,4 +115,50 @@ export function docsLlmsTxt(origin: string): string {
 /** The plain-markdown body of a page, or null when the id names nothing. */
 export function docsMarkdown(id: string): string | null {
   return DOCS_PAGES[id]?.markdown ?? null;
+}
+
+/** The headers a markdown docs body is served with; `vary` is added where Accept chose it. */
+const MARKDOWN_HEADERS = {
+  "content-type": "text/markdown; charset=utf-8",
+  "cache-control": "public, max-age=300",
+} as const;
+
+/** One page's markdown as a response — what `/docs/<id>.md` answers with. */
+export function docsMarkdownResponse(markdown: string): Response {
+  return new Response(markdown, { headers: MARKDOWN_HEADERS });
+}
+
+/**
+ * The page a docs PAGE path names (`/docs`, `/docs/`, `/docs/<id>`, `/docs/<a>/<b>`), or null
+ * when the path is not one — including the `.md` twins and `/docs/llms.txt`, which are their own
+ * resource routes and never come through here.
+ */
+function docsPageAtPath(pathname: string): DocsPage | null {
+  if (pathname !== DOCS_BASE && !pathname.startsWith(`${DOCS_BASE}/`)) {
+    return null;
+  }
+  return docsPageFor(pathname === DOCS_BASE ? "" : pathname.slice(`${DOCS_BASE}/`.length));
+}
+
+/**
+ * The markdown answer for a NON-BROWSER fetch of a docs page path, or null to leave the request
+ * alone.
+ *
+ * `curl` sends a bare wildcard Accept, so before this the documentation answered a terminal with
+ * the app's protocol card — the right answer for a workspace address, the wrong one for a public
+ * page whose whole point is being readable. A path that names no page is left alone too, so the
+ * miss keeps whatever answer it already had.
+ */
+export function docsNegotiatedMarkdown(request: Request): Response | null {
+  if (cardFace(request) === "html") {
+    return null;
+  }
+  const page = docsPageAtPath(new URL(request.url).pathname);
+  if (page === null) {
+    return null;
+  }
+  const response = docsMarkdownResponse(page.markdown);
+  // The same URL now has two bodies, chosen by Accept — caches must key on it.
+  response.headers.set("vary", "accept");
+  return response;
 }

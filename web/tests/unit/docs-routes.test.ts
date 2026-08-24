@@ -5,6 +5,7 @@ import {
   docsLlmsTxt,
   docsMarkdown,
   docsMarkdownPath,
+  docsNegotiatedMarkdown,
   docsNeighbours,
   docsPageFor,
   docsPath,
@@ -117,9 +118,8 @@ describe("/docs/llms.txt", () => {
   const index = docsLlmsTxt("https://topos.example.com");
 
   it("links every page's MARKDOWN twin, ABSOLUTE, on the deployment's own origin", () => {
-    // This index is read by machines, and a non-browser fetch of a PAGE path gets the app's
-    // constant protocol card. The `.md` twins are resource routes, so they answer with prose —
-    // linking anything else would hand an agent a URL that does not resolve to documentation.
+    // This index is read by machines, and the `.md` path says what it serves in the URL — one
+    // address whose answer never depends on a header.
     for (const group of docsSidebar()) {
       for (const page of group.pages) {
         expect(index).toContain(`](https://topos.example.com${docsMarkdownPath(page.id)})`);
@@ -170,5 +170,63 @@ describe("the markdown twin", () => {
         expect(markdown).not.toContain("GENERATED-CLI-REFERENCE");
       }
     }
+  });
+});
+
+describe("a non-browser fetch of a docs PAGE path", () => {
+  const fetchDocs = (path: string, accept?: string): Response | null =>
+    docsNegotiatedMarkdown(
+      new Request(`https://topos.example.com${path}`, {
+        headers: accept === undefined ? {} : { accept },
+      }),
+    );
+
+  it("serves the page's markdown to curl's bare Accept (the D14 soft-card fix)", async () => {
+    const response = fetchDocs("/docs/quickstart", "*/*");
+    expect(response).not.toBeNull();
+    expect(response?.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(await (response as Response).text()).toBe(docsMarkdown("quickstart"));
+  });
+
+  it("serves the same bytes as the page's own .md twin, for every page in the nav", async () => {
+    for (const group of docsSidebar()) {
+      for (const page of group.pages) {
+        const response = fetchDocs(page.path, "*/*");
+        expect(response, page.path).not.toBeNull();
+        expect(await (response as Response).text()).toBe(docsMarkdown(page.id));
+      }
+    }
+  });
+
+  it("answers the docs ROOT too, with or without the trailing slash", async () => {
+    for (const path of [DOCS_BASE, `${DOCS_BASE}/`]) {
+      const response = fetchDocs(path, "*/*");
+      expect(response, path).not.toBeNull();
+      expect(await (response as Response).text()).toBe(docsMarkdown("index"));
+    }
+  });
+
+  it("varies on accept — the same URL now has two bodies", () => {
+    expect(fetchDocs("/docs/quickstart", "*/*")?.headers.get("vary")).toBe("accept");
+  });
+
+  it("leaves a BROWSER alone — the page renders exactly as before", () => {
+    expect(fetchDocs("/docs/quickstart", "text/html")).toBeNull();
+    expect(fetchDocs("/docs/quickstart", "text/html,application/xhtml+xml,*/*;q=0.8")).toBeNull();
+  });
+
+  it("leaves everything that is not a docs page alone — the card still answers those", () => {
+    for (const path of ["/", "/northwind", "/northwind/skills/x", "/docsomething", "/login"]) {
+      expect(fetchDocs(path, "*/*"), path).toBeNull();
+    }
+  });
+
+  it("leaves a docs path that names NO page alone — the miss keeps its own answer", () => {
+    expect(fetchDocs("/docs/no-such-page", "*/*")).toBeNull();
+  });
+
+  it("never intercepts the .md twins or the llms.txt index — those are their own routes", () => {
+    expect(fetchDocs("/docs/quickstart.md", "*/*")).toBeNull();
+    expect(fetchDocs("/docs/llms.txt", "*/*")).toBeNull();
   });
 });
