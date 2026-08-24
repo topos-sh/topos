@@ -19,7 +19,7 @@ import {
   submissionCapRefusal,
 } from "@/lib/db/invite-caps.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
-import { MCP_RESOLVED_REVISION } from "@/lib/db/queries.mcp-catalog.server";
+import { MCP_RESOLVED_REVISION, mcpRevisionFacts } from "@/lib/db/queries.mcp-catalog.server";
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
   bundle,
@@ -1052,7 +1052,13 @@ export async function laneMcpServersIndex(actor: {
     WHERE bm.workspace_id = ${ws} AND b.status <> 'deleted'
     ORDER BY b.id
   `);
-  return (rows.rows as Record<string, unknown>[]).map((r) => ({
+  return (rows.rows as Record<string, unknown>[]).map(laneMcpEntryOf);
+}
+
+/** One connected-server row as the lane spells it — written once, for the index and the
+ *  by-revision read, which answer with the same facts about the same columns. */
+function laneMcpEntryOf(r: Record<string, unknown>): LaneMcpIndexEntry {
+  return {
     skill_id: r.skill_id as string,
     name: r.name as string,
     kind: r.kind as string,
@@ -1062,7 +1068,54 @@ export async function laneMcpServersIndex(actor: {
     document: r.document as Record<string, unknown>,
     ...(r.pinned === true ? { pinned: true as const } : {}),
     updated_at: Number(r.revision_at),
-  }));
+  };
+}
+
+/**
+ * ONE STORED REVISION of a server this workspace connects — the read a committed `topos.lock`
+ * converges through, so a checkout installs the revision the lock names instead of whatever the
+ * catalog serves today.
+ *
+ * It answers with what DELIVERY WOULD HAVE ANSWERED while that revision was current: the same
+ * columns, the same shaping, the stored document verbatim (a public row's document was trimmed to
+ * the delivered shape and stamped with the verified tier when it was written, which is why there
+ * is nothing to re-shape here). `null` — the lane's uniform 404 — for everything else:
+ *
+ *  - a bundle this workspace does not connect, or one it deleted;
+ *  - a revision of ANOTHER server (the join pins the revision to the connection's own server), so
+ *    the lane is no oracle for the catalog at large;
+ *  - a revision NEVER PROMOTED (`published_at IS NULL`): a proposal is not something anybody was
+ *    ever delivered, and a lock cannot name one;
+ *  - a document today's gate would refuse — RE-VALIDATED on the way out, exactly as the vault's
+ *    own document read is, because the rules can tighten between a publish and a read.
+ */
+export async function laneMcpRevision(
+  actor: { readonly workspaceId: string },
+  bundleId: string,
+  revisionId: string,
+): Promise<LaneMcpIndexEntry | null> {
+  const rows = await getDb().execute(sql`
+    SELECT b.id AS skill_id, b.name, b.kind, b.status, b.display_name,
+           r.id AS revision_id, r.document,
+           (bm.pinned_revision_id IS NOT NULL) AS pinned,
+           (extract(epoch from r.published_at) * 1000)::bigint AS revision_at
+    FROM web.bundle_mcp bm
+    JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
+    JOIN web.mcp_server ms ON ms.id = bm.server_id
+    JOIN web.mcp_server_revision r ON r.server_id = ms.id
+    WHERE bm.workspace_id = ${actor.workspaceId} AND b.status <> 'deleted'
+      AND b.id = ${bundleId} AND r.id = ${revisionId}
+      AND r.published_at IS NOT NULL
+    LIMIT 1
+  `);
+  const row = (rows.rows as Record<string, unknown>[])[0];
+  if (row === undefined) {
+    return null;
+  }
+  const entry = laneMcpEntryOf(row);
+  return mcpRevisionFacts(entry.document, { requireVersion: false }).refusal === null
+    ? entry
+    : null;
 }
 
 // ── The shared helpers other DAL modules use ────────────────────────────────────────────────
