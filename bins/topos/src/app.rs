@@ -3275,7 +3275,10 @@ fn session_login_pending_disclosure(
         verification_uri: p.verification_uri.clone(),
         user_code: p.user_code.clone(),
         interval_secs: p.interval_secs,
-        expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
+        expires_at_millis: p
+            .expires_at
+            .as_deref()
+            .and_then(crate::ops::parse_rfc3339_utc_millis),
     })
 }
 
@@ -3333,33 +3336,6 @@ fn finish_session_logout(
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
-}
-
-/// Parse the client's own RFC 3339 UTC spelling (`YYYY-MM-DDTHH:MM:SSZ` — what the pending
-/// disclosures carry) back to epoch millis. Anything else answers `None` (the waiting line then
-/// shows elapsed time only).
-fn parse_rfc3339_utc_millis(s: &str) -> Option<i64> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
-        return None;
-    }
-    if bytes[13] != b':' || bytes[16] != b':' || bytes[19] != b'Z' {
-        return None;
-    }
-    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse().ok() };
-    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
-        return None;
-    }
-    // Howard Hinnant's days-from-civil (the inverse of `render::civil_from_days`).
-    let yy = if m <= 2 { y - 1 } else { y };
-    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
-    let yoe = yy - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some((days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000)
 }
 
 /// The waiting line — ONE static print, no timer. The device-flow precedent waits without a
@@ -4022,13 +3998,15 @@ fn list_discovery() -> Option<ops::DiscoveryRoots> {
 mod tests {
     use super::{
         DEFAULT_WEB_ORIGIN, PendingDisclosure, WaitPolicy, block_on_pending, build_pull_scope,
-        claim_grammar, document_flag, list_page_argv, next_page_action, parse_rfc3339_utc_millis,
-        resolve_web_origin, waiting_line,
+        claim_grammar, document_flag, list_page_argv, next_page_action, resolve_web_origin,
+        waiting_line,
     };
     use std::process::ExitCode;
 
     use crate::ids::Clock;
-    use crate::ops::{self, PullScope, RowPage, StoreScope, TargetMode, VersionRef};
+    use crate::ops::{
+        self, PullScope, RowPage, StoreScope, TargetMode, VersionRef, parse_rfc3339_utc_millis,
+    };
 
     struct TestClock(u64);
     impl Clock for TestClock {

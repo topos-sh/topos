@@ -295,10 +295,17 @@ fn plane_version_event(v: &WireLogVersion) -> serde_json::Value {
 }
 
 /// A plane proposal event (open + every resolution).
+///
+/// `at` is WHEN THE PROPOSAL WAS OPENED — the one instant the row records for itself, and the one it
+/// always has (a resolution is rendered in the line's own words, and moving the row to the day it was
+/// rejected would file "proposed by X" away from when X did it). The server stamps it as a string, so
+/// it is parsed here; a spelling this client cannot read leaves the row undated rather than dated
+/// wrong, and the merge keeps it beside the neighbour it arrived next to.
 fn plane_proposal_event(p: &WireLogProposal) -> serde_json::Value {
     json!({
         "action": "proposal",
         "source": "plane",
+        "at": super::parse_rfc3339_utc_millis(&p.created_at),
         "version_id": p.version_id,
         "proposer": p.proposer,
         "status": p.status,
@@ -442,6 +449,64 @@ mod tests {
     fn a_history_where_nothing_carries_a_time_is_left_exactly_as_it_was() {
         let events = order_newest_first(vec![undated("a"), undated("b"), undated("c")]);
         assert_eq!(tags(&events), ["a", "b", "c"]);
+    }
+
+    fn proposal(created_at: &str) -> WireLogProposal {
+        WireLogProposal {
+            version_id: "f".repeat(64),
+            proposer: "Mia <mia@topos.sh>".to_owned(),
+            status: "open".to_owned(),
+            resolved_by: None,
+            resolved_reason: None,
+            resolved_at: None,
+            created_at: created_at.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_proposal_is_dated_by_when_it_was_opened() {
+        // The server stamps `created_at` as a string; the merge orders by `at`, so a proposal that
+        // stayed undated could sort ahead of an action that happened after it.
+        let event = plane_proposal_event(&proposal("2023-11-15T22:13:20Z"));
+        assert_eq!(event["at"].as_i64(), Some(1_700_086_400_000));
+    }
+
+    #[test]
+    fn a_stamp_this_client_cannot_read_leaves_the_proposal_undated() {
+        // Undated beats dated-wrong: the merge then keeps the row beside the neighbour it arrived
+        // next to, rather than filing it under a guess.
+        for unreadable in [
+            "",
+            "yesterday",
+            "2023-11-15T22:13:20.500Z",
+            "2023-11-15 22:13:20Z",
+        ] {
+            let event = plane_proposal_event(&proposal(unreadable));
+            assert!(event["at"].is_null(), "{unreadable}: {event}");
+        }
+    }
+
+    #[test]
+    fn an_old_proposal_sinks_below_the_action_that_happened_after_it() {
+        // The exact symptom the stamp fixes. Proposals arrive LAST in the merge, so an undated one
+        // inherited the key of the newest thing above it — the plane version here — and rode up
+        // past a local action it predates by a day. Its own date puts it where it belongs.
+        let events = assemble_log_events(
+            vec![dated("add", 1_700_000_000_000)],
+            Vec::new(),
+            vec![dated("v", 1_700_086_400_000)],
+            vec![plane_proposal_event(&proposal("2023-11-13T22:13:20Z"))],
+            &HashSet::new(),
+        );
+        let order: Vec<&str> = events
+            .iter()
+            .map(|e| {
+                e.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| e.get("action").and_then(Value::as_str).unwrap_or("?"))
+            })
+            .collect();
+        assert_eq!(order, ["v", "add", "proposal"], "{events:?}");
     }
 
     #[test]
