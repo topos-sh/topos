@@ -267,9 +267,20 @@ pub(crate) fn classify_key(key: &str) -> Result<KeyShape, KeyError> {
                 workspace: (*ws).to_string(),
                 channel: (*name).to_string(),
             }),
+            // The bundle's PAGE URL — what `publish` hands out as the share line and what a
+            // browser's address bar shows (`…/skills/<bundle>`, `…/mcp/<server>`): the same
+            // bundle, spelled by its page. Recorded in the canonical `<host>/<ws>/<bundle>` form.
+            [host, ws, "skills" | "mcp", bundle] if is_name(ws) && is_name(bundle) => {
+                Ok(KeyShape::WorkspaceBundle {
+                    host: (*host).to_string(),
+                    workspace: (*ws).to_string(),
+                    bundle: (*bundle).to_string(),
+                })
+            }
             [host, ws, mid, _] if is_name(ws) && *mid != "channels" => Err(err(format!(
-                "`{key}` is not a reference — only `channels` sits third \
-                 (`{host}/{ws}/channels/<name>`); a bundle is `{host}/{ws}/<bundle>`",
+                "`{key}` is not a reference — a bundle is `{host}/{ws}/<bundle>` (its page URL, \
+                 `{host}/{ws}/skills/<bundle>` or `{host}/{ws}/mcp/<server>`, names the same \
+                 bundle); a channel is `{host}/{ws}/channels/<name>`",
             ))),
             _ => Err(err(format!(
                 "`{key}` is not a reference — `<host>/<workspace>` (the feed), \
@@ -631,12 +642,40 @@ mod tests {
         // `host/ws/channels` never classifies as a bundle named `channels` …
         let e = classify_key("topos.sh/acme/channels").unwrap_err();
         assert!(e.message.contains("channels/<name>"), "{e}");
-        // … and only `channels` may sit third on a four-segment workspace key.
-        let e = classify_key("topos.sh/acme/skills/deploy").unwrap_err();
-        assert!(e.message.contains("only `channels` sits third"), "{e}");
+        // … and an unknown third segment on a four-segment workspace key refuses, teaching the
+        // page-URL forms that DO name a bundle.
+        let e = classify_key("topos.sh/acme/things/deploy").unwrap_err();
+        assert!(e.message.contains("skills/<bundle>"), "{e}");
         assert!(
             classify_key("topos.sh/acme/channels/backend").is_ok(),
             "the four-segment channel form stays valid"
+        );
+    }
+
+    #[test]
+    fn a_bundle_page_url_names_the_bundle() {
+        // The share line `publish` prints and the browser's address bar — both classify as the
+        // bundle itself, recorded canonically.
+        for spelled in ["topos.sh/acme/skills/deploy", "topos.sh/acme/mcp/deploy"] {
+            assert_eq!(
+                classify_key(spelled).unwrap(),
+                KeyShape::WorkspaceBundle {
+                    host: "topos.sh".into(),
+                    workspace: "acme".into(),
+                    bundle: "deploy".into()
+                },
+                "{spelled}"
+            );
+        }
+        // The pasted form, scheme and all — the share line verbatim.
+        let pasted = parse_input("https://topos.sh/acme/skills/deploy", None).unwrap();
+        assert_eq!(
+            pasted.shape,
+            KeyShape::WorkspaceBundle {
+                host: "topos.sh".into(),
+                workspace: "acme".into(),
+                bundle: "deploy".into()
+            }
         );
     }
 

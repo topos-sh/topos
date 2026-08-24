@@ -2816,11 +2816,11 @@ fn distinct_sorted_readers(entries: &[&UntrackedEntry]) -> Vec<String> {
 fn harness_not_found_message(name: &str, harness: &str, available: &[String]) -> String {
     if available.is_empty() {
         format!(
-            "no untracked skill named '{name}' in harness '{harness}' — run `topos list` to see what's adoptable"
+            "no untracked bundle named '{name}' in harness '{harness}' — run `topos list` to see what's adoptable"
         )
     } else {
         format!(
-            "no untracked skill named '{name}' in harness '{harness}' — it is available in: {} (try `topos add {name}@<harness>`)",
+            "no untracked bundle named '{name}' in harness '{harness}' — it is available in: {} (try `topos add {name}@<harness>`)",
             available.join(", ")
         )
     }

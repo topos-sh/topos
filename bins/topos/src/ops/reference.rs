@@ -142,10 +142,10 @@ fn add_feed(
     if !global {
         // The SAME teaching the manifest grammar gives a feed row written into a project file.
         return Err(ClientError::InvalidArgument(format!(
-            "`{reference}` is a feed row — personal by nature, so it lives in the global manifest \
-             (`~/.topos/topos.toml`) only; a project manifest is a repo fact, identical for every \
-             contributor, and a channel (`{reference}/channels/<name>`) is the repo-shaped set to \
-             name here"
+            "`{reference}` is a whole workspace — that is a machine-wide subscription, not a \
+             project line. Machine-wide: `topos add -g {reference}`. In this project, name one \
+             bundle (`topos add {reference}/<bundle>`) or a channel \
+             (`topos add {reference}/channels/<name>`)"
         )));
     }
     let connected = medit::connected_workspaces(ctx);

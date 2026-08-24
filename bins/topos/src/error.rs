@@ -619,8 +619,9 @@ pub(crate) enum ClientError {
     /// that name sits in any known harness dir. Usage guidance shown VERBATIM (the name is the user's own
     /// argv token). Distinct from [`ClientError::NoSuchSkill`] (which is about *tracked* skills).
     #[error(
-        "no untracked skill named '{name}' — run `topos list` to see what's adoptable, or adopt a \
-         directory by path (`topos add ./<dir>`)"
+        "no untracked bundle named '{name}' here — run `topos list` to see what's adoptable, adopt \
+         a directory by path (`topos add ./<dir>`), or name a workspace's bundle by its address \
+         (`topos add topos.sh/<workspace>/{name}` — its page URL works too)"
     )]
     NoUntrackedSkill { name: String },
     /// `add <skill>` named a skill that is already tracked (so discovery excludes it) — the right move is
