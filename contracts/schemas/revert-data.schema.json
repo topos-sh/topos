@@ -19,10 +19,14 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "project_lock": {
-      "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the forward commit — the\ncheckout the command stood in runs the restored version at its next update. Absent when no\nproject lock records the bundle (or its row pins a version). **INFERRED** (additive-only).",
-      "type": [
-        "string",
-        "null"
+      "description": "The cwd project's `topos.lock` beside this revert: its entry for the bundle ADVANCED to the\nforward commit (the checkout runs the restored version at its next update), or was HELD at\nthe version the manifest pins. Absent when no project lock records the bundle. **INFERRED**\n(additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectLock"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "reverted_to": {
@@ -53,6 +57,28 @@
     "current_generation"
   ],
   "$defs": {
+    "ProjectLock": {
+      "description": "The cwd project's `topos.lock` beside a pointer move this machine made (a landed publish, a\nlanded revert): which file, which version its entry now records, and whether that entry was\nHELD rather than moved — the manifest pins the bundle, so the lock keeps the pinned version\nand the move changes nothing about what the project runs. A reader branches on `held`.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "The lock file, as a path.",
+          "type": "string"
+        },
+        "held": {
+          "description": "Whether the entry was HELD by a manifest pin instead of moved.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "The version the entry records now: the moved-to version, or the pinned one it kept.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "version"
+      ]
+    },
     "WorkspaceRef": {
       "description": "THE WORKSPACE A VERB'S ACT REACHED — one field, one spelling, in every payload below.\n\n`<host>/<name>` is the address a person types and the one `topos workspace list` prints, so a\nconsumer can hand what it read here straight back to `--workspace`. The two halves ride apart\nbecause a slash inside a name would make parsing one string ambiguous, and the opaque\n`workspace_id` stays exactly what it was — the wire key — and is never spelled here.",
       "type": "object",

@@ -109,10 +109,14 @@
       ]
     },
     "project_lock": {
-      "description": "The project `topos.lock` whose entry for this bundle ADVANCED to the version just shipped —\nthe checkout the command stood in runs the new version at once, the way a commit moves\n`HEAD`. Absent when no project lock records the bundle (or its row pins a version).\n**INFERRED** (additive-only).",
-      "type": [
-        "string",
-        "null"
+      "description": "The cwd project's `topos.lock` beside this publish: its entry for the bundle ADVANCED to\nthe version just shipped (the checkout runs it at once, the way a commit moves `HEAD`), or\nwas HELD at the version the manifest pins. Absent when no project lock records the bundle.\n**INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectLock"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "reference": {
@@ -207,6 +211,28 @@
       },
       "required": [
         "name"
+      ]
+    },
+    "ProjectLock": {
+      "description": "The cwd project's `topos.lock` beside a pointer move this machine made (a landed publish, a\nlanded revert): which file, which version its entry now records, and whether that entry was\nHELD rather than moved — the manifest pins the bundle, so the lock keeps the pinned version\nand the move changes nothing about what the project runs. A reader branches on `held`.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "The lock file, as a path.",
+          "type": "string"
+        },
+        "held": {
+          "description": "Whether the entry was HELD by a manifest pin instead of moved.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "The version the entry records now: the moved-to version, or the pinned one it kept.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "version"
       ]
     },
     "Republish": {

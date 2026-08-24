@@ -763,6 +763,10 @@ pub(crate) fn followed_workspace(ctx: &Ctx<'_>, skill_id: &str) -> Option<String
 /// read through the manifest (the row's address, else the file's `workspace`). A project that
 /// names neither, or another workspace, is left alone and nothing is said.
 ///
+/// A pinned row is disclosed as HELD (the version the lock keeps — the entry's, else the pin
+/// itself) rather than silently left, so a pin intentionally standing between the project and
+/// this move is still on the receipt.
+///
 /// Best-effort by design: the remote half has landed, and a local fault must never fail the
 /// command — it is said on stderr and the next `topos update` there converges the lock.
 pub(crate) fn advance_project_lock(
@@ -771,7 +775,7 @@ pub(crate) fn advance_project_lock(
     version: &str,
     host: &str,
     workspace: &str,
-) -> Option<String> {
+) -> Option<topos_types::results::ProjectLock> {
     let roots = ctx.roots.as_ref()?;
     let cwd = roots.cwd.as_deref()?;
     let dir = crate::manifest::scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home))?;
@@ -796,11 +800,20 @@ pub(crate) fn advance_project_lock(
         return None;
     }
     // The row that asks for the bundle, when the manifest spells one: a pinned row holds.
-    if row.is_some_and(|r| r.pin().is_some()) {
-        return None;
+    if let Some(pin) = row.and_then(|r| r.pin()) {
+        let kept = lock_entry_version(ctx, &dir, name).unwrap_or(pin);
+        return Some(topos_types::results::ProjectLock {
+            file: path.display().to_string(),
+            version: kept,
+            held: true,
+        });
     }
     match crate::manifest::lock::advance_entry(ctx.fs, &dir, name, version) {
-        Ok(true) => Some(path.display().to_string()),
+        Ok(true) => Some(topos_types::results::ProjectLock {
+            file: path.display().to_string(),
+            version: version.to_owned(),
+            held: false,
+        }),
         Ok(false) => None,
         Err(e) => {
             crate::out::errln!(
@@ -824,6 +837,21 @@ fn lock_workspace(ctx: &Ctx<'_>, dir: &std::path::Path) -> Option<String> {
     crate::manifest::lock::LockDoc::parse(&String::from_utf8_lossy(&bytes))
         .ok()?
         .workspace
+}
+
+/// The version a project lock's entry for `name` records, when the file, the entry, and a
+/// workspace version all exist.
+fn lock_entry_version(ctx: &Ctx<'_>, dir: &std::path::Path, name: &str) -> Option<String> {
+    let bytes = ctx
+        .fs
+        .read_opt(&dir.join(crate::manifest::lock::LOCK_FILE))
+        .ok()??;
+    crate::manifest::lock::LockDoc::parse(&String::from_utf8_lossy(&bytes))
+        .ok()?
+        .skills
+        .get(name)?
+        .version
+        .clone()
 }
 
 /// The `host/workspace` a project manifest's own `workspace` header names, when it parses.

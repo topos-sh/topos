@@ -81,8 +81,14 @@ fn a_pointer_move_advances_only_the_lock_of_its_own_workspace() {
     )
     .unwrap();
     std::fs::write(&lock, &with_header).unwrap();
-    assert!(ops::advance_project_lock(&ctx, "deploy", &v2, HOST, WS_NAME).is_none());
+    let held = ops::advance_project_lock(&ctx, "deploy", &v2, HOST, WS_NAME)
+        .expect("a held pin is disclosed, never silently left");
+    assert!(held.held, "{held:?}");
+    assert_eq!(held.version, v1, "the version the lock keeps");
+    assert!(held.file.ends_with("topos.lock"), "{held:?}");
     assert_eq!(lock_text(&proj.0), with_header, "the pinned entry stays");
+    // Another workspace's move against the pinned row: still nothing — not even a held line.
+    assert!(ops::advance_project_lock(&ctx, "deploy", &v2, HOST, "other").is_none());
 }
 
 #[test]
