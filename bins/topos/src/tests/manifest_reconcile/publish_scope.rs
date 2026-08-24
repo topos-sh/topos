@@ -784,6 +784,38 @@ fn an_unmodified_copy_of_an_older_version_carries_forward_over_the_live_current(
     );
 }
 
+/// A PROPOSAL of a copy carried forward is built over the live current, and its receipt names
+/// THAT as the base a reviewer reads it against — never the older version this store applied.
+#[test]
+fn a_proposal_of_a_carried_forward_copy_names_the_live_current_as_its_base() {
+    let rig = Rig::new("pubscope-forward-propose");
+    rig.seed_session();
+    let mine = one_file(b"# deploy\n");
+    let restored = revert_shaped(b"# deploy\nthe version the revert restored\n");
+    let seams = publish_seams_with(&mine, &[&restored]);
+    let (proj, _machine_dir, _project_dir) = both_scopes(
+        "pubscope-forward-propose-repo",
+        &rig,
+        &seams.plane,
+        &seams.dir,
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    seams
+        .plane
+        .serves(vec![delivered_at("s_deploy", "deploy", &restored, 2)]);
+
+    let proposed = match publish_arm(&ctx, &seams, ops::StoreScope::Here, true).unwrap() {
+        ops::PublishOutcome::Proposed(d) => d,
+        other => panic!("a --propose opens a proposal: {other:?}"),
+    };
+    assert_eq!(
+        proposed.base_version_id,
+        hex(&restored.id),
+        "the base is the version the candidate parents on"
+    );
+    assert_ne!(proposed.base_version_id, hex(&mine.id));
+}
+
 /// The delivery's advertised digest is DISCLOSURE, not trust. A snapshot that advertises the
 /// copy's own digest for a current whose verified bytes differ must never end in "already
 /// published": the verdict is confirmed against the bytes that reproduce the version id, and the
