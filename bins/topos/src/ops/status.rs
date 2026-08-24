@@ -67,12 +67,15 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
         shown.push(sr);
     }
     if show_machine {
-        scopes.push(scope_body(
-            resolved.machine(),
-            &resolved,
-            awaiting,
-            in_project,
-        ));
+        let mut body = scope_body(resolved.machine(), &resolved, awaiting, in_project);
+        // THE BUILT-IN IS ON THIS MACHINE and no file asks for it — it ships with the binary. A
+        // panel built from manifest rows alone said "nothing demanded machine-wide" while
+        // `topos list -g` showed the bundle on the line above it. Best-effort: an unreadable
+        // record says nothing rather than failing an offline health panel.
+        body.builtin_in_place = !super::builtin::placement_dirs(ctx)
+            .unwrap_or_default()
+            .is_empty();
+        scopes.push(body);
         shown.push(resolved.machine());
     }
     // The machine scope not shown in full rides ONE summary line with ITS pending counts.
@@ -112,6 +115,8 @@ fn scope_body(
         },
         notes: sr.notes.clone(),
         attention: attention(sr, awaiting, machine, in_project),
+        // The caller fills this for the machine scope (the built-in lives in the machine store).
+        builtin_in_place: false,
     }
 }
 

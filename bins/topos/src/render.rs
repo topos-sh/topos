@@ -848,6 +848,42 @@ fn tty_path(raw: &str) -> String {
     }
 }
 
+/// `topos add topos` — the BUILT-IN's restore receipt. Every other `add` answer names the file it
+/// recorded into; this one has none to name, and saying nothing about that left a person holding a
+/// receipt for an act with no visible trace. So it names what it actually did — the folders that
+/// took a copy — and then why no manifest line appeared: the bundle ships with the binary.
+///
+/// Reads the verb's own `--json` data (`{restored, changed, folders}`), which is the whole of what
+/// the restore knows.
+pub(crate) fn builtin_add_tty(data: &serde_json::Value) -> String {
+    let folders: Vec<&str> = data
+        .get("folders")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let changed = data.get("changed").and_then(serde_json::Value::as_bool) == Some(true);
+    // NOTHING TOOK A COPY: no agent folder on this machine could take one (none detected, or the
+    // `topos` dir there is somebody else's and stays untouched). "Placed" would be a claim the
+    // filesystem does not bear out, and there is no undo for a copy that is not there.
+    if folders.is_empty() {
+        return "No agent folder on this machine took a copy of the built-in topos bundle.\nNo \
+                manifest line records it — the bundle ships with the topos binary."
+            .to_owned();
+    }
+    let lead = if changed {
+        "Placed the built-in topos bundle on this machine:"
+    } else {
+        "The built-in topos bundle is already in place:"
+    };
+    let mut s = lead.to_owned();
+    for folder in &folders {
+        s.push_str(&format!("\n  {}", tty_path(folder)));
+    }
+    s.push_str("\nNo manifest line records it — the bundle ships with the topos binary.");
+    s.push_str("\nundo: topos remove topos --yes");
+    s
+}
+
 /// The IDENTITY CLAIM's receipt (`add <path> --as <bundle>`): the folder is now one of this
 /// bundle's places, and the tail says what that means for the bytes already in it — nothing
 /// changed at claim time, and what the next update will do about it depends only on what they are.
@@ -1493,14 +1529,30 @@ fn counted(n: u64, noun: &str) -> String {
 
 /// The scope section header — it leads with the governing FILE, so "why is this here" starts at
 /// the line that asked for it. The machine scope with no file says so honestly: no file, nothing
-/// demanded machine-wide.
-fn scope_header(scope: &str, manifest: Option<&str>) -> String {
+/// demanded machine-wide — unless the BUILT-IN stands here, whose own line ([`builtin_line`])
+/// carries that clause instead, so the panel does not say it twice one line apart.
+fn scope_header(scope: &str, manifest: Option<&str>, builtin_in_place: bool) -> String {
     match (scope, manifest) {
         ("project", Some(f)) => format!("This folder — {f}"),
         ("project", None) => "This folder".to_owned(),
         (_, Some(f)) => format!("Machine-wide — {f}"),
+        (_, None) if builtin_in_place => "Machine-wide — no global manifest".to_owned(),
         (_, None) => "Machine-wide — no global manifest; nothing demanded machine-wide".to_owned(),
     }
+}
+
+/// The BUILT-IN's line on the machine panel, said only where the panel would otherwise read as if
+/// the machine held nothing: `topos list -g` shows a `topos` row `from built-in`, and a health
+/// panel one command away saying nothing is demanded machine-wide reads as a contradiction. It is
+/// no contradiction — the bundle ships with the binary, so no file asks for it — and this is the
+/// line that says so. Empty where a manifest governs the scope: that file is the answer to "what
+/// is here", and the row is on `list`.
+fn builtin_line(scope: &topos_types::results::StatusScope) -> String {
+    if !scope.builtin_in_place || scope.manifest.is_some() {
+        return String::new();
+    }
+    "\n  the built-in topos bundle is in place; no workspace demands anything machine-wide"
+        .to_owned()
 }
 
 /// The INVENTORY's own section header — the listing names what the section holds and which file
@@ -2500,8 +2552,13 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
     for scope in &d.scopes {
         s.push_str(&format!(
             "\n{}",
-            scope_header(&scope.scope, scope.manifest.as_deref())
+            scope_header(
+                &scope.scope,
+                scope.manifest.as_deref(),
+                scope.builtin_in_place
+            )
         ));
+        s.push_str(&builtin_line(scope));
         for r in &scope.regimes {
             s.push_str(&format!("\n  {} — {}", r.workspace.address(), r.regime));
         }
@@ -9539,6 +9596,7 @@ mod tests {
                         command: "topos list".to_owned(),
                     },
                 ],
+                builtin_in_place: false,
             }],
             machine_summary: Some(StatusScopeSummary {
                 attention: vec![
@@ -9627,6 +9685,7 @@ mod tests {
                 }],
                 notes: Vec::new(),
                 attention: Vec::new(),
+                builtin_in_place: false,
             }],
             machine_summary: None,
             ..connected.clone()
@@ -9641,6 +9700,55 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("nothing pending"), "{text}");
+
+        // THE BUILT-IN STANDS HERE and no file asks for it — it ships with the binary. Saying
+        // "nothing demanded machine-wide" one command away from a `topos list -g` that shows the
+        // bundle read as a contradiction; the panel names it instead, and the header's own clause
+        // steps aside so the fact is not stated twice a line apart.
+        let with_builtin = StatusData {
+            scopes: vec![StatusScope {
+                scope: "machine".to_owned(),
+                manifest: None,
+                regimes: Vec::new(),
+                notes: Vec::new(),
+                attention: Vec::new(),
+                builtin_in_place: true,
+            }],
+            machine_summary: None,
+            ..connected.clone()
+        };
+        let text = status_tty(&with_builtin);
+        assert!(
+            text.contains(
+                "Machine-wide — no global manifest\n  the built-in topos bundle is in place; no \
+                 workspace demands anything machine-wide\n  nothing pending"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("machine-wide").count(),
+            1,
+            "the clause is said once, not twice a line apart: {text}"
+        );
+        // A file GOVERNS the scope: that file is the answer to what is here, and the bundle's row
+        // is on `list`. No line is spent restating it.
+        let governed = StatusData {
+            scopes: vec![StatusScope {
+                scope: "machine".to_owned(),
+                manifest: Some("~/.topos/topos.toml".to_owned()),
+                regimes: Vec::new(),
+                notes: Vec::new(),
+                attention: Vec::new(),
+                builtin_in_place: true,
+            }],
+            machine_summary: None,
+            ..connected.clone()
+        };
+        assert!(
+            !status_tty(&governed).contains("the built-in topos bundle"),
+            "{}",
+            status_tty(&governed)
+        );
 
         // The unconnected face states the fix in prose (join by address, or create a workspace).
         let fresh = StatusData {

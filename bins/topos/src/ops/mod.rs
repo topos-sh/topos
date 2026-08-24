@@ -72,7 +72,8 @@ pub(crate) use arm::{
     EvidenceView, Scrubbed, Triggers, arm_detected, probe_detected, register_new_detected,
 };
 pub(crate) use builtin::{
-    ensure_builtin, is_builtin, restore_builtin, skill_md as builtin_skill_md,
+    ensure_builtin, is_builtin, placement_dirs as builtin_placement_dirs, restore_builtin,
+    skill_md as builtin_skill_md,
 };
 pub(crate) use claim::claim;
 #[cfg(test)]
@@ -87,7 +88,7 @@ pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 #[cfg(test)]
 pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
-    placement_dirs as builtin_placement_dirs, remove_builtin as builtin_remove,
+    remove_builtin as builtin_remove,
 };
 pub(crate) use diff::{DiffBudget, diff, diff_resolved};
 pub(crate) use fmt::fmt_manifest;

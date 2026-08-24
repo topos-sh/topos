@@ -2082,6 +2082,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     count: 2,
                     command: "topos update".to_owned(),
                 }],
+                // A project scope: the built-in is a machine fact.
+                builtin_in_place: false,
             }],
             machine_summary: Some(StatusScopeSummary {
                 attention: vec![AttentionCount {

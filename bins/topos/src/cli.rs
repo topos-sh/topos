@@ -266,7 +266,9 @@ pub(crate) enum Command {
     /// catalogs of the workspaces you are connected to — when only a workspace has it, that is
     /// what you get. A GitHub source shows what it found and waits for `--yes`, every time — a
     /// skill is instructions your agent will follow, and that listing is there to be read.
-    /// `add topos` restores the built-in topos skill. `--kind mcp` SHARES AN MCP SERVER with your
+    /// `add topos` restores the built-in topos bundle: it ships with the binary, so it records no
+    /// line anywhere, and its receipt names the folders that took a copy instead of a file.
+    /// `--kind mcp` SHARES AN MCP SERVER with your
     /// workspace and gets it here in the same command: the source is its registry name
     /// (`io.github.acme/weather`) or an https link to its `server.json`, and the workspace reads
     /// the document, rules on it, and answers with the name it shares the server as — your agents

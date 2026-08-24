@@ -812,19 +812,17 @@ fn run_command(
                 );
             }
             if ops::is_builtin(&source) {
-                let result = ops::restore_builtin(&ctx)
-                    .map(|sync| serde_json::json!({ "restored": true, "changed": sync.changed }));
-                return finish(
-                    json,
-                    cmd_name,
-                    result,
-                    |_| {
-                        "Restored the built-in `topos` skill on this machine \
-                         (undo: topos remove topos --yes).\nsource: built-in"
-                            .to_owned()
-                    },
-                    &diag,
-                );
+                // The FOLDERS the restore actually wrote — read back after it ran, because they
+                // are what this receipt has to name in place of the manifest file every other
+                // `add` answer names (the built-in has none: it ships with the binary).
+                let result = ops::restore_builtin(&ctx).map(|sync| {
+                    serde_json::json!({
+                        "restored": true,
+                        "changed": sync.changed,
+                        "folders": ops::builtin_placement_dirs(&ctx).unwrap_or_default(),
+                    })
+                });
+                return finish(json, cmd_name, result, render::builtin_add_tty, &diag);
             }
             // REFERENCES first, read by SHAPE (the joined-key grammar): a workspace bundle
             // (`@ws/name`, the canonical `host/ws/name`), a channel (`@ws/channels/x`), a
