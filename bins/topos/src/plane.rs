@@ -13,8 +13,9 @@
 
 use topos_core::digest::FileMode;
 use topos_types::requests::{
-    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex, WireMe,
-    WireNotice, WireProposalIndex, WireProtocolCard, WireSkillIndex, WireSkillLog,
+    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex,
+    WireMcpIndexEntry, WireMe, WireNotice, WireProposalIndex, WireProtocolCard, WireSkillIndex,
+    WireSkillLog,
 };
 use topos_types::{Receipt, TerminalOutcome, WireCurrentRecord, WireError};
 
@@ -354,6 +355,24 @@ pub(crate) trait DirectorySource {
     /// # Errors
     /// As [`me`](Self::me).
     fn skills_index(&self, workspace_id: &str) -> Result<WireSkillIndex, ClientError>;
+
+    /// `GET /v1/workspaces/{ws}/mcp-servers/{skill}/revisions/{revision}` — ONE stored revision of
+    /// a connected server, in the same shape the catalog index carries the current one. What a
+    /// committed `topos.lock` converges an `[mcp]` entry to.
+    ///
+    /// `Ok(None)` is the lane's uniform 404, and it is an ANSWER, not a fault: the workspace does
+    /// not serve that revision — because it is gone, or because the server is older than the lane
+    /// itself. The caller degrades either way, so the two are one outcome here.
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault; [`ClientError::WireInvalid`] on a malformed
+    /// body.
+    fn mcp_revision(
+        &self,
+        workspace_id: &str,
+        skill_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<WireMcpIndexEntry>, ClientError>;
 
     /// `GET /v1/workspaces/{ws}/proposals` — the workspace review inbox (author-message first).
     ///

@@ -1225,6 +1225,14 @@ mod tests {
         ) -> Result<topos_types::requests::WireSkillIndex, ClientError> {
             unreachable!()
         }
+        fn mcp_revision(
+            &self,
+            _w: &str,
+            _s: &str,
+            _r: &str,
+        ) -> Result<Option<topos_types::requests::WireMcpIndexEntry>, ClientError> {
+            unreachable!()
+        }
         fn proposals_index(
             &self,
             _w: &str,

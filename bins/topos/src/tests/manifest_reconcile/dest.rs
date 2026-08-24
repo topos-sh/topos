@@ -437,6 +437,14 @@ impl DirectorySource for ChannelsDropAfterFirst {
     fn skills_index(&self, ws: &str) -> Result<WireSkillIndex, ClientError> {
         self.inner.skills_index(ws)
     }
+    fn mcp_revision(
+        &self,
+        ws: &str,
+        s: &str,
+        r: &str,
+    ) -> Result<Option<topos_types::requests::WireMcpIndexEntry>, ClientError> {
+        self.inner.mcp_revision(ws, s, r)
+    }
     fn proposals_index(&self, ws: &str) -> Result<WireProposalIndex, ClientError> {
         self.inner.proposals_index(ws)
     }

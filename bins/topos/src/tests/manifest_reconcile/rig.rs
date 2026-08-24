@@ -415,6 +415,9 @@ pub(in crate::tests) struct FakeDirectory {
     pub(super) skills: Vec<WireSkillIndexEntry>,
     /// The catalog's SECOND list — the workspace's connected servers, carrying their documents.
     pub(super) mcp_servers: Vec<topos_types::requests::WireMcpIndexEntry>,
+    /// The server revisions this workspace still SERVES BY ID (the by-revision lane's stock).
+    /// Empty is a workspace that serves none — which is also every server older than the lane.
+    pub(super) mcp_revisions: Vec<topos_types::requests::WireMcpIndexEntry>,
     pub(super) channels: Vec<WireChannelEntry>,
     /// When set, the index reads fail (a transport fault) — the freeze suites flip it.
     pub(super) unavailable: Arc<Mutex<bool>>,
@@ -428,17 +431,37 @@ impl FakeDirectory {
         Self {
             skills,
             mcp_servers: Vec::new(),
+            mcp_revisions: Vec::new(),
             channels,
             unavailable: Arc::new(Mutex::new(false)),
         }
     }
 
     /// The same fake, serving one connected SERVER beside whatever file bundles it already has.
+    /// The served revision is by-revision readable too: a workspace serves what it has stored.
     pub(in crate::tests) fn with_server(
         mut self,
         entry: topos_types::requests::WireMcpIndexEntry,
     ) -> Self {
+        self.mcp_revisions.push(entry.clone());
         self.mcp_servers.push(entry);
+        self
+    }
+
+    /// One further revision this workspace still serves BY ID — the older document a `topos.lock`
+    /// names. It is not in the catalog list: the catalog serves `current`, this lane serves any.
+    pub(in crate::tests) fn with_revision(
+        mut self,
+        entry: topos_types::requests::WireMcpIndexEntry,
+    ) -> Self {
+        self.mcp_revisions.push(entry);
+        self
+    }
+
+    /// A workspace whose server predates the by-revision lane: it serves NO revision by id, so
+    /// every such read answers the lane's uniform miss.
+    pub(in crate::tests) fn serving_no_revisions(mut self) -> Self {
+        self.mcp_revisions.clear();
         self
     }
     pub(super) fn set_unavailable(&self, v: bool) {
@@ -489,6 +512,19 @@ impl DirectorySource for FakeDirectory {
             mcp_servers: self.mcp_servers.clone(),
             skills: self.skills.clone(),
         })
+    }
+    fn mcp_revision(
+        &self,
+        _ws: &str,
+        skill_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<topos_types::requests::WireMcpIndexEntry>, ClientError> {
+        self.check_reachable()?;
+        Ok(self
+            .mcp_revisions
+            .iter()
+            .find(|e| e.skill_id == skill_id && e.revision_id == revision_id)
+            .cloned())
     }
     fn proposals_index(&self, _ws: &str) -> Result<WireProposalIndex, ClientError> {
         unreachable!()
@@ -1218,6 +1254,14 @@ impl DirectorySource for NamedDirectory {
     fn skills_index(&self, ws: &str) -> Result<WireSkillIndex, ClientError> {
         self.0.skills_index(ws)
     }
+    fn mcp_revision(
+        &self,
+        ws: &str,
+        s: &str,
+        r: &str,
+    ) -> Result<Option<topos_types::requests::WireMcpIndexEntry>, ClientError> {
+        self.0.mcp_revision(ws, s, r)
+    }
     fn proposals_index(&self, ws: &str) -> Result<WireProposalIndex, ClientError> {
         self.0.proposals_index(ws)
     }
@@ -1285,6 +1329,20 @@ pub(in crate::tests) fn catalog_server(
         pinned: None,
         revoked: None,
         updated_at: 0,
+    }
+}
+
+/// The same served row at a NAMED revision — what a `topos.lock` records, and what the fixtures
+/// that exercise one need two of.
+pub(in crate::tests) fn catalog_server_at(
+    skill_id: &str,
+    name: &str,
+    url: &str,
+    revision_id: &str,
+) -> topos_types::requests::WireMcpIndexEntry {
+    topos_types::requests::WireMcpIndexEntry {
+        revision_id: revision_id.to_owned(),
+        ..catalog_server(skill_id, name, url)
     }
 }
 

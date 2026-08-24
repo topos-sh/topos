@@ -2772,21 +2772,14 @@ fn reconcile_thing<'a>(
             // other kind is not this row's target and must never install in its place.
             let mcp_row = matches!(row.kind(), BundleKind::Mcp);
             if mcp_row && let Some(entry) = catalog.mcp_servers.iter().find(|e| &e.name == bundle) {
-                match locked_mcp_decision(env.ctx, sc, bundle, &entry.skill_id, &entry.revision_id)
+                match locked_mcp_decision(env, sc, run, bundle, &entry.skill_id, &entry.revision_id)
                 {
-                    LockedMcp::Held => {
-                        let locked = sc.locked_revision(bundle).expect("held implies locked");
+                    LockedMcp::Honored(delivered) => {
+                        let locked = sc.locked_revision(bundle).expect("honored implies locked");
                         sweep.lock_harvest.mcp.insert(bundle.clone(), locked);
                         sweep.explicit.insert(entry.skill_id.clone());
-                        sweep.disclosures.push(crate::message::disclosure(
-                            "MCP_HELD",
-                            format!(
-                                "{bundle}: held at the locked revision; `topos update` takes \
-                                 the served one"
-                            ),
-                        ));
-                        // The demand runs from the STANDING record (`delivered: None`), so the
-                        // placed entries stay exactly as the lock says.
+                        // The lock is honored as a skill's is — silently. `delivered: None` runs
+                        // the demand from the STANDING record, which already holds this document.
                         sync_workspace_server(
                             env,
                             sc,
@@ -2794,7 +2787,7 @@ fn reconcile_thing<'a>(
                             &ServerTarget {
                                 skill_id: &entry.skill_id,
                                 name: &entry.name,
-                                delivered: None,
+                                delivered,
                                 reach: mcp_filter(
                                     sc,
                                     row.fields().dest,
@@ -2812,14 +2805,14 @@ fn reconcile_thing<'a>(
                         );
                         return;
                     }
-                    LockedMcp::RefuseFresh => {
+                    LockedMcp::RefuseUnavailable(reason) => {
                         sweep.warnings.push(crate::message::failure(
                             "LOCK_REVISION_UNAVAILABLE",
                             format!(
-                                "\"{}\" ({}): topos.lock records a revision this checkout has \
-                                 never held, and no by-revision fetch exists — run \
-                                 `topos install` once without --frozen (the lock then records \
-                                 the served revision), or `topos update`.",
+                                "\"{}\" ({}): topos.lock records a revision this checkout does \
+                                 not hold and {reason}. Run `topos install` once without \
+                                 --frozen (the lock then records the served revision), or \
+                                 `topos update`.",
                                 row.reference, sc.label
                             ),
                         ));
@@ -2828,14 +2821,11 @@ fn reconcile_thing<'a>(
                             .insert((sc.label.clone(), entry.skill_id.clone()));
                         return;
                     }
-                    LockedMcp::FillServed => {
+                    LockedMcp::FillServed(reason) => {
                         sweep.lock_pin_overrides.insert(bundle.clone());
                         sweep.disclosures.push(crate::message::disclosure(
                             "MCP_FILLED",
-                            format!(
-                                "{bundle}: the lock takes the served revision (no by-revision \
-                                 fetch exists to honor the old one on a fresh checkout)"
-                            ),
+                            format!("{bundle}: the lock takes the served revision — {reason}"),
                         ));
                     }
                     LockedMcp::Ordinary => {}
@@ -3601,25 +3591,18 @@ fn reconcile_set<'a>(
                 // config files. A channel with no `mcp_dest` does not narrow them at all.
                 ChannelMember::Server(server) => {
                     match locked_mcp_decision(
-                        env.ctx,
+                        env,
                         sc,
+                        run,
                         &server.name,
                         &server.skill_id,
                         &server.revision_id,
                     ) {
-                        LockedMcp::Held => {
+                        LockedMcp::Honored(delivered) => {
                             let locked = sc
                                 .locked_revision(&server.name)
-                                .expect("held implies locked");
+                                .expect("honored implies locked");
                             sweep.lock_harvest.mcp.insert(server.name.clone(), locked);
-                            sweep.disclosures.push(crate::message::disclosure(
-                                "MCP_HELD",
-                                format!(
-                                    "{}: held at the locked revision; `topos update` takes \
-                                     the served one",
-                                    server.name
-                                ),
-                            ));
                             sync_workspace_server(
                                 env,
                                 sc,
@@ -3627,7 +3610,7 @@ fn reconcile_set<'a>(
                                 &ServerTarget {
                                     skill_id: &server.skill_id,
                                     name: &server.name,
-                                    delivered: None,
+                                    delivered,
                                     reach: mcp_filter(
                                         sc,
                                         row.fields().mcp_dest,
@@ -3648,13 +3631,13 @@ fn reconcile_set<'a>(
                             );
                             continue;
                         }
-                        LockedMcp::RefuseFresh => {
+                        LockedMcp::RefuseUnavailable(reason) => {
                             sweep.warnings.push(crate::message::failure(
                                 "LOCK_REVISION_UNAVAILABLE",
                                 format!(
-                                    "{} ({}): topos.lock records a revision this checkout has \
-                                     never held, and no by-revision fetch exists — run \
-                                     `topos install` once without --frozen, or `topos update`.",
+                                    "{} ({}): topos.lock records a revision this checkout does \
+                                     not hold and {reason}. Run `topos install` once without \
+                                     --frozen, or `topos update`.",
                                     server.name, sc.label
                                 ),
                             ));
@@ -3663,13 +3646,12 @@ fn reconcile_set<'a>(
                                 .insert((sc.label.clone(), server.skill_id.clone()));
                             continue;
                         }
-                        LockedMcp::FillServed => {
+                        LockedMcp::FillServed(reason) => {
                             sweep.lock_pin_overrides.insert(server.name.clone());
                             sweep.disclosures.push(crate::message::disclosure(
                                 "MCP_FILLED",
                                 format!(
-                                    "{}: the lock takes the served revision (no by-revision \
-                                     fetch exists to honor the old one on a fresh checkout)",
+                                    "{}: the lock takes the served revision — {reason}",
                                     server.name
                                 ),
                             ));
@@ -4543,24 +4525,30 @@ fn scope_recorded_revision(ctx: &Ctx<'_>, sc: &ScopeCtx<'_>, skill_id: &str) -> 
     .map(|r| r.revision_id)
 }
 
-/// The three honest moves for a LOCKED `[mcp]` revision meeting a different served one — there
-/// is no fetch-by-revision lane, so the lock can only ever record what the config HOLDS:
-/// - a standing record AT the locked revision is held (the served one arrives as `topos
-///   update`), and the demand runs from the record;
-/// - a fresh checkout under `--frozen` refuses (a mismatch it cannot honor);
-/// - a fresh checkout on plain install takes the SERVED revision, and the lock records that,
-///   said out loud.
+/// What a LOCKED `[mcp]` revision meeting a DIFFERENT served one resolves to. An `install`
+/// converges an MCP entry to the revision the lock names exactly as it converges a skill to its
+/// locked version — the workspace serves one revision by id, and the entry is rendered from that.
+/// The degraded moves stay for the case the lane cannot answer (the revision is gone, or the
+/// server is older than the lane): `--frozen` refuses, a plain install takes the served revision
+/// and says so.
 enum LockedMcp {
-    Held,
-    RefuseFresh,
-    FillServed,
     /// No locked revision, or it matches the served one — the ordinary flow.
     Ordinary,
+    /// THE LOCK IS HONORED: converge to the locked revision. `Some` = the document the workspace
+    /// just served for it; `None` = this scope's record already stands at it, so the demand runs
+    /// from the record and there was nothing to fetch.
+    Honored(Option<ServerDelivery>),
+    /// The locked revision could not be had, under `--frozen`: refuse, and write nothing. The
+    /// string is the clause naming WHY, in the workspace's own terms.
+    RefuseUnavailable(String),
+    /// The same, outside `--frozen`: take the SERVED revision, and disclose the swap.
+    FillServed(String),
 }
 
 fn locked_mcp_decision(
-    ctx: &Ctx<'_>,
+    env: &Env<'_>,
     sc: &ScopeCtx<'_>,
+    run: &SessionRun,
     name: &str,
     skill_id: &str,
     served_revision: &str,
@@ -4571,10 +4559,39 @@ fn locked_mcp_decision(
     if locked == served_revision {
         return LockedMcp::Ordinary;
     }
-    match scope_recorded_revision(ctx, sc, skill_id) {
-        Some(rec) if rec == locked => LockedMcp::Held,
-        _ if sc.frozen() => LockedMcp::RefuseFresh,
-        _ => LockedMcp::FillServed,
+    // The record already holds the locked revision's own document — the fetch would answer with
+    // what this scope was given, so it is not made. This is also the offline path.
+    if scope_recorded_revision(env.ctx, sc, skill_id).is_some_and(|rec| rec == locked) {
+        return LockedMcp::Honored(None);
+    }
+    let ws = &run.session.workspace_name;
+    match run
+        .transports
+        .directory
+        .mcp_revision(&run.session.workspace_id, skill_id, &locked)
+    {
+        Ok(Some(entry)) => match ServerDelivery::from_catalog(&entry) {
+            Some(delivered) => LockedMcp::Honored(Some(delivered)),
+            // A served row this build cannot write back out is not a revision it can honor.
+            None => unavailable(sc, format!("{ws} served a revision topos could not read")),
+        },
+        Ok(None) => unavailable(sc, format!("{ws} does not serve that revision")),
+        Err(e) => unavailable(
+            sc,
+            format!(
+                "{ws} could not be reached for it ({})",
+                crate::render::safe_message(&e)
+            ),
+        ),
+    }
+}
+
+/// The locked revision could not be had: the mode decides which honest move that is.
+fn unavailable(sc: &ScopeCtx<'_>, reason: String) -> LockedMcp {
+    if sc.frozen() {
+        LockedMcp::RefuseUnavailable(reason)
+    } else {
+        LockedMcp::FillServed(reason)
     }
 }
 
