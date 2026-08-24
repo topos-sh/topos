@@ -4,6 +4,24 @@
   "description": "`revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —\nnever a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**",
   "type": "object",
   "properties": {
+    "copy": {
+      "description": "The copy in the scope the command stood in, AFTER the revert: the same row `topos update\n<skill>` prints — the converge a landed revert runs on that one bundle, so the folder the\ncommand stood beside holds the restored content (a copy with unpublished edits gets the\nupdate's own draft/conflict handling, said on the row). Absent when the converge could\nnot run (`copy_fault` says why). **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PullSkill"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "copy_fault": {
+      "description": "Why the standing scope's copy was NOT converged after the revert landed — the remote half\nstands; this names the local fault and the update that finishes the job. The project lock\nis not advanced past a copy that does not hold the version. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "current_generation": {
       "type": "integer",
       "format": "uint64",
@@ -57,6 +75,285 @@
     "current_generation"
   ],
   "$defs": {
+    "ConflictHolds": {
+      "description": "What a folder holds while a merge stands (see [`ConflictPlacement`]). **INFERRED** (additive).",
+      "oneOf": [
+        {
+          "description": "This person's own version — the draft the merge stopped on. Every folder reads this the\nmoment a merge stops, because a conflict writes to none of them.",
+          "type": "string",
+          "const": "yours"
+        },
+        {
+          "description": "The team's version: a `--dest`-narrowed reset took this one copy while the merge stayed\nstopped over the others.",
+          "type": "string",
+          "const": "theirs"
+        },
+        {
+          "description": "Both versions, marked up — topos's OWN comparison tree, which a receipt must never read as\nwork of the person's. A merge writes it to the workbench, so a placement holds it only\nwhere one was copied over it (or an install upgraded mid-merge); either way the bytes are\nnot a version anybody chose, and both ways out replace them.",
+          "type": "string",
+          "const": "marked_up"
+        },
+        {
+          "description": "None of the three — the person kept working in this folder after the merge stopped.",
+          "type": "string",
+          "const": "newer_edits"
+        }
+      ]
+    },
+    "ConflictPathKind": {
+      "description": "How a single path conflicts. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A textual three-way overlap — diff3 markers were written at the path.",
+          "type": "string",
+          "const": "content"
+        },
+        {
+          "description": "A non-UTF-8 file with a true three-way divergence — theirs kept at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "binary_content"
+        },
+        {
+          "description": "Mine modified the file; theirs deleted it — mine kept at the path.",
+          "type": "string",
+          "const": "modify_delete"
+        },
+        {
+          "description": "Mine deleted the file; theirs modified it — theirs kept at the path.",
+          "type": "string",
+          "const": "delete_modify"
+        },
+        {
+          "description": "Both sides added the path with different content — theirs at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "add_add"
+        },
+        {
+          "description": "A consent-significant mode disagreement — theirs' bytes + mode at the path.",
+          "type": "string",
+          "const": "mode_mode"
+        },
+        {
+          "description": "A side (or the merged output) exceeded the client size cap — theirs at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "oversize"
+        }
+      ]
+    },
+    "ConflictPathReport": {
+      "description": "One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ConflictPathKind"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ]
+    },
+    "ConflictPlacement": {
+      "description": "One folder a stopped merge's bundle sits in, and what that folder holds RIGHT NOW. The pair is\nwhat lets a re-disclosure tell per-folder truth: a merge can stand for days while a narrowed\nreset takes one copy and the person keeps working in another. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "dir": {
+          "description": "The folder, as a receipt spells it (`~`-abbreviated display path).",
+          "type": "string"
+        },
+        "holds": {
+          "description": "What is in it.",
+          "$ref": "#/$defs/ConflictHolds"
+        }
+      },
+      "required": [
+        "dir",
+        "holds"
+      ]
+    },
+    "ConflictReason": {
+      "description": "Why a merge could not be applied cleanly. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A genuine three-way merge with at least one unresolved path.",
+          "type": "string",
+          "const": "three_way"
+        },
+        {
+          "description": "Unrelated histories — no recorded base; a 2-way manual choice is required.",
+          "type": "string",
+          "const": "no_base"
+        }
+      ]
+    },
+    "McpAgentState": {
+      "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation — its\nconfig ENTRY, projected onto [the one outcome vocabulary](TargetOutcome). **INFERRED**\n(additive).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The harness registry slug (e.g. `claude-code`, `cursor`).",
+          "type": "string"
+        },
+        "file": {
+          "description": "The config file the entry lives in (the `list <name>` deep dive shows it; receipts omit\nit).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "description": "A short human-readable qualifier (why not-supported / how a change goes live), when one\nexists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "What this bundle's entry in that agent's config looks like after the run.",
+          "$ref": "#/$defs/TargetOutcome"
+        }
+      },
+      "required": [
+        "agent",
+        "state"
+      ]
+    },
+    "MergeReport": {
+      "description": "The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED\nfields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),\nnot this exact shape.",
+      "type": "object",
+      "properties": {
+        "base_version_id": {
+          "description": "The three-way base (the draft's fork point).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "clean": {
+          "description": "Whether the merge was clean (`true` → draft-on-current, publishable) or blocked (`false`).",
+          "type": "boolean"
+        },
+        "conflicts": {
+          "description": "The conflicting paths when `clean` is `false` — the agent's resolution checklist.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConflictPathReport"
+          }
+        },
+        "copy_dir": {
+          "description": "Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,\nnever a folder an agent reads. A hand resolution left there is what `update <skill>\n--keep-mine` commits. Display path (`~`-abbreviated). Absent for a clean merge.\n**INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "drop_diff": {
+          "description": "For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "placements": {
+          "description": "Every folder this bundle sits in while the merge stands, each with WHAT IS IN IT — read\nfrom the folder itself, never assumed. A conflict writes to no folder, so the whole set\nreads `yours` the moment it stops; a copy taken by a narrowed reset, or edited on after the\nstop, says so instead. Folders that are gone (or unreadable) are absent: an unverifiable\nfolder must never become a claim. Empty for a clean merge (which rewrites its placements).\n**INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConflictPlacement"
+          }
+        },
+        "reason": {
+          "description": "Why the merge could not resolve itself — `three_way` (a real fork point; the workbench holds\nboth sides marked up) or `no_base` (unrelated histories; the workbench holds this person's\nfiles with the team's beside them). Absent on a clean merge and on a resolution. **INFERRED**\n(additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConflictReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved": {
+          "description": "How a STOPPED merge was finished, when this row is a `--keep-mine` resolution. Absent on a\nclean merge and on a conflict. **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergeResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result_digest": {
+          "description": "The merged/conflict tree's `bundle_digest`.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "result_version_id": {
+          "description": "The forward 1-parent commit carrying the merged (or conflict-marked) tree.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "theirs_version_id": {
+          "description": "`current` (theirs) the draft was merged onto.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "took": {
+          "description": "The paths a `keep_mine` resolution TOOK from the team — every file whose committed content\nor mode differs from this person's own draft, including ones the team deleted. Sorted by raw\npath bytes. Empty when the resolution changed nothing of theirs, and always empty for a\n`by_hand` resolution (that tree is the person's own, wholesale — nothing in it is claimable\nas taken from the team). **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "base_version_id",
+        "theirs_version_id",
+        "result_version_id",
+        "result_digest",
+        "clean"
+      ]
+    },
+    "MergeResolution": {
+      "description": "How `--keep-mine` finished a stopped merge — the two paths say different things about whose\nwording landed, so a receipt must never speak for both at once. **INFERRED** (additive).",
+      "oneOf": [
+        {
+          "description": "The workbench was left alone: the three-way merge, settled on this person's side wherever\nthe two sides collided, with everything else the team changed taken (`git merge -X ours`).",
+          "type": "string",
+          "const": "keep_mine"
+        },
+        {
+          "description": "The workbench was EDITED: those files are the person's own reconciliation, committed\nunexamined (`git commit` after resolving by hand). Nothing here is topos's choice.",
+          "type": "string",
+          "const": "by_hand"
+        }
+      ]
+    },
+    "Narrowing": {
+      "description": "A row edit that stopped demanding some of a bundle's surfaces while the bundle itself keeps\ndelivering here — the loss an `update` receipt leads with, so a deliberate narrowing is never\nquieter than the install that preceded it. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The surfaces this run retired — one line each under the lead.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Surface"
+          }
+        },
+        "still": {
+          "description": "Where the bundle STILL delivers, as the receipt spells it. Never empty: a row reaching\nnothing is not a narrowing, and the rows already say that in their own words.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "still",
+        "from"
+      ]
+    },
     "ProjectLock": {
       "description": "The cwd project's `topos.lock` beside a pointer move this machine made (a landed publish, a\nlanded revert): which file, which version its entry now records, and whether that entry was\nHELD rather than moved — the manifest pins the bundle, so the lock keeps the pinned version\nand the move changes nothing about what the project runs. A reader branches on `held`.\n**INFERRED** (additive-only).",
       "type": "object",
@@ -77,6 +374,263 @@
       "required": [
         "file",
         "version"
+      ]
+    },
+    "PullAction": {
+      "description": "What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the\nsemantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.",
+      "oneOf": [
+        {
+          "description": "State ① — already current; nothing to do.",
+          "type": "string",
+          "const": "up_to_date"
+        },
+        {
+          "description": "State ② clean — auto fast-forwarded to the new bytes.",
+          "type": "string",
+          "const": "fast_forwarded"
+        },
+        {
+          "description": "The bundle's FIRST materialization in this scope: the never-received baseline received its\nfirst bytes and they landed (skill folders, or — for a config-placed bundle — config\nentries). `destinations` names where. **Additive.**",
+          "type": "string",
+          "const": "installed"
+        },
+        {
+          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version, a config-placed bundle's entry\ndeleted or edited by hand and put back). `destinations` names the folders (config files,\nfor a config-placed bundle). A catch-up is not a first materialization, so it never reads\n`installed`. **Additive.**\n\nSerialized as `updated` — the word every human surface prints for it. A wire token and a\nterminal line naming one outcome two ways is one vocabulary too many.",
+          "type": "string",
+          "const": "updated"
+        },
+        {
+          "description": "This machine's OWN recipe choice ended delivery here (a dropped feed line, an `\"off\"`\nswitch, a dropped row) and the placed copies were uninstalled now — `destinations` names\nwhat left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is\nupstream's act. **Additive.**",
+          "type": "string",
+          "const": "removed"
+        },
+        {
+          "description": "State ④ resolved cleanly — a three-way merge (or the escape) landed a draft-on-current.",
+          "type": "string",
+          "const": "merged"
+        },
+        {
+          "description": "State ④ resolved with conflicts — a complete conflict tree was materialized and publish is blocked\nuntil the author resolves (or escapes).",
+          "type": "string",
+          "const": "conflicted"
+        },
+        {
+          "description": "State ③ — a SETTLED local draft (unchanged across two runs) was copied onto this bundle's\nother agent folders in its scope; their recorded baselines advance to the draft, and the\ndraft copy itself is untouched.",
+          "type": "string",
+          "const": "draft_synced"
+        },
+        {
+          "description": "A transient local hold (e.g. a local go-back is pinned).",
+          "type": "string",
+          "const": "held"
+        },
+        {
+          "description": "UPSTREAM withdrew the skill (archived, or its last delivering channel dropped it): the agent\ndirs were cleaned; the sidecar keeps the bytes + any draft delta (\"keep it as yours\" is a\nnarration away).",
+          "type": "string",
+          "const": "withdrawn"
+        },
+        {
+          "description": "A store record no row claims and nothing delivers RESOLVED, once: the record retires from\nevery surface; nothing on disk was deleted — placed files belong to the person now, and\n`note` carries the one-line fact. **Additive.**",
+          "type": "string",
+          "const": "released"
+        }
+      ]
+    },
+    "PullSkill": {
+      "description": "One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value\nenum* (`PullAction`) is INFERRED.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PullAction"
+        },
+        "applied": {
+          "description": "Highest generation actually materialized to disk.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "destinations": {
+          "description": "The DESTINATIONS this row's action touched: the skill folders an `installed` row landed in\n(or a `removed` row uninstalled), or the config files a config-placed (`mcp`) bundle's\nentries live in. Display paths — abbreviated to `~` under the user's home. Empty (and\nomitted) for actions that moved no destination. **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "display": {
+          "description": "The workspace-QUALIFIED display name a receipt leads with (`@<ws>/<name>` when the host is\nthis machine's one connected host, else `<host>/<ws>/<name>`). Absent for non-workspace\nsources, which read by their plain `skill` name. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "draft": {
+          "description": "Whether this bundle carries LOCAL EDITS that are not shared — the same fact `list` prints\nas `(draft)` and `status` counts as `drafts ahead`.\n\nDelivery had nothing to do for such a row, so its action is `up_to_date` — and a summary\nbuilt from actions alone then announced \"all up to date\" about the very bundles `list` and\n`status` were calling drafts. The three surfaces disagreed about one machine. Carried here\nso the receipt can say both true things at once: nothing was owed, and something of yours\nis still unshared. **INFERRED** (additive).",
+          "type": "boolean"
+        },
+        "harnesses": {
+          "description": "Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold\nthe server entry and how. Empty (and omitted) for file-bundle skills. **INFERRED**\n(additive).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpAgentState"
+          }
+        },
+        "kept": {
+          "description": "Locally-EDITED copies a `removed` row kept in place instead of uninstalling (the person's\nown work is never deleted by ending delivery) — their display paths, `~`-abbreviated.\n**INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "description": "The catalog bundle kind (`\"mcp\"` for a config-placed MCP-server bundle). Absent ⇒ an\nordinary skill. Carried so a receipt can name what it reconciled instead of calling every\nrow a skill — a state a row with no engaged agent could not otherwise report. **INFERRED**\n(additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "merge": {
+          "description": "Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergeReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "narrowed": {
+          "description": "The NARROWING a `removed` row is the loss half of (see [`Narrowing`]) — present only where\nthe run proved the bundle still delivers somewhere in this scope, which is what tells a\ndeliberate narrowing apart from delivery ending. **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Narrowing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "description": "The fact a row states BESIDE its action: the whole thing a `released` row prints (why the\nrecord resolved and where its files stand now — two lines, the second the folders, which a\nhuman renderer indents under the first), or — on any other action — the one line naming\nthe folders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed": {
+          "description": "The generation the plane most recently served — the sync target.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "scope": {
+          "description": "The SCOPE this row reconciled in — `\"person\"` for the home dirs, or the project\ndirectory's path for an in-checkout delivery. The receipt sections rows by it. Absent on\nrows predating the field. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill": {
+          "type": "string"
+        },
+        "synced_placements": {
+          "description": "How many OTHER agent folders a settled local draft was copied onto this run (a\n`draft_synced` row's count). Absent when the run synced nothing. **INFERRED** (additive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "workspace_id": {
+          "description": "The workspace this followed skill lives in, or `None` for a targeted go-back / local-only pull that\nhas no follow entry. A pulled skill is normally followed (so `Some`), but `pull <skill>@<hash>` on an\nunfollowed copy has none — `Option` keeps that honest and stays symmetric with [`SkillEntry`]. Names\nthe workspace so a session-start sweep does not show two same-named skills indistinguishably.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "skill",
+        "observed",
+        "applied",
+        "action"
+      ]
+    },
+    "Surface": {
+      "description": "ONE SURFACE a run answered for, in the vocabulary both target shapes share: the agent that\nreads it, where this bundle's copy lives there, and what the run left. `target` is a config\nfile for a config-placed (`mcp`) bundle and a folder for a skill. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The harness registry slug that reads it (e.g. `opencode`). EMPTY where the destination\nnames no single harness — a folder several agents share.",
+          "type": "string"
+        },
+        "note": {
+          "description": "The short qualifier the outcome carries (why a surface was not placed), when one exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TargetOutcome"
+        },
+        "target": {
+          "description": "The config file or folder the copy lives in, as a receipt spells it. Absent where nothing\nstands and there is no target to name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "state"
+      ]
+    },
+    "TargetOutcome": {
+      "description": "**THE ONE OUTCOME VOCABULARY** — what a single managed TARGET looks like after a run.\n\nA bundle's bytes reach a machine as one of two target shapes: a placement DIRECTORY the bundle\nowns, or an ENTRY it owns inside a config file. They are the same question asked twice (\"what\ndoes the thing topos owns look like now?\"), and they used to answer in two unrelated word sets\n— dirs through the row's action, entries through a free-form per-agent string that a reader\nhad to know by heart. Both now project onto THIS set, and both render from\n[`TargetOutcome::word`], so one outcome cannot be called two things.\n\nEvery variant is DERIVED, never chosen at a render site: from the drift vocabulary the\nownership record is scanned into (absent / clean / modified / foreign / unscannable) plus the\none bit the record cannot hold — whether this run WROTE the target. **INFERRED**, and the value\nset is CLOSED: every consumer matches it exhaustively and there is no unknown arm, so a new\noutcome is a deliberate change that ships with a release — never a value a running client is\nexpected to tolerate.",
+      "oneOf": [
+        {
+          "description": "Nothing was there and this run wrote it — the target's FIRST materialization here.",
+          "type": "string",
+          "const": "created"
+        },
+        {
+          "description": "The target stood at what the record says topos wrote, and this run rewrote it: a version\ncaught up, or a hand-deleted target put back. Never `created` — the distinction is the\nwhole reason a person can tell a new install from a repair.",
+          "type": "string",
+          "const": "refreshed"
+        },
+        {
+          "description": "Found byte-for-byte as recorded; nothing was written.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Changed since topos wrote it — a local edit, left exactly as it is.",
+          "type": "string",
+          "const": "drifted"
+        },
+        {
+          "description": "Content topos holds no record of writing, standing where this bundle's target belongs.\nNever overwritten.",
+          "type": "string",
+          "const": "conflicting"
+        },
+        {
+          "description": "The target could not be read safely, so nothing was decided about it — fail closed.",
+          "type": "string",
+          "const": "unprovable"
+        },
+        {
+          "description": "The target left this run.",
+          "type": "string",
+          "const": "removed"
+        },
+        {
+          "description": "The surface exists but this bundle was deliberately not placed there (no config of that\nkind at this scope, a `dest` that excludes it).",
+          "type": "string",
+          "const": "not-supported"
+        }
       ]
     },
     "WorkspaceRef": {

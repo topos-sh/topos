@@ -154,7 +154,10 @@ fn session_lane(
     }
 }
 
-/// The transports a `revert` never reaches through the session lane.
+/// The transports a `revert` reaches through the session lane only AFTER the move landed — the
+/// converge it then runs on the standing scope's copy. Here the server is unreachable for that
+/// exchange, so what the rig pins is the receipt's fault path: the remote half stands, the copy
+/// is said to be not updated, and no lock is advanced past it.
 struct InertReconcile;
 impl crate::plane::PlaneSource for InertReconcile {
     fn get_current(
@@ -177,14 +180,16 @@ impl crate::plane::DeliverySource for InertReconcile {
         &self,
         _w: &str,
     ) -> Result<crate::plane::DeliverySnapshot, crate::plane::PlaneError> {
-        unreachable!()
+        Err(crate::plane::PlaneError::Unreachable(
+            "no delivery in this rig".to_owned(),
+        ))
     }
     fn report_applied(
         &self,
         _w: &str,
         _r: &[crate::plane::AppliedSkillReport],
     ) -> Result<(), crate::plane::PlaneError> {
-        unreachable!()
+        Ok(())
     }
 }
 struct InertContribute;
@@ -435,6 +440,19 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
         ops::RevertOutcome::Applied(data) => {
             assert_eq!(data.reverted_to, good_hex);
             assert_eq!(data.new_version_id, to_hex(&forward));
+            // The landed move converges the standing copy through the session lane; this rig
+            // cannot deliver, so the receipt says the copy was not updated and names the update
+            // that finishes it — and advances no lock past a copy that does not hold the version.
+            assert!(data.copy.is_none(), "{data:?}");
+            let fault = data
+                .copy_fault
+                .as_deref()
+                .expect("the converge fault is disclosed");
+            assert!(
+                fault.ends_with(&format!("`topos update {name}` converges it")),
+                "{fault}"
+            );
+            assert!(data.project_lock.is_none(), "{data:?}");
         }
         other => panic!("--yes applies, got {other:?}"),
     }
