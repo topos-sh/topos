@@ -276,9 +276,9 @@ fn run_command(
     // the MACHINE home and nowhere else — an object id IS its bytes, so one download serves every
     // scope on this box, while a project store's `.topos/` is per-checkout state that would make
     // each checkout pay for the same bytes again.
-    let fetch_cache_dir = resolve_home().join("cache").join("objects");
+    let fetch_cache_home = resolve_home();
     let fetch_cache =
-        || crate::fetch_cache::FetchCache::new(fetch_cache_dir.clone(), Rc::new(RealFs));
+        || crate::fetch_cache::FetchCache::new(fetch_cache_home.clone(), Rc::new(RealFs));
 
     // `uninstall` dispatches BEFORE state recovery and enrollment loading: its whole point is to
     // remove `~/.topos/` even when that state is corrupt — an unreadable/newer credentials doc or a

@@ -261,11 +261,12 @@ impl SessionInstall {
         Layout::new(&self.root.0.join(".topos"))
     }
 
-    /// The machine-wide fetched-object cache this install's byte transports share — the fixture's
-    /// OWN `.topos/cache/objects`, wired exactly where the composition root wires the real one, so
-    /// the composed suites run the cached fetch path rather than one only production takes.
-    fn fetch_cache_dir(&self) -> PathBuf {
-        self.root.0.join(".topos").join("cache").join("objects")
+    /// The machine HOME the fetched-object cache anchors under (its `cache/objects` chain is
+    /// proven below it) — the fixture's OWN `.topos`, wired exactly where the composition root
+    /// wires the real one, so the composed suites run the cached fetch path rather than one only
+    /// production takes.
+    fn fetch_cache_home(&self) -> PathBuf {
+        self.root.0.join(".topos")
     }
 
     /// Whether the login WAL is on disk (a pending browser approval).
@@ -328,7 +329,7 @@ impl SessionInstall {
             work: self.root.0.join("work"),
         };
         let device_id = crate::identity::load_or_create_device_id(&fs, &layout).expect("device id");
-        let connect = connect_session(self.fetch_cache_dir());
+        let connect = connect_session(self.fetch_cache_home());
         let routed = ops::SessionRoutedPlane::load(&fs, &layout, &connect);
         let cache = ops::CacheFollow::load(&fs, &layout);
         let ctx = Ctx {
@@ -360,16 +361,17 @@ impl SessionInstall {
             let enroll_connect = |base: &str| -> Box<dyn crate::plane::EnrollSource> {
                 Box::new(UreqDeviceClient::new(base.to_owned(), None))
             };
-            let delivery_connect = |base: &str,
-                                    cred: &str,
-                                    ws: &str|
-             -> Box<dyn crate::plane::DeliverySource> {
-                Box::new(
-                    UreqPlane::new(base.to_owned(), Some(cred.to_owned()), Default::default())
-                        .with_workspaces(vec![ws.to_owned()])
-                        .with_fetch_cache(FetchCache::new(self.fetch_cache_dir(), Rc::new(RealFs))),
-                )
-            };
+            let delivery_connect =
+                |base: &str, cred: &str, ws: &str| -> Box<dyn crate::plane::DeliverySource> {
+                    Box::new(
+                        UreqPlane::new(base.to_owned(), Some(cred.to_owned()), Default::default())
+                            .with_workspaces(vec![ws.to_owned()])
+                            .with_fetch_cache(FetchCache::new(
+                                self.fetch_cache_home(),
+                                Rc::new(RealFs),
+                            )),
+                    )
+                };
             let lane_connect =
                 |base: &str, cred: &str| -> Box<dyn crate::plane::GovernanceSource> {
                     Box::new(UreqDeviceClient::new(
@@ -428,7 +430,7 @@ impl SessionInstall {
             if !global {
                 ops::init(ctx, false, None).map_err(err_str)?;
             }
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             match ops::add_reference(
                 ctx,
                 &connect,
@@ -486,7 +488,7 @@ impl SessionInstall {
     /// `topos remove <targets…> --yes` — the manifest arm; `Ok(true)` when it claimed the tokens.
     pub fn remove(&self, targets: &[&str], cwd: Option<&Path>) -> Result<bool, String> {
         self.with_ctx(cwd, |ctx| {
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             let owned: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
             ops::remove_project(ctx, &connect, &owned, None, true, &Default::default())
                 .map(|r| r.is_some())
@@ -497,7 +499,7 @@ impl SessionInstall {
     /// `topos remove -g <reference> --yes` — `(kind, note)` from the applied receipt.
     pub fn remove_global(&self, reference: &str) -> Result<(String, Option<String>), String> {
         self.with_ctx(None, |ctx| {
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             match ops::remove_global(
                 ctx,
                 &connect,
@@ -526,7 +528,7 @@ impl SessionInstall {
         cwd: Option<&Path>,
     ) -> Result<(PullData, Vec<String>), String> {
         self.with_ctx(cwd, |ctx| {
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             ops::manifest_update(
                 ctx,
                 &connect,
@@ -578,7 +580,7 @@ impl SessionInstall {
         cwd: Option<&Path>,
     ) -> Result<PublishView, String> {
         self.with_ctx(cwd, |ctx| {
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             match ops::publish(
                 ctx,
                 Some(&connect),
@@ -617,7 +619,7 @@ impl SessionInstall {
         message: Option<&str>,
     ) -> Result<String, String> {
         self.with_ctx(None, |ctx| {
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             let connectors = ops::ReviewConnectors { session: &connect };
             let verdict = match verdict {
                 "approve" => ops::ReviewVerdict::Approve,
@@ -643,7 +645,7 @@ impl SessionInstall {
     /// `topos protect <target> [<level>] --yes`.
     pub fn protect(&self, target: &str, level: Option<&str>) -> Result<(), String> {
         self.with_ctx(None, |ctx| {
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             let connectors = ops::ProtectConnectors { session: &connect };
             ops::protect(ctx, &connectors, target, level, None, true)
                 .map(|_| ())
@@ -654,7 +656,7 @@ impl SessionInstall {
     /// `topos invite <emails…> --yes`.
     pub fn invite(&self, emails: &[&str]) -> Result<(), String> {
         self.with_ctx(None, |ctx| {
-            let connect = connect_session(self.fetch_cache_dir());
+            let connect = connect_session(self.fetch_cache_home());
             let connectors = ops::InviteConnectors { session: &connect };
             let owned: Vec<String> = emails.iter().map(|e| (*e).to_owned()).collect();
             ops::invite(ctx, &connectors, owned, None, None, None, true)
