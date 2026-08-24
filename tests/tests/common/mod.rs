@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use plane_store::Authority;
+use plane_store::{Authority, StoreConfig};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection, PgPool, Row};
 use topos::test_support::SessionInstall;
@@ -477,7 +477,20 @@ pub(crate) struct Stack {
     pub(crate) api_base: String,
     /// The boot-minted workspace's row id (`w_…`).
     pub(crate) workspace_id: String,
-    _dir: Scratch,
+    /// The loopback address the vault serves on — the ONE address the spawned app dials, kept so
+    /// the vault can be torn down and re-served on it ([`Stack::restart_vault`]).
+    pub(crate) plane_addr: SocketAddr,
+    /// The vault-facing pool (connected as `topos_plane`), reused by every rebuild of the
+    /// authority — the vault is stateless, the database is not.
+    plane_pool: PgPool,
+    /// The byte store the vault serves from (a local dir by default; an S3-compatible bucket for
+    /// the store e2e). A rebuild opens the SAME store.
+    store: StoreConfig,
+    /// The live `axum::serve` task; [`Stack::restart_vault`] aborts it and puts the replacement here.
+    plane_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// This stack's scratch dir — the staging roots and (on the local backend) the object dir live
+    /// under it, which is what a vault rebuild deletes.
+    dir: Scratch,
 }
 
 /// Stand the composed stack up: provision the database by the production recipe, serve the vault
@@ -485,6 +498,13 @@ pub(crate) struct Stack {
 /// of it, and poke ONE document request so first-boot setup mints the workspace (with the preset
 /// claim code). The workspace is returned UNCLAIMED — `claim_owner` is the first ceremony.
 pub(crate) fn start_stack(tag: &str) -> Stack {
+    start_stack_with_store(tag, None)
+}
+
+/// [`start_stack`] over a NAMED byte store. `None` keeps the local-directory default (rooted in
+/// this stack's own scratch dir — what every suite but the store e2e runs); `Some(config)` serves
+/// the vault's bytes from that store instead (the S3-compatible arm, driven against a local MinIO).
+pub(crate) fn start_stack_with_store(tag: &str, store: Option<StoreConfig>) -> Stack {
     let dir = Scratch::new("topos-e2e", tag);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -492,6 +512,9 @@ pub(crate) fn start_stack(tag: &str) -> Stack {
         .expect("build tokio runtime");
 
     let (admin_pool, plane_pool, web_url) = rt.block_on(provision_pg());
+    let store = store.unwrap_or_else(|| StoreConfig::Local {
+        root: dir.0.join("git"),
+    });
 
     // The in-process vault: the custody authority over the plane-role pool, served loopback-only.
     let listener = rt
@@ -499,22 +522,13 @@ pub(crate) fn start_stack(tag: &str) -> Stack {
         .expect("bind the vault listener");
     let plane_addr = listener.local_addr().expect("vault local addr");
     let plane_base = format!("http://{plane_addr}");
-    let authority = Authority::from_pool(
-        plane_pool,
-        &plane_store::StoreConfig::Local {
-            root: dir.0.join("git"),
-        },
+    let plane_task = serve_vault(
+        &rt,
+        listener,
+        plane_pool.clone(),
+        &store,
         &dir.0.join("staging"),
-    )
-    .expect("open the custody authority");
-    let state = PlaneState::new(Arc::new(authority)).with_internal_token(INTERNAL_TOKEN);
-    rt.spawn(async move {
-        let _ = axum::serve(
-            listener,
-            router(state).into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await;
-    });
+    );
 
     let app_port = free_port();
     let setup_link_file = dir.0.join("setup-link.txt");
@@ -546,14 +560,109 @@ pub(crate) fn start_stack(tag: &str) -> Stack {
         origin,
         api_base,
         workspace_id,
-        _dir: dir,
+        plane_addr,
+        plane_pool,
+        store,
+        plane_task: Mutex::new(Some(plane_task)),
+        dir,
     }
+}
+
+/// Build the custody authority over `pool` + `store` with `staging` as its staging root, and serve
+/// it on `listener` — the vault half of the stack, in the ONE place both the first boot and a
+/// rebuild ([`Stack::restart_vault`]) go through.
+fn serve_vault(
+    rt: &tokio::runtime::Runtime,
+    listener: tokio::net::TcpListener,
+    pool: PgPool,
+    store: &StoreConfig,
+    staging: &Path,
+) -> tokio::task::JoinHandle<()> {
+    let authority = Authority::from_pool(pool, store, staging).expect("open the custody authority");
+    let state = PlaneState::new(Arc::new(authority)).with_internal_token(INTERNAL_TOKEN);
+    rt.spawn(async move {
+        let _ = axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    })
 }
 
 impl Stack {
     /// The workspace ADDRESS a `follow` targets (`<origin>/<slug>` — the shareable resource address).
     pub(crate) fn address(&self) -> String {
         format!("{}/{WS_NAME}", self.origin)
+    }
+
+    /// Tear the in-process vault DOWN and stand a BRAND-NEW one up on the SAME loopback address the
+    /// running web app already dials: abort the serve task (which drops its listener and every
+    /// connection it held), delete EVERY local dir this vault used (the staging roots it ingested
+    /// through, and the object dir a `Local` store writes into), then rebuild the authority over the
+    /// same Postgres pool and the same byte store with a brand-new EMPTY staging root, and serve it
+    /// again. The app is never restarted and never reconfigured — it keeps calling the same address.
+    ///
+    /// Returns the new staging root, empty by construction: over a remote byte store the rebuilt
+    /// vault starts with NO local state at all, which is the whole point of the exercise.
+    pub(crate) fn restart_vault(&self) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        if let Some(task) = self.plane_task.lock().expect("the vault task").take() {
+            task.abort();
+            // Await the aborted task: `abort` only REQUESTS cancellation, and the address is not
+            // free until the listener it owns is actually dropped.
+            let _ = self.rt.block_on(task);
+        }
+        // Everything the old vault kept on local disk goes — every staging root it ever used, and
+        // the local object dir (absent on an S3 store, which is the case this exists for).
+        for entry in std::fs::read_dir(&self.dir.0)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "git" || name.starts_with("staging") {
+                std::fs::remove_dir_all(entry.path()).expect("delete the vault's local state");
+            }
+        }
+        let staging = self
+            .dir
+            .0
+            .join(format!("staging-{}", N.fetch_add(1, Ordering::Relaxed)));
+
+        // Re-bind THE SAME address (the old listener went with the aborted task; the short retry
+        // covers the kernel's own timing).
+        let mut bound = None;
+        for _ in 0..50 {
+            match self
+                .rt
+                .block_on(tokio::net::TcpListener::bind(self.plane_addr))
+            {
+                Ok(listener) => {
+                    bound = Some(listener);
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        let listener =
+            bound.unwrap_or_else(|| panic!("re-bind the vault listener at {}", self.plane_addr));
+        *self.plane_task.lock().expect("the vault task") = Some(serve_vault(
+            &self.rt,
+            listener,
+            self.plane_pool.clone(),
+            &self.store,
+            &staging,
+        ));
+
+        let health = format!("http://{}/healthz", self.plane_addr);
+        for _ in 0..100 {
+            if ureq::get(&health).call().is_ok() {
+                return staging;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("the rebuilt vault never answered {health}");
     }
 
     // ── ceremonies over HTTP ────────────────────────────────────────────────────────────────────
