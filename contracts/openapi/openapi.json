@@ -1044,6 +1044,104 @@
         }
       }
     },
+    "/v1/workspaces/{ws}/mcp-servers/{skill}/revisions/{revision_id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "get_mcp_revision",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skill",
+            "in": "path",
+            "description": "The connected server bundle's immutable id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_id",
+            "in": "path",
+            "description": "The catalog revision (`mcpr_` + 32 lowercase hex).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <device credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ONE stored revision of a server this workspace connects, in the shape the catalog index carries the current one — what a committed `topos.lock` converges an `[mcp]` entry to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireMcpIndexEntry"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, non-member, a bundle this workspace does not connect, a revision of another server, or one nobody was ever delivered (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{ws}/me": {
       "get": {
         "tags": [

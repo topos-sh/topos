@@ -15,9 +15,9 @@ use topos_types::requests::{
     ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
     WireAppliedSkill, WireCandidate, WireChannelEntry, WireChannelIndex, WireChannelSkill,
     WireDelivery, WireDeliverySkill, WireFile, WireFileMode, WireLogProposal, WireLogVersion,
-    WireMe, WireNotice, WireOpenProposal, WireProposalEntry, WireProposalIndex, WireProposalList,
-    WireProtocolCard, WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireUpstream,
-    WireVersionFile, WireVersionMeta, WireVia,
+    WireMcpIndexEntry, WireMe, WireNotice, WireOpenProposal, WireProposalEntry, WireProposalIndex,
+    WireProposalList, WireProtocolCard, WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
+    WireUpstream, WireVersionFile, WireVersionMeta, WireVia,
 };
 use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
 use topos_types::{
@@ -45,6 +45,7 @@ use topos_types::{
         crate::routes::door::get_version,
         crate::routes::door::list_proposals,
         crate::routes::door::list_skills,
+        crate::routes::door::get_mcp_revision,
         crate::routes::door::get_delivery,
         crate::routes::door::put_report,
         crate::routes::door::get_me,
@@ -90,9 +91,10 @@ use topos_types::{
         // The proposals-listing read.
         WireProposalList,
         WireOpenProposal,
-        // The workspace catalog read.
+        // The workspace catalog read, and its by-revision twin for a connected server.
         WireSkillIndex,
         WireSkillIndexEntry,
+        WireMcpIndexEntry,
         // The per-device delivery read + the applied-state report.
         WireDelivery,
         WireDeliverySkill,
