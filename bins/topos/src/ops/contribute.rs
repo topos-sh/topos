@@ -720,6 +720,8 @@ mod tests {
             good: None,
             display_name: None,
             channel: None,
+            base_version: None,
+            republished_version: None,
             last_receipt: None,
             bundle_kind: None,
         };
@@ -847,6 +849,8 @@ mod tests {
             good: Some(old.clone()),
             display_name: None,
             channel: None,
+            base_version: None,
+            republished_version: None,
             last_receipt: None,
             bundle_kind: None,
         };
@@ -946,6 +950,8 @@ mod tests {
             good: None,
             display_name: None,
             channel: None,
+            base_version: None,
+            republished_version: None,
             last_receipt: None,
             bundle_kind: None,
         };

@@ -435,6 +435,18 @@ pub struct OpRecord {
     /// [`OpRecord::op`], the operation kind.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_kind: Option<String>,
+    /// The version this publish/propose PARENTED on — the workspace's live current the candidate
+    /// was built over, which is also the version its receipt's undo restores. Persisted so a
+    /// crashed send RESUMES to the same receipt: the local lock still names the older version
+    /// the copy equalled, and an undo derived from it would be a no-op. `None` for a genesis
+    /// publish and for a revert/review. **Additive optional.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_version: Option<String>,
+    /// The OLDER version the copy EQUALLED when this publish carried its content forward over
+    /// a newer live current (a revert had moved `current` past it) — the receipt names both.
+    /// `None` for an ordinary draft, a genesis, and a revert/review. **Additive optional.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub republished_version: Option<String>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_receipt: Option<Receipt>,

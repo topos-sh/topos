@@ -317,6 +317,8 @@ fn migration_dispatch_is_fail_closed() {
             // A present name must survive the crash-safe doc round-trip (it rides a publish WAL).
             display_name: Some("deploy-helper".to_owned()),
             channel: Some("ops".to_owned()),
+            base_version: None,
+            republished_version: None,
             last_receipt: None,
             bundle_kind: None,
         },

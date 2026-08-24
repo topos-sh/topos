@@ -4,6 +4,13 @@
   "description": "`ops/<op_id>.json` — the durable request identity, persisted (`0600`) BEFORE the first network send so\nan uncertain write replays the SAME `op_id` (the server returns the byte-identical receipt — no\ndouble-advance, no duplicate commit). It carries the full bound identity of the op — the workspace,\nskill, kind, candidate commit, digest, and expected generation — so an idempotent replay re-sends the\nidentical request. **Field-set pinned.**",
   "type": "object",
   "properties": {
+    "base_version": {
+      "description": "The version this publish/propose PARENTED on — the workspace's live current the candidate\nwas built over, which is also the version its receipt's undo restores. Persisted so a\ncrashed send RESUMES to the same receipt: the local lock still names the older version\nthe copy equalled, and an undo derived from it would be a no-op. `None` for a genesis\npublish and for a revert/review. **Additive optional.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "bundle_digest": {
       "description": "The candidate's byte-exact bundle digest (the consent hash) — part of the op's bound identity.",
       "type": "string",
@@ -68,6 +75,13 @@
       "description": "The client-minted UUIDv4 (also the filename).",
       "type": "string",
       "format": "uuid"
+    },
+    "republished_version": {
+      "description": "The OLDER version the copy EQUALLED when this publish carried its content forward over\na newer live current (a revert had moved `current` past it) — the receipt names both.\n`None` for an ordinary draft, a genesis, and a revert/review. **Additive optional.**",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "schema_version": {
       "type": "integer",

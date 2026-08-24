@@ -238,6 +238,8 @@ pub(crate) fn revert(
                 // A revert renames nothing — carry no name so the plane preserves the stored one.
                 display_name: None,
                 channel: None,
+                base_version: None,
+                republished_version: None,
                 last_receipt: None,
             }
         }

@@ -150,6 +150,8 @@ mod tests {
             good: None,
             display_name: None,
             channel: None,
+            base_version: None,
+            republished_version: None,
             last_receipt: None,
             bundle_kind: None,
         }
