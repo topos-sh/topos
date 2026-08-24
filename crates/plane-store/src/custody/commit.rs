@@ -1,12 +1,14 @@
 //! The write orchestration — commit / publish / pointer move / revert / purge / the reclaims.
 //!
-//! Every byte-introducing write is the same three-phase story: **ingest** (quarantine + server
-//! rehash), **migrate** (lease → durable install → durable git commit), then **one serializable
-//! transaction** that records the version rows and, when asked, runs the generation-fenced pointer
-//! CAS. The candidate's committed lease is released only after that transaction resolves, so the GC
-//! keep-set covers the objects continuously across the lease→edge handoff. A refused transaction
-//! (CONFLICT, a lineage violation) rolls back its version rows; the released lease then lets
-//! ordinary GC reclaim the unique staged bytes.
+//! Every byte-introducing write is the same three-phase story: **ingest** (ephemeral staging +
+//! server rehash), **migrate** (lease → store put → skeleton put), then **one serializable
+//! transaction** that records the version rows — including the git commit locator + message —
+//! and, when asked, runs the generation-fenced pointer CAS. The candidate's committed lease is
+//! released only after that transaction resolves, so the GC keep-set covers the objects
+//! continuously across the lease→edge handoff. A refused transaction (CONFLICT, a lineage
+//! violation) rolls back its version rows; the released lease then lets ordinary GC reclaim the
+//! unique staged bytes (the orphan skeleton objects are accepted debris, reclaimed with the
+//! workspace).
 //!
 //! Idempotency is CONTENT-shaped, not receipt-shaped: an identical candidate re-committed converges
 //! on the same version row (`deduped`), and every pointer mover honors the idempotent-CAS rule (see
@@ -65,7 +67,7 @@ pub struct BundleDeleteReport {
     pub objects_reclaimed: usize,
 }
 
-/// Mint a fresh op id (16 random bytes as lowercase hex) — the quarantine/lease/audit key of one
+/// Mint a fresh op id (16 random bytes as lowercase hex) — the staging/lease/audit key of one
 /// ingest. Vault-minted, never caller-supplied, so an op id is never reused across requests.
 fn mint_op_id() -> Result<OpId> {
     let mut buf = [0u8; 16];
@@ -96,15 +98,18 @@ async fn ingest_and_commit(
     // crash-lost bytes), and the commit transaction dedups the version row, so re-committing an
     // identical candidate is safe, idempotent, and self-healing.
     let staged = lifecycle::ingest(authority, ws, bundle, &op_id, candidate, now).await?;
-    if let Err(e) = lifecycle::migrate(authority, ws, &staged, now).await {
-        // A refused/failed migrate: the audit row goes terminal and the lease (if any) is released
-        // so the staged bytes become ordinary garbage.
-        let _ = authority.db().mark_upload_aborted(&op_id).await;
-        let _ = authority.db().release_lease(ws, &op_id).await;
-        return Err(e);
-    }
+    let git_commit_oid = match lifecycle::migrate(authority, ws, bundle, &staged, now).await {
+        Ok(oid) => oid,
+        Err(e) => {
+            // A refused/failed migrate: the audit row goes terminal and the lease (if any) is released
+            // so the staged bytes become ordinary garbage.
+            let _ = authority.db().mark_upload_aborted(&op_id).await;
+            let _ = authority.db().release_lease(ws, &op_id).await;
+            return Err(e);
+        }
+    };
 
-    let outcome = commit_staged(authority, ws, bundle, &staged, action, now).await;
+    let outcome = commit_staged(authority, ws, bundle, &staged, git_commit_oid, action, now).await;
     match outcome {
         Ok(txn) => {
             // The version rows are durable — they root the objects now; the lease may go.
@@ -141,6 +146,7 @@ async fn commit_staged(
     ws: &WorkspaceId,
     bundle: &BundleId,
     staged: &StagedCandidate,
+    git_commit_oid: [u8; 20],
     action: PointerAction,
     now: i64,
 ) -> Result<crate::db::custody::pointer::CommitTxnOutcome> {
@@ -158,6 +164,8 @@ async fn commit_staged(
                 bundle_digest_hex: &digest_hex,
                 object_ids: &object_ids,
                 op_id: &staged.op_id,
+                git_commit_oid: &git_commit_oid,
+                message: &staged.message,
             },
             action,
             now,
@@ -235,6 +243,11 @@ pub(crate) async fn move_pointer(
 /// never moves backward. A purged target is refused typed; a crashed caller's retry (the pointer
 /// already advanced to a version carrying the target's exact bytes) answers success idempotently.
 ///
+/// The forward commit REUSES the target's root tree object (the skeleton is content-addressed and
+/// retained), so only one new commit object is put. Both locators — the target's tree and the
+/// current version's commit — come from version rows; a pre-import row fails closed naming
+/// `import-local`.
+///
 /// `message` is the CALLER's forward-commit message, recorded verbatim into the commit frame: the
 /// public device wire lets a client pre-derive the forward commit id from `(parents, tree, author,
 /// message)` and verify the move landed on exactly that version, so the frame's inputs must be the
@@ -306,23 +319,15 @@ pub(crate) async fn revert(
     }
     let parent = pointer.version_id;
 
-    // The forward commit's content: the TARGET's tree (structure from git, object set from the
-    // reachability rows), the caller's message (deterministic across retries — a replay re-sends
-    // the identical one), the caller's attribution.
-    let git_dir = authority.workspace_git_dir(ws);
-    let entries: Vec<(String, topos_core::digest::FileMode, [u8; 20])> = {
-        let target = to_version.0;
-        crate::authority::run_blocking(move || {
-            let store = topos_gitstore::Store::open(&git_dir).map_err(AuthorityError::integrity)?;
-            Ok(store
-                .read_tree_structure(target)
-                .map_err(AuthorityError::integrity)?
-                .into_iter()
-                .map(|l| (l.path, l.mode, l.git_oid))
-                .collect())
-        })
+    // The forward commit's content: the TARGET's tree (its root tree OID, read from the target's
+    // commit object), the object set from the reachability rows, the caller's message
+    // (deterministic across retries — a replay re-sends the identical one), the caller's
+    // attribution. Both locators come from version rows and fail closed on a pre-import NULL.
+    let target_commit_oid = require_commit_oid(authority, ws, bundle, to_version).await?;
+    let parent_commit_oid = require_commit_oid(authority, ws, bundle, parent).await?;
+    let target_tree_oid = crate::read::read_commit(authority, ws, target_commit_oid)
         .await?
-    };
+        .tree_oid;
     let object_ids: Vec<ObjectId> = authority
         .db()
         .version_objects(ws, bundle, to_version)
@@ -333,13 +338,13 @@ pub(crate) async fn revert(
     let forward = lifecycle::frame_version_id(&parent_ids, target_digest, attribution, message)?;
 
     let op_id = mint_op_id()?;
-    lifecycle::stage_forward_commit(
+    let forward_commit_oid = lifecycle::stage_forward_commit(
         authority,
         ws,
         &op_id,
         forward,
-        target_digest,
-        &entries,
+        target_tree_oid,
+        &[parent_commit_oid],
         &parents,
         &object_ids,
         attribution,
@@ -361,6 +366,8 @@ pub(crate) async fn revert(
                 bundle_digest_hex: &digest_hex,
                 object_ids: &object_ids,
                 op_id: &op_id,
+                git_commit_oid: &forward_commit_oid,
+                message,
             },
             PointerAction::Cas(Some(expected_generation)),
             now,
@@ -394,6 +401,25 @@ pub(crate) async fn revert(
     }
 }
 
+/// A version row's recorded git commit locator, failing closed: an unknown version is NotFound;
+/// a pre-import row (NULL locator) names the cure.
+async fn require_commit_oid(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    bundle: &BundleId,
+    version: CommitId,
+) -> Result<[u8; 20]> {
+    match authority
+        .db()
+        .version_git_commit_oid(ws, bundle, version)
+        .await?
+    {
+        None => Err(AuthorityError::NotFound),
+        Some(None) => Err(AuthorityError::integrity(crate::lifecycle::PreImportRow)),
+        Some(Some(oid)) => Ok(oid),
+    }
+}
+
 /// The byte purge: refuse if pointed-at; tombstone the blobs unique to the version; stamp
 /// `purged_at`; then reclaim the denylisted bytes inline through the ordinary three-step fence (they
 /// are unrooted the moment the transaction commits). The version row — the hash, the attribution,
@@ -412,29 +438,25 @@ pub(crate) async fn purge_version(
         .purge_version(ws, bundle, version, attribution, now)
         .await?;
 
-    // Targeted reclaim: the same acquire → unlink → finalize fence a GC pass runs, driven over exactly
-    // the just-denylisted set. A blob a concurrent ingest holds under a live lease is spared here and
-    // picked up by a later pass (the install CAS refuses the tombstoned blob, so the lease lapses).
+    // Targeted reclaim: the same acquire → single-attempt delete → finalize fence a GC pass runs,
+    // driven over exactly the just-denylisted set. A blob a concurrent ingest holds under a live
+    // lease is spared here and picked up by a later pass (the install CAS refuses the tombstoned
+    // blob, so the lease lapses); an ambiguous delete leaves the row `deleting` for recovery.
     let started = tokio::time::Instant::now();
     let mut reclaimed = 0;
     for object_id in &unique {
         let acquire_now = now.saturating_add(lifecycle::elapsed_ms(started));
-        let (location, git_oid) = match authority
+        let git_oid = match authority
             .db()
             .acquire_for_delete(ws, *object_id, acquire_now)
             .await?
         {
             crate::db::AcquireOutcome::Spared => continue,
-            crate::db::AcquireOutcome::Acquired { location, git_oid } => (location, git_oid),
+            crate::db::AcquireOutcome::Acquired { git_oid } => git_oid,
         };
-        if !authority
-            .db()
-            .confirm_deleting_owner(ws, *object_id, acquire_now)
-            .await?
-        {
+        if !crate::gc::delete_owned(authority, ws, *object_id, git_oid, acquire_now).await? {
             continue;
         }
-        crate::gc::unlink_object(authority, ws, location, *object_id, git_oid)?;
         let finalize_now = now.saturating_add(lifecycle::elapsed_ms(started));
         authority
             .db()
@@ -449,9 +471,9 @@ pub(crate) async fn purge_version(
 }
 
 /// Bundle GC on app instruction (the app already decided the deletion): drop every row of the
-/// bundle, then run one GC pass so the newly-unrooted bytes are reclaimed inline. The per-workspace
-/// git repo keeps the (tiny) commit/tree skeletons of the deleted versions — unreadable without the
-/// dropped rows, reclaimed with the workspace.
+/// bundle, then run one GC pass so the newly-unrooted bytes are reclaimed inline. The store keeps
+/// the (tiny) commit/tree skeleton objects of the deleted versions — unreadable without the
+/// dropped rows, reclaimed with the workspace (exactly the retention the per-workspace repo had).
 pub(crate) async fn delete_bundle(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -467,26 +489,25 @@ pub(crate) async fn delete_bundle(
 }
 
 /// Workspace reclaim: drop every row of the workspace across all custody tables, then remove its
-/// physical stores (the git repo, the large-object root, the quarantine root) whole. Row-first, so a
-/// failed directory removal leaves only invisible orphan bytes (no row reaches them).
+/// staging dirs and bulk-delete everything under its store prefix (blobs AND the skeleton
+/// objects). Row-first, so a failed store deletion leaves only invisible orphan bytes (no row
+/// reaches them) — and idempotent, so a re-run finishes the job.
 pub(crate) async fn delete_workspace(authority: &Authority, ws: &WorkspaceId) -> Result<()> {
     authority.db().delete_workspace_rows(ws).await?;
-    let dirs = [
-        authority.workspace_git_dir(ws),
-        authority.workspace_quarantine_root(ws),
-        authority.workspace_large_dir(ws),
-    ];
+    // The ephemeral staging dirs (local, whole-dir).
+    let staging = authority.workspace_staging_root(ws);
     crate::authority::run_blocking(move || {
-        for dir in dirs {
-            match std::fs::remove_dir_all(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(AuthorityError::internal(e)),
-            }
+        match std::fs::remove_dir_all(&staging) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AuthorityError::internal(e)),
         }
         Ok(())
     })
-    .await
+    .await?;
+    // The store prefix — list + bulk-delete, the one sanctioned prefix operation.
+    authority.store().delete_workspace_prefix(ws).await?;
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

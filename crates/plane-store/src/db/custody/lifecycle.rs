@@ -56,39 +56,20 @@ pub(crate) enum InstallOutcome {
 /// The outcome of a GC acquire step (the guarded `present → deleting` CAS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AcquireOutcome {
-    /// The object was acquired for unlink. `location` selects which store the unlink targets; `git_oid`
-    /// locates the loose git object (used when `location` is [`Location::Git`]; for an offloaded object the
-    /// unlink keys on the object id, and `git_oid` is the carrier value the row always carries).
-    Acquired {
-        location: Location,
-        git_oid: [u8; GIT_OID_LEN],
-    },
+    /// The object was acquired for delete; `git_oid` is its store locator (the loose blob key).
+    Acquired { git_oid: [u8; GIT_OID_LEN] },
     /// The object was spared — it is reachable from a live version, named by a live lease, or not present.
     Spared,
 }
 
-/// Which physical store holds an object's bytes. The database is the sole authority for this; only the
-/// physical fetch/install/unlink dispatches on it — reachability (`version_object`) references the
-/// `object_id` regardless of where the bytes sit. `large-remote` is schema-reserved for the deferred
-/// S3-compatible backend; nothing writes it yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Location {
-    /// A loose object in the per-workspace git store (physically located by its `git_oid`).
-    Git,
-    /// Offloaded to the per-workspace local large-object store (physically located by its `object_id`; the
-    /// `git_oid` is still recorded as the tree-entry bridge key the render walk joins on).
-    LargeLocal,
-}
-
-impl Location {
-    /// The stored string form (matches the `object_presence.location` CHECK constraint).
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Location::Git => "git",
-            Location::LargeLocal => "large-local",
-        }
-    }
-}
+/// The single live `object_presence.location` value. The column survives (it documents which store
+/// FAMILY holds an object's bytes and remains the seam a future placement split would widen), but
+/// exactly one value is written since the object store subsumed the size-routed large-object
+/// split: every blob is a loose git object at its `git_oid` key. The legacy values
+/// (`large-local`, schema-reserved `large-remote`) are read as pre-import rows and fail closed —
+/// `topos-plane import-local` converts them (re-framing the raw large-store files as git blobs and
+/// flipping the column) as part of the one-shot cutover.
+pub(in crate::db) const LOCATION_STORE: &str = "git";
 
 impl Db {
     // ── object_presence: the fenced state machine ─────────────────────────────────────────────────────
@@ -116,46 +97,18 @@ impl Db {
         }
     }
 
-    /// The recorded physical [`Location`] of a **`present`** object (a pool read; no transaction). `None`
-    /// means there is no *live* location — no row at all, one never installed, OR a non-`present` row (a
-    /// reclaimed `absent`/`deleting`/`unavailable` one). The caller treats `None` as `git`. **The
-    /// `status = 'present'` filter is load-bearing for reads:** after a large-local object is GC'd its row
-    /// lingers as `absent` with `location = 'large-local'`; the filter makes this report no live location for
-    /// it, so a read can never be routed to the deleted side-store object. Drives the ingest dedup-reuse belt
-    /// (always called on a `present` row, so the filter is transparent there) and the single-object read dispatch.
-    pub(crate) async fn object_location(
-        &self,
-        ws: &WorkspaceId,
-        object_id: ObjectId,
-    ) -> Result<Option<Location>> {
-        let ws_s = ws.as_str();
-        let oid = object_id.0.as_slice();
-        let row = sqlx::query!(
-            r#"SELECT location AS "location!" FROM object_presence
-               WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'"#,
-            ws_s,
-            oid,
-        )
-        .fetch_optional(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        match row {
-            None => Ok(None),
-            Some(r) => Ok(Some(parse_location(&r.location)?)),
-        }
-    }
-
-    /// The [`Location`] **and** git locator of a **`present`** object — `(location, git_oid)` for a present
-    /// row, else `None` (no live row). This drives the single-object read dispatch: the git arm reads the
-    /// loose object **directly by `git_oid`** rather than walking the version's tree, so a git-resident
-    /// object in a MIXED bundle — one that also contains an offloaded blob whose git object is intentionally
-    /// absent — reads correctly (a whole-tree re-hash would fault on the absent offloaded sibling before
-    /// reaching the requested blob). `None` falls back to the tree walk.
+    /// The store locator of a **`present`** object — its loose-blob `git_oid` — else `None` (no
+    /// live row: never installed, or reclaimed to `absent`/`deleting`/`unavailable`). **The
+    /// `status = 'present'` filter is load-bearing for reads:** a reclaimed object's row lingers
+    /// with its old locator; the filter makes this report no live locator for it, so a read can
+    /// never be routed to a deleted object. A live row whose `location` is not the one written
+    /// value is a PRE-IMPORT row (the size-routed large-object era) and fails closed naming the
+    /// cure — `topos-plane import-local` converts it.
     pub(crate) async fn object_dispatch(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
-    ) -> Result<Option<(Location, [u8; GIT_OID_LEN])>> {
+    ) -> Result<Option<[u8; GIT_OID_LEN]>> {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
         let row = sqlx::query!(
@@ -170,32 +123,32 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         match row {
             None => Ok(None),
-            Some(r) => Ok(Some((
-                parse_location(&r.location)?,
-                git_oid_from_row(r.git_oid)?,
-            ))),
+            Some(r) => {
+                if r.location != LOCATION_STORE {
+                    return Err(AuthorityError::integrity(PreImportLocation));
+                }
+                Ok(Some(git_oid_from_row(r.git_oid)?))
+            }
         }
     }
 
-    /// The install transition: `absent → present`, set ONLY after the caller has durably installed the
-    /// bytes at their final path **in the store named by `location`**. One serializable transaction:
-    /// reject a denylisted blob; then the guarded upsert (the `WHERE status = 'absent'` cannot fire on a
-    /// `deleting` row, so resurrection is impossible by construction); then, if the upsert was suppressed,
-    /// classify the blocking state so the caller can reuse / wait / reject. `git_oid` is always recorded —
-    /// the loose-object locator for a `git` object, and the tree-entry bridge key (for the render walk) for
-    /// a `large-local` one; `size` is operational only. Routing decides `location`; the CAS, the fence, and
-    /// the non-resurrectable `deleting` guard are unchanged by it.
+    /// The install transition: `absent → present`, set ONLY after the caller's store put returned
+    /// (the seam makes that imply durable). One serializable transaction: reject a denylisted
+    /// blob; then the guarded upsert (the `WHERE status = 'absent'` cannot fire on a `deleting`
+    /// row, so resurrection is impossible by construction); then, if the upsert was suppressed,
+    /// classify the blocking state so the caller can reuse / wait / reject. `git_oid` is the
+    /// loose-blob store locator, recorded in the same CAS that flips `present`; `size` (raw file
+    /// bytes) is operational only.
     pub(crate) async fn install_object(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
-        location: Location,
         git_oid: &[u8; GIT_OID_LEN],
         size: i64,
         now: i64,
     ) -> Result<InstallOutcome> {
         run_serializable!(self, tx, {
-            install_object_txn(&mut tx, self, ws, object_id, location, git_oid, size, now).await
+            install_object_txn(&mut tx, self, ws, object_id, git_oid, size, now).await
         })
     }
 
@@ -410,7 +363,7 @@ impl Db {
         object_id: ObjectId,
         older_than: i64,
         now: i64,
-    ) -> Result<Option<(Location, [u8; GIT_OID_LEN])>> {
+    ) -> Result<Option<[u8; GIT_OID_LEN]>> {
         run_serializable!(self, tx, {
             acquire_stale_for_recovery_txn(&mut tx, ws, object_id, older_than, now).await
         })
@@ -618,7 +571,6 @@ async fn install_object_txn(
     db: &Db,
     ws: &WorkspaceId,
     object_id: ObjectId,
-    location: Location,
     git_oid: &[u8; GIT_OID_LEN],
     size: i64,
     now: i64,
@@ -626,7 +578,7 @@ async fn install_object_txn(
     let ws_s = ws.as_str();
     let oid = object_id.0.as_slice();
     let goid = git_oid.as_slice();
-    let loc = location.as_str();
+    let loc = LOCATION_STORE;
 
     // A denylisted blob is never (re-)introduced — the bytes the caller wrote stay an unreferenced
     // orphan (harmless). The ingest's pre-check is best-effort; THIS is the serializing check.
@@ -714,7 +666,7 @@ async fn acquire_for_delete_txn(
                     ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id
                   WHERE plo.workspace_id = $1 AND plo.object_id = $2
                     AND (pl.expires_at IS NULL OR pl.expires_at > $3))
-            RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!"
+            RETURNING git_oid AS "git_oid: Vec<u8>"
             "#,
         ws_s,
         oid,
@@ -725,10 +677,11 @@ async fn acquire_for_delete_txn(
     .map_err(AuthorityError::internal)?;
     let outcome = match row {
         None => AcquireOutcome::Spared,
-        // `location` selects the store the unlink targets; `git_oid` is the git locator (used for a
-        // `git` object). The keep-set re-check above is storage-independent, so the fence is unchanged.
+        // `git_oid` is the store locator the single-attempt delete targets. The keep-set re-check
+        // above is storage-independent, so the fence is unchanged. A pre-import row's legacy
+        // location needs no arm here: its loose key simply is not in the store, and the delete's
+        // idempotent not-found is a clean removal (the old on-disk large file is not the store's).
         Some(r) => AcquireOutcome::Acquired {
-            location: parse_location(&r.location)?,
             git_oid: git_oid_from_row(r.git_oid)?,
         },
     };
@@ -775,7 +728,7 @@ async fn acquire_stale_for_recovery_txn(
     object_id: ObjectId,
     older_than: i64,
     now: i64,
-) -> Result<Option<(Location, [u8; GIT_OID_LEN])>> {
+) -> Result<Option<[u8; GIT_OID_LEN]>> {
     let ws_s = ws.as_str();
     let oid = object_id.0.as_slice();
     let row = sqlx::query!(
@@ -787,7 +740,7 @@ async fn acquire_stale_for_recovery_txn(
                        ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id
                       AND v.version_id = vo.version_id
                      WHERE vo.workspace_id = $1 AND vo.object_id = $2 AND v.purged_at IS NULL)
-               RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!""#,
+               RETURNING git_oid AS "git_oid: Vec<u8>""#,
         ws_s,
         oid,
         older_than,
@@ -798,7 +751,7 @@ async fn acquire_stale_for_recovery_txn(
     .map_err(AuthorityError::internal)?;
     let acquired = match row {
         None => None,
-        Some(r) => Some((parse_location(&r.location)?, git_oid_from_row(r.git_oid)?)),
+        Some(r) => Some(git_oid_from_row(r.git_oid)?),
     };
     Ok(acquired)
 }
@@ -1033,17 +986,6 @@ fn parse_status(s: &str) -> Result<ObjectStatus> {
     }
 }
 
-/// Parse a stored location string. `large-remote` is schema-reserved for the deferred S3-compatible backend
-/// and nothing writes it, so meeting it — or any unknown value — is store corruption (the read/unlink
-/// dispatch has no arm for it). The CHECK constraint already forbids anything outside the known set.
-fn parse_location(s: &str) -> Result<Location> {
-    match s {
-        "git" => Ok(Location::Git),
-        "large-local" => Ok(Location::LargeLocal),
-        _ => Err(AuthorityError::integrity(BadLocation)),
-    }
-}
-
 /// Convert a stored 32-byte object-id BYTEA into an [`ObjectId`], or an integrity fault on a bad width.
 pub(in crate::db) fn object_id_from_row(bytes: Vec<u8>) -> Result<ObjectId> {
     let arr: [u8; 32] = bytes
@@ -1078,8 +1020,10 @@ fn reparse_op(s: &str) -> Result<OpId> {
 struct BadStatus;
 
 #[derive(Debug, thiserror::Error)]
-#[error("stored object location is not a known value")]
-struct BadLocation;
+#[error(
+    "a live object's location predates the object-store import — run `topos-plane import-local`"
+)]
+struct PreImportLocation;
 
 #[derive(Debug, thiserror::Error)]
 #[error("stored content id is not 32 bytes")]

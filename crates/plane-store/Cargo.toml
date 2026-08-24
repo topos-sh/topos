@@ -34,12 +34,21 @@ sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "po
 tokio = { workspace = true, features = ["time", "rt"] }
 # `getrandom` mints the per-ingest op ids and the serializable-retry jitter.
 getrandom.workspace = true
+# The ONE object-store seam the vault's bytes live behind: `LocalFileSystem` (self-host default)
+# and the S3-compatible backend (R2, MinIO) behind one trait. plane-store/topos-plane own this
+# dependency exclusively — a check-arch assertion keeps it out of every other crate's tree.
+object_store.workspace = true
+# Drives object_store's list/delete streams (workspace deletion, import verification).
+futures-util.workspace = true
 # The serializable-retry breadcrumb (a `debug!` per re-run) — diagnostics only.
 tracing.workspace = true
 
 [dev-dependencies]
 # Drives `#[tokio::test]` — `rt` + `macros` for the runtime + attribute. (`time` comes from the normal dep.)
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] } # test-util: the paused-clock delete-bound test
+# The store-contract suite's fault wrappers implement `object_store::ObjectStore`, whose trait is
+# `#[async_trait]`-shaped; test-only.
+async-trait = "0.1"
 
 [lints]
 workspace = true

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT git_commit_oid AS \"git_commit_oid: Vec<u8>\"\n               FROM version WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "git_commit_oid: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "1801161f36ac117ee00d352bd4b3f150bac7734cf2ca308b40194bfc205c6842"
+}

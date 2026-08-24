@@ -499,8 +499,14 @@ pub(crate) fn start_stack(tag: &str) -> Stack {
         .expect("bind the vault listener");
     let plane_addr = listener.local_addr().expect("vault local addr");
     let plane_base = format!("http://{plane_addr}");
-    let authority = Authority::from_pool(plane_pool, &dir.0.join("git"), &dir.0.join("large"))
-        .expect("open the custody authority");
+    let authority = Authority::from_pool(
+        plane_pool,
+        &plane_store::StoreConfig::Local {
+            root: dir.0.join("git"),
+        },
+        &dir.0.join("staging"),
+    )
+    .expect("open the custody authority");
     let state = PlaneState::new(Arc::new(authority)).with_internal_token(INTERNAL_TOKEN);
     rt.spawn(async move {
         let _ = axum::serve(

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE object_presence SET location = 'git' WHERE workspace_id = $1 AND object_id = $2 AND location <> 'git'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "27b6d44b38a89a52d92712784a94f1adb06c8dbe74263dcb34a4abca68829b9c"
+}

@@ -1377,10 +1377,10 @@ fn loose_bytes(store_dir: &std::path::Path, oid: [u8; 20]) -> Vec<u8> {
 fn codec_blob_oid_and_frame_match_the_repo_store() {
     let scratch = Scratch::new("codec-blob");
     let store = Store::init(&scratch.0).expect("init");
-    let bytes: &[u8] = b"# a skill\nwith bytes \x00\xff\n";
+    let bytes: &[u8] = b"# a guide\nwith bytes \x00\xff\n";
     let th = store
         .write_bundle(&[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes,
         }])
@@ -1422,9 +1422,9 @@ fn codec_tree_and_commit_oids_match_the_repo_store_including_nesting_and_a_paren
     let store = Store::init(&scratch.0).expect("init");
     let files = [
         ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
-            bytes: b"skill",
+            bytes: b"guide",
         },
         ImportFile {
             path: "scripts/run.sh",
@@ -1504,9 +1504,9 @@ fn codec_tree_and_commit_oids_match_the_repo_store_including_nesting_and_a_paren
     // A CHILD commit with a parent: parity again, with the parent's git OID in the frame.
     let th2 = store
         .write_bundle(&[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
-            bytes: b"skill v2",
+            bytes: b"guide v2",
         }])
         .expect("write_bundle v2");
     let vid2 = identity::commit_id(&Commit {

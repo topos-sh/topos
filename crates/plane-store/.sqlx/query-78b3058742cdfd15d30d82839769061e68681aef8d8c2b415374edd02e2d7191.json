@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT op.git_oid AS \"git_oid!: Vec<u8>\" FROM object_presence op\n               WHERE op.workspace_id = $1 AND op.status = 'present' AND op.git_oid IS NOT NULL\n                 AND EXISTS (\n                     SELECT 1 FROM version_object vo\n                     JOIN version v\n                       ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id\n                      AND v.version_id = vo.version_id\n                     WHERE vo.workspace_id = op.workspace_id AND vo.object_id = op.object_id\n                       AND v.purged_at IS NULL)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "git_oid!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "78b3058742cdfd15d30d82839769061e68681aef8d8c2b415374edd02e2d7191"
+}

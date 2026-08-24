@@ -1,38 +1,46 @@
-//! The object-lifecycle orchestration — quarantine ingest + lease-before-migrate-into-git, built over the
-//! DB transitions (`mod db`) and the dumb git fence primitives (`topos-gitstore`). `ingest` + `migrate`
-//! are the entry every byte-introducing write shares; every object that reaches the main store does so
-//! through this path, so it carries an `object_presence` row (the sole presence authority GC acts over).
+//! The object-lifecycle orchestration — ephemeral staging + lease-before-migrate-into-the-store,
+//! built over the DB transitions (`mod db`) and the object-store seam (`crate::store`). `ingest` +
+//! `migrate` are the entry every byte-introducing write shares; every object that reaches the
+//! store does so through this path, so it carries an `object_presence` row (the sole presence
+//! authority GC acts over).
 //!
-//! Steps map to the crash-safe publication protocol: **A/B (ingest)** open a GC-excluded quarantine and
-//! stage + rehash + denylist-check the candidate; **D (migrate)** lease the candidate's FULL object set,
-//! then install each not-already-present object durably (the DB decides reuse; bytes reach `present` only
-//! after the durable install), then record the git commit. The version-row transaction that consumes the
-//! lease is a later step (`commit`). `migrate` is split into `lease` / `install` / `finish` so a test can
-//! interleave a GC between them deterministically (no timing).
+//! Steps map to the crash-safe publication protocol: **A/B (ingest)** record the upload row and
+//! stage + rehash + denylist-check the candidate into an EPHEMERAL per-op directory under the
+//! staging root (no volume required — losing staging on a container replacement loses only
+//! in-flight candidates, which the client's write-ahead log replays); **D (migrate)** lease the
+//! candidate's FULL object set, then put each not-already-present object to the store as a zlib
+//! loose blob (the DB decides reuse; bytes reach `present` only after the put returns), then put
+//! the version SKELETON (tree + commit objects) and record the commit locator. The version-row
+//! transaction that consumes the lease is a later step (`commit`); a crash between the skeleton
+//! put and that transaction leaves orphan skeleton objects — ACCEPTED (immutable,
+//! content-addressed, bytes-cheap; reclaimed with the workspace). `migrate` is split into `lease`
+//! / `install` / `finish` so a test can interleave a GC between them deterministically (no timing).
 //!
 //! **Clock convention: one server-clock unit = one epoch MILLISECOND.** Every TTL constant and
-//! elapsed-time computation here is millisecond-valued — a seconds-valued constant added to an epoch-ms
-//! `now` would silently collapse the lease/quarantine fences a thousandfold.
+//! elapsed-time computation here is millisecond-valued — a seconds-valued constant added to an
+//! epoch-ms `now` would silently collapse the lease/quarantine fences a thousandfold.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::{self, Commit};
-use topos_gitstore::{GitstoreError, ImportFile, LargeObjectStore, StagedEntry, Store};
+use topos_gitstore::GitstoreError;
+use topos_gitstore::codec;
 
 use crate::authority::Authority;
-use crate::db::{InstallOutcome, Location, ObjectStatus};
+use crate::db::{InstallOutcome, ObjectStatus};
 use crate::error::{AuthorityError, Result};
 use crate::id::{BundleId, CommitId, ObjectId, OpId, WorkspaceId};
 use crate::upload::CandidateUpload;
 
 /// The most files one candidate may carry. The per-blob reject cap bounds each file's SIZE; this
 /// bounds their NUMBER, which is what actually bounds ingest cost — every file costs a denylist
-/// probe, a staged object, an install CAS and several fsyncs, all serialized under the promotion
+/// probe, a staged file, an install CAS and a store put, all serialized under the promotion
 /// lease. The client's own importer carries the same dimension (`git_source.rs`).
 pub(crate) const MAX_CANDIDATE_FILES: usize = 20_000;
 
-/// How long an in-flight staging quarantine lives before the janitor may sweep it (epoch-ms; one hour).
+/// How long an in-flight staging dir lives before the janitor may sweep it (epoch-ms; one hour).
 /// Generous: in-process ingest→commit is sub-second.
 pub(crate) const QUARANTINE_TTL_MS: i64 = 3600 * 1000;
 
@@ -48,8 +56,20 @@ const WAIT_BACKOFF_START: Duration = Duration::from_millis(5);
 const WAIT_BACKOFF_CAP: Duration = Duration::from_millis(200);
 const WAIT_MAX_POLLS: u32 = 200;
 
-/// A candidate staged into its quarantine, ready to migrate. Carries the gitstore staging result + the
-/// recomputed identity; the `op_id` ties it to its quarantine + lease + `upload` audit row.
+/// One file staged into the per-op staging dir: its bundle-relative path + mode, its topos
+/// `object_id` (`sha256(raw bytes)`, the authority's identity), the git blob `git_oid` (the
+/// physical store key), and size.
+#[derive(Debug, Clone)]
+pub(crate) struct StagedEntry {
+    pub path: String,
+    pub mode: FileMode,
+    pub object_id: [u8; 32],
+    pub git_oid: [u8; 20],
+    pub size: u64,
+}
+
+/// A candidate staged into its per-op dir, ready to migrate. Carries the staging result + the
+/// recomputed identity; the `op_id` ties it to its staging dir + lease + `upload` audit row.
 #[derive(Debug, Clone)]
 pub(crate) struct StagedCandidate {
     pub op_id: OpId,
@@ -64,7 +84,7 @@ pub(crate) struct StagedCandidate {
 
 /// The linearity fence: a version has **at most one parent** — `0` for a bundle's genesis, exactly
 /// `1` for every other version — so a bundle's remote history is a LIST, never a DAG. The kernel
-/// frame and the git store both stay general (they accept any parent slice); the AUTHORITY is what
+/// frame and the codec both stay general (they accept any parent slice); the AUTHORITY is what
 /// refuses, which is where every other custody rule already lives.
 ///
 /// It fences the COUNT at the commit FRAME, the earliest point a candidate's full parent set is
@@ -86,8 +106,8 @@ fn fence_linear_lineage(parents: &[[u8; 32]]) -> Result<()> {
 
 /// Mint a candidate frame's `version_id` — the ONE place the vault turns `(parents, tree, author,
 /// message)` into a version id, so [`fence_linear_lineage`] cannot be bypassed by a new caller. The
-/// id BINDS the parent set (the store re-derives it from the frame and refuses a lying ref), so a
-/// frame minted here can never gain a parent on its way to the durable commit.
+/// id BINDS the parent set, so a frame minted here can never gain a parent on its way to the
+/// durable commit.
 pub(crate) fn frame_version_id(
     parents: &[[u8; 32]],
     tree: [u8; 32],
@@ -105,10 +125,12 @@ pub(crate) fn frame_version_id(
     .map_err(|e| AuthorityError::RejectedUpload(format!("invalid commit frame: {e:?}")))
 }
 
-/// Step A + B: record the `upload` staging row, open a GC-excluded quarantine, stage the candidate's full
-/// tree into it (server rehash), and reject any blob on the denylist (a best-effort early guard; the
-/// serializing check is the install CAS + the commit transaction). Recomputes the `version_id` from the
-/// rehashed bytes — a client id is never trusted, and none is even carried.
+/// Step A + B: record the `upload` staging row, stage the candidate's full tree into its EPHEMERAL
+/// per-op dir (server rehash), and reject any blob on the denylist (a best-effort early guard; the
+/// serializing check is the install CAS + the commit transaction). Recomputes the `version_id` from
+/// the rehashed bytes — a client id is never trusted, and none is even carried. Staging writes are
+/// deliberately NOT fsynced: the dir is ephemeral by design (a crash re-uploads; nothing durable
+/// references it).
 pub(crate) async fn ingest(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -123,27 +145,27 @@ pub(crate) async fn ingest(
         ));
     }
     // Bound the file COUNT, not just each blob's size. Ingest cost is per-file and large — a
-    // denylist probe, a staged loose object, a quarantine open, an install CAS and several
-    // fsyncs — so a body well under the byte cap can still buy hundreds of thousands of
-    // round trips, serialized under the promotion lease. The ceiling is far above any real
-    // bundle and far below what it takes to stall the vault.
+    // denylist probe, a staged file, an install CAS and a store put — so a body well under the
+    // byte cap can still buy hundreds of thousands of round trips, serialized under the promotion
+    // lease. The ceiling is far above any real bundle and far below what it takes to stall the vault.
     if candidate.files.len() > MAX_CANDIDATE_FILES {
         return Err(AuthorityError::RejectedUpload(
             "a bundle exceeds the maximum allowed file count".to_owned(),
         ));
     }
-    // Per-blob guards BEFORE staging, so an oversize or purged blob is never persisted to the quarantine
-    // (the object id is `sha256(bytes)`, exactly what `Store::stage` recomputes, so neither needs staging).
+    // Per-blob guards BEFORE staging, so an oversize or purged blob is never persisted to the
+    // staging dir (the object id is `sha256(bytes)`, exactly what the stage recomputes below, so
+    // neither needs staging).
     for f in &candidate.files {
         // Reject cap: a blob over the per-blob limit fails typed and stages nothing.
-        if f.bytes.len() as u64 > authority.large_reject_cap() {
+        if f.bytes.len() as u64 > authority.reject_cap() {
             return Err(AuthorityError::RejectedUpload(
                 "a candidate blob exceeds the maximum allowed size".to_owned(),
             ));
         }
         // Denylist: never (re-)introduce purged bytes. Best-effort early; the install CAS + the commit
         // transaction re-check serializably.
-        let oid = ObjectId(topos_core::digest::sha256(&f.bytes));
+        let oid = ObjectId(digest::sha256(&f.bytes));
         if authority.db().is_tombstoned(ws, oid).await? {
             return Err(AuthorityError::RejectedUpload(
                 "a candidate blob is on the denylist".to_owned(),
@@ -157,9 +179,8 @@ pub(crate) async fn ingest(
     // janitor-able row. The janitor rebuilds the sweep path from the validated ids, never a stored path.
     authority.db().insert_upload(ws, bundle, op_id, now).await?;
 
-    // Stage on the blocking pool: `Store::stage` writes + fsyncs every blob of the bundle, so running it
-    // inline would pin an async worker for the whole candidate. The files move into the closure (owned);
-    // the non-`Send` gix `Store` is opened and dropped inside it.
+    // Stage on the blocking pool: the whole candidate's bytes are written to disk, so running it
+    // inline would pin an async worker. The files move into the closure (owned).
     let CandidateUpload {
         files,
         parent,
@@ -168,33 +189,65 @@ pub(crate) async fn ingest(
     } = candidate;
     let stage_dir = quarantine_dir.clone();
     let staged = crate::authority::run_blocking(move || {
-        let import: Vec<ImportFile<'_>> = files
+        // Validate + compute the consent digest through the one kernel implementation (re-runs
+        // check_path + the collision rules), BEFORE writing anything — a rejected bundle stages
+        // nothing.
+        let manifest: Vec<ManifestEntry> = files
             .iter()
-            .map(|f| ImportFile {
-                path: &f.path,
+            .map(|f| ManifestEntry {
+                path: f.path.clone(),
                 mode: f.mode,
-                bytes: &f.bytes,
+                content_sha256: digest::sha256(&f.bytes),
             })
             .collect();
-        Store::stage(&stage_dir, &import).map_err(map_stage_reject)
+        let bundle_digest = digest::bundle_digest(&manifest).map_err(|r| {
+            AuthorityError::RejectedUpload(format!("canonical rule violated: {r:?}"))
+        })?;
+
+        // Stage into a FRESH dir: a retry / re-ingest that reuses the op id (the authority's
+        // quarantine row is an upsert, so reuse is a supported path) must not inherit a prior
+        // candidate's files — the staged set is exactly THIS candidate's.
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(&stage_dir).map_err(AuthorityError::internal)?;
+        }
+        std::fs::create_dir_all(&stage_dir).map_err(AuthorityError::internal)?;
+        let mut entries = Vec::with_capacity(files.len());
+        for (f, m) in files.iter().zip(&manifest) {
+            let git_oid = codec::blob_git_oid(&f.bytes).map_err(map_stage_reject)?;
+            // One staged file per DISTINCT object (a blob at two paths is one object) — named by
+            // its content id, so the install can read it back by `object_id` alone.
+            let staged_path = stage_dir.join(crate::store::hex_lower(&m.content_sha256));
+            if !staged_path.exists() {
+                std::fs::write(&staged_path, &f.bytes).map_err(AuthorityError::internal)?;
+            }
+            entries.push(StagedEntry {
+                path: f.path.clone(),
+                mode: f.mode,
+                object_id: m.content_sha256,
+                git_oid,
+                size: f.bytes.len() as u64,
+            });
+        }
+        Ok((entries, bundle_digest))
     })
     .await?;
+    let (entries, bundle_digest) = staged;
 
     let parent_ids: Vec<[u8; 32]> = parent.iter().map(|c| c.0).collect();
-    let version_id = frame_version_id(&parent_ids, staged.bundle_digest, &attribution, &message)?;
+    let version_id = frame_version_id(&parent_ids, bundle_digest, &attribution, &message)?;
 
     // The stage completed — flip the audit row to 'quarantined' and record the recomputed digest.
     authority
         .db()
-        .mark_upload_quarantined(op_id, &crate::id::hex32(&staged.bundle_digest))
+        .mark_upload_quarantined(op_id, &crate::id::hex32(&bundle_digest))
         .await?;
 
     Ok(StagedCandidate {
         op_id: op_id.clone(),
         quarantine_dir,
         version_id,
-        bundle_digest: staged.bundle_digest,
-        entries: staged.entries,
+        bundle_digest,
+        entries,
         parent,
         attribution,
         message,
@@ -223,9 +276,10 @@ pub(crate) async fn migrate_lease(
         .await
 }
 
-/// Step D, part 2: install every not-already-present object into the main store durably. The DB decides
-/// reuse (`present` → skip); a `deleting` object is waited out (OUTSIDE any write transaction) then
-/// re-copied fresh; bytes reach `present` only after the durable install. The lease (part 1) protects them
+/// Step D, part 2: put every not-already-present object to the store as a zlib loose blob. The DB
+/// decides reuse (`present` → skip); a `deleting` object is waited out (OUTSIDE any write
+/// transaction) then re-put fresh; bytes reach `present` only after the put returns (durable on
+/// both backends — the local backend fsyncs inside the seam). The lease (part 1) protects them
 /// throughout.
 pub(crate) async fn migrate_install(
     authority: &Authority,
@@ -233,56 +287,77 @@ pub(crate) async fn migrate_install(
     staged: &StagedCandidate,
     now: i64,
 ) -> Result<()> {
-    // Pass the quarantine DIR (not an open `Store`) into `install_one`: the gix `Store` (which is not `Send`)
-    // is opened fresh inside the synchronous install helpers and never held across an `.await`, so the
-    // migrate future stays `Send` (axum's handlers require it). The fence logic + write order are unchanged.
     for entry in distinct_entries(&staged.entries) {
         install_one(authority, ws, &staged.quarantine_dir, entry, now).await?;
     }
     Ok(())
 }
 
-/// Step D, part 3: record the migrated candidate's git commit durably (build its tree from the installed
-/// blob ids — never re-writing a blob outside the fence — write the commit + version ref + fsync), then
-/// make the lease non-expiring (the candidate stays rooted until its version row lands) and drop the
-/// quarantine.
+/// Step D, part 3: put the migrated candidate's version SKELETON — its (nested) tree objects and
+/// its commit object, encoded in memory — then make the lease non-expiring (the candidate stays
+/// rooted until its version row lands) and drop the staging dir. Returns the commit's git OID for
+/// the version row.
+///
+/// Skeleton objects carry no presence/reachability rows: they are the version's addressing
+/// skeleton, retained until workspace deletion (exactly as the per-workspace repo retained them).
+/// A crash between the skeleton put and the version-row transaction leaves orphan skeleton
+/// objects — accepted (immutable, content-addressed, bytes-cheap).
 pub(crate) async fn migrate_finish(
     authority: &Authority,
     ws: &WorkspaceId,
+    bundle: &BundleId,
     staged: &StagedCandidate,
     now: i64,
-) -> Result<()> {
-    // The durable commit write runs on the blocking pool (fsync-heavy tree + commit + ref writes must not
-    // pin an async worker); the non-`Send` gix `Store` is opened and dropped inside the closure. The
-    // commit-then-lease ORDER is load-bearing.
-    {
-        let git_dir = authority.workspace_git_dir(ws);
-        let entries: Vec<(String, topos_core::digest::FileMode, [u8; 20])> = staged
-            .entries
-            .iter()
-            .map(|e| (e.path.clone(), e.mode, e.git_oid))
-            .collect();
-        let parents: Vec<[u8; 32]> = staged.parent.iter().map(|c| c.0).collect();
-        let (version_id, bundle_digest) = (staged.version_id.0, staged.bundle_digest);
-        let (attribution, message) = (staged.attribution.clone(), staged.message.clone());
-        crate::authority::run_blocking(move || {
-            let main = crate::authority::open_or_init_store(&git_dir)?;
-            let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
-                .iter()
-                .map(|(p, m, g)| (p.as_str(), *m, *g))
-                .collect();
-            main.commit_durable(
-                version_id,
-                &parents,
-                &entry_refs,
-                bundle_digest,
-                &attribution,
-                &message,
-            )
-            .map_err(map_stage_reject)
-        })
-        .await?;
+) -> Result<[u8; 20]> {
+    // The parent's git commit locator comes from its VERSION ROW — refs are gone. A parent row
+    // predating the object-store import (NULL locator) fails closed, naming the cure.
+    let parent_commit_oids: Vec<[u8; 20]> = match staged.parent {
+        None => Vec::new(),
+        Some(parent) => {
+            let oid = authority
+                .db()
+                .version_git_commit_oid(ws, bundle, parent)
+                .await?;
+            match oid {
+                None => {
+                    return Err(AuthorityError::RejectedUpload(
+                        "a parent version is not present in this workspace".to_owned(),
+                    ));
+                }
+                Some(None) => return Err(AuthorityError::integrity(PreImportRow)),
+                Some(Some(oid)) => vec![oid],
+            }
+        }
+    };
+
+    // Encode the skeleton in memory (pure; component validation matches the client's write path).
+    let entry_refs: Vec<(&str, FileMode, [u8; 20])> = staged
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.mode, e.git_oid))
+        .collect();
+    let tree = codec::encode_tree(&entry_refs).map_err(map_stage_reject)?;
+    let commit = codec::encode_commit(
+        tree.root_oid,
+        &parent_commit_oids,
+        &staged.attribution,
+        &staged.message,
+    )
+    .map_err(map_stage_reject)?;
+    let commit_oid = commit.git_oid;
+
+    // Put trees then the commit (idempotent content-addressed puts — a re-run re-writes the
+    // identical objects).
+    for obj in tree.objects {
+        authority
+            .store()
+            .put_loose(ws, &obj.git_oid, obj.zlib_bytes)
+            .await?;
     }
+    authority
+        .store()
+        .put_loose(ws, &commit.git_oid, commit.zlib_bytes)
+        .await?;
 
     // Success: the lease becomes the durable root until the version-row transaction consumes it. The CAS
     // on the staged commit + lease liveness fails closed if this ingest's lease lapsed (so it cannot acquire
@@ -291,35 +366,36 @@ pub(crate) async fn migrate_finish(
         .db()
         .commit_lease(ws, &staged.op_id, staged.version_id, now)
         .await?;
-    // Post-commit cleanup (the objects are safely in the main store): remove the quarantine dir. A
-    // rm failure leaves an orphan dir beside a live audit row — a low-severity, disk-only residual (the
-    // janitor sweeps rows still in-flight; a committed row's leaked dir waits for an operator).
+    // Post-commit cleanup (the objects are safely in the store): remove the staging dir. A rm
+    // failure leaves an orphan dir beside a live audit row — a low-severity, disk-only residual
+    // (the janitor sweeps rows still in-flight; a committed row's leaked dir is ephemeral anyway).
     remove_quarantine_dir(&staged.quarantine_dir);
-    Ok(())
+    Ok(commit_oid)
 }
 
-/// Stage a SERVER-CONSTRUCTED forward commit (a revert): its objects are already present in the main store
-/// (the revert restores a retained version's tree), so there is **nothing to install** — just lease the
-/// object set, write the commit durably, and make the lease non-expiring. The commit transaction then
-/// consumes the lease exactly as a publish does, so the lease→edge handoff behaves identically. No upload,
-/// no quarantine — the entries + object set come from the (present) target version.
+/// Stage a SERVER-CONSTRUCTED forward commit (a revert): its objects are already present in the
+/// store (the revert restores a retained version's tree — the SAME root tree object), so there is
+/// **nothing to install and no tree to build** — just lease the object set, put the new commit
+/// object, and make the lease non-expiring. The commit transaction then consumes the lease exactly
+/// as a publish does, so the lease→edge handoff behaves identically. No upload, no staging dir.
+/// Returns the forward commit's git OID for the version row.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stage_forward_commit(
     authority: &Authority,
     ws: &WorkspaceId,
     op_id: &OpId,
     version_id: CommitId,
-    bundle_digest: [u8; 32],
-    entries: &[(String, topos_core::digest::FileMode, [u8; 20])],
+    tree_oid: [u8; 20],
+    parent_commit_oids: &[[u8; 20]],
     parents: &[CommitId],
     object_ids: &[ObjectId],
     attribution: &str,
     message: &str,
     now: i64,
-) -> Result<()> {
+) -> Result<[u8; 20]> {
     // This frame arrives already minted (the caller pre-derived its id), so it is the one parent
     // SLICE the crate does not build itself — the linearity fence runs on it here, before the lease
-    // and before any commit object reaches the workspace repo.
+    // and before any commit object reaches the store.
     let parent_bytes: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
     fence_linear_lineage(&parent_bytes)?;
 
@@ -330,40 +406,23 @@ pub(crate) async fn stage_forward_commit(
         .insert_lease(ws, op_id, version_id, object_ids, now + LEASE_TTL_MS)
         .await?;
 
-    // The durable commit write runs on the blocking pool (as `migrate_finish`); the non-`Send` gix `Store`
-    // is opened and dropped inside the closure. Order is unchanged.
-    {
-        let git_dir = authority.workspace_git_dir(ws);
-        let entries = entries.to_vec();
-        let (attribution, message) = (attribution.to_owned(), message.to_owned());
-        crate::authority::run_blocking(move || {
-            let main = crate::authority::open_or_init_store(&git_dir)?;
-            let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
-                .iter()
-                .map(|(p, m, g)| (p.as_str(), *m, *g))
-                .collect();
-            main.commit_durable(
-                version_id.0,
-                &parent_bytes,
-                &entry_refs,
-                bundle_digest,
-                &attribution,
-                &message,
-            )
-            .map_err(map_stage_reject)
-        })
+    let commit = codec::encode_commit(tree_oid, parent_commit_oids, attribution, message)
+        .map_err(map_stage_reject)?;
+    let commit_oid = commit.git_oid;
+    authority
+        .store()
+        .put_loose(ws, &commit.git_oid, commit.zlib_bytes)
         .await?;
-    }
 
     authority
         .db()
         .commit_lease(ws, op_id, version_id, now)
         .await?;
-    Ok(())
+    Ok(commit_oid)
 }
 
-/// Remove a quarantine dir, treating "already gone" as success. Returns whether the dir is now gone; any
-/// other error leaves it as the documented disk-only orphan.
+/// Remove a staging dir, treating "already gone" as success (a replaced container lost it — the
+/// ephemeral-staging contract). Returns whether the dir is now gone.
 pub(crate) fn remove_quarantine_dir(dir: &std::path::Path) -> bool {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => true,
@@ -375,13 +434,15 @@ pub(crate) fn remove_quarantine_dir(dir: &std::path::Path) -> bool {
 /// The full migrate (lease → install → finish). `migrate_finish` is given a finish time advanced by the
 /// REAL install duration, not the lease-start `now` — so if installation ran past the lease TTL (e.g. many
 /// `deleting`-waits), `commit_lease`'s liveness CAS sees the lease expired and fails closed instead of
-/// committing a candidate whose objects a concurrent GC may already have reclaimed.
+/// committing a candidate whose objects a concurrent GC may already have reclaimed. Returns the
+/// commit's git OID for the version row.
 pub(crate) async fn migrate(
     authority: &Authority,
     ws: &WorkspaceId,
+    bundle: &BundleId,
     staged: &StagedCandidate,
     now: i64,
-) -> Result<()> {
+) -> Result<[u8; 20]> {
     let started = tokio::time::Instant::now();
     migrate_lease(authority, ws, staged, now).await?;
     migrate_install(authority, ws, staged, now).await?;
@@ -389,14 +450,13 @@ pub(crate) async fn migrate(
     // clock by that elapsed time so the lease-liveness CAS is meaningful. In the fast path (and in tests)
     // this is ~0, so finish ≈ now.
     let finish_now = now.saturating_add(elapsed_ms(started));
-    migrate_finish(authority, ws, staged, finish_now).await
+    migrate_finish(authority, ws, bundle, staged, finish_now).await
 }
 
-/// Install one object, honoring the fence + the size route: reuse if `present` (re-materializing into the
-/// object's RECORDED store if a crash lost it); wait out `deleting` (no transaction held across the sleep,
-/// so GC's finalize can never be blocked) then re-copy; reject if `unavailable`. **Routing is a Step-D
-/// concern only** — the CAS, the lease, and the non-resurrectable `deleting` guard are unchanged; only
-/// *which store* the bytes are written to (and recorded in `location`) varies, by the blob's size.
+/// Install one object, honoring the fence: reuse if `present` (re-putting into the store if a
+/// crash lost the bytes); wait out `deleting` (no transaction held across the sleep, so GC's
+/// finalize can never be blocked) then re-put; reject if `unavailable`. The CAS, the lease, and
+/// the non-resurrectable `deleting` guard are exactly the pre-object-store fence.
 async fn install_one(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -410,18 +470,15 @@ async fn install_one(
         match authority.db().object_status(ws, object_id).await? {
             ObjectStatus::Present => {
                 // Dedup reuse — but never PIN a version over bytes a past crash silently removed.
-                // Re-materialize into the object's RECORDED store (NEVER re-route by this candidate's
-                // size — that would split-brain the bytes vs the row, and the GC unlink would then look
-                // in the wrong store). This ingest's lease already spares the row, so no GC can race the
-                // re-copy; the DB row stays `present` throughout (the store never becomes the presence
-                // authority — we only refuse to root nothing).
-                let location = authority
-                    .db()
-                    .object_location(ws, object_id)
-                    .await?
-                    .unwrap_or(Location::Git);
-                rematerialize_if_gone(authority, ws, quarantine_dir, entry, location).await?;
-                return Ok(()); // dedup: reuse the already-present (and now verified) bytes
+                // Re-put from this candidate's staging if the store lost them. This ingest's lease
+                // already spares the row, so no GC can race the re-put; the DB row stays `present`
+                // throughout (the store never becomes the presence authority — we only refuse to
+                // root nothing). The store key is the row's recorded locator, which for a healthy
+                // dedup equals this candidate's `git_oid` (same bytes ⇒ same blob framing).
+                if !authority.store().exists(ws, &entry.git_oid).await? {
+                    put_staged_blob(authority, ws, quarantine_dir, entry).await?;
+                }
+                return Ok(()); // dedup: reuse the already-present (and now re-materialized) bytes
             }
             ObjectStatus::Unavailable => {
                 return Err(AuthorityError::RejectedUpload(
@@ -430,23 +487,21 @@ async fn install_one(
             }
             ObjectStatus::Deleting => {
                 // A GC is unlinking these bytes — wait for `absent` (poll on the pool; no txn held), then
-                // re-copy fresh. NEVER override `deleting` (the non-resurrectable fence).
+                // re-put fresh. NEVER override `deleting` (the non-resurrectable fence).
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(WAIT_BACKOFF_CAP);
                 continue;
             }
             ObjectStatus::Absent => {
-                // Fresh install: the size decides the store (≥ threshold → the large-object store, else git).
-                // Install the bytes durably FIRST, then the `absent → present` CAS records that location — so
-                // a `present` row always denotes durably-installed bytes, in either store.
-                let location = route_location(entry.size, authority.large_threshold());
-                install_bytes(authority, ws, quarantine_dir, entry, location).await?;
+                // Fresh install: put the bytes FIRST (the seam makes "put returned" imply durable),
+                // then the `absent → present` CAS records the locator — so a `present` row always
+                // denotes bytes durably in the store.
+                put_staged_blob(authority, ws, quarantine_dir, entry).await?;
                 match authority
                     .db()
                     .install_object(
                         ws,
                         object_id,
-                        location,
                         &entry.git_oid,
                         i64::try_from(entry.size).map_err(AuthorityError::integrity)?,
                         now,
@@ -474,96 +529,35 @@ async fn install_one(
     Err(AuthorityError::internal(DeletingWaitTimedOut))
 }
 
-/// The size route: a file blob at/above the threshold is offloaded to the large-object store; a smaller one
-/// stays in git. Decides a FRESH install's location only — an existing object reuses its recorded location.
-fn route_location(size: u64, threshold: u64) -> Location {
-    if size >= threshold {
-        Location::LargeLocal
-    } else {
-        Location::Git
-    }
-}
-
-/// Physically install one staged blob into the store named by `location`, durably — a git loose object (a
-/// FRESH main handle each time, so gix's object cache can't make `write_blob` skip a just-removed object),
-/// or the per-workspace large-object store (verify-on-write `put`). The DB `absent → present` CAS that
-/// records the location runs only AFTER this returns. The fsync-heavy copy runs on the blocking pool; the
-/// non-`Send` gix `Store` is opened and dropped inside the closure (never alive across an `.await`).
-async fn install_bytes(
+/// Read one staged blob from this op's staging dir (verifying `sha256(bytes) == object_id` — a
+/// staged file corrupted after the stage can never be installed under a locator whose bytes now
+/// lie), frame it as a zlib loose blob (asserting the frame lands on the recorded `git_oid`), and
+/// put it to the store. The blocking-pool section covers the file read + framing; the put is the
+/// seam's own async op.
+async fn put_staged_blob(
     authority: &Authority,
     ws: &WorkspaceId,
     quarantine_dir: &Path,
     entry: &StagedEntry,
-    location: Location,
 ) -> Result<()> {
-    let qdir = quarantine_dir.to_path_buf();
-    let entry = entry.clone();
-    let git_dir = authority.workspace_git_dir(ws);
-    let large = authority.large_store(ws);
-    crate::authority::run_blocking(move || {
-        install_bytes_sync(&qdir, &entry, location, &git_dir, &large)
+    let staged_path = quarantine_dir.join(crate::store::hex_lower(&entry.object_id));
+    let (expected_object, expected_git) = (entry.object_id, entry.git_oid);
+    let loose = crate::authority::run_blocking(move || {
+        let bytes = std::fs::read(&staged_path).map_err(AuthorityError::internal)?;
+        if digest::sha256(&bytes) != expected_object {
+            return Err(AuthorityError::integrity(StagedBlobCorrupt));
+        }
+        let obj = codec::encode_blob(&bytes).map_err(AuthorityError::internal)?;
+        if obj.git_oid != expected_git {
+            return Err(AuthorityError::integrity(StagedBlobCorrupt));
+        }
+        Ok(obj)
     })
-    .await
-}
-
-/// The synchronous body of [`install_bytes`] (also the re-copy arm of [`rematerialize_if_gone`]): open a
-/// fresh quarantine handle, then copy into the target store `location` names.
-fn install_bytes_sync(
-    quarantine_dir: &Path,
-    entry: &StagedEntry,
-    location: Location,
-    git_dir: &Path,
-    large: &topos_gitstore::LocalLargeStore,
-) -> Result<()> {
-    let quarantine = Store::open(quarantine_dir).map_err(AuthorityError::internal)?;
-    match location {
-        Location::Git => {
-            let main = crate::authority::open_or_init_store(git_dir)?;
-            main.install_object_durable(&quarantine, entry.git_oid)
-                .map_err(AuthorityError::internal)?;
-        }
-        Location::LargeLocal => {
-            let bytes = quarantine
-                .read_staged_blob(entry.git_oid)
-                .map_err(AuthorityError::internal)?;
-            large
-                .put(entry.object_id, &bytes)
-                .map_err(AuthorityError::internal)?;
-        }
-    }
-    Ok(())
-}
-
-/// The dedup-reuse belt: if the object's bytes are gone from its RECORDED store (a crash lost them), re-copy
-/// them from this candidate's quarantine — re-asserting "no root over gone bytes" without making the store
-/// the presence authority. `exists` is a belt only; the DB row's `present` status stays the authority. The
-/// stat + conditional copy run in one blocking-pool closure (the gix `Store` never crosses an `.await`).
-async fn rematerialize_if_gone(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    quarantine_dir: &Path,
-    entry: &StagedEntry,
-    location: Location,
-) -> Result<()> {
-    let qdir = quarantine_dir.to_path_buf();
-    let entry = entry.clone();
-    let git_dir = authority.workspace_git_dir(ws);
-    let large = authority.large_store(ws);
-    crate::authority::run_blocking(move || {
-        let present = match location {
-            Location::Git => crate::authority::open_or_init_store(&git_dir)?
-                .object_exists(entry.git_oid)
-                .map_err(AuthorityError::internal)?,
-            Location::LargeLocal => large
-                .exists(entry.object_id)
-                .map_err(AuthorityError::internal)?,
-        };
-        if !present {
-            install_bytes_sync(&qdir, &entry, location, &git_dir, &large)?;
-        }
-        Ok(())
-    })
-    .await
+    .await?;
+    authority
+        .store()
+        .put_loose(ws, &loose.git_oid, loose.zlib_bytes)
+        .await
 }
 
 /// Whole elapsed milliseconds since `started`, saturating into `i64` — the increment added to a
@@ -572,7 +566,7 @@ pub(crate) fn elapsed_ms(started: tokio::time::Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
-/// The distinct object ids of a staged bundle's entries (a blob at two paths is one object). The commit
+/// The distinct object ids of a staged bundle's entries (a blob at two paths is one edge). The commit
 /// transaction derives the candidate's reachability + availability set from this same function — the
 /// authoritative in-process candidate tree — so the `version_object` edges it writes match exactly the
 /// object set `migrate_lease` rooted.
@@ -593,8 +587,8 @@ fn distinct_entries(entries: &[StagedEntry]) -> Vec<&StagedEntry> {
         .collect()
 }
 
-/// Map a gitstore stage/commit failure to the boundary error: a canonical-rule reject / missing parent /
-/// id mismatch is the caller's problem; a low-level fault is internal.
+/// Map a codec/staging failure to the boundary error: a canonical-rule reject / bad path is the
+/// caller's problem; a low-level fault is internal.
 fn map_stage_reject(e: GitstoreError) -> AuthorityError {
     match e {
         GitstoreError::Reject(reason) => {
@@ -602,12 +596,6 @@ fn map_stage_reject(e: GitstoreError) -> AuthorityError {
         }
         GitstoreError::RejectPath(msg) => {
             AuthorityError::RejectedUpload(format!("invalid path component: {msg}"))
-        }
-        GitstoreError::MissingParent => AuthorityError::RejectedUpload(
-            "a parent version is not present in this workspace".into(),
-        ),
-        GitstoreError::VersionMismatch => {
-            AuthorityError::RejectedUpload("the commit id does not match the staged bytes".into())
         }
         other => AuthorityError::internal(other),
     }
@@ -618,3 +606,17 @@ fn map_stage_reject(e: GitstoreError) -> AuthorityError {
     "an object stayed in the deleting state past the wait bound (a crashed GC awaiting recovery)"
 )]
 struct DeletingWaitTimedOut;
+
+/// A version row that predates the object-store import — its git commit locator/message are NULL.
+/// The cure is one-shot: `topos-plane import-local`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "this version predates the object-store import (no recorded commit locator) — run `topos-plane import-local`"
+)]
+pub(crate) struct PreImportRow;
+
+/// A staged file's bytes no longer match the identity recorded at stage time (post-stage
+/// corruption of the ephemeral dir) — the install refuses rather than framing lying bytes.
+#[derive(Debug, thiserror::Error)]
+#[error("a staged blob's bytes do not match the identity recorded at stage time")]
+struct StagedBlobCorrupt;

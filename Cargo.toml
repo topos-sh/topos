@@ -66,6 +66,11 @@ imara-diff = "0.1"            # topos-gitstore: the diff ENGINE behind the unifi
 # `binary` (zlib-rs) + `color` (anstyle) deps out — the merge needs neither.
 diffy = { version = "=0.5.0", default-features = false, features = ["std"] }
 sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM (held at 0.8.6 for the offline-metadata drift gate)
+# plane-store: the ONE object-store seam the vault's bytes live behind — LocalFileSystem for the
+# self-host default, `aws` for any S3-compatible endpoint (R2, MinIO). Owned by plane-store/topos-plane
+# ALONE (a check-arch assertion pins it out of the client, kernel, and leaf crates).
+object_store = { version = "0.12", features = ["aws"] }
+futures-util = { version = "0.3", default-features = false } # plane-store: drive object_store's list/delete streams
 # The async runtime is the SERVER's (sqlx is async-native): it reaches plane-store's library via sqlx's
 # `runtime-tokio` feature, and is a dev-dependency there to drive `#[tokio::test]`. The client never gets
 # this edge — check-arch forbids `topos -> plane-store` — so the CLI stays sync and tokio-free.

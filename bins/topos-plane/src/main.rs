@@ -6,15 +6,16 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use topos_plane::{PlaneConfig, PlaneState, router, spawn_maintenance};
+use topos_plane::{PlaneConfig, PlaneState, StoreBackend, router, spawn_maintenance};
 
-/// The vault's runtime configuration (flags or env).
+/// The serving configuration (flags or env) — the default command.
 #[derive(Debug, Parser)]
 #[command(
     name = "topos-plane",
-    about = "The Topos vault (OSS) — pure byte custody."
+    about = "The Topos vault (OSS) — pure byte custody. Bare invocation (or `serve`) serves; \
+             `import-local` is the one-shot cutover from the pre-object-store on-disk layout."
 )]
 struct Config {
     /// The address to bind (host:port). Bind an INTERNAL interface — the vault must never be
@@ -25,22 +26,87 @@ struct Config {
     /// for a managed / BYO database over the network). The schema is migrated on startup.
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
-    /// The per-workspace git-object store root (created if absent).
+    /// Which object store holds the bundle bytes: `local` (a directory — the self-host default)
+    /// or `s3` (any S3-compatible endpoint: R2, MinIO, AWS — configured via TOPOS_PLANE_S3_*).
+    #[arg(long, env = "TOPOS_PLANE_STORE", default_value = "local")]
+    store: StoreKind,
+    /// The local store root (created if absent) — required for `--store local`, ignored for `s3`.
+    /// Reuses the pre-object-store git root: an existing volume's loose objects are already at
+    /// their keys.
     #[arg(long, env = "TOPOS_PLANE_GIT_ROOT")]
-    git_root: PathBuf,
-    /// The per-workspace large-object store root (created if absent).
-    #[arg(long, env = "TOPOS_PLANE_LARGE_ROOT")]
-    large_root: PathBuf,
+    git_root: Option<PathBuf>,
+    /// The S3-compatible endpoint URL (e.g. `https://<account>.r2.cloudflarestorage.com`).
+    #[arg(long, env = "TOPOS_PLANE_S3_ENDPOINT")]
+    s3_endpoint: Option<String>,
+    /// The bucket name.
+    #[arg(long, env = "TOPOS_PLANE_S3_BUCKET")]
+    s3_bucket: Option<String>,
+    /// The access key id.
+    #[arg(long, env = "TOPOS_PLANE_S3_ACCESS_KEY_ID")]
+    s3_access_key_id: Option<String>,
+    /// The secret access key (a secret — never logged).
+    #[arg(long, env = "TOPOS_PLANE_S3_SECRET_ACCESS_KEY", hide_env_values = true)]
+    s3_secret_access_key: Option<String>,
+    /// The region (`auto` for R2).
+    #[arg(long, env = "TOPOS_PLANE_S3_REGION", default_value = "auto")]
+    s3_region: String,
+    /// The EPHEMERAL upload-staging directory (no volume required; losing it on a container
+    /// replacement loses only in-flight uploads, which clients replay).
+    #[arg(long, env = "TOPOS_PLANE_TMP")]
+    tmp: Option<PathBuf>,
     /// The internal-lane bearer token (a secret — never logged; only its sha256 is retained). Arms
     /// the `/internal/v1/*` custody lane; unset, every route on that lane answers 404.
     #[arg(long, env = "TOPOS_PLANE_INTERNAL_TOKEN", hide_env_values = true)]
     internal_token: Option<String>,
-    /// Seconds between storage-maintenance passes (the recovery sweep + quarantine janitor + a GC
+    /// Seconds between storage-maintenance passes (the recovery sweep + staging janitor + a GC
     /// pass per workspace — the reclamation the storage layer mandates but does not schedule). The
     /// first pass runs at startup. `0` disables the scheduler (an operator running the passes
     /// out-of-band).
     #[arg(long, env = "TOPOS_PLANE_GC_INTERVAL_SECS", default_value_t = 300)]
     gc_interval_secs: u64,
+}
+
+/// The closed store-backend vocabulary of `--store`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum StoreKind {
+    Local,
+    S3,
+}
+
+/// Resolve the serving config's store backend, failing typed on a missing required field.
+fn store_backend(cfg: &Config) -> Result<StoreBackend> {
+    match cfg.store {
+        StoreKind::Local => {
+            let Some(root) = cfg.git_root.clone() else {
+                bail!("--store local requires --git-root (or TOPOS_PLANE_GIT_ROOT)");
+            };
+            Ok(StoreBackend::Local { root })
+        }
+        StoreKind::S3 => {
+            let missing = |what: &str| format!("--store s3 requires {what} (TOPOS_PLANE_S3_*)");
+            Ok(StoreBackend::S3 {
+                endpoint: cfg
+                    .s3_endpoint
+                    .clone()
+                    .with_context(|| missing("an endpoint"))?,
+                bucket: cfg.s3_bucket.clone().with_context(|| missing("a bucket"))?,
+                access_key_id: cfg
+                    .s3_access_key_id
+                    .clone()
+                    .with_context(|| missing("an access key id"))?,
+                secret_access_key: cfg
+                    .s3_secret_access_key
+                    .clone()
+                    .with_context(|| missing("a secret access key"))?,
+                region: cfg.s3_region.clone(),
+            })
+        }
+    }
+}
+
+/// The default ephemeral staging root when `TOPOS_PLANE_TMP` is unset: under the system temp dir.
+fn default_tmp() -> PathBuf {
+    std::env::temp_dir().join("topos-plane")
 }
 
 #[tokio::main]
@@ -54,11 +120,26 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cfg = Config::parse();
+    // Two commands, dispatched by the first argument: `import-local` (the one-shot cutover) and
+    // `serve` (the default — a bare `topos-plane`, flags and env exactly as before, keeps every
+    // existing deployment's invocation working; an explicit leading `serve` is accepted too).
+    let mut argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match argv.get(1).and_then(|a| a.to_str()) {
+        Some("import-local") => {
+            argv.remove(1);
+            return topos_plane::import_local_main(argv).await;
+        }
+        Some("serve") => {
+            argv.remove(1);
+        }
+        _ => {}
+    }
+
+    let cfg = Config::parse_from(argv);
     let state = PlaneState::open(PlaneConfig {
-        database_url: cfg.database_url,
-        git_root: cfg.git_root,
-        large_root: cfg.large_root,
+        database_url: cfg.database_url.clone(),
+        store: store_backend(&cfg)?,
+        staging_root: cfg.tmp.clone().unwrap_or_else(default_tmp),
     })
     .await?;
     // The internal-lane token (post-construction): only its sha256 is retained; unset (or blank),

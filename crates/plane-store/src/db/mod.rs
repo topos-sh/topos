@@ -253,7 +253,7 @@ fn duration_millis(d: Option<Duration>) -> Option<u64> {
 // The custody raw-SQL: the object-lifecycle fence, the version/pointer transaction, and the reads.
 pub(crate) mod custody;
 
-pub(crate) use custody::lifecycle::{AcquireOutcome, InstallOutcome, Location, ObjectStatus};
+pub(crate) use custody::lifecycle::{AcquireOutcome, InstallOutcome, ObjectStatus};
 
 #[cfg(test)]
 mod retry_backoff_tests {

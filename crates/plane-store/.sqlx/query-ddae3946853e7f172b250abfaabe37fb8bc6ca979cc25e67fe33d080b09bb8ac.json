@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO version (workspace_id, bundle_id, version_id, commit_id, first_parent, author_display, created_at, git_commit_oid, message) VALUES ($1, $2, $3, $3, $4, $5, to_timestamp($6::double precision / 1000.0), $7, $8) ON CONFLICT (workspace_id, bundle_id, version_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Float8",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ddae3946853e7f172b250abfaabe37fb8bc6ca979cc25e67fe33d080b09bb8ac"
+}

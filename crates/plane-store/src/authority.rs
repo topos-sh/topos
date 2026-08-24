@@ -3,22 +3,17 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use topos_gitstore::{LocalLargeStore, Store};
-
 use crate::commit::{BundleDeleteReport, CommittedVersion, PointerState, PurgeReport};
 use crate::db::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{BundleId, CommitId, ObjectId, OpId, WorkspaceId};
 use crate::read::{CurrentInfo, LogEntry, VersionMeta, WorkspaceStorage};
+use crate::store::{PlaneStore, StoreConfig};
 use crate::upload::CandidateUpload;
 
-/// The default size at/above which a file blob is offloaded to the large-object store (≈ 1 MiB). Git
-/// packs/dedups small text-shaped blobs well but degrades on large binaries; below this they stay in git.
-pub(crate) const DEFAULT_LARGE_THRESHOLD: u64 = 1 << 20;
-
-/// The default per-blob hard reject cap (≈ 100 MiB): a blob larger than this is refused at ingest before
-/// any bytes are staged.
-pub(crate) const DEFAULT_LARGE_REJECT_CAP: u64 = 100 << 20;
+/// The default per-blob hard reject cap (≈ 100 MiB): a blob larger than this is refused at ingest
+/// before any bytes are staged.
+pub(crate) const DEFAULT_REJECT_CAP: u64 = 100 << 20;
 
 /// The default cap on a log read (the composing server may ask for fewer, never more per request).
 pub const DEFAULT_LOG_LIMIT: usize = 50;
@@ -48,105 +43,117 @@ pub struct PoolConfig {
 /// The vault's byte-custody authority — the **only** public type in this crate.
 ///
 /// PURE BYTE CUSTODY: versions (content-addressed), the generation-fenced `current` pointer, the
-/// object stores, and the GC fence. The vault has ONE caller (the composing server fronting the
+/// object store, and the GC fence. The vault has ONE caller (the composing server fronting the
 /// product app) and treats every request as PRE-AUTHORIZED — no identity, no membership, no policy
 /// lives here. Requests carry opaque `(workspace_id, bundle_id, …)` strings plus attribution
 /// display strings stored verbatim; the vault validates SHAPE (charset/length), never meaning.
 ///
-/// Every raw SQL statement and raw git-object read is private; it owns one Postgres schema (every
-/// row bound on `workspace_id`) and a confined root under which each workspace gets its own git
-/// object store + large-object store. Cross-workspace isolation is that database binding — never
-/// the directory.
+/// Every raw SQL statement and raw object read is private; it owns one Postgres schema (every row
+/// bound on `workspace_id`) and one object store whose every key is prefixed by the workspace id.
+/// Cross-workspace isolation is that database binding — never the key prefix. The vault itself is
+/// **stateless**: Postgres + the object store are the whole of its durable state; the only local
+/// directory is the ephemeral staging root, safe to lose on any container replacement (a client's
+/// write-ahead log replays an interrupted upload).
 #[derive(Debug)]
 pub struct Authority {
     db: Db,
-    git_root: PathBuf,
-    /// The confined root under which each workspace gets its **own** large-object store (a sibling of
-    /// `git_root`); big blobs are offloaded here at migrate. Per-workspace subdirs are the hard tenant
-    /// boundary (no cross-workspace dedup), exactly like `git_root`.
-    large_root: PathBuf,
-    /// Size at/above which a file blob is offloaded to the large-object store (operational config; never
-    /// enters any id/digest).
-    large_threshold: u64,
+    store: PlaneStore,
+    /// The EPHEMERAL staging root — per-op upload quarantines live at
+    /// `<staging_root>/<workspace>/<op_id>/`. No volume required; the janitor sweeps stale op dirs
+    /// via the `upload`-row protocol, and losing the whole root loses only in-flight candidates.
+    staging_root: PathBuf,
     /// Per-blob hard reject cap, enforced at ingest.
-    large_reject_cap: u64,
+    reject_cap: u64,
 }
 
 impl Authority {
-    /// Open the authority over a Postgres `database_url`, a git-store root, and a large-object-store root
-    /// (the roots created if absent; the schema migrated on the database).
+    /// Open the authority over a Postgres `database_url`, the object-store `config`, and an
+    /// ephemeral `staging_root` (created if absent; the schema migrated on the database).
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`] if a store root cannot be created or the database cannot be opened or
-    /// migrated.
-    pub async fn open(database_url: &str, git_root: &Path, large_root: &Path) -> Result<Self> {
-        Self::open_with_pool(database_url, git_root, large_root, PoolConfig::default()).await
+    /// [`AuthorityError::Internal`] if the store cannot be opened, the staging root cannot be
+    /// created, or the database cannot be opened or migrated.
+    pub async fn open(
+        database_url: &str,
+        store: &StoreConfig,
+        staging_root: &Path,
+    ) -> Result<Self> {
+        Self::open_with_pool(database_url, store, staging_root, PoolConfig::default()).await
     }
 
     /// Open the authority exactly like [`open`](Self::open) but with explicit connection-pool tuning.
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`] if a store root cannot be created or the database cannot be opened or
-    /// migrated.
+    /// As [`open`](Self::open).
     pub async fn open_with_pool(
         database_url: &str,
-        git_root: &Path,
-        large_root: &Path,
+        store: &StoreConfig,
+        staging_root: &Path,
         pool: PoolConfig,
     ) -> Result<Self> {
-        std::fs::create_dir_all(git_root).map_err(AuthorityError::internal)?;
-        std::fs::create_dir_all(large_root).map_err(AuthorityError::internal)?;
+        let store = PlaneStore::open(store)?;
+        std::fs::create_dir_all(staging_root).map_err(AuthorityError::internal)?;
         let db = Db::connect(database_url, &pool).await?;
         Ok(Self {
             db,
-            git_root: git_root.to_path_buf(),
-            large_root: large_root.to_path_buf(),
-            large_threshold: DEFAULT_LARGE_THRESHOLD,
-            large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
+            store,
+            staging_root: staging_root.to_path_buf(),
+            reject_cap: DEFAULT_REJECT_CAP,
         })
     }
 
     /// Build the authority over an **already-open** `PgPool` (the schema assumed already migrated) plus the
-    /// two store roots. The injection seam for `#[sqlx::test]` — which provisions a fresh per-test database,
-    /// runs the migrations, and hands over the pool — and for an out-of-crate e2e harness that provisions its
-    /// own per-test database the same way. Test / `test-fixtures` only: it is the sole place a `sqlx` type
-    /// (`PgPool`) crosses this boundary, and it is compiled out of the production build.
+    /// store config and staging root. The injection seam for `#[sqlx::test]` — which provisions a fresh
+    /// per-test database, runs the migrations, and hands over the pool — and for an out-of-crate e2e
+    /// harness that provisions its own per-test database the same way. Test / `test-fixtures` only: it is
+    /// the sole place a `sqlx` type (`PgPool`) crosses this boundary, and it is compiled out of the
+    /// production build.
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`] if a store root cannot be created.
+    /// [`AuthorityError::Internal`] if the store cannot be opened or the staging root created.
     #[cfg(any(test, feature = "test-fixtures"))]
-    pub fn from_pool(pool: sqlx::PgPool, git_root: &Path, large_root: &Path) -> Result<Self> {
-        std::fs::create_dir_all(git_root).map_err(AuthorityError::internal)?;
-        std::fs::create_dir_all(large_root).map_err(AuthorityError::internal)?;
+    pub fn from_pool(pool: sqlx::PgPool, store: &StoreConfig, staging_root: &Path) -> Result<Self> {
+        let store = PlaneStore::open(store)?;
+        std::fs::create_dir_all(staging_root).map_err(AuthorityError::internal)?;
         Ok(Self {
             db: Db::from_pool(pool),
-            git_root: git_root.to_path_buf(),
-            large_root: large_root.to_path_buf(),
-            large_threshold: DEFAULT_LARGE_THRESHOLD,
-            large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
+            store,
+            staging_root: staging_root.to_path_buf(),
+            reject_cap: DEFAULT_REJECT_CAP,
         })
     }
 
-    /// Override the size-routing threshold + per-blob reject cap (operational config — neither ever enters
-    /// a manifest, digest, or id). A **test-fixture knob**: no consuming server sets it — production runs
-    /// the defaults — and tests use a tiny threshold to force a placement. Compiled out of the production
-    /// build alongside [`Authority::from_pool`].
+    /// As [`Self::from_pool`], over an already-built object store — the in-crate injection seam
+    /// for the in-memory contract suite and the delete-race fault rig.
+    #[cfg(test)]
+    pub(crate) fn from_pool_with_store(
+        pool: sqlx::PgPool,
+        store: PlaneStore,
+        staging_root: &Path,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(staging_root).map_err(AuthorityError::internal)?;
+        Ok(Self {
+            db: Db::from_pool(pool),
+            store,
+            staging_root: staging_root.to_path_buf(),
+            reject_cap: DEFAULT_REJECT_CAP,
+        })
+    }
+
+    /// Override the per-blob reject cap (operational config — it never enters a manifest, digest,
+    /// or id). A **test-fixture knob**: no consuming server sets it — production runs the default —
+    /// and tests use a tiny cap to force the refusal. Compiled out of the production build
+    /// alongside [`Authority::from_pool`].
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
-    pub fn with_large_limits(mut self, threshold: u64, reject_cap: u64) -> Self {
-        self.large_threshold = threshold;
-        self.large_reject_cap = reject_cap;
+    pub fn with_reject_cap(mut self, reject_cap: u64) -> Self {
+        self.reject_cap = reject_cap;
         self
     }
 
-    /// The size at/above which a file blob is offloaded to the large-object store.
-    pub(crate) fn large_threshold(&self) -> u64 {
-        self.large_threshold
-    }
-
     /// The per-blob hard reject cap enforced at ingest.
-    pub(crate) fn large_reject_cap(&self) -> u64 {
-        self.large_reject_cap
+    pub(crate) fn reject_cap(&self) -> u64 {
+        self.reject_cap
     }
 
     // ── the write surface ─────────────────────────────────────────────────────────────────────────
@@ -285,8 +292,8 @@ impl Authority {
         crate::commit::delete_bundle(self, ws, bundle, now).await
     }
 
-    /// Workspace reclaim: drop every custody row of the workspace and remove its physical stores.
-    /// Idempotent.
+    /// Workspace reclaim: drop every custody row of the workspace, then bulk-delete everything
+    /// under its store prefix and its staging dirs. Idempotent.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a fault.
@@ -332,7 +339,8 @@ impl Authority {
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] on an unknown or purged version; [`AuthorityError::Integrity`] on
-    /// a bookkeeping/store divergence; [`AuthorityError::Internal`] on a database fault.
+    /// a bookkeeping/store divergence — including a pre-import row with no recorded git commit
+    /// locator (run `topos-plane import-local`); [`AuthorityError::Internal`] on a database fault.
     pub async fn read_version(
         &self,
         ws: &WorkspaceId,
@@ -343,11 +351,13 @@ impl Authority {
     }
 
     /// The first-parent commit chain from `current`, capped at `limit` — version ids + messages +
-    /// attributions + timestamps (a purged version stays listed with its purge stamp).
+    /// attributions + timestamps (a purged version stays listed with its purge stamp). Answered
+    /// from Postgres alone.
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] when the bundle has no pointer; [`AuthorityError::Integrity`] on
-    /// a broken chain; [`AuthorityError::Internal`] on a database fault.
+    /// a broken chain or a pre-import row (run `topos-plane import-local`);
+    /// [`AuthorityError::Internal`] on a database fault.
     pub async fn log(
         &self,
         ws: &WorkspaceId,
@@ -360,7 +370,8 @@ impl Authority {
     /// Every workspace's stored byte total, ordered by workspace id — the operational accounting
     /// read (opaque workspace ids in, numbers out; the caller joins them to whatever they mean).
     /// Counts `present` objects ONLY: `deleting`/`absent`/`unavailable` bytes are not custody the
-    /// product should bill or display. A workspace holding no present object is absent.
+    /// product should bill or display. A workspace holding no present object is absent. The figure
+    /// is RAW file bytes (the size recorded at install), never compressed store bytes.
     ///
     /// # Errors
     /// [`AuthorityError::Integrity`] on a malformed stored row; [`AuthorityError::Internal`] on a
@@ -380,8 +391,8 @@ impl Authority {
         self.db.workspaces_with_objects().await
     }
 
-    /// Run one GC pass over a workspace (acquire → unlink → finalize per unrooted object). Returns the
-    /// number of objects reclaimed.
+    /// Run one GC pass over a workspace (acquire → single-attempt delete → finalize per unrooted
+    /// object; an ambiguous delete leaves the row for a later pass). Returns the number reclaimed.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on faults.
@@ -399,12 +410,31 @@ impl Authority {
     }
 
     /// Run the quarantine janitor (sweep expired/abandoned staging dirs) across all workspaces.
-    /// Returns the number swept.
+    /// Returns the number swept. The composing server MUST run it on boot: staging is ephemeral,
+    /// and a replaced container's leftover `upload` rows are what this reconciles.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on faults.
     pub async fn run_janitor(&self, now: i64) -> Result<usize> {
         crate::gc::quarantine_janitor(self, now).await
+    }
+
+    // ── the one-shot cutover ─────────────────────────────────────────────────────────────────────
+
+    /// `import-local` — migrate a PRE-object-store on-disk layout (per-workspace bare repos under
+    /// `git_root`, the size-routed large-object files under `large_root`) into the configured
+    /// store, and backfill the de-git columns. Run with the vault STOPPED; idempotent (a rerun
+    /// resumes). See [`crate::ImportReport::passed`] — a `false` report names every failure.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on an I/O, store, or database
+    /// fault; per-item problems land in the report's `failures` instead.
+    pub async fn import_local(
+        &self,
+        git_root: &Path,
+        large_root: &Path,
+    ) -> Result<crate::custody::import::ImportReport> {
+        crate::custody::import::import_local(self, git_root, large_root).await
     }
 
     // ── crate-internal plumbing ───────────────────────────────────────────────────────────────────
@@ -414,83 +444,27 @@ impl Authority {
         &self.db
     }
 
-    /// The per-workspace git-store directory — one component under the confined root. `WorkspaceId`
-    /// is a validated path-safe id (no separators, no leading dot), so this can never escape
-    /// `git_root`.
-    pub(crate) fn workspace_git_dir(&self, ws: &WorkspaceId) -> PathBuf {
-        self.git_root.join(ws.as_str())
+    /// The object store — crate-private (no raw store read escapes the authority's rules).
+    pub(crate) fn store(&self) -> &PlaneStore {
+        &self.store
     }
 
-    /// The per-workspace quarantine ROOT: `git_root/.quarantine/<ws>`. The `.quarantine` component
-    /// is reserved by the id shape rule (no id may start with a dot), so it can never collide with a
-    /// workspace store dir — and it is a SIBLING of those dirs, so nothing walking a workspace store
-    /// ever sees a quarantine.
-    pub(crate) fn workspace_quarantine_root(&self, ws: &WorkspaceId) -> PathBuf {
-        self.git_root.join(".quarantine").join(ws.as_str())
+    /// The per-workspace staging root: `<staging_root>/<ws>`. `WorkspaceId` is a validated
+    /// path-safe id (no separators, no leading dot), so this can never escape the staging root.
+    pub(crate) fn workspace_staging_root(&self, ws: &WorkspaceId) -> PathBuf {
+        self.staging_root.join(ws.as_str())
     }
 
-    /// The per-op upload-quarantine directory: `git_root/.quarantine/<ws>/<op_id>`. Both ids are
-    /// validated path-safe newtypes, so the path can never escape `git_root`.
+    /// The per-op upload-staging directory: `<staging_root>/<ws>/<op_id>`. Both ids are validated
+    /// path-safe newtypes, so the path can never escape the staging root.
     pub(crate) fn workspace_quarantine_dir(&self, ws: &WorkspaceId, op_id: &OpId) -> PathBuf {
-        self.workspace_quarantine_root(ws).join(op_id.as_str())
-    }
-
-    /// Open the per-workspace git store for reading. A failure here is reached only after the database
-    /// said the bytes exist, so a missing/un-openable store is a bookkeeping/store divergence (corruption).
-    pub(crate) fn open_store(&self, ws: &WorkspaceId) -> Result<Store> {
-        Store::open(&self.workspace_git_dir(ws)).map_err(AuthorityError::integrity)
-    }
-
-    /// The per-workspace large-object store directory (`large_root/<ws>`).
-    pub(crate) fn workspace_large_dir(&self, ws: &WorkspaceId) -> PathBuf {
-        self.large_root.join(ws.as_str())
-    }
-
-    /// The per-workspace large-object store handle, rooted at `large_root/<ws>/`. `WorkspaceId` is a
-    /// validated, path-safe id, so the root can never escape `large_root` and one workspace's handle can
-    /// never name another's bytes — cross-workspace isolation is the path itself, and byte-identical
-    /// content in two workspaces is two distinct physical objects (no cross-workspace dedup).
-    /// Construction stays inside this crate, so nothing outside the authority can fetch a large object by
-    /// bare hash. Infallible: the store creates its directories lazily on the first `put`.
-    pub(crate) fn large_store(&self, ws: &WorkspaceId) -> LocalLargeStore {
-        LocalLargeStore::new(self.workspace_large_dir(ws))
+        self.workspace_staging_root(ws).join(op_id.as_str())
     }
 }
 
-/// Open-or-create a bare per-workspace git store at `dir` — the write-path open. A free fn so a
-/// blocking-pool closure can call it with an owned dir.
-///
-/// Creation is serialized under an in-process lock: two concurrent first-time writers can both observe
-/// the directory as absent, and bare-repo `init` is neither an idempotent open-or-create nor atomic (a
-/// racer can open a repo mid-init and fail) — write sections genuinely run in parallel on the
-/// blocking pool, so a bare open→init would race. Under the lock the loser re-opens what the winner
-/// completed; the fast path (the store already exists) takes no lock at all. The lock covers ONE
-/// process; the `or_else(open)` below covers the rest.
-pub(crate) fn open_or_init_store(dir: &Path) -> Result<Store> {
-    if let Ok(store) = Store::open(dir) {
-        return Ok(store);
-    }
-    static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _creation = INIT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match Store::open(dir) {
-        Ok(store) => Ok(store),
-        // The CROSS-PROCESS creation race: two plane processes sharing one git volume (a rolling
-        // deploy's overlap, a second replica on a shared mount) can both attempt first-time creation,
-        // and the in-process mutex is no help there. If our `init` lost to another process's completed
-        // `init`, fall back to opening what that process created rather than failing the write.
-        Err(_) => Store::init(dir)
-            .or_else(|_| Store::open(dir))
-            .map_err(AuthorityError::internal),
-    }
-}
-
-/// Run one synchronous store section on tokio's **blocking pool**, so fsync-heavy git/large-object I/O
-/// (bundle staging, durable installs and commits, verify-on-read byte fetches up to the reject cap) never
-/// pins an async worker thread. The closure takes **owned** inputs and opens the non-`Send` gix `Store`
-/// inside itself (it can never cross the boundary); a pool-join fault maps to
-/// [`AuthorityError::Internal`].
+/// Run one synchronous section on tokio's **blocking pool**, so filesystem I/O (candidate staging,
+/// staged-byte reads) never pins an async worker thread. The closure takes **owned** inputs; a
+/// pool-join fault maps to [`AuthorityError::Internal`].
 pub(crate) async fn run_blocking<T, F>(f: F) -> Result<T>
 where
     T: Send + 'static,
