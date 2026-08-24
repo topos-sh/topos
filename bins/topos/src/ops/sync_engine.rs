@@ -539,9 +539,19 @@ pub(crate) fn sync_one_planned(
                     "the consent kernel refused a clean forward apply for {name}"
                 )));
             }
+            // What this fast-forward REPLACES, when the target undoes it — decided while the lock
+            // still names the replaced version (the apply below rewrites it).
+            let undone = (!first_receive)
+                .then(|| {
+                    undone_version_note(&store, &lock, &name, target_commit, &target_digest_hex)
+                })
+                .flatten();
             apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
+            if undone.is_some() {
+                row.note = undone;
+            }
             Ok(row)
         }
         ApplyClass::Diverged => {
@@ -1060,6 +1070,54 @@ fn apply_forward(
     )?;
     log_apply(ctx, skill_id, "pull", t.commit, &report);
     Ok(())
+}
+
+/// The receipt's second fact for a fast-forward that UNDOES the version it replaces: the copy
+/// stood, unmodified, at a version whose content the target does not carry — a revert restored an
+/// older state (this machine's own publish, say), and by the merge model a clean tree follows it,
+/// the way a clean checkout follows `git pull`. The line names the replaced version, the current
+/// one, and the one command that brings the replaced version back; unpublished edits are never
+/// touched here (an edited copy takes the merge arm, never this one). The command spells the
+/// version IN FULL: `revert` resolves a prefix against the machine store's own history, and a
+/// version this scope applied (a project store's own publish) need not be there — the full id
+/// resolves everywhere.
+///
+/// "Undoes" is a CONTENT fact, read from this store's own history: the target's bytes equal a
+/// version OLDER than the replaced one (an ancestor on its first-parent line). A target that
+/// builds on the replaced version — the ordinary teammate's publish — restores no ancestor and
+/// earns no line. `None` too when the history this store holds is too shallow to say.
+fn undone_version_note(
+    store: &Store,
+    lock: &Lock,
+    name: &str,
+    target: [u8; 32],
+    target_digest_hex: &str,
+) -> Option<String> {
+    let replaced = super::parse_hex32(&lock.base_commit).ok()?;
+    if replaced == target {
+        return None;
+    }
+    let restores_ancestor = store
+        .log(replaced)
+        .ok()?
+        .into_iter()
+        .skip(1)
+        .take(256)
+        .any(|node| {
+            store_bundle_digest_opt(store, node.version_id)
+                .ok()
+                .flatten()
+                .is_some_and(|d| to_hex(&d) == target_digest_hex)
+        });
+    let short = |hex: &str| hex.get(..12).unwrap_or(hex).to_owned();
+    restores_ancestor.then(|| {
+        let (was, now) = (short(&lock.base_commit), short(&to_hex(&target)));
+        format!(
+            "replaced your copy (= version {was}) with current {now} — {was} stays in history: \
+             topos revert {name} --to {}",
+            lock.base_commit
+        )
+    })
 }
 
 /// Converge the MANAGED placements onto the ALREADY-APPLIED version from the LOCAL store: fill a

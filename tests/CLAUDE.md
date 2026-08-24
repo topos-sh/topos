@@ -70,7 +70,10 @@ what only a cross-crate composed run can prove.
   undone version's bytes) is then read by every verb against the workspace's LIVE current — `diff`
   shows the real difference, `publish` previews and mints a forward publish naming which version
   current is (the revert), `log` shows every hop, and a fresh machine converges on the carried-
-  forward content. Binary-driven over fake `$HOME`s like the store suite.
+  forward content; a second arc runs `update` over that copy — it fast-forwards (a clean tree
+  follows the team) and the receipt names the version it replaced with the full `revert --to`
+  that brings it back, which the arc then runs. Binary-driven over fake `$HOME`s like the store
+  suite.
 - **`tests/uniform_e2e.rs`** — the NON-ORACLE discipline over real HTTP: byte-identical uniform
   404s across foreign/never-existed workspaces, wrong paths, garbage credentials; the
   `session_approval` knob's born-pending lane (exactly two typed answers until approval).
