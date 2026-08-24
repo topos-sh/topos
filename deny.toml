@@ -36,6 +36,12 @@ private = { ignore = true }
 crate = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]
 
+# The same trust-store data in its sibling packaging (pulled in by object_store's reqwest/rustls
+# stack) — same license, same data-only scope.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 
