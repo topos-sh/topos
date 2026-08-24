@@ -28,7 +28,8 @@ backend = "latest"
 
 `topos init` creates it (writing the `workspace = ` line from your default workspace); the CLI
 writes its lines. `topos install` places exactly what the lock records; `topos update` moves the
-lock and shows the diff.
+lock and shows the diff. A `topos publish` or `topos revert` run inside the checkout moves the
+lock too — a commit moves `HEAD` — after the checkout's own copy holds the version.
 
 ## One workspace per project
 
@@ -134,6 +135,10 @@ project keeps a bundle out by removing the row that brings it.
 - `topos remove <name>` — the exact inverse.
 - `topos install` — `topos.lock` entries for rows the lock lacks; nothing else.
 - `topos update [<name>]` — the lock, rewritten from what "latest" now resolves to.
+- `topos publish <name>` — the lock's entry for that bundle, advanced to the version that
+  landed (run inside the checkout; a pinned row is left alone and the receipt says so).
+- `topos revert <name> --to <version>` — the lock's entry, advanced to the new version the
+  revert made current, once the checkout's copy holds it.
 - `topos login` — the machine file's `[workspaces]` row, first connection only.
 
 ## Editing by hand
