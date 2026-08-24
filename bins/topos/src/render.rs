@@ -3568,29 +3568,40 @@ fn preview_apply_line(
         .as_ref()
         .map(|c| format!(" {}", change_phrase(c)))
         .unwrap_or_default();
-    let lands = if data.lands_in.is_empty() {
-        // The catalog alone: the address the describe's header names, and no channel.
-        let ws = data
-            .workspace
-            .as_ref()
-            .map(|w| w.address())
-            .or_else(|| data.workspace_display_name.clone())
-            .unwrap_or_else(|| data.workspace_id.clone());
-        format!("Lands in {ws} (no channel)")
-    } else {
-        format!("Lands in {}", data.lands_in.join(", "))
-    };
-    let note = data
+    // A placement the channel index predicts WITHHELD (curated, against a member) is not a
+    // channel the version reaches: the clause says so — the catalog alone (or the channels that
+    // do carry it), and that a curator places it into the target.
+    let withheld = data
         .placement_note
         .as_ref()
-        .map(|n| format!(" ({n})"))
-        .unwrap_or_default();
+        .and_then(|_| data.placements.first())
+        .map(String::as_str);
+    let lands = match (data.lands_in.is_empty(), withheld) {
+        (true, Some(target)) => {
+            format!("Lands in the catalog only — a curator places it into {target}")
+        }
+        (false, Some(target)) => format!(
+            "Lands in {} — a curator places it into {target}",
+            data.lands_in.join(", ")
+        ),
+        (true, None) => {
+            // The catalog alone: the address the describe's header names, and no channel.
+            let ws = data
+                .workspace
+                .as_ref()
+                .map(|w| w.address())
+                .or_else(|| data.workspace_display_name.clone())
+                .unwrap_or_else(|| data.workspace_id.clone());
+            format!("Lands in {ws} (no channel)")
+        }
+        (false, None) => format!("Lands in {}", data.lands_in.join(", ")),
+    };
     let gate = match data.gate {
         PublishGate::Lands => "no review required",
         PublishGate::Proposal => "review required — opens a proposal",
     };
     format!(
-        "Preview only — nothing published.{counts} {lands}{note}, {gate}. Apply: {}",
+        "Preview only — nothing published.{counts} {lands}, {gate}. Apply: {}",
         argv_line(yes_argv)
     )
 }
@@ -6260,13 +6271,25 @@ mod tests {
              topos.sh/ideamotive (no channel), no review required. Apply: topos publish \
              r2-smoke --yes"
         );
-        d.lands_in = vec!["everyone".to_owned()];
+        // A curated target against a member is WITHHELD: it is never listed as reached — the
+        // clause names the catalog (or the channels that do carry the bundle) and the curator.
+        d.placements = vec!["everyone".to_owned()];
+        d.lands_in = Vec::new();
         d.placement_note =
             Some("curated: lands catalog-only; a curator places it afterwards".to_owned());
         assert!(
             super::preview_apply_line(&d, &yes).contains(
-                "Lands in everyone (curated: lands catalog-only; a curator places it \
-                 afterwards), no review required."
+                "Lands in the catalog only — a curator places it into everyone, no review \
+                 required."
+            ),
+            "{}",
+            super::preview_apply_line(&d, &yes)
+        );
+        d.placements = vec!["backend".to_owned()];
+        d.lands_in = vec!["everyone".to_owned()];
+        assert!(
+            super::preview_apply_line(&d, &yes).contains(
+                "Lands in everyone — a curator places it into backend, no review required."
             ),
             "{}",
             super::preview_apply_line(&d, &yes)
