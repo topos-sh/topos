@@ -37,6 +37,54 @@ fn lock_text(proj: &std::path::Path) -> String {
     std::fs::read_to_string(proj.join("topos.lock")).unwrap_or_default()
 }
 
+/// A pointer move this machine makes (a landed publish, a landed revert) advances the cwd
+/// project's lock — for THE WORKSPACE THE MOVE HAPPENED IN, and no other. Lock entries are keyed
+/// by bare name, so a project asking workspace A for `deploy` must not record workspace B's
+/// version when a `--workspace B` publish of a same-named bundle runs inside it. The lock's own
+/// header decides; a lock without one is read through the manifest.
+#[test]
+fn a_pointer_move_advances_only_the_lock_of_its_own_workspace() {
+    let rig = Rig::new("lock-advance-scope");
+    let v1 = "1".repeat(64);
+    let v2 = "2".repeat(64);
+    let v3 = "3".repeat(64);
+    let proj = project(
+        "lock-advance-scope-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let lock = proj.0.join("topos.lock");
+    let with_header = format!(
+        "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[skills.deploy]\nversion = \"{v1}\"\n"
+    );
+    std::fs::write(&lock, &with_header).unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // Another workspace's move, same bare name: the lock is left alone and nothing is said.
+    assert!(ops::advance_project_lock(&ctx, "deploy", &v2, HOST, "other").is_none());
+    assert_eq!(lock_text(&proj.0), with_header, "untouched");
+    // The lock's own workspace: moved.
+    assert!(ops::advance_project_lock(&ctx, "deploy", &v2, HOST, WS_NAME).is_some());
+    assert!(lock_text(&proj.0).contains(&v2), "{}", lock_text(&proj.0));
+
+    // A lock without a header is read through the manifest's `workspace`.
+    let bare = format!("schema = 1\n\n[skills.deploy]\nversion = \"{v2}\"\n");
+    std::fs::write(&lock, &bare).unwrap();
+    assert!(ops::advance_project_lock(&ctx, "deploy", &v3, HOST, "other").is_none());
+    assert_eq!(lock_text(&proj.0), bare, "untouched");
+    assert!(ops::advance_project_lock(&ctx, "deploy", &v3, HOST, WS_NAME).is_some());
+    assert!(lock_text(&proj.0).contains(&v3), "{}", lock_text(&proj.0));
+
+    // A pinned row holds: the pin is what the project asked to run.
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"{v1}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(&lock, &with_header).unwrap();
+    assert!(ops::advance_project_lock(&ctx, "deploy", &v2, HOST, WS_NAME).is_none());
+    assert_eq!(lock_text(&proj.0), with_header, "the pinned entry stays");
+}
+
 #[test]
 fn install_fills_the_lock_once_and_never_bumps_it() {
     let rig = Rig::new("lock-fill");

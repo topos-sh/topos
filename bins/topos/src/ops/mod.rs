@@ -756,25 +756,47 @@ pub(crate) fn followed_workspace(ctx: &Ctx<'_>, skill_id: &str) -> Option<String
 /// manifest PINS (`name = "<version>"`) is left alone, because the pin is what that project asked
 /// to run. Returns the lock's path when an entry moved (or already stood at the version).
 ///
+/// The move belongs to ONE workspace — `host`/`workspace`, the lane the publish signed in — and
+/// lock entries are keyed by bare name: a project asking another workspace for a same-named
+/// bundle (`publish -g foo --workspace B` run inside a checkout on A's `foo`) must not have B's
+/// version recorded under A. The lock's own header names its workspace; a lock without one is
+/// read through the manifest (the row's address, else the file's `workspace`). A project that
+/// names neither, or another workspace, is left alone and nothing is said.
+///
 /// Best-effort by design: the remote half has landed, and a local fault must never fail the
 /// command — it is said on stderr and the next `topos update` there converges the lock.
-pub(crate) fn advance_project_lock(ctx: &Ctx<'_>, name: &str, version: &str) -> Option<String> {
+pub(crate) fn advance_project_lock(
+    ctx: &Ctx<'_>,
+    name: &str,
+    version: &str,
+    host: &str,
+    workspace: &str,
+) -> Option<String> {
     let roots = ctx.roots.as_ref()?;
     let cwd = roots.cwd.as_deref()?;
     let dir = crate::manifest::scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home))?;
     let path = dir.join(crate::manifest::lock::LOCK_FILE);
-    // The row that asks for the bundle, when the manifest spells one: a pinned row holds.
     let manifest = dir.join(crate::manifest::MANIFEST_FILE);
-    let pinned = manifest_edit::local_rows(ctx)
+    let rows: Vec<crate::manifest::scopes::PlanRow> = manifest_edit::local_rows(ctx)
         .ok()
         .into_iter()
         .flatten()
         .find(|(p, _, _)| *p == manifest)
-        .is_some_and(|(_, _, rows)| {
-            rows.iter()
-                .any(|row| row.shape.leaf_name() == name && row.pin().is_some())
-        });
-    if pinned {
+        .map(|(_, _, rows)| rows)
+        .unwrap_or_default();
+    let row = rows.iter().find(|row| row.shape.leaf_name() == name);
+    // WHOSE lock this is: the header the lock carries, else what the manifest says for this row.
+    let recorded = lock_workspace(ctx, &dir).or_else(|| match row.map(|r| &r.shape) {
+        Some(crate::manifest::keys::KeyShape::WorkspaceBundle {
+            host, workspace, ..
+        }) => Some(format!("{host}/{workspace}")),
+        _ => manifest_workspace(ctx, &manifest),
+    })?;
+    if recorded != format!("{host}/{workspace}") {
+        return None;
+    }
+    // The row that asks for the bundle, when the manifest spells one: a pinned row holds.
+    if row.is_some_and(|r| r.pin().is_some()) {
         return None;
     }
     match crate::manifest::lock::advance_entry(ctx.fs, &dir, name, version) {
@@ -791,6 +813,30 @@ pub(crate) fn advance_project_lock(ctx: &Ctx<'_>, name: &str, version: &str) -> 
             None
         }
     }
+}
+
+/// The `host/workspace` a project's `topos.lock` header records, when the file exists and parses.
+fn lock_workspace(ctx: &Ctx<'_>, dir: &std::path::Path) -> Option<String> {
+    let bytes = ctx
+        .fs
+        .read_opt(&dir.join(crate::manifest::lock::LOCK_FILE))
+        .ok()??;
+    crate::manifest::lock::LockDoc::parse(&String::from_utf8_lossy(&bytes))
+        .ok()?
+        .workspace
+}
+
+/// The `host/workspace` a project manifest's own `workspace` header names, when it parses.
+fn manifest_workspace(ctx: &Ctx<'_>, manifest: &std::path::Path) -> Option<String> {
+    let bytes = ctx.fs.read_opt(manifest).ok()??;
+    let doc = crate::manifest::document::parse_manifest(
+        &String::from_utf8_lossy(&bytes),
+        crate::manifest::document::ManifestScope::Project,
+    )
+    .ok()?;
+    crate::manifest::scopes::ScopePlan::from_doc(&doc, Some(manifest.to_path_buf()))
+        .workspace
+        .map(|(h, w)| format!("{h}/{w}"))
 }
 
 /// The workspace a followed skill lives in, or a typed error if it is not followed — the STRICT scope the
