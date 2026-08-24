@@ -200,6 +200,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/workspaces/{ws}/mcp-servers/{skill}/revisions/{revision_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_mcp_revision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces/{ws}/me": {
         parameters: {
             query?: never;
@@ -2655,6 +2671,72 @@ export interface operations {
                 };
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_mcp_revision: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The connected server bundle's immutable id. */
+                skill: string;
+                /** @description The catalog revision (`mcpr_` + 32 lowercase hex). */
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description ONE stored revision of a server this workspace connects, in the shape the catalog index carries the current one — what a committed `topos.lock` converges an `[mcp]` entry to. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireMcpIndexEntry"];
+                };
+            };
+            /** @description Missing/blank credential, non-member, a bundle this workspace does not connect, a revision of another server, or one nobody was ever delivered (indistinguishable). */
             404: {
                 headers: {
                     [name: string]: unknown;

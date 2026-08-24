@@ -49,6 +49,7 @@ const PUBLIC_ROUTES = [
   { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/protection" },
   { method: "get", path: "/v1/workspaces/{ws}/delivery" },
   { method: "post", path: "/v1/workspaces/{ws}/invitations" },
+  { method: "get", path: "/v1/workspaces/{ws}/mcp-servers/{skill}/revisions/{revision_id}" },
   { method: "get", path: "/v1/workspaces/{ws}/me" },
   { method: "post", path: "/v1/workspaces/{ws}/notices/ack" },
   { method: "get", path: "/v1/workspaces/{ws}/proposals" },

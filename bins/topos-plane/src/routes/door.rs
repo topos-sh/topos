@@ -18,8 +18,8 @@ use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthStartRequest, DeviceAuthStartResponse,
     InvitationRequest, LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
     ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
-    WireChannelIndex, WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireSkillIndex,
-    WireSkillLog, WireVersionMeta,
+    WireChannelIndex, WireDelivery, WireMcpIndexEntry, WireMe, WireProposalIndex, WireProposalList,
+    WireSkillIndex, WireSkillLog, WireVersionMeta,
 };
 use topos_types::{JsonEnvelope, WireCurrentRecord};
 
@@ -336,6 +336,26 @@ pub(crate) fn get_current() {}
     ),
 )]
 pub(crate) fn list_skills() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/mcp-servers/{skill}/revisions/{revision_id}",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("skill" = String, Path, description = "The connected server bundle's immutable id."),
+        ("revision_id" = String, Path, description = "The catalog revision (`mcpr_` + 32 lowercase hex)."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "ONE stored revision of a server this workspace connects, in the shape the catalog index carries the current one — what a committed `topos.lock` converges an `[mcp]` entry to.", body = WireMcpIndexEntry),
+        (status = 404, description = "Missing/blank credential, non-member, a bundle this workspace does not connect, a revision of another server, or one nobody was ever delivered (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn get_mcp_revision() {}
 
 #[utoipa::path(
     get,
