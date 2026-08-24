@@ -2618,10 +2618,12 @@ pub struct Republish {
     /// The older version the copy's bytes equal — the version being carried forward.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub copy_version_id: String,
-    /// The version the forward publish mints (predicted on the preview from the same preimage
-    /// the apply commits; the landed id on the receipt).
+    /// The version the forward publish minted — on the RECEIPT only. A preview does not predict
+    /// it: the id folds in the message and the parent the apply will see, and a preview that
+    /// named one landed beside a receipt naming another the moment a `-m` was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub new_version_id: String,
+    pub new_version_id: Option<String>,
 }
 
 /// A publish preview's per-file count of what the draft changes against the live `current`.

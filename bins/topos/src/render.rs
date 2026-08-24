@@ -3641,7 +3641,9 @@ fn change_phrase(c: &topos_types::results::ChangeSummary) -> String {
 
 /// The one line both publish surfaces print for a copy that equals an OLDER version than the
 /// live current — the preview in the present tense, the receipt in the past. Versions are named
-/// short (the same 12-char spelling every surface prints; `revert --to` resolves it).
+/// short (the same 12-char spelling every surface prints; `revert --to` resolves it). The
+/// preview promises no id: the version the apply mints folds in the message and the parent it
+/// sees, so the preview says "a new version" and the receipt names the one that landed.
 fn republish_line(rep: &topos_types::results::Republish, landed: bool) -> String {
     let message = rep
         .current_message
@@ -3650,7 +3652,10 @@ fn republish_line(rep: &topos_types::results::Republish, landed: bool) -> String
         .unwrap_or_default();
     let current = short(&rep.current_version_id);
     let copy = short(&rep.copy_version_id);
-    let new = short(&rep.new_version_id);
+    let new = rep
+        .new_version_id
+        .as_deref()
+        .map_or_else(|| "a new version".to_owned(), |v| short(v).to_owned());
     if landed {
         format!(
             "current was {current}{message}; your copy equaled {copy} — published {copy}'s \
@@ -3659,7 +3664,7 @@ fn republish_line(rep: &topos_types::results::Republish, landed: bool) -> String
     } else {
         format!(
             "current is {current}{message}; your copy equals {copy} — publishing {copy}'s \
-             content forward as {new}"
+             content forward as a new version"
         )
     }
 }
@@ -6306,21 +6311,26 @@ mod tests {
             current_version_id: format!("234b25b0a7af{}", "0".repeat(52)),
             current_message: Some("topos: revert".to_owned()),
             copy_version_id: format!("2d450876464a{}", "0".repeat(52)),
-            new_version_id: format!("8432cca436b8{}", "0".repeat(52)),
+            new_version_id: None,
         };
         let mut d = describing(PublishGate::Lands);
         d.republish = Some(rep.clone());
+        // The preview promises no id — the apply's `-m` or a moved parent would make it a lie.
         let preview = super::publish_describe_tty(&d, &yes_argv());
         assert!(
             preview.contains(
                 "\n  current is 234b25b0a7af (\"topos: revert\"); your copy equals 2d450876464a — \
-                 publishing 2d450876464a's content forward as 8432cca436b8\n"
+                 publishing 2d450876464a's content forward as a new version\n"
             ),
             "{preview}"
         );
+        let landed_id = format!("8432cca436b8{}", "0".repeat(52));
         let landed = publish_tty(&PublishData {
-            version_id: rep.new_version_id.clone(),
-            republish: Some(rep),
+            version_id: landed_id.clone(),
+            republish: Some(Republish {
+                new_version_id: Some(landed_id),
+                ..rep
+            }),
             ..published()
         });
         assert!(

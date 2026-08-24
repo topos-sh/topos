@@ -744,22 +744,22 @@ fn an_unmodified_copy_of_an_older_version_carries_forward_over_the_live_current(
         preview.undo.as_deref(),
         Some(format!("topos revert deploy --to {}", hex(&restored.id)).as_str())
     );
+    // The preview names no version: the apply's message and parent decide the id.
+    assert!(predicted.new_version_id.is_none(), "{predicted:?}");
     let tty = crate::render::publish_describe_tty(&preview, &["topos".into(), "publish".into()]);
     assert!(
         tty.contains(&format!(
             "current is {} (\"topos: revert\"); your copy equals {} — publishing {}'s content \
-             forward as {}",
+             forward as a new version",
             &hex(&restored.id)[..12],
             &hex(&mine.id)[..12],
             &hex(&mine.id)[..12],
-            &predicted.new_version_id[..12]
         )),
         "{tty}"
     );
 
     let data = landed(publish_at(&ctx, &seams, ops::StoreScope::Here).unwrap());
-    // The new version parents on the LIVE current and carries the copy's bytes — the very id the
-    // preview predicted.
+    // The new version parents on the LIVE current and carries the copy's bytes.
     let expected = topos_core::identity::commit_id(&topos_core::identity::Commit {
         parents: &[restored.id],
         tree: mine.digest,
@@ -768,7 +768,6 @@ fn an_unmodified_copy_of_an_older_version_carries_forward_over_the_live_current(
     })
     .unwrap();
     assert_eq!(data.version_id, hex(&expected));
-    assert_eq!(data.version_id, predicted.new_version_id);
     assert_eq!(data.bundle_digest, hex(&mine.digest));
     let landed_rep = data
         .republish
@@ -777,7 +776,10 @@ fn an_unmodified_copy_of_an_older_version_carries_forward_over_the_live_current(
     assert_eq!(landed_rep.current_version_id, hex(&restored.id));
     assert_eq!(landed_rep.current_message.as_deref(), Some("topos: revert"));
     assert_eq!(landed_rep.copy_version_id, hex(&mine.id));
-    assert_eq!(landed_rep.new_version_id, data.version_id);
+    assert_eq!(
+        landed_rep.new_version_id.as_deref(),
+        Some(data.version_id.as_str())
+    );
     assert_eq!(
         data.undo.as_deref(),
         Some(format!("topos revert deploy --to {}", &hex(&restored.id)[..12]).as_str())
@@ -873,7 +875,10 @@ fn a_resumed_forward_publish_prints_the_undo_naming_the_live_current() {
     assert_eq!(rep.current_version_id, hex(&restored.id));
     assert_eq!(rep.current_message.as_deref(), Some("topos: revert"));
     assert_eq!(rep.copy_version_id, hex(&mine.id));
-    assert_eq!(rep.new_version_id, data.version_id);
+    assert_eq!(
+        rep.new_version_id.as_deref(),
+        Some(data.version_id.as_str())
+    );
     let tty = crate::render::publish_tty(&data);
     assert!(
         tty.contains(&format!(

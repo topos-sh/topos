@@ -1082,10 +1082,11 @@ export interface components {
             /** @description The workspace's live `current` at the time of the publish. */
             current_version_id: string;
             /**
-             * @description The version the forward publish mints (predicted on the preview from the same preimage
-             *     the apply commits; the landed id on the receipt).
+             * @description The version the forward publish minted — on the RECEIPT only. A preview does not predict
+             *     it: the id folds in the message and the parent the apply will see, and a preview that
+             *     named one landed beside a receipt naming another the moment a `-m` was added.
              */
-            new_version_id: string;
+            new_version_id?: string | null;
         };
         /**
          * @description `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
