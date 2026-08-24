@@ -1,12 +1,13 @@
 //! The project LOCK's behavior end to end: install fills and never bumps, update moves,
-//! `--frozen` refuses gaps, a fresh checkout converges to the lock (not to current), and a
-//! channel freezes to its locked member list.
+//! `--frozen` refuses gaps, a fresh checkout converges to the lock (not to current) — for a
+//! connected MCP server's revision exactly as for a skill's version — and a channel freezes to
+//! its locked member list.
 
 use std::sync::{Arc, Mutex};
 
 use super::rig::{
-    CallLog, FakeDirectory, FakePlane, HOST, Rig, WS_NAME, catalog_entry, channel, connect,
-    delivered, delivered_at, one_file, project, sweep,
+    CallLog, FakeDirectory, FakePlane, HOST, Rig, Scratch, WS_NAME, catalog_entry,
+    catalog_server_at, channel, connect, delivered, delivered_at, one_file, project, sweep,
 };
 use crate::ops;
 use topos_types::results::PullAction;
@@ -539,4 +540,223 @@ fn a_lock_held_project_reports_held_once_and_never_fast_forwards_forever() {
         "{:?}",
         out.disclosures
     );
+}
+
+// =================================================================================================
+// The `[mcp]` half of the lock: a connected server's entry converges to the revision the lock
+// names, exactly as a skill's converges to its locked version. The workspace serves one revision
+// by id; a workspace that serves none is the degraded path below.
+// =================================================================================================
+
+/// A revision id of the shape the catalog mints (`mcpr_` + 32 hex).
+fn rev(tag: &str) -> String {
+    format!("mcpr_{}", tag.repeat(32 / tag.len()))
+}
+
+/// What the PROJECT's store recorded for a connected server — the whole durable state of the kind.
+fn recorded(
+    rig: &Rig,
+    proj: &std::path::Path,
+    skill_id: &str,
+) -> topos_types::persisted::McpServerRecord {
+    let layout = crate::sidecar::existing_project_store(&rig.fs, proj).expect("a project store");
+    let sid = crate::id::SkillId::parse(skill_id).unwrap();
+    crate::doc::read_doc(&rig.fs, &layout.published(&sid).server)
+        .expect("the record reads")
+        .expect("a record stands")
+}
+
+/// A checkout whose committed lock names an OLD revision, and a workspace that has moved on.
+fn locked_mcp_project(tag: &str, old: &str) -> Scratch {
+    let proj = project(
+        tag,
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = \"latest\"\n"),
+    );
+    std::fs::write(
+        proj.0.join("topos.lock"),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[mcp.linear]\nrevision = \"{old}\"\n"
+        ),
+    )
+    .unwrap();
+    proj
+}
+
+#[test]
+fn an_mcp_entry_converges_to_the_locked_revision_and_only_update_moves_it() {
+    let rig = Rig::new("lock-mcp");
+    rig.seed_session();
+    let (old, new) = (rev("a"), rev("b"));
+    let proj = locked_mcp_project("lock-mcp-proj", &old);
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    // The workspace serves the NEW revision as current, and still serves the old one by id.
+    let dir = FakeDirectory::new(Vec::new(), Vec::new())
+        .with_server(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v2",
+            &new,
+        ))
+        .with_revision(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v1",
+            &old,
+        ));
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // A FRESH CHECKOUT takes the lock's revision — the document a teammate received then, not
+    // the one the catalog serves today.
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let record = recorded(&rig, &proj.0, "s_linear");
+    assert_eq!(record.revision_id, old);
+    assert_eq!(
+        record.document["remotes"][0]["url"], "https://mcp.example/v1",
+        "the locked revision's own document: {record:?}"
+    );
+    assert!(lock_text(&proj.0).contains(&old), "the lock never moved");
+    // Honoring a lock is not news — a skill's lock says nothing either.
+    assert!(
+        !out.disclosures
+            .iter()
+            .any(|m| m.code.as_deref() == Some("MCP_FILLED")),
+        "{:?}",
+        out.disclosures
+    );
+
+    // `--frozen` SUCCEEDS on that same fresh checkout: the revision the lock names is available.
+    let frozen = Rig::new("lock-mcp-frozen");
+    frozen.seed_session();
+    let cold = locked_mcp_project("lock-mcp-frozen-proj", &old);
+    let cold_ctx = frozen.ctx_at(Some(&cold.0));
+    install(&cold_ctx, &plane, &dir, ops::LockMode::Frozen).expect("the locked revision is served");
+    assert_eq!(recorded(&frozen, &cold.0, "s_linear").revision_id, old);
+
+    // A repeat install holds there (the record already stands at the locked revision).
+    install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    assert_eq!(recorded(&rig, &proj.0, "s_linear").revision_id, old);
+
+    // `topos update` is what moves it — the lock and the entry both take the served revision.
+    sweep(&ctx, &plane, &dir);
+    let record = recorded(&rig, &proj.0, "s_linear");
+    assert_eq!(record.revision_id, new);
+    assert_eq!(
+        record.document["remotes"][0]["url"],
+        "https://mcp.example/v2"
+    );
+    let text = lock_text(&proj.0);
+    assert!(text.contains(&new) && !text.contains(&old), "{text}");
+}
+
+#[test]
+fn a_workspace_that_serves_no_revision_by_id_keeps_the_degraded_moves() {
+    let rig = Rig::new("lock-mcp-old");
+    rig.seed_session();
+    let (old, new) = (rev("a"), rev("b"));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    // A server too old to serve revisions by id: the catalog answers, the by-revision lane does
+    // not — which is byte-for-byte what a revision that is simply gone looks like from here.
+    let dir = FakeDirectory::new(Vec::new(), Vec::new())
+        .with_server(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v2",
+            &new,
+        ))
+        .serving_no_revisions();
+
+    // `--frozen` REFUSES, names the fix, and writes nothing.
+    let cold = locked_mcp_project("lock-mcp-old-frozen", &old);
+    let cold_ctx = rig.ctx_at(Some(&cold.0));
+    let err = install(&cold_ctx, &plane, &dir, ops::LockMode::Frozen).unwrap_err();
+    assert!(err.detail().contains("--frozen"), "{}", err.detail());
+    assert!(
+        crate::sidecar::existing_project_store(&rig.fs, &cold.0)
+            .and_then(|l| {
+                let sid = crate::id::SkillId::parse("s_linear").unwrap();
+                crate::doc::read_doc::<topos_types::persisted::McpServerRecord>(
+                    &rig.fs,
+                    &l.published(&sid).server,
+                )
+                .ok()
+                .flatten()
+            })
+            .is_none(),
+        "frozen recorded nothing"
+    );
+
+    // A plain install takes the served revision instead, says so, and the lock records what the
+    // machine actually holds.
+    let proj = locked_mcp_project("lock-mcp-old-proj", &old);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    let filled = out
+        .disclosures
+        .iter()
+        .find(|m| m.code.as_deref() == Some("MCP_FILLED"))
+        .unwrap_or_else(|| panic!("{:?}", out.disclosures));
+    assert!(
+        filled.text.contains("does not serve that revision"),
+        "{}",
+        filled.text
+    );
+    assert_eq!(recorded(&rig, &proj.0, "s_linear").revision_id, new);
+    let text = lock_text(&proj.0);
+    assert!(text.contains(&new) && !text.contains(&old), "{text}");
+}
+
+#[test]
+fn a_channels_mcp_member_converges_to_the_locked_revision_too() {
+    // A channel carries members of both kinds, and the lock records each member's own entry —
+    // so the server a channel brings honors its lock exactly as an explicit `[mcp]` row does.
+    let rig = Rig::new("lock-mcp-channel");
+    rig.seed_session();
+    let (old, new) = (rev("a"), rev("b"));
+    let proj = project(
+        "lock-mcp-channel-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\ntools = \"latest\"\n"),
+    );
+    std::fs::write(
+        proj.0.join("topos.lock"),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[channels.tools]\nmembers = \
+             [\"linear\"]\n\n[mcp.linear]\nrevision = \"{old}\"\n"
+        ),
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let mut dir = FakeDirectory::new(Vec::new(), Vec::new())
+        .with_server(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v2",
+            &new,
+        ))
+        .with_revision(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v1",
+            &old,
+        ));
+    dir.channels = vec![channel("tools", &[("s_linear", "linear")])];
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Install).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let record = recorded(&rig, &proj.0, "s_linear");
+    assert_eq!(record.revision_id, old);
+    assert_eq!(
+        record.document["remotes"][0]["url"], "https://mcp.example/v1",
+        "{record:?}"
+    );
+    assert!(lock_text(&proj.0).contains(&old));
+
+    // And `update` moves the member's entry, the channel's member list beside it.
+    sweep(&ctx, &plane, &dir);
+    assert_eq!(recorded(&rig, &proj.0, "s_linear").revision_id, new);
+    assert!(lock_text(&proj.0).contains(&new));
 }

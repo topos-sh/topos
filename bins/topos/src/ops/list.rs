@@ -3745,6 +3745,14 @@ mod tests {
                 mcp_servers: Vec::new(),
             }))
         }
+        fn mcp_revision(
+            &self,
+            _w: &str,
+            _s: &str,
+            _r: &str,
+        ) -> Result<Option<topos_types::requests::WireMcpIndexEntry>, ClientError> {
+            unreachable!("list --remote reads channels + skills only")
+        }
         fn proposals_index(&self, _w: &str) -> Result<WireProposalIndex, ClientError> {
             unreachable!()
         }

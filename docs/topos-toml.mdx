@@ -100,7 +100,10 @@ server you run from a folder is a path row with the kind spelled out:
 weather = { path = "./tools/weather-server", kind = "mcp" }
 ```
 
-The lock records the catalog revision each shared server resolved to.
+The lock records the catalog revision each shared server resolved to, and `topos install`
+converges the entry to that revision exactly as it converges a skill to its version — a fresh
+checkout writes the configuration a teammate received then, not whatever the catalog serves
+today. `topos update` is what moves it.
 
 ## Your machine's own file
 

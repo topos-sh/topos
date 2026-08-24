@@ -386,16 +386,23 @@ impl DeliverySource for FakePlane {
 pub(super) struct FakeDirectory {
     pub(super) skills: Vec<WireSkillIndexEntry>,
     pub(super) servers: Vec<WireMcpIndexEntry>,
+    /// What the workspace serves BY REVISION ID — the lane a committed lock reads. The catalog
+    /// serves `current`; this serves any revision the workspace still has, and an empty list is a
+    /// workspace whose server predates the lane.
+    pub(super) revisions: Vec<WireMcpIndexEntry>,
     pub(super) channels: Vec<WireChannelEntry>,
 }
 impl FakeDirectory {
-    /// A catalog holding these connected servers and nothing else.
+    /// A catalog holding these connected servers and nothing else. Every served row is readable
+    /// by its own revision id too, as a workspace's stored revisions are.
     pub(super) fn of_servers(servers: Vec<WireMcpIndexEntry>) -> Self {
         Self {
+            revisions: servers.clone(),
             servers,
             ..Self::default()
         }
     }
+
     /// A catalog holding these file bundles and nothing else.
     pub(super) fn of_skills(skills: Vec<WireSkillIndexEntry>) -> Self {
         Self {
@@ -465,6 +472,18 @@ impl DirectorySource for FakeDirectory {
             mcp_servers: self.servers.clone(),
             skills: self.skills.clone(),
         })
+    }
+    fn mcp_revision(
+        &self,
+        _ws: &str,
+        skill_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<WireMcpIndexEntry>, ClientError> {
+        Ok(self
+            .revisions
+            .iter()
+            .find(|e| e.skill_id == skill_id && e.revision_id == revision_id)
+            .cloned())
     }
     fn proposals_index(&self, _ws: &str) -> Result<WireProposalIndex, ClientError> {
         unreachable!()

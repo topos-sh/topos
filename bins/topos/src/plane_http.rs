@@ -1592,6 +1592,30 @@ impl DirectorySource for UreqDeviceClient {
         )
     }
 
+    fn mcp_revision(
+        &self,
+        workspace_id: &str,
+        skill_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<topos_types::requests::WireMcpIndexEntry>, ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        ensure_safe_ids_client(revision_id, workspace_id)?;
+        match self.get_typed(
+            workspace_id,
+            &format!(
+                "/v1/workspaces/{workspace_id}/mcp-servers/{skill_id}/revisions/{revision_id}"
+            ),
+            "server revision",
+            skill_id,
+        ) {
+            Ok(entry) => Ok(Some(entry)),
+            // The uniform 404 is this lane's ANSWER for a revision it does not serve — including
+            // from a server that serves none — so it degrades rather than failing the sweep.
+            Err(ClientError::TargetNotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn proposals_index(&self, workspace_id: &str) -> Result<WireProposalIndex, ClientError> {
         ensure_safe_ids_client("proposals", workspace_id)?;
         self.get_typed(

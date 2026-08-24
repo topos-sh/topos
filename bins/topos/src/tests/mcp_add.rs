@@ -286,6 +286,14 @@ impl DirectorySource for ShareLane {
             mcp_servers: self.servers.lock().unwrap().clone(),
         })
     }
+    fn mcp_revision(
+        &self,
+        _ws: &str,
+        _s: &str,
+        _r: &str,
+    ) -> Result<Option<WireMcpIndexEntry>, ClientError> {
+        unreachable!("no by-revision read in these flows")
+    }
     fn proposals_index(&self, _ws: &str) -> Result<WireProposalIndex, ClientError> {
         unreachable!("no proposal read in these flows")
     }

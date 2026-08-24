@@ -34,6 +34,7 @@ fn channel_of(skills: Vec<WireSkillIndexEntry>, servers: Vec<WireMcpIndexEntry>)
             skills: members,
         }],
         skills,
+        revisions: servers.clone(),
         servers,
     }
 }
