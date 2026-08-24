@@ -144,7 +144,7 @@ services:
   plane:
     # Pinned to one release (see the header). Override with TOPOS_VERSION, or build from source with
     # the docker-compose.build.yml override.
-    image: ghcr.io/topos-sh/topos-plane:${TOPOS_VERSION:-v0.1.46}
+    image: ghcr.io/topos-sh/topos-plane:${TOPOS_VERSION:-v0.1.47}
     restart: unless-stopped
     mem_limit: 1g
     # NO `ports:` — the plane is internal-only. The web app reaches it at http://plane:8787 over the
@@ -170,7 +170,7 @@ services:
   gateway:
     # The same release as the other two — one TOPOS_VERSION moves all three, and they are only ever
     # tested together.
-    image: ghcr.io/topos-sh/topos-gateway:${TOPOS_VERSION:-v0.1.46}
+    image: ghcr.io/topos-sh/topos-gateway:${TOPOS_VERSION:-v0.1.47}
     restart: unless-stopped
     mem_limit: 1g
     # WHAT THIS BOUNDS IS CONCURRENT MCP STREAMS, NOT MEMORY (mem_limit above is the memory
@@ -237,7 +237,7 @@ services:
   web:
     # The same release as the plane and the gateway — one TOPOS_VERSION moves all three, and they are
     # only ever tested together.
-    image: ghcr.io/topos-sh/topos-web:${TOPOS_VERSION:-v0.1.46}
+    image: ghcr.io/topos-sh/topos-web:${TOPOS_VERSION:-v0.1.47}
     restart: unless-stopped
     mem_limit: 1g
     depends_on:
