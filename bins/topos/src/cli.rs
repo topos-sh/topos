@@ -533,6 +533,9 @@ pub(crate) enum Command {
         /// prefix of at least 8 characters.
         #[arg(long = "to")]
         to: String,
+        /// Act on your machine-wide copy of the skill, even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
         /// Apply the previewed revert (also confirms when that version is already live).
         #[arg(long)]
         yes: bool,

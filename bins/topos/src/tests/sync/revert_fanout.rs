@@ -343,6 +343,7 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
         &good_hex,
         false,
         None,
+        ops::StoreScope::Here,
     )
     .unwrap();
     match &described {
@@ -377,6 +378,7 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
         &good_hex,
         false,
         Some(WS),
+        ops::StoreScope::Here,
     )
     .unwrap();
     match &described_ws {
@@ -426,6 +428,7 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
         &good_hex,
         true,
         None,
+        ops::StoreScope::Here,
     )
     .unwrap();
     match applied {
@@ -512,6 +515,7 @@ fn a_short_to_resolves_against_the_workspaces_history_not_just_local_bytes() {
         &short,
         false,
         None,
+        ops::StoreScope::Here,
     )
     .unwrap();
     match &described {
@@ -551,6 +555,7 @@ fn a_short_to_resolves_against_the_workspaces_history_not_just_local_bytes() {
         "beef1234",
         false,
         None,
+        ops::StoreScope::Here,
     )
     .unwrap_err();
     assert_eq!(err.code(), "INVALID_ARGUMENT");
@@ -568,6 +573,7 @@ fn a_short_to_resolves_against_the_workspaces_history_not_just_local_bytes() {
         "0123abcd",
         false,
         None,
+        ops::StoreScope::Here,
     )
     .unwrap_err();
     assert_eq!(
@@ -627,6 +633,7 @@ fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
         &good_hex,
         false,
         None,
+        ops::StoreScope::Here,
     )
     .unwrap();
     assert!(
@@ -643,6 +650,7 @@ fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
         &good_hex,
         true,
         None,
+        ops::StoreScope::Here,
     )
     .unwrap();
     assert!(

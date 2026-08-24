@@ -6,6 +6,9 @@
 //! destination, NOT the bad one). The client computes the byte-identical forward `commit_id` the plane
 //! reconstructs (over the FRESH current parent — a stale parent would be a DENIED, not a clean CONFLICT).
 //! Team-only — the local go-back is `pull <skill>@<hash>`.
+//!
+//! The verb acts on the scope you stand in, like every other: the bundle resolves in the cwd
+//! chain's project stores first, then the machine's (`-g` names the machine outright).
 
 use topos_core::digest::to_hex;
 use topos_core::identity::{self, Commit};
@@ -15,7 +18,9 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
 use super::reconcile::SessionConnect;
-use super::{VersionRef, resolve_followed_skill_in_workspace, resolve_version_ref, workspace_of};
+use super::{
+    StoreScope, VersionRef, resolve_followed_skill_in_scope, resolve_version_ref, workspace_of,
+};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
@@ -64,6 +69,7 @@ pub(crate) fn revert(
     to: &str,
     yes: bool,
     workspace: Option<&str>,
+    scope: StoreScope,
 ) -> Result<RevertOutcome, ClientError> {
     // Argv is validated FIRST (a malformed hash is a usage error however un-enrolled the machine is).
     // `--to` is the sole source of the good destination — it accepts the full 64-hex id OR a short prefix
@@ -79,7 +85,15 @@ pub(crate) fn revert(
     // this is the STRICT resolve — a candidate with NO follow entry (a local-only skill that merely shares
     // the name) is dropped before the ambiguity count, and a non-followed target fails locally as "not a
     // followed skill" rather than an opaque plane rejection.
-    let (id, lock) = resolve_followed_skill_in_workspace(ctx, skill_name, workspace)?;
+    //
+    // Resolved WHERE YOU STAND (or on the machine, with `-g`): the copy a project checkout
+    // delivers lives in that checkout's own store, and every per-skill read and write below rides
+    // the OWNING store's layout. The machine-level seams — the sessions, the plane, the follow
+    // state, the cwd roots — stay the outer ctx's.
+    let (layout, id, lock) = resolve_followed_skill_in_scope(ctx, skill_name, workspace, scope)?;
+    let outer_ctx = ctx;
+    let store_ctx = super::pull::ctx_with_layout(ctx, &layout);
+    let ctx = &store_ctx;
     // The KIND decides whether this verb applies at all, asked before any version is resolved.
     let placements: Vec<String> = crate::doc::read_map(ctx.fs, &ctx.layout.published(&id).map)
         .ok()
@@ -100,8 +114,9 @@ pub(crate) fn revert(
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
     // The SESSION lane: the skill's own workspace names the session whose credential signs — and,
-    // for a short `--to`, the session whose credential reads the workspace's history.
-    let all = crate::sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    // for a short `--to`, the session whose credential reads the workspace's history. Sessions
+    // are a machine fact, read from the machine store whatever scope holds the copy.
+    let all = crate::sessions::read_sessions(outer_ctx.fs, &outer_ctx.layout)?;
     let lane_session = all
         .sessions
         .iter()
@@ -197,13 +212,16 @@ pub(crate) fn revert(
                 // The SHORT id, the way every listing prints it and every person copies it. A
                 // 64-char hex in a paste-ready line is a line nobody reads, and `--to` resolves a
                 // prefix against this workspace's whole history — the same set the id came from.
-                let mut yes_argv = vec![
-                    "topos".to_owned(),
-                    "revert".to_owned(),
+                let mut yes_argv = vec!["topos".to_owned(), "revert".to_owned()];
+                // The scope flag rides where a person writes it: right after the verb.
+                if scope == StoreScope::Machine {
+                    yes_argv.push("-g".to_owned());
+                }
+                yes_argv.extend([
                     skill_name.to_owned(),
                     "--to".to_owned(),
                     crate::render::short(&good_hex).to_owned(),
-                ];
+                ]);
                 if workspace.is_some() {
                     yes_argv.push("--workspace".to_owned());
                     yes_argv.push(workspace_id.clone());

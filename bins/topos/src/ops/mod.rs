@@ -522,6 +522,36 @@ fn resolve_skill_here(
     Ok((ctx.layout.clone(), id, lock))
 }
 
+/// The STRICT resolve ([`resolve_followed_skill_in_workspace`]) in the scope the invocation
+/// SELECTED — the same walk [`resolve_skill_here`] makes, for the verbs that only ever act on a
+/// FOLLOWED bundle (`revert`). Bare, the cwd chain's project stores answer nearest first, then
+/// the machine's home store: a bundle a project `topos.toml` delivers keeps its custody in the
+/// checkout's own store, and a `revert` run from inside that checkout is about THAT copy — the
+/// copy `list`, `log`, `diff`, and `update` all resolve there. Resolving in the home store alone
+/// answered "no tracked skill" inside a project whose machine scope did not also hold the
+/// bundle, and the identical command worked the moment `update -g` made it. `-g` names the
+/// machine copy instead. Returns the OWNING store's layout beside the hit.
+fn resolve_followed_skill_in_scope(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+    scope: StoreScope,
+) -> Result<(crate::sidecar::Layout, SkillId, Lock), ClientError> {
+    if scope == StoreScope::Here {
+        for playout in project_stores(ctx) {
+            let pctx = pull::ctx_with_layout(ctx, &playout);
+            match resolve_followed_skill_in_workspace(&pctx, name, workspace) {
+                Ok((id, lock)) => return Ok((playout, id, lock)),
+                // Not in THIS store — keep walking out; anything else is this scope's answer.
+                Err(ClientError::NoSuchSkill { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    let (id, lock) = resolve_followed_skill_in_workspace(ctx, name, workspace)?;
+    Ok((ctx.layout.clone(), id, lock))
+}
+
 /// A store's DRAFT of one bundle: the folder holding the unshipped bytes, and the digest those
 /// bytes carry — the pair a cross-scope disclosure needs, because naming a second copy is only
 /// honest while its bytes differ from the ones being shipped.
