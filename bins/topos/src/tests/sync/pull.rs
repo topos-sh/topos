@@ -117,6 +117,56 @@ fn a_bare_diff_reads_against_the_live_current_not_the_cached_base() {
     );
 }
 
+/// By the merge model an unmodified copy fast-forwards, and it does so even when the served
+/// current UNDOES the version it holds (a revert restored older bytes). What the receipt then owes
+/// is the disclosure: which version it replaced, and the one command that brings it back. An
+/// ordinary forward move — a version that builds on the one held — says nothing of the kind.
+#[test]
+fn a_fast_forward_that_undoes_the_held_version_says_so_and_names_the_way_back() {
+    let rig = Rig::new("ff-undone");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id);
+    // The ordinary move: v1 builds on the genesis bytes — a plain fast-forward, no note.
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::FastForwarded);
+    assert_eq!(row.note, None, "{row:?}");
+
+    // A revert restores the genesis bytes on top of v1: the copy (= v1, unmodified) is replaced,
+    // and the receipt says with what, and how v1 comes back.
+    let restored = mk_version(&[v1.id], BASE, "d_rev", "topos: revert");
+    plane.add_version(&id, &restored);
+    plane.set_current(&id, served(WS, &id, restored.id, 2));
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::FastForwarded);
+    let full = to_hex(&v1.id);
+    let (was, now) = (&full[..12], &to_hex(&restored.id)[..12]);
+    assert_eq!(
+        row.note.as_deref(),
+        Some(
+            format!(
+                "replaced your copy (= version {was}) with current {now} — {was} stays in \
+                 history: topos revert {name} --to {full}"
+            )
+            .as_str()
+        ),
+        "{row:?}"
+    );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(BASE)));
+    // The receipt prints the fact under the row.
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0, 0);
+    assert!(
+        tty.contains(&format!("replaced your copy (= version {was})")),
+        "{tty}"
+    );
+}
+
 #[test]
 fn a_never_received_bundle_installs_on_the_bare_sweep() {
     let rig = Rig::new("first-receive");

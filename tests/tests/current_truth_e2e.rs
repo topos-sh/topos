@@ -269,41 +269,71 @@ fn locked_version(project: &Path) -> Option<String> {
     None
 }
 
-/// Stand the AUTHOR up: a machine, a logged-in session, a project holding the bundle source, the
-/// adopt that records it, the genesis publish, and the machine-wide copy the login's feed
-/// delivers (the copy `revert` reads). Returns `(project dir, the genesis version)`.
+/// Stand the AUTHOR up the way the by-hand journey did: a machine, a logged-in session, the
+/// genesis publish from a folder OUTSIDE any checkout (the machine's own store), then a project
+/// whose `topos.toml` asks for the bundle by name and whose first `update` places it under the
+/// checkout's `.claude/skills/` — the copy the author then edits and publishes from. Returns
+/// `(project dir, that placed copy, the genesis version)`.
 fn author_publishes_v1(
     stack: &Stack,
     author: &Machine,
     owner: &Session,
     nonce: &str,
-) -> (PathBuf, String) {
+) -> (PathBuf, PathBuf, String) {
     login(stack, author, owner);
-    let project = author.root().canonicalize().expect("canonical author root");
-    let src = project.join(BUNDLE);
+    let root = author.root().canonicalize().expect("canonical author root");
+    let src = root.join("src").join(BUNDLE);
     write_bundle(&src, &v1_files(nonce));
     author
-        .run_in(&project, &["init", "--json"])
-        .data("the author's topos init");
-    author
         .run_in(
-            &project,
-            &["add", src.to_str().expect("utf-8 path"), "--json"],
+            &root,
+            &["add", "-g", src.to_str().expect("utf-8 path"), "--json"],
         )
-        .data("the author adopts the bundle folder");
-    let genesis = publish(author, &project, "v1: the first truth");
+        .data("the author adopts the bundle folder machine-wide");
+    let genesis = author
+        .run_in(
+            &root,
+            &[
+                "publish",
+                BUNDLE,
+                "--yes",
+                "-m",
+                "v1: the first truth",
+                "--json",
+            ],
+        )
+        .data("the genesis publish");
     let v1 = version_of(&genesis);
-    // The author's own machine takes the feed's copy — the copy `revert` reads.
-    let mine = author
-        .run(&["update", "-g", "--json"])
-        .data("the owner's own machine-wide sweep");
-    assert_eq!(row(&mine, BUNDLE)["action"], "installed", "{mine}");
-    // The project's lock records the genesis version the way an `update` there would.
+
+    // The project: a manifest row by name, and the update that places the copy and writes the
+    // lock.
+    let project = root.join("proj");
+    std::fs::create_dir_all(&project).expect("create the project dir");
     author
+        .run_in(&project, &["init", "--json"])
+        .data("the project's topos init");
+    author
+        .run_in(&project, &["add", BUNDLE, "--json"])
+        .data("the project asks for the bundle by name");
+    let placed_row = author
         .run_in(&project, &["update", "--json"])
         .data("the project's first update");
+    let copy = row(&placed_row, BUNDLE)["destinations"][0]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.join(".claude").join("skills").join(BUNDLE));
+    let copy = if copy.is_absolute() {
+        copy
+    } else {
+        project.join(copy)
+    };
+    assert_eq!(
+        placed(&copy),
+        expected(&v1_files(nonce)),
+        "the project copy holds v1: {placed_row}"
+    );
     assert_eq!(locked_version(&project).as_deref(), Some(v1.as_str()));
-    (project, v1)
+    (project, copy, v1)
 }
 
 /// Run the exact `undo:` line a receipt printed (`topos revert <name> --to <version>`), applied.
@@ -334,9 +364,8 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
 
     // ── 1. v1, then v2 from inside the project ──────────────────────────────────────────────────
     let author = Machine::new("truth-author");
-    let (project, v1) = author_publishes_v1(&stack, &author, &owner, &nonce);
-    let src = project.join(BUNDLE);
-    write_bundle(&src, &v2_files(&nonce));
+    let (project, copy, v1) = author_publishes_v1(&stack, &author, &owner, &nonce);
+    write_bundle(&copy, &v2_files(&nonce));
     let v2_receipt = publish(&author, &project, "v2: the reference gains a line");
     let v2 = version_of(&v2_receipt);
     assert_ne!(v1, v2);
@@ -360,7 +389,7 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
 
     // The project copy still holds v2's bytes — the version the revert just undid. Nothing here
     // touched it, and the sidecar's cache still calls v2 current.
-    assert_eq!(placed(&src), expected(&v2_files(&nonce)));
+    assert_eq!(placed(&copy), expected(&v2_files(&nonce)));
 
     // ── 3. `diff` shows the REAL difference against the live current ────────────────────────────
     let diffed = author
@@ -485,5 +514,89 @@ fn after_a_revert_every_verb_decides_against_the_live_current() {
         &dev,
         &v2_files(&nonce),
         "the forward publish reaches a fresh machine",
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// publish → revert → update: the unmodified copy fast-forwards, and the receipt says what it
+// replaced and how that version comes back.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn an_update_over_an_undone_copy_fast_forwards_and_names_what_it_replaced() {
+    let nonce = format!("undone-{}", std::process::id());
+    let stack = start_stack("current-truth-update");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    let author = Machine::new("undone-author");
+    let (project, copy, _v1) = author_publishes_v1(&stack, &author, &owner, &nonce);
+    write_bundle(&copy, &v2_files(&nonce));
+    let v2_receipt = publish(&author, &project, "v2: the reference gains a line");
+    let v2 = version_of(&v2_receipt);
+    let undo = v2_receipt["undo"]
+        .as_str()
+        .expect("the undo line")
+        .to_owned();
+    let reverted = run_undo(&author, &project, &undo);
+    let restored = reverted["new_version_id"]
+        .as_str()
+        .expect("the forward-revert commit")
+        .to_owned();
+    assert_eq!(
+        placed(&copy),
+        expected(&v2_files(&nonce)),
+        "the copy still holds v2"
+    );
+
+    // The docs' recovery: `topos update` there. An unmodified copy is a clean tree, so it
+    // fast-forwards — and the receipt discloses the version it replaced with the way back.
+    let updated = author
+        .run_in(&project, &["update", BUNDLE, "--json"])
+        .data("the update over the undone copy");
+    let swept = row(&updated, BUNDLE);
+    assert_eq!(swept["action"], "fast_forwarded", "{updated}");
+    assert_eq!(
+        swept["note"],
+        format!(
+            "replaced your copy (= version {v2s}) with current {now} — {v2s} stays in history: \
+             topos revert {BUNDLE} --to {v2}",
+            v2s = &v2[..12],
+            now = &restored[..12]
+        ),
+        "{updated}"
+    );
+    assert_eq!(
+        placed(&copy),
+        expected(&v1_files(&nonce)),
+        "the copy now holds the restored bytes"
+    );
+    let tty = author.run_in(&project, &["update", BUNDLE]).stdout;
+    assert!(tty.contains("all up to date"), "{tty}");
+
+    // …and the way back it named works, exactly as printed (the full id: `revert` resolves a
+    // prefix against the MACHINE store's history, which never held this project-published
+    // version): v2's content is current again.
+    let back = author
+        .run_in(
+            &project,
+            &["revert", BUNDLE, "--to", &v2, "--yes", "--json"],
+        )
+        .data("the revert the receipt named");
+    assert_eq!(back["reverted_to"], v2, "{back}");
+    let again = author
+        .run_in(&project, &["update", BUNDLE, "--json"])
+        .data("the update after the way back");
+    assert_eq!(row(&again, BUNDLE)["action"], "fast_forwarded", "{again}");
+    assert_eq!(placed(&copy), expected(&v2_files(&nonce)));
+    // A revert of the revert undoes the restored version in turn — the copy held it, unmodified
+    // — so this receipt names IT as the version replaced (the same rule, one hop later).
+    assert!(
+        row(&again, BUNDLE)["note"]
+            .as_str()
+            .is_some_and(|n| n.starts_with(&format!(
+                "replaced your copy (= version {}) with current ",
+                &restored[..12]
+            ))),
+        "{again}"
     );
 }
