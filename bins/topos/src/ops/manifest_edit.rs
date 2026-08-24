@@ -1280,10 +1280,10 @@ pub(super) fn feed_items(ctx: &Ctx<'_>, connect: &SessionConnect<'_>) -> Vec<Fee
                 // `add <host>/<ws>/<server>` of a server the feed already delivers wrote a
                 // redundant row, while the same add of a skill correctly wrote nothing and said
                 // so. The offline branch below has always counted both — the two must agree.
+                // A REVOKED revision still counts: the wire's own word for it is "pulled back
+                // after publication — still delivered, and disclosed". The offline branch's skip
+                // is `withdrawn`, which is the opposite fact (upstream stopped delivering it).
                 for m in &snapshot.mcp_servers {
-                    if m.revoked {
-                        continue;
-                    }
                     out.push(FeedItem {
                         host: session.host.clone(),
                         workspace: session.workspace_name.clone(),
