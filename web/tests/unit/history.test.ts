@@ -10,6 +10,7 @@ function meta(overrides: Partial<HistoryMetaLike> & { version_id: string }): His
     parents: [],
     author: "dev-1",
     message: `msg ${overrides.version_id.slice(-4)}`,
+    created_at_ms: 1_700_000_000_000,
     files: [{}, {}],
     ...overrides,
   };
@@ -35,6 +36,11 @@ describe("walkHistory", () => {
     expect(page.cursor).toBeNull();
     expect(page.truncated).toBe(false);
     expect(page.steps[0]).toMatchObject({ author: "dev-1", fileCount: 2 });
+    // The walk already fetches each version's metadata; WHEN it was committed rides along, so
+    // the History tab can stamp its rows without a second read.
+    expect(page.steps.map((s) => s.createdAtMs)).toEqual([
+      1_700_000_000_000, 1_700_000_000_000, 1_700_000_000_000,
+    ]);
   });
 
   it("follows the FIRST parent of a merge and keeps the full parent set on the step", async () => {

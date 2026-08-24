@@ -12,6 +12,8 @@ export interface HistoryMetaLike {
   parents: string[];
   author: string;
   message: string;
+  /** When the version was committed (epoch milliseconds) — the vault records it on every row. */
+  created_at_ms: number;
   files: readonly unknown[];
 }
 
@@ -23,6 +25,8 @@ export interface HistoryStep {
   versionId: string;
   author: string;
   message: string;
+  /** When this version was committed (epoch milliseconds). */
+  createdAtMs: number;
   /**
    * The COMPLETE parent set; the walk follows parents[0]. A published version commits ONE parent
    * — a resolved merge arrives as a single forward commit on the team's version — so the spine is
@@ -75,6 +79,7 @@ export async function walkHistory(
       versionId: meta.version_id,
       author: meta.author,
       message: meta.message,
+      createdAtMs: meta.created_at_ms,
       parents: [...meta.parents],
       fileCount: meta.files.length,
     });

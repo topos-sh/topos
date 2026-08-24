@@ -1,6 +1,6 @@
 import { FileListing } from "@/components/browse/file-listing";
 import { BrowseEmpty } from "@/components/browse/shell";
-import { firstLine } from "@/components/format";
+import { firstLine, relativeTime, utcStamp } from "@/components/format";
 import { Card, Chip, SectionHeading } from "@/components/ui";
 import { bundleNoun, useBundleBase } from "@/lib/bundle-base";
 import type { CustodyVersionMeta } from "@/lib/plane/wire";
@@ -62,6 +62,13 @@ export function VersionFiles({
           <span className="min-w-0 flex-1 truncate text-dim text-sm">
             {firstLine(version.message)}
           </span>
+          <time
+            dateTime={new Date(version.created_at_ms).toISOString()}
+            title={utcStamp(version.created_at_ms)}
+            className="text-faint text-xs"
+          >
+            {relativeTime(new Date(version.created_at_ms))}
+          </time>
           <span className="text-faint text-xs">
             {fileCount === 1 ? "1 file" : `${fileCount} files`}
           </span>

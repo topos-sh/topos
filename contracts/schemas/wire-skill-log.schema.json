@@ -105,6 +105,14 @@
       "description": "One version in a skill's history. A PURGED version stays listed — who purged it and when — with its\nbytes gone (author/message may be absent once the underlying objects are reclaimed).",
       "type": "object",
       "properties": {
+        "at": {
+          "description": "WHEN the version was committed (epoch milliseconds) — the same field name and units a\n`pull` event carries, so one history line reads the same whatever produced it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
         "author": {
           "description": "The version author, when the commit object is still readable.",
           "type": [

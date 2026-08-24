@@ -1508,6 +1508,12 @@ export interface components {
          *     bytes gone (author/message may be absent once the underlying objects are reclaimed).
          */
         WireLogVersion: {
+            /**
+             * Format: int64
+             * @description WHEN the version was committed (epoch milliseconds) — the same field name and units a
+             *     `pull` event carries, so one history line reads the same whatever produced it.
+             */
+            at?: number | null;
             /** @description The version author, when the commit object is still readable. */
             author?: string | null;
             /** @description Whether this version is the skill's `current`. */

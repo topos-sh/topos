@@ -35,6 +35,9 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
       versions: log.ok
         ? log.data.versions.map((v, index) => ({
             version_id: v.version_id,
+            // WHEN it was committed, in the same field and units a `pull` event carries — the
+            // custody row has always recorded it, and nothing downstream could show it.
+            at: v.created_at_ms,
             author: v.author_display,
             message: v.message,
             current: index === 0,

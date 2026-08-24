@@ -44,6 +44,22 @@ export function relativeTime(value: string | Date, now?: Date): string {
   return years === 1 ? "1 year ago" : `${years} years ago`;
 }
 
+/**
+ * The absolute instant behind a relative time — "2026-08-24 19:23 UTC".
+ *
+ * UTC and fixed-format on purpose: a locale- or zone-derived string is computed differently on
+ * the server and in the browser, and this renders as a server-rendered text node the client
+ * re-computes at hydration. One spelling everywhere is what keeps them equal.
+ */
+export function utcStamp(value: number | string | Date): string {
+  const then = value instanceof Date ? value : new Date(value);
+  const at = then.getTime();
+  if (!Number.isFinite(at)) {
+    return "";
+  }
+  return `${then.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
 /** A commit message's title line. */
 export function firstLine(message: string): string {
   const line = message.split("\n", 1)[0] ?? "";

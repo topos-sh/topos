@@ -1174,6 +1174,10 @@ pub struct WireLogVersion {
     /// The version message, when the commit object is still readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// WHEN the version was committed (epoch milliseconds) — the same field name and units a
+    /// `pull` event carries, so one history line reads the same whatever produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
     /// Whether this version is the skill's `current`.
     pub current: bool,
     /// When the version's bytes were purged (epoch milliseconds) — the tombstone half.

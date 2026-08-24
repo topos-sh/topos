@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { firstLine } from "@/components/format";
+import { firstLine, relativeTime, utcStamp } from "@/components/format";
 import { RevertControl } from "@/components/skill/revert-control";
 import { Card, SectionHeading, ShortId } from "@/components/ui";
 import { bundlePath, useBundleBase } from "@/lib/bundle-base";
@@ -7,13 +7,15 @@ import { useWsPath } from "@/lib/ws-path";
 
 /**
  * One row of first-parent history, shaped by the route loader from the vault's immutable
- * version metadata. `author` is the pass-through display attribution recorded at ingest;
- * commit messages and authors render as text nodes only.
+ * version metadata: WHEN it landed, who is recorded as its author, its message, and its file
+ * count. Commit messages and authors render as text nodes only.
  */
 export interface HistoryStepView {
   versionId: string;
   author: string;
   message: string;
+  /** When this version was committed (epoch milliseconds), as the vault recorded it. */
+  createdAtMs: number;
   /**
    * The COMPLETE parent set; the spine follows parents[0]. Every version a client can publish
    * commits ONE parent — a resolved merge lands as a single forward commit on the team's version
@@ -94,6 +96,13 @@ export function HistorySection({ skill, data }: { skill: string; data: HistorySe
                 <span className="min-w-0 flex-1 truncate text-sm text-dim">
                   {firstLine(step.message)}
                 </span>
+                <time
+                  dateTime={new Date(step.createdAtMs).toISOString()}
+                  title={utcStamp(step.createdAtMs)}
+                  className="text-xs text-faint"
+                >
+                  {relativeTime(new Date(step.createdAtMs))}
+                </time>
                 <span className="text-xs text-faint">
                   {step.fileCount === 1 ? "1 file" : `${step.fileCount} files`}
                 </span>
