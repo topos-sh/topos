@@ -469,7 +469,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // `add` of the fixture skill (offline; no plane op, so no receipt).
     let add_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
@@ -521,7 +521,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // (a) Nothing local carries the name, ONE workspace publishes it: the row is that workspace's
     //     canonical reference, and the note teaches the spelling it resolved to.
     let add_subscribed = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
@@ -575,7 +575,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // (b) A local directory carried the name and adopted in place — and a connected workspace
     //     publishes the same name, so the team-managed spelling rides the receipt beside it.
     let add_published_match = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
@@ -648,7 +648,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .collect();
     let add_ambiguous = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: false,
         data: serde_json::json!({ "candidates": add_candidates }),
@@ -674,7 +674,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // receipt speaks from — what the folder's bytes turned out to be, and the duplicate the
     // engine had placed beside it, which held no edits and retired with the claim.
     let add_claimed = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
@@ -749,7 +749,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .collect();
     let add_already_added = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: false,
         data: serde_json::json!({ "candidates": claim_candidates }),
@@ -775,7 +775,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // stops managing the folder; `kept_dirs` names it and `bytes_kept` says what that means. No
     // manifest is named: this bundle's row spelled no destinations, so no file was opened.
     let remove_claim_detached = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "remove".to_owned(),
         ok: true,
         data: serde_json::to_value(RemoveData {
@@ -829,7 +829,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // the agents the converge actually reached — an empty list there is what makes the receipt
     // say the row was recorded rather than installed.
     let add_mcp_adopted = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
@@ -906,7 +906,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // gains one destination, `dest_change.added` names exactly it, and the undo takes back only
     // that. `frozen` stays absent because the row already named destinations.
     let add_dest_extended = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
@@ -975,7 +975,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // typed `set_delivery` block carries the set, the reach word, the surfaces the converge
     // answered for, and the agents that were asked about.
     let add_set_delivered = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
@@ -1039,7 +1039,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // A clean `pull` that found one followed skill already current.
     let pull_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
@@ -1079,7 +1079,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // A `pull` that auto-resolved a diverged draft cleanly → a draft-on-current (publishable).
     let fx_merged = "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f";
     let pull_merged = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
@@ -1134,7 +1134,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // A `pull` whose merge conflicted → every agent folder still holding the author's own version,
     // the complete conflict tree in the scope's own workbench, publish blocked until resolved.
     let pull_conflicted = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
@@ -1220,7 +1220,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // `list_golden_matches...` test — path-free by construction, so the bytes are stable across
     // machines.
     let list_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "list".to_owned(),
         ok: true,
         data: serde_json::to_value(ListData {
@@ -1258,7 +1258,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // `diff` of a one-line draft edit against current — the vendored unified diff body.
     let diff_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "diff".to_owned(),
         ok: true,
         data: serde_json::to_value(DiffData {
@@ -1282,7 +1282,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // `log` after adopting the fixture skill — the local add action + the genesis version.
     let log_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "log".to_owned(),
         ok: true,
         data: serde_json::to_value(LogData {
@@ -1322,7 +1322,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // version is safely staged as NEEDS_REVIEW and the receipt's `details.downgraded` says why the
     // pointer did not move.
     let publish_downgraded = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "publish".to_owned(),
         ok: true,
         data: serde_json::json!({}),
@@ -1330,7 +1330,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         messages: vec![],
         next_actions: vec![],
         receipt: Some(Receipt {
-            schema_version: 1,
+            schema_version: topos_types::WIRE_SCHEMA_VERSION,
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
             command: "publish".to_owned(),
             outcome: TerminalOutcome::NeedsReview,
@@ -1352,7 +1352,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // A publish that lost the race — the team moved current; rebase and retry.
     let publish_conflict = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "publish".to_owned(),
         ok: false,
         data: serde_json::json!({}),
@@ -1363,7 +1363,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             argv(&["topos", "publish", "pr-describe"]),
         )],
         receipt: Some(Receipt {
-            schema_version: 1,
+            schema_version: topos_types::WIRE_SCHEMA_VERSION,
             op_id: "9f1b8c2e-7a6d-4e3f-9b0a-1c2d3e4f5a6b".to_owned(),
             command: "publish".to_owned(),
             outcome: TerminalOutcome::Conflict,
@@ -1402,7 +1402,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // bundle (the caller's own web stance), one `verdict` notice carrying its reason, and one open
     // proposal awaiting review.
     let delivery_ok = WireDelivery {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         workspace_id: "w_demo".to_owned(),
         skills: vec![
             WireDeliverySkill {
@@ -1487,7 +1487,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // empty sets and a zero gauge with `session_status: "pending"`; the client's sweep skips the
     // workspace quietly (a `status`-visible fact, not an error).
     let delivery_pending = WireDelivery {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         workspace_id: "w_demo".to_owned(),
         skills: vec![],
         mcp_servers: vec![],
@@ -1508,7 +1508,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // (a manifest-line remove applies immediately instead — see `remove.ok`). `applied: false` —
     // nothing has changed.
     let remove_describe = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "remove".to_owned(),
         ok: true,
         data: serde_json::to_value(RemoveData {
@@ -1546,7 +1546,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // line leaves the nearest manifest, every sidecar byte kept) with the undo-led receipt
     // (`add` is the inverse).
     let remove_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "remove".to_owned(),
         ok: true,
         data: serde_json::to_value(RemoveData {
@@ -1578,7 +1578,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // `protect <skill>` (bare) — the DESCRIBE of TIGHTENING a skill to `reviewed`.
     // `applied: false`, `loosening: false` (tightening takes reviewer+).
     let protect_describe = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "protect".to_owned(),
         ok: true,
         data: serde_json::to_value(ProtectData {
@@ -1609,7 +1609,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // verdict decides is the process exit code, which the payload also carries so an agent reading
     // this document through a wrapper never has to see the process's own.
     let verify_responding = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "verify".to_owned(),
         ok: true,
         data: serde_json::to_value(VerifyData {
@@ -1638,7 +1638,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // registers clients on demand, which is what `sign_in` says — the agent app needs nothing
     // arranged first.
     let verify_sign_in = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "verify".to_owned(),
         ok: true,
         data: serde_json::to_value(VerifyData {
@@ -1667,7 +1667,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // clients or tokens somebody registered in advance. The verdict is not worse — the server is
     // healthy — but nothing an agent does on its own will get it in.
     let verify_sign_in_manual = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "verify".to_owned(),
         ok: true,
         data: serde_json::to_value(VerifyData {
@@ -1695,7 +1695,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // `review` (bare) — the review INBOX/OUTBOX across enrolled workspaces, author-message first.
     let review_inbox = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "review".to_owned(),
         ok: true,
         data: serde_json::to_value(ReviewIndexData {
@@ -1726,7 +1726,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // `invite` (bare, no emails) — the no-mutation read of the workspace address
     // (`changed: false` — nothing was sent).
     let invite_read = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "invite".to_owned(),
         ok: true,
         data: serde_json::to_value(InviteReadData {
@@ -1750,7 +1750,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // The TTY prints only the destination + the gate; the rest of these fields are the envelope's
     // (an agent reads them, a person reads them on the receipt).
     let publish_describe = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "publish".to_owned(),
         ok: true,
         data: serde_json::to_value(PublishDescribeData {
@@ -1807,7 +1807,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // or the address does not validate — the publish itself is unaffected), and the `undo` that
     // puts the team back on the version `current` held before this one.
     let publish_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "publish".to_owned(),
         ok: true,
         data: serde_json::to_value(PublishData {
@@ -1859,7 +1859,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // Here the edits are in the OTHER scope's copy, so the answer points across and offers the one
     // command that shares them.
     let publish_no_changes = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "publish".to_owned(),
         ok: true,
         data: serde_json::to_value(PublishNoChangesData {
@@ -1885,7 +1885,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // person-scoped notices feed the hook's staleness warning + narration read. `command: "update"`
     // (the reshaped verb; `pull` is its hidden alias).
     let update_stale = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "update".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
@@ -1951,7 +1951,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // committed arrays are the bytes `topos diff --json` prints and cannot drift from them by hand.
     let diff_size_fact = vec![topos::message::diff_truncated(false)];
     let diff_truncated = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "diff".to_owned(),
         ok: true,
         data: serde_json::to_value(DiffData {
@@ -1989,7 +1989,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // A ROW-PAGED `log` (`--limit`/`--offset`, or the `--json` default page): the additive
     // `truncated`/`total` markers + the NEXT_PAGE next action carrying the COMPLETE argv.
     let log_paged = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "log".to_owned(),
         ok: true,
         data: serde_json::to_value(LogData {
@@ -2040,7 +2040,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // with ITS counts) and the read-only trigger rows (OpenClaw's presence needs a live scheduler
     // query, so its row is an honest unknown).
     let status_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "status".to_owned(),
         ok: true,
         data: serde_json::to_value(StatusData {
@@ -2115,7 +2115,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // `ENROLL_RESUME` next-action re-invokes `login` (re-invoking IS the resume, at the disclosed
     // interval). The code rides its own field — it never rides a URL.
     let login_pending = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "login".to_owned(),
         ok: true,
         data: serde_json::to_value(LoginData {
@@ -2158,7 +2158,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // disclosure (`delivered` = what the profile delivers here right now; from here delivery is
     // silent).
     let login_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "login".to_owned(),
         ok: true,
         data: serde_json::to_value(LoginData {
@@ -2202,7 +2202,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         argv(&["topos", "self-update", "--version", "v0.1.9"]),
     )];
     let login_server_too_old = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "login".to_owned(),
         ok: false,
         data: serde_json::json!({}),
@@ -2229,7 +2229,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // `logout` — the session ended: the server-side revoke landed, the local row deleted. Skills,
     // drafts, and manifests stay; `topos login <address>` starts a fresh session.
     let logout_ok = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "logout".to_owned(),
         ok: true,
         data: serde_json::to_value(LogoutData {
@@ -2251,7 +2251,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // followed because nothing CAN be. The join fix rides `next_actions` as an argv TEMPLATE whose
     // `needs` names the placeholder the caller must fill (`<workspace-address>`).
     let update_not_enrolled = JsonEnvelope {
-        schema_version: 1,
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
         command: "update".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {

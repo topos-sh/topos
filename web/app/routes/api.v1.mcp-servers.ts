@@ -18,6 +18,7 @@ import {
 } from "@/lib/mcp/fetch.server";
 import { scheduleRevisionProbe } from "@/lib/mcp/probe.server";
 import { suggestedNameFor, validateServerJson } from "@/lib/mcp/validate.server";
+import { ACCEPTED_WIRE_SCHEMA_VERSIONS } from "@/lib/plane/contract/version";
 import { allowUpstreamFetch } from "@/lib/rate-limit.server";
 
 /**
@@ -68,8 +69,9 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     document_url?: unknown;
   };
   // The body is a VERSIONED contract, and the version is what makes a future incompatible one
-  // refusable. A caller that does not state this one is not speaking it.
-  if (body.schema_version !== 1) {
+  // refusable. A caller stating none of the versions this tier reads is not speaking it — and the
+  // list holds every version the min-CLI floor still admits, never this build's alone.
+  if (!ACCEPTED_WIRE_SCHEMA_VERSIONS.includes(body.schema_version as number)) {
     return badRequest("malformed mcp server body: schema_version");
   }
   const registryName = body.registry_name;

@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { installTestEnv } from "./helpers/test-env";
 
 /**
@@ -23,7 +24,7 @@ describe("the uniform 404", () => {
     expect(res.status).toBe(404);
     expect(res.headers.get("content-type")).toContain("application/json");
     expect(await res.json()).toEqual({
-      schema_version: 1,
+      schema_version: WIRE_SCHEMA_VERSION,
       command: "error",
       ok: false,
       data: {},
@@ -63,7 +64,7 @@ describe("the frozen 429", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("7");
     expect(await res.json()).toEqual({
-      schema_version: 1,
+      schema_version: WIRE_SCHEMA_VERSION,
       command: "rate_limited",
       ok: false,
       data: {},
@@ -94,7 +95,7 @@ describe("the version floor's 426", () => {
       risk_note: "replaces the topos binary on this machine with the named release",
     };
     expect(await res.json()).toEqual({
-      schema_version: 1,
+      schema_version: WIRE_SCHEMA_VERSION,
       command: "error",
       ok: false,
       data: {},

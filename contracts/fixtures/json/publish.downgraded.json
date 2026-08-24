@@ -1,12 +1,12 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "publish",
   "ok": true,
   "data": {},
   "warnings": [],
   "next_actions": [],
   "receipt": {
-    "schema_version": 1,
+    "schema_version": 2,
     "op_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
     "command": "publish",
     "outcome": "NEEDS_REVIEW",

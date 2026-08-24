@@ -4,6 +4,7 @@ import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.serv
 import { isTokenActor, requireReadActor } from "@/lib/auth/guards.server";
 import { type ReportedHarnessState, reportApplied } from "@/lib/db/queries.lane.server";
 import { serviceReportApplied } from "@/lib/db/queries.tokens.server";
+import { ACCEPTED_WIRE_SCHEMA_VERSIONS } from "@/lib/plane/contract/version";
 
 /**
  * `PUT /api/v1/workspaces/{ws}/report` — the session's post-reconcile applied snapshot
@@ -141,7 +142,10 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (typeof parsed !== "object" || parsed === null || !Array.isArray(report.applied)) {
     return badRequest("malformed report body");
   }
-  if (report.schema_version !== 1) {
+  // The body is a VERSIONED contract, and this tier reads the versions its floor still admits —
+  // a deployed client speaks the version it was built with, and refusing those would break every
+  // machine in the field the moment this server ships.
+  if (!ACCEPTED_WIRE_SCHEMA_VERSIONS.includes(report.schema_version as number)) {
     return badRequest("malformed report body: schema_version");
   }
   const applied: {

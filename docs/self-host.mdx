@@ -191,7 +191,7 @@ curl -fsS -H 'Accept: application/json' https://topos.example.com
 ```
 
 Liveness answers `{"ok":true}`, and the protocol card answers
-`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api","server_version":"0.1.36","min_cli_version":"0.1.15"}`.
+`{"schema_version":2,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api","server_version":"0.1.36","min_cli_version":"0.1.15"}`.
 The last two fields are this deployment's compatibility declaration — the release it runs, and the
 oldest `topos` it still speaks to (see [Upgrades](#upgrades)). In the checkout,
 `bash scripts/compose-smoke.sh` runs the same end-to-end smoke the repo's CI does — it builds the

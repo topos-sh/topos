@@ -12,10 +12,8 @@ import { Buffer } from "node:buffer";
  * exists.
  */
 
-import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
+import { SERVER_RELEASE_VERSION, WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { type NextAction, nextAction } from "./next-actions.server";
-
-const WIRE_SCHEMA_VERSION = 1;
 
 interface WireErrorShape {
   code: string;

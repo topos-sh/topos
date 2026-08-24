@@ -1,5 +1,5 @@
 import { MIN_CLI_VERSION } from "@/lib/api/compat.server";
-import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
+import { SERVER_RELEASE_VERSION, WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { apiBase } from "@/lib/plane/public-base.server";
 
 /**
@@ -86,7 +86,7 @@ export function cardResponse(request: Request): Response | null {
   if (face === "json") {
     return Response.json(
       {
-        schema_version: 1,
+        schema_version: WIRE_SCHEMA_VERSION,
         card: "topos-protocol-card",
         api_base_url: apiBase(request),
         server_version: SERVER_RELEASE_VERSION,

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { ACCEPTED_WIRE_SCHEMA_VERSIONS } from "@/lib/plane/contract/version";
 import { laneHeaders } from "./helpers/lane";
 import {
   bootWorkspace,
@@ -353,11 +354,11 @@ describe("the body, and the misses", () => {
     expect((await post("sn_owner", {})).status).toBe(400);
   });
 
-  it("a body that states no contract version is a bad request", async () => {
-    // The version is what makes a future incompatible body refusable; a caller that does not
-    // state this one is not speaking it.
+  it("a body that states no contract version this tier reads is a bad request", async () => {
+    // The version is what makes a future incompatible body refusable; a caller stating one this
+    // tier does not read is not speaking the contract.
     const answer = await post("sn_owner", {
-      schema_version: 2,
+      schema_version: Math.max(...ACCEPTED_WIRE_SCHEMA_VERSIONS) + 1,
       registry_name: "io.github.acme/offered",
     });
     expect(answer.status).toBe(400);
@@ -369,6 +370,18 @@ describe("the body, and the misses", () => {
         })
       ).status,
     ).toBe(400);
+  });
+
+  it("every version the floor still admits is read — a deploy breaks no machine in the field", async () => {
+    // The min-CLI floor admits releases built against an older wire; the door reads what they
+    // send, or shipping this server would refuse them all.
+    for (const version of ACCEPTED_WIRE_SCHEMA_VERSIONS) {
+      const answer = await post("sn_owner", {
+        schema_version: version,
+        registry_name: "io.github.acme/offered",
+      });
+      expect(answer.status, `schema_version ${version}`).not.toBe(400);
+    }
   });
 
   it("a GET on the served path is the uniform 404, byte-identical to a miss", async () => {

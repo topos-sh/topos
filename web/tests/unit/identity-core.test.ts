@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { SessionActor } from "@/lib/auth/guards.server";
+import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 import { applyPlaneDdl } from "../helpers/plane-ddl";
 import { installTestEnv } from "./helpers/test-env";
 
@@ -769,7 +770,7 @@ describe("the feed (assignments − declines) + delivery", () => {
     const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
     const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
     const delivery = await lane.deliveryFor(actor);
-    expect(delivery.schema_version).toBe(1);
+    expect(delivery.schema_version).toBe(WIRE_SCHEMA_VERSION);
     expect(delivery.workspace_id).toBe(wsId);
     expect(delivery.session_status).toBe("active");
     const skill = delivery.skills.find((s) => s.skill_id === "s_everyone");

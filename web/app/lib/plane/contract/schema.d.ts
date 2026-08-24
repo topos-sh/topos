@@ -615,7 +615,7 @@ export interface components {
             receipt?: null | components["schemas"]["Receipt"];
             /**
              * Format: int32
-             * @description Always `1` for this contract version (the schema pins it `const`).
+             * @description Always `2` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
             /**
@@ -1044,7 +1044,7 @@ export interface components {
             outcome: components["schemas"]["TerminalOutcome"];
             /**
              * Format: int32
-             * @description Always `1` for this contract version (the schema pins it `const`).
+             * @description Always `2` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
             skill_id?: string | null;
@@ -1188,7 +1188,7 @@ export interface components {
             applied: components["schemas"]["WireAppliedSkill"][];
             /**
              * Format: int32
-             * @description Always `1` for this contract version (the schema pins it `const`).
+             * @description Always `2` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
         };
@@ -1280,7 +1280,7 @@ export interface components {
             record: components["schemas"]["CurrentRecord"];
             /**
              * Format: int32
-             * @description Always `1` for this contract version (the schema pins it `const`).
+             * @description Always `2` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
             scope: components["schemas"]["PointerScope"];
@@ -1321,7 +1321,7 @@ export interface components {
             proposals_awaiting: number;
             /**
              * Format: int32
-             * @description Always `1` for this contract version (the schema pins it `const`).
+             * @description Always `2` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
             /**
@@ -1683,7 +1683,7 @@ export interface components {
             card: string;
             /**
              * Format: int32
-             * @description Always `1` for this contract version (the schema pins it `const`).
+             * @description Always `2` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
             /**

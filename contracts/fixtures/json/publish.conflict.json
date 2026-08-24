@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "publish",
   "ok": false,
   "data": {},
@@ -17,7 +17,7 @@
     }
   ],
   "receipt": {
-    "schema_version": 1,
+    "schema_version": 2,
     "op_id": "9f1b8c2e-7a6d-4e3f-9b0a-1c2d3e4f5a6b",
     "command": "publish",
     "outcome": "CONFLICT",
