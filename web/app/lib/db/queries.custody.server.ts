@@ -7,13 +7,16 @@ import {
   bundle,
   channel,
   channelBundle,
+  deviceOwner,
   notice,
   opReceipt,
   proposal,
   workspace,
 } from "@/lib/db/schema.app";
+import { user } from "@/lib/db/schema.auth";
 import { planeVersion } from "@/lib/db/schema.custody";
 import type { McpGateRefusal } from "@/lib/mcp/publish-gate.server";
+import { personAttribution } from "@/lib/person-display";
 
 /**
  * The custody-op ORCHESTRATION's data half — everything the publish/propose/review/revert
@@ -325,6 +328,78 @@ export async function versionCreatedAtMap(
       ),
     );
   return new Map(rows.map((r) => [r.versionId, r.createdAt]));
+}
+
+// ── Who a machine publishes as (the author display-time key) ────────────────────────────────
+
+/**
+ * The commit-author string a client signs with: `d_` + 32 lowercase hex. Anything else is a
+ * person-shaped attribution already (a web ceremony records the actor's own display), so it is
+ * neither recorded here nor resolved on the way out.
+ */
+const DEVICE_AUTHOR = /^d_[0-9a-f]{32}$/;
+
+/** Is `author` a machine id rather than a person? */
+export function isDeviceAuthor(author: string): boolean {
+  return DEVICE_AUTHOR.test(author);
+}
+
+/**
+ * Remember that THIS machine publishes as THIS person, so a version signed with a machine id
+ * can be rendered as its author afterwards.
+ *
+ * Called wherever the session lane accepts a candidate frame: the session names the person, the
+ * frame names the machine, and the two are only ever seen together here. Deliberately outside
+ * the publish's own transaction — the pairing is true whether or not the publish lands, and a
+ * failure to record it must never fail a publish. Idempotent: a repeat only moves `last_seen_at`.
+ */
+export async function rememberDeviceOwner(actor: PublishActor, author: string): Promise<void> {
+  if (!isDeviceAuthor(author)) {
+    return;
+  }
+  try {
+    await getDb()
+      .insert(deviceOwner)
+      .values({ workspaceId: actor.workspaceId, deviceId: author, userId: actor.userId })
+      .onConflictDoUpdate({
+        target: [deviceOwner.workspaceId, deviceOwner.deviceId],
+        set: { userId: actor.userId, lastSeenAt: new Date() },
+      });
+  } catch {
+    // A display convenience is never worth a failed publish.
+  }
+}
+
+/**
+ * The people behind a set of recorded authors — the display-time half. Authors that are not
+ * machine ids pass through untouched (they are already a person's own attribution), and a
+ * machine this workspace has never seen publish is simply absent, so the caller keeps the id
+ * the version was signed with rather than inventing a name for it.
+ */
+export async function authorDisplayMap(
+  // Every surface that renders an author reads it: the session lane's log (a SessionActor or a
+  // machine token) and the web's own bundle pages (a MemberActor). Only the workspace scope is
+  // used — this read asks no other question of the actor.
+  actor: ReadActor | MemberActor,
+  authors: readonly string[],
+): Promise<Map<string, string>> {
+  const devices = [...new Set(authors.filter(isDeviceAuthor))];
+  if (devices.length === 0) {
+    return new Map();
+  }
+  const rows = await getDb()
+    .select({ deviceId: deviceOwner.deviceId, name: user.name, email: user.email })
+    .from(deviceOwner)
+    .innerJoin(user, eq(user.id, deviceOwner.userId))
+    .where(
+      and(eq(deviceOwner.workspaceId, actor.workspaceId), inArray(deviceOwner.deviceId, devices)),
+    );
+  return new Map(rows.map((r) => [r.deviceId, personAttribution(r.name, r.email)]));
+}
+
+/** One recorded author as a person, or the author verbatim when nothing names them. */
+export function displayAuthor(author: string, people: Map<string, string>): string {
+  return people.get(author) ?? author;
 }
 
 export interface GenesisRegistration {

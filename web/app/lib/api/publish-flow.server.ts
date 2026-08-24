@@ -20,6 +20,7 @@ import {
   placeIntoChannelInTx,
   publishTargetOf,
   registerGenesisBundleInTx,
+  rememberDeviceOwner,
 } from "@/lib/db/queries.custody.server";
 import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
 
@@ -113,6 +114,10 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     // Two-parent author merges stay unaccepted (the custody lane commits one parent).
     return badRequest("two-parent author merges are not accepted");
   }
+  // The session names the person and the frame names the machine — the only place the two are
+  // seen together. Remembering the pairing is what lets this version's author render as a person
+  // later, without a byte of the identity-bearing commit frame changing.
+  await rememberDeviceOwner(actor, candidate.author);
   const createdAt = receiptNow();
   const target = await publishTargetOf(actor, skillId);
   const isGenesis = target === undefined;

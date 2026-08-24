@@ -18,6 +18,7 @@ import {
   inFinalTx,
   insertReceiptInTx,
   publishTargetOf,
+  rememberDeviceOwner,
   versionOutsideHistoryWindow,
 } from "@/lib/db/queries.custody.server";
 import { revertPointer } from "@/lib/plane/custody.server";
@@ -155,7 +156,9 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   // the forward id from `(parents, tree, author, message)` and will verify the served pointer
   // names exactly that version, so the custody lane records the wire's author + message
   // verbatim (a substituted display string would derive a different id and the client would
-  // refuse the OK).
+  // refuse the OK). What CAN be recorded is who that machine is: the pairing lives beside the
+  // history, and the reading of the author resolves through it.
+  await rememberDeviceOwner(actor, author);
   const reverted = await revertPointer(actor.workspaceId, target.bundleId, {
     to_version_id: good,
     expected_generation: head.expected,
