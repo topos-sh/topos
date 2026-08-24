@@ -1549,7 +1549,9 @@ fn a_bare_add_of_a_feed_delivered_server_answers_the_way_a_skill_does() {
     // The fork ladder CLAIMS NOTHING here — it is a question about a folder's bytes, and there is
     // no folder.
     assert!(
-        ops::keep_as_yours(&ctx, "deepwiki", false).unwrap().is_none(),
+        ops::keep_as_yours(&ctx, "deepwiki", false)
+            .unwrap()
+            .is_none(),
         "a server bundle is never a re-fork case"
     );
 

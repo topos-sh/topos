@@ -1532,7 +1532,10 @@ fn run_command(
             // acknowledges a byte-level no-op.
             ops::revert(
                 &ctx,
-                &connect_contribute,
+                &ops::RevertConnectors {
+                    contribute: &connect_contribute,
+                    session: &connect_session_transports,
+                },
                 &skill,
                 &to,
                 yes,

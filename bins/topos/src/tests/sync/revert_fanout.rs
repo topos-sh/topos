@@ -56,6 +56,174 @@ impl crate::plane::ContributeSource for RecordingContribute {
     }
 }
 
+/// A directory lane serving ONE skill's workspace history — the same list `topos log` prints. It
+/// is what a short `--to` resolves against, so a machine that never applied a version can still
+/// revert the team to it.
+struct HistoryDirectory {
+    versions: Vec<String>,
+}
+impl crate::plane::DirectorySource for HistoryDirectory {
+    fn me(&self, _ws: &str) -> Result<topos_types::requests::WireMe, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn channels_index(
+        &self,
+        _ws: &str,
+    ) -> Result<topos_types::requests::WireChannelIndex, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn skills_index(
+        &self,
+        _ws: &str,
+    ) -> Result<topos_types::requests::WireSkillIndex, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn mcp_revision(
+        &self,
+        _w: &str,
+        _s: &str,
+        _r: &str,
+    ) -> Result<Option<topos_types::requests::WireMcpIndexEntry>, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn proposals_index(
+        &self,
+        _ws: &str,
+    ) -> Result<topos_types::requests::WireProposalIndex, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn skill_log(
+        &self,
+        _ws: &str,
+        skill_id: &str,
+    ) -> Result<topos_types::requests::WireSkillLog, crate::error::ClientError> {
+        Ok(topos_types::requests::WireSkillLog {
+            skill_id: skill_id.to_owned(),
+            name: "s".to_owned(),
+            kind: "skill".to_owned(),
+            status: "active".to_owned(),
+            base_name: None,
+            versions: self
+                .versions
+                .iter()
+                .map(|v| topos_types::requests::WireLogVersion {
+                    version_id: v.clone(),
+                    author: None,
+                    message: None,
+                    current: false,
+                    purged_at: None,
+                    purged_by: None,
+                })
+                .collect(),
+            proposals: Vec::new(),
+        })
+    }
+    fn protect_skill(&self, _w: &str, _s: &str, _l: &str) -> Result<(), crate::error::ClientError> {
+        unreachable!()
+    }
+    fn protect_channel(
+        &self,
+        _w: &str,
+        _c: &str,
+        _l: &str,
+    ) -> Result<(), crate::error::ClientError> {
+        unreachable!()
+    }
+    fn add_mcp_server(
+        &self,
+        _w: &str,
+        _b: topos_types::requests::McpAddRequest,
+    ) -> Result<topos_types::requests::McpAddedData, crate::error::ClientError> {
+        unreachable!()
+    }
+}
+
+/// A session lane whose only live seam is the directory (the history read). Nothing else in a
+/// `revert` touches these transports.
+fn session_lane(
+    versions: Vec<String>,
+) -> impl Fn(&crate::sessions::Session) -> ops::SessionTransports {
+    move |_s: &crate::sessions::Session| ops::SessionTransports {
+        plane: Box::new(InertReconcile),
+        directory: Box::new(HistoryDirectory {
+            versions: versions.clone(),
+        }),
+        contribute: Box::new(InertContribute),
+        governance: Box::new(InertGovernance),
+    }
+}
+
+/// The transports a `revert` never reaches through the session lane.
+struct InertReconcile;
+impl crate::plane::PlaneSource for InertReconcile {
+    fn get_current(
+        &self,
+        _s: &str,
+        _k: Option<crate::plane::KnownCurrent>,
+    ) -> Result<crate::plane::PointerFetch, crate::plane::PlaneError> {
+        unreachable!()
+    }
+    fn fetch_version(
+        &self,
+        _s: &str,
+        _v: [u8; 32],
+    ) -> Result<crate::plane::FetchedVersion, crate::plane::PlaneError> {
+        unreachable!()
+    }
+}
+impl crate::plane::DeliverySource for InertReconcile {
+    fn fetch_delivery(
+        &self,
+        _w: &str,
+    ) -> Result<crate::plane::DeliverySnapshot, crate::plane::PlaneError> {
+        unreachable!()
+    }
+    fn report_applied(
+        &self,
+        _w: &str,
+        _r: &[crate::plane::AppliedSkillReport],
+    ) -> Result<(), crate::plane::PlaneError> {
+        unreachable!()
+    }
+}
+struct InertContribute;
+impl crate::plane::ContributeSource for InertContribute {
+    fn publish(
+        &self,
+        _b: topos_types::requests::PublishRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn propose(
+        &self,
+        _b: topos_types::requests::ProposeRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn revert(
+        &self,
+        _b: topos_types::requests::RevertRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        unreachable!()
+    }
+    fn review(
+        &self,
+        _b: topos_types::requests::ReviewRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        unreachable!()
+    }
+}
+struct InertGovernance;
+impl crate::plane::GovernanceSource for InertGovernance {
+    fn invite(
+        &self,
+        _w: &str,
+        _b: topos_types::requests::InvitationRequest,
+    ) -> Result<topos_types::requests::InvitationData, crate::error::ClientError> {
+        unreachable!()
+    }
+}
+
 /// The tree (bundle) digest of a version's files — the value the no-op compares.
 fn tree_of(v: &Version) -> [u8; 32] {
     let entries: Vec<ManifestEntry> = v
@@ -159,11 +327,23 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
         }
     };
     let good_hex = to_hex(&good.id);
+    let lane = session_lane(vec![good_hex.clone()]);
     let ctx = rig.ctx(&plane, &foll);
 
     // Bare = DESCRIBE: nothing written — no POST, no op-WAL. The paste-ready apply carries no
     // `--workspace` when none was given.
-    let described = ops::revert(&ctx, &connect, &name, &good_hex, false, None).unwrap();
+    let described = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &lane,
+        },
+        &name,
+        &good_hex,
+        false,
+        None,
+    )
+    .unwrap();
     match &described {
         ops::RevertOutcome::Describe { yes_argv, .. } => {
             assert_eq!(
@@ -173,7 +353,9 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
                     "revert".to_owned(),
                     name.clone(),
                     "--to".to_owned(),
-                    good_hex.clone(),
+                    // THE SHORT ID — what every listing prints and what a person copies. A
+                    // 64-char hex in a paste-ready line is a line nobody reads.
+                    crate::render::short(&good_hex).to_owned(),
                     "--yes".to_owned(),
                 ],
             );
@@ -184,7 +366,18 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
 
     // A `--workspace` disambiguation is PRESERVED on the paste-ready apply (as the canonical id),
     // so the suggested command re-resolves to exactly the skill described.
-    let described_ws = ops::revert(&ctx, &connect, &name, &good_hex, false, Some(WS)).unwrap();
+    let described_ws = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &lane,
+        },
+        &name,
+        &good_hex,
+        false,
+        Some(WS),
+    )
+    .unwrap();
     match &described_ws {
         ops::RevertOutcome::Describe { yes_argv, .. } => {
             assert_eq!(
@@ -194,7 +387,7 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
                     "revert".to_owned(),
                     name.clone(),
                     "--to".to_owned(),
-                    good_hex.clone(),
+                    crate::render::short(&good_hex).to_owned(),
                     "--workspace".to_owned(),
                     WS.to_owned(),
                     "--yes".to_owned(),
@@ -222,7 +415,18 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
     );
 
     // `--yes` = apply: exactly one POST; the forward move lands.
-    let applied = ops::revert(&ctx, &connect, &name, &good_hex, true, None).unwrap();
+    let applied = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &lane,
+        },
+        &name,
+        &good_hex,
+        true,
+        None,
+    )
+    .unwrap();
     match applied {
         ops::RevertOutcome::Applied(data) => {
             assert_eq!(data.reverted_to, good_hex);
@@ -231,6 +435,148 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
         other => panic!("--yes applies, got {other:?}"),
     }
     assert_eq!(posts.get(), 1, "--yes POSTs exactly once");
+}
+
+/// A SHORT `--to` resolves against WHAT THE WORKSPACE HAS PUBLISHED — the same versions
+/// `topos log` prints — not merely the ones this machine has applied. The documented form ("a
+/// unique prefix of 8+ characters works") was unusable off a fresh machine: a 12-hex id copied
+/// straight out of `topos log` was refused with "matches no locally recorded version", because
+/// the candidate set was this machine's gitstore alone.
+#[test]
+fn a_short_to_resolves_against_the_workspaces_history_not_just_local_bytes() {
+    let rig = Rig::new("rv-short-to");
+    let (id, name, _genesis) = rig.adopt(&[("SKILL.md", FileMode::Regular, b"base\n")]);
+    seed_instance(&rig);
+    let foll = follow(&id);
+
+    let good = mk_version(
+        &[],
+        &[("SKILL.md", FileMode::Regular, b"good bytes\n")],
+        "auth",
+        "m-good",
+    );
+    let current = mk_version(
+        &[],
+        &[("SKILL.md", FileMode::Regular, b"current bytes\n")],
+        "auth",
+        "m-current",
+    );
+    let mut plane = FixturePlane::default();
+    plane.set_current(&id, served(WS, &id, current.id, 5));
+    plane.add_version(&id, &good);
+    plane.add_version(&id, &current);
+
+    let posts = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let forward = identity::commit_id(&Commit {
+        parents: &[current.id],
+        tree: tree_of(&good),
+        author: DEVICE,
+        message: REVERT_MSG,
+    })
+    .unwrap();
+    let receipt = ok_revert_receipt(served(WS, &id, forward, 6));
+    let connect = {
+        let posts = posts.clone();
+        move |_b: &str, _c: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+            Box::new(RecordingContribute {
+                posts: posts.clone(),
+                receipt: receipt.clone(),
+            })
+        }
+    };
+    let good_hex = to_hex(&good.id);
+    let ctx = rig.ctx(&plane, &foll);
+    // This machine never applied `good` — its bytes are not in the local store.
+    assert!(
+        !ops::local_version_ids(
+            &ctx,
+            &rig.layout()
+                .published(&crate::id::SkillId::parse(&id).unwrap())
+        )
+        .unwrap()
+        .contains(&good_hex),
+        "the fixture's point is a version this machine has NOT applied"
+    );
+
+    // WITH the workspace history, the 12-hex id off `topos log` resolves.
+    let lane = session_lane(vec![good_hex.clone(), to_hex(&current.id)]);
+    let short = crate::render::short(&good_hex).to_owned();
+    let described = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &lane,
+        },
+        &name,
+        &short,
+        false,
+        None,
+    )
+    .unwrap();
+    match &described {
+        ops::RevertOutcome::Describe { data, yes_argv } => {
+            // The resolved FULL hex is what the outcome carries — a prefix never leaks into a
+            // document or the wire.
+            assert_eq!(data.reverted_to, good_hex);
+            // …and the paste-ready apply prints the SHORT id, the way the listing did.
+            assert_eq!(
+                yes_argv,
+                &vec![
+                    "topos".to_owned(),
+                    "revert".to_owned(),
+                    name.clone(),
+                    "--to".to_owned(),
+                    short.clone(),
+                    "--yes".to_owned(),
+                ],
+            );
+        }
+        other => panic!("bare revert describes, got {other:?}"),
+    }
+    assert_eq!(posts.get(), 0, "a describe POSTs nothing");
+
+    // A prefix TWO published versions share refuses, naming the candidates — never a coin flip
+    // over which release the team goes back to.
+    let twin_a = format!("beef1234{}", "a".repeat(56));
+    let twin_b = format!("beef1234{}", "b".repeat(56));
+    let ambiguous = session_lane(vec![twin_a.clone(), twin_b.clone()]);
+    let err = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &ambiguous,
+        },
+        &name,
+        "beef1234",
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(err.to_string().contains("beef1234aaaa"), "{err}");
+    assert!(err.to_string().contains("beef1234bbbb"), "{err}");
+
+    // A prefix NOTHING in the history matches says where to look, never "locally recorded".
+    let err = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &lane,
+        },
+        &name,
+        "0123abcd",
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "--to '0123abcd' matches no version of '{name}' in this workspace's history — `topos \
+             log {name}` lists them"
+        )
+    );
+    assert_eq!(posts.get(), 0, "no refusal POSTs anything");
 }
 
 #[test]
@@ -265,16 +611,39 @@ fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
         }
     };
     let good_hex = to_hex(&good.id);
+    let lane = session_lane(vec![good_hex.clone()]);
     let ctx = rig.ctx(&plane, &foll);
 
     // Both bare and `--yes` are a typed no-op that mints no forward commit and POSTs nothing — the
     // pre-fix id compare (good.id != current.id) would have minted one.
-    let bare = ops::revert(&ctx, &connect, &name, &good_hex, false, None).unwrap();
+    let bare = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &lane,
+        },
+        &name,
+        &good_hex,
+        false,
+        None,
+    )
+    .unwrap();
     assert!(
         matches!(&bare, ops::RevertOutcome::NoOp(d) if d.is_noop),
         "bare: {bare:?}"
     );
-    let yes = ops::revert(&ctx, &connect, &name, &good_hex, true, None).unwrap();
+    let yes = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &connect,
+            session: &lane,
+        },
+        &name,
+        &good_hex,
+        true,
+        None,
+    )
+    .unwrap();
     assert!(
         matches!(yes, ops::RevertOutcome::NoOp(_)),
         "--yes acknowledges the no-op"
