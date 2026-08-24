@@ -2669,7 +2669,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plane-store"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3959,7 +3959,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "topos"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "base64",
  "clap",
@@ -3984,7 +3984,7 @@ dependencies = [
 
 [[package]]
 name = "topos-core"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "sha2",
  "unicode-normalization",
@@ -3992,7 +3992,7 @@ dependencies = [
 
 [[package]]
 name = "topos-e2e"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "axum",
  "plane-store",
@@ -4006,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "topos-gitstore"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "diffy",
  "flate2",
@@ -4018,7 +4018,7 @@ dependencies = [
 
 [[package]]
 name = "topos-harness"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "hex",
  "jsonc-parser",
@@ -4030,7 +4030,7 @@ dependencies = [
 
 [[package]]
 name = "topos-plane"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "anyhow",
  "axum",
@@ -4053,7 +4053,7 @@ dependencies = [
 
 [[package]]
 name = "topos-types"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "jsonschema",
  "schemars",
@@ -4794,7 +4794,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "anyhow",
  "flate2",
