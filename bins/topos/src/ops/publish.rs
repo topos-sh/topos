@@ -393,12 +393,12 @@ pub(crate) fn publish_describe(
         .find(|(fid, _)| fid == id.as_str())
         .map(|(_, fc)| fc);
     let followed = follow_entry.is_some();
-    let live = if followed || sync.observed != GENESIS {
+    let mut live = if followed || sync.observed != GENESIS {
         Some(live_or_cached(ctx, &lane, &sp, id.as_str(), &lock, &sync)?)
     } else {
         None
     };
-    let standing = standing(live.as_ref(), &lock, &digest_hex);
+    let standing = classify(ctx, &sp, id.as_str(), live.as_mut(), &lock, &digest_hex)?;
     match &standing {
         Standing::Matches => {
             return Ok(PublishPreview::NoChanges(no_changes(
@@ -813,6 +813,50 @@ fn standing(live: Option<&LiveCurrent>, lock: &Lock, digest_hex: &str) -> Standi
         });
     }
     Standing::Behind
+}
+
+/// [`standing`], with the one verdict that ends the verb CONFIRMED: "already published" is
+/// declared only against the live current's VERIFIED digest. The delivery's advertised
+/// `bundle_digest` is disclosure, not trust — the bytes that reproduce the version id are the
+/// bytes a copy is compared to. A `Matches` on the advertised digest re-derives the digest from
+/// this store (when the version is held here) or from a verified fetch, and re-classifies on it
+/// when the two disagree; a lying advertisement can then only cost one extra read, never a
+/// publish that was silently skipped.
+fn classify(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    skill_id: &str,
+    live: Option<&mut LiveCurrent>,
+    lock: &Lock,
+    digest_hex: &str,
+) -> Result<Standing, ClientError> {
+    let first = standing(live.as_deref(), lock, digest_hex);
+    let (Standing::Matches, Some(l)) = (&first, live) else {
+        return Ok(first);
+    };
+    let verified = verified_live_digest(ctx, sp, skill_id, l)?;
+    if verified == l.digest_hex {
+        return Ok(Standing::Matches);
+    }
+    l.digest_hex = verified;
+    Ok(standing(Some(l), lock, digest_hex))
+}
+
+/// The live current's digest re-derived from its bytes: the store's walk when the version is
+/// held here, else a fetch that must reproduce the version id.
+fn verified_live_digest(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    skill_id: &str,
+    live: &LiveCurrent,
+) -> Result<String, ClientError> {
+    let store = Store::open(&sp.store)?;
+    if let Some(d) = sync_engine::store_bundle_digest_opt(&store, live.commit)? {
+        return Ok(to_hex(&d));
+    }
+    Ok(to_hex(
+        &contribute::fetch_verified_bundle(ctx, skill_id, live.commit)?.0,
+    ))
 }
 
 /// The live current's files + its history line: from this store when the version is held here,
@@ -1399,12 +1443,12 @@ fn enrolled_publish(
         None => {
             // THE SERVER'S CURRENT IS THE TRUTH (see the describe's twin): the copy is classified
             // against the live current, read here, never against the cache.
-            let live = if followed || sync.observed != GENESIS {
+            let mut live = if followed || sync.observed != GENESIS {
                 Some(live_or_cached(ctx, &lane, &sp, id.as_str(), &lock, &sync)?)
             } else {
                 None
             };
-            let standing = standing(live.as_ref(), &lock, &digest_hex);
+            let standing = classify(ctx, &sp, id.as_str(), live.as_mut(), &lock, &digest_hex)?;
             let base = match (&standing, &live) {
                 // The copy IS the live current — an earlier publish of these bytes already LANDED
                 // (the retry a failed local rewrite asks for resolves here), so the pending
