@@ -1494,3 +1494,81 @@ fn two_same_named_mcp_bundles_in_one_scope_each_keep_their_own_states() {
         "{text}"
     );
 }
+
+/// A machine whose `list -g` prints `r2-smoke  (not applied here yet — `topos update -g` applies
+/// it)` answered `revert` with `no tracked skill named 'r2-smoke'` — the same machine
+/// contradicting its own listing, and no next step for a state that is ONE command from being
+/// real. The row is asked about before a miss is claimed, and each of the two states says what it
+/// is: the demanded row names the update that would apply it (as prose AND as a runnable
+/// `next_actions` argv), the genuine miss names the listing that says what this scope tracks.
+#[test]
+fn revert_tells_a_demanded_unapplied_row_apart_from_a_name_it_never_heard_of() {
+    let rig = Rig::new("zq-revert-unapplied");
+    rig.seed_session();
+    // The machine-wide recipe DEMANDS the bundle; nothing has ever applied it here (no store
+    // record, no lock) — exactly the row the inventory prints as "not applied here yet".
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
+    let ctx = rig.ctx_at(None);
+    let no_contribute = |_: &str, _: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        unreachable!("the copy is resolved before any write lane is built")
+    };
+    let no_session = |_: &Session| -> ops::SessionTransports {
+        unreachable!("the copy is resolved before any workspace read")
+    };
+    let good = "a".repeat(64);
+    let revert = |name: &str| {
+        ops::revert(
+            &ctx,
+            &ops::RevertConnectors {
+                contribute: &no_contribute,
+                session: &no_session,
+            },
+            name,
+            &good,
+            false,
+            None,
+            ops::StoreScope::Machine,
+        )
+        .expect_err("no applied copy to revert")
+    };
+
+    let demanded = revert("deploy");
+    assert_eq!(
+        demanded.to_string(),
+        "deploy is not applied on this machine yet — `topos update -g` applies it; revert acts on \
+         an applied copy",
+        "{demanded:?}"
+    );
+    assert_eq!(
+        scope_ways_out(
+            "revert",
+            &["revert", "deploy", "--to", &good, "-g"],
+            &demanded
+        ),
+        vec![(
+            "UPDATE_SKILLS".to_owned(),
+            vec![
+                "topos".to_owned(),
+                "update".to_owned(),
+                "-g".to_owned(),
+                "--json".to_owned(),
+            ],
+        )],
+        "the fix rides as a runnable argv, spelled for the scope the row lives in",
+    );
+
+    // A name nothing demands and nothing tracks: still a refusal — in the BUNDLE vocabulary, and
+    // pointing at the listing rather than ending on a dead word.
+    let unknown = revert("never-heard-of-it");
+    assert_eq!(
+        unknown.to_string(),
+        "no tracked bundle named 'never-heard-of-it' here — `topos list -g` shows what this \
+         machine tracks",
+        "{unknown:?}"
+    );
+    // Both still branch as the one refusal an agent already knows.
+    assert_eq!(demanded.code(), "NO_SUCH_SKILL");
+    assert_eq!(unknown.code(), "NO_SUCH_SKILL");
+}

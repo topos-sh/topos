@@ -96,7 +96,18 @@ pub(crate) fn revert(
     // delivers lives in that checkout's own store, and every per-skill read and write below rides
     // the OWNING store's layout. The machine-level seams — the sessions, the plane, the follow
     // state, the cwd roots — stay the outer ctx's.
-    let (layout, id, lock) = resolve_followed_skill_in_scope(ctx, skill_name, workspace, scope)?;
+    //
+    // A miss here is TWO states, and only one of them is a dead end: the scope may carry a
+    // manifest row for the name that no `update` has applied yet (`list` prints it as such), or
+    // it may track nothing of the name at all. The first has a next step and now says it.
+    let (layout, id, lock) =
+        match resolve_followed_skill_in_scope(ctx, skill_name, workspace, scope) {
+            Ok(hit) => hit,
+            Err(ClientError::NoSuchSkill { name }) => {
+                return Err(super::unapplied_or_unknown(ctx, &name, scope));
+            }
+            Err(e) => return Err(e),
+        };
     let outer_ctx = ctx;
     let store_ctx = super::pull::ctx_with_layout(ctx, &layout);
     let ctx = &store_ctx;

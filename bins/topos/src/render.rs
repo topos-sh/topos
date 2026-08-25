@@ -590,6 +590,14 @@ const STATIC_PROSE_COMMANDS: &[(&str, &str, &[&str])] = &[
         "UPDATE_SKILLS",
         &["topos", "update", "--json"],
     ),
+    // The MACHINE sweep, spelled whole: a refusal about a machine-scope row (a demanded bundle no
+    // update has applied there yet) must hand back the `-g` form, not the here-scope one that
+    // would leave the row exactly as it found it.
+    (
+        "topos update -g",
+        "UPDATE_SKILLS",
+        &["topos", "update", "-g", "--json"],
+    ),
     ("topos self-update", "UPDATE_CLI", &["topos", "self-update"]),
 ];
 
