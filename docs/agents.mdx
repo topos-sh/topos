@@ -9,7 +9,7 @@ own fix. Exactly one question exists, and it only ever reaches a terminal: which
 touch here. On a terminal, a run that needs a pick and finds several agents installed offers a
 numbered list. Piped or under `--json` the same run prints the installed agents in `data` and exits
 `2` instead, carrying `topos init -a <agent>` as the way through; inside Claude Code it picks
-Claude Code without asking. A machine with no agent installed at all is never asked: the run goes
+Claude Code without asking. `install --frozen` never asks either: with no pick it verifies and fetches the lock's bundles and places nothing (`NO_PICK`). A machine with no agent installed at all is never asked: the run goes
 through, places nothing, and says so (`NO_AGENT_INSTALLED`), so a build box still installs and
 edits its manifest. Five rules cover almost everything:
 
