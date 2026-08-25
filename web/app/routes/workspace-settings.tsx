@@ -15,7 +15,11 @@ import { StalenessWindowPanel } from "@/components/policy/staleness-window-panel
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { composition } from "@/composition.server";
-import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
+import {
+  memberPageInScope,
+  requireMemberInScope,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
   setMcpGateway,
@@ -47,7 +51,7 @@ function lastSetOf(row: AuditEventRow | undefined): LastSetLine | null {
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   // Management is a confirmed OWNER seat — the actor's role IS the seat table's.
   const isOwner = actor.role === "owner";
   // The registration knob governs sign-up only where the install IS the workspace (single

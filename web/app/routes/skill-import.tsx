@@ -2,7 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
 import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { publishGenesisBundle, webNewDestination } from "@/lib/api/genesis.server";
-import { requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope, requireMemberInScope } from "@/lib/auth/guards.server";
 import { fetchUpstreamTree, governedCopiesOf, resolveTreeSource } from "@/lib/db/upstream.server";
 import { useSubmittingIntent } from "@/lib/pending";
 import { allowUpstreamFetch } from "@/lib/rate-limit.server";
@@ -25,7 +25,7 @@ export function meta() {
  * what lands) and runs the ordinary genesis publish + provenance rows.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace } = await requireMemberInScope(request, params);
+  const { workspace } = await memberPageInScope(request, params);
   // The canonical reference's HOST half — the same origin resolution as the login address, so
   // the dedup notice's `topos add <host>/<ws>/<name>` line is unambiguous however many servers
   // the reader's installation is logged into.

@@ -5,7 +5,12 @@ import { ChannelTabs } from "@/components/channel/channel-tabs";
 import { ConfirmButton, ConfirmNameField } from "@/components/confirm";
 import { buttonClasses, Card, SectionHeading } from "@/components/ui";
 import { requireTypedName } from "@/lib/auth/ceremony.server";
-import { notFound, requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
+import {
+  memberPageInScope,
+  notFound,
+  requireMemberInScope,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   type ChannelDeleteOutcome,
@@ -31,7 +36,7 @@ export function meta({ params }: { params: { channel?: string } }) {
  * so a member finds the tab without an existence oracle.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { actor } = await requireMemberInScope(request, params);
+  const { actor } = await memberPageInScope(request, params);
   const channel = params.channel;
   if (!channel) {
     notFound();

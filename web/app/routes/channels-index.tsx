@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
-import { requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope } from "@/lib/auth/guards.server";
 import { type ChannelSummary, channelsOf } from "@/lib/db/queries.channels.server";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -16,7 +16,7 @@ export function meta({ params }: { params: { ws?: string } }) {
  * its own Rails-style `channels/new` route (channel-new.tsx).
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { actor } = await requireMemberInScope(request, params);
+  const { actor } = await memberPageInScope(request, params);
   return { channels: await channelsOf(actor) };
 }
 

@@ -4,7 +4,11 @@ import { ConfirmButton, ConfirmNameField } from "@/components/confirm";
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, PageHeader } from "@/components/ui";
 import { requireTypedName } from "@/lib/auth/ceremony.server";
-import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
+import {
+  memberPageInScope,
+  requireMemberInScope,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   archivedSkillById,
@@ -26,7 +30,7 @@ export function meta({ params }: { params: { ws?: string } }) {
  * hands the page the owner flag so a plain member sees the list without the action controls.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const archived = await archivedSkillsOf(actor);
   return {
     wsName: workspace.name,

@@ -2,7 +2,7 @@ import { Package, Plus } from "lucide-react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useFetcher, useLoaderData, useSearchParams } from "react-router";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
-import { requireMember, requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope, requireMember, requireMemberInScope } from "@/lib/auth/guards.server";
 import { baseForKind, bundlePath } from "@/lib/bundle-base";
 import {
   type AssignedBundle,
@@ -41,7 +41,7 @@ export function meta() {
  * ceremony, nobody else's rows touched.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { actor } = await requireMemberInScope(request, params);
+  const { actor } = await memberPageInScope(request, params);
   const [view, catalog] = await Promise.all([
     assignedView(actor),
     skillIndexOf(actor, actor.workspaceId),

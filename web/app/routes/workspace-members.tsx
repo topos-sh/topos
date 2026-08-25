@@ -11,6 +11,7 @@ import { RemoveMemberForm } from "@/components/members/remove-member-form";
 import { RoleForm } from "@/components/members/role-form";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
 import {
+  memberPageInScope,
   requireMember,
   requireMemberInScope,
   requireWorkspaceOwner,
@@ -53,7 +54,7 @@ function lapseLabel(expiresAt: Date | null, now: number): string {
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const isOwner = actor.role === "owner";
   const [roster, pending] = await Promise.all([rosterOf(actor), pendingInvitationsOf(actor)]);
   const displayByUserId = new Map(roster.map((seat) => [seat.userId, seat.display]));

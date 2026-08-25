@@ -20,6 +20,7 @@ import { TrustPanel } from "@/components/review/TrustPanel";
 import { Card } from "@/components/ui";
 import { noFilesRefusal } from "@/lib/api/genesis.server";
 import {
+  memberPageInScope,
   notFound,
   requireMember,
   requireMemberInScope,
@@ -106,7 +107,7 @@ interface RenderedDiffFile {
  * stays a plain synchronous component.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const ws = workspace.id;
   const base = baseOf(params);
   const skill = bundleNameOf(params);
