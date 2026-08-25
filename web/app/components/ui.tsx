@@ -68,6 +68,28 @@ export function BusyFields({
   );
 }
 
+/**
+ * "NOT YOURS" — spread onto a text field that is not a credential.
+ *
+ * Password managers ignore `autocomplete="off"` by design, read a lone text field in a form as a
+ * sign-in field, and mount their own inline menu over it. The menu then takes the first keypress,
+ * so the first Enter after a page load goes to the menu instead of the form: nothing leaves the
+ * browser, nothing appears in the page, and only a second attempt gets through — which reads as
+ * "it refused what I typed". A login-approval code, a recovery code, a workspace name: none of
+ * them is anything a manager has saved, and none of them should cost a person a second try.
+ *
+ * These are the opt-outs 1Password, LastPass, and Bitwarden each document. They go BESIDE an
+ * honest `autoComplete` (`one-time-code` for a single-use code, `organization` for a company
+ * name), never instead of it — the platform hint says what the field IS, and these say who it
+ * is not for. Never spread this onto an email or password field: filling those is the whole
+ * point of a password manager.
+ */
+export const NOT_A_CREDENTIAL = {
+  "data-1p-ignore": "true",
+  "data-lpignore": "true",
+  "data-bwignore": "true",
+} as const;
+
 /** A short identifier (version hash, fingerprint) in mono, self-labeling as truncated. */
 export function ShortId({ value, length = 12 }: { value: string; length?: number }) {
   return (

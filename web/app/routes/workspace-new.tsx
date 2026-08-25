@@ -12,7 +12,14 @@ import {
   useLocation,
   useNavigation,
 } from "react-router";
-import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import {
+  BusyFields,
+  buttonClasses,
+  Card,
+  NOT_A_CREDENTIAL,
+  PageHeader,
+  SectionHeading,
+} from "@/components/ui";
 import { actorFromSession, notFound, requireSession, safeNextPath } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { announceCeremony } from "@/lib/ceremony-event";
@@ -287,7 +294,8 @@ function CreateForm({
                   type="text"
                   name="displayName"
                   required
-                  autoComplete="off"
+                  autoComplete="organization"
+                  {...NOT_A_CREDENTIAL}
                   spellCheck={false}
                   placeholder="Acme Engineering"
                   maxLength={100}
@@ -304,6 +312,7 @@ function CreateForm({
                   name="slug"
                   required
                   autoComplete="off"
+                  {...NOT_A_CREDENTIAL}
                   spellCheck={false}
                   placeholder="acme-engineering"
                   pattern="[a-z0-9][a-z0-9-]*"

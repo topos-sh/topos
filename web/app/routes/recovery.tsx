@@ -8,7 +8,7 @@ import {
   redirect,
   useActionData,
 } from "react-router";
-import { BusyFields, buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses, NOT_A_CREDENTIAL } from "@/components/ui";
 import { notFound } from "@/lib/auth/guards.server";
 import { consumeRecoveryCode } from "@/lib/auth/recovery.server";
 import { useSubmittingIntent } from "@/lib/pending";
@@ -88,7 +88,8 @@ export default function RecoveryPage() {
               type="text"
               name="code"
               required
-              autoComplete="off"
+              autoComplete="one-time-code"
+              {...NOT_A_CREDENTIAL}
               spellCheck={false}
               className={`${INPUT} font-mono`}
               placeholder="paste the code"

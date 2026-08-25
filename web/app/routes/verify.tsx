@@ -10,7 +10,7 @@ import {
   useFetcher,
   useLoaderData,
 } from "react-router";
-import { BusyFields, buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses, NOT_A_CREDENTIAL } from "@/components/ui";
 import { composition } from "@/composition.server";
 import {
   actorFromSession,
@@ -556,9 +556,7 @@ function CodeLookup() {
             name="code"
             maxLength={USER_CODE_LENGTH}
             autoComplete="one-time-code"
-            data-1p-ignore="true"
-            data-lpignore="true"
-            data-bwignore="true"
+            {...NOT_A_CREDENTIAL}
             spellCheck={false}
             className={`${INPUT} font-mono uppercase`}
             placeholder="AB29-CD34"
@@ -1005,7 +1003,8 @@ function CreateFields({
         <input
           type="text"
           name="displayName"
-          autoComplete="off"
+          autoComplete="organization"
+          {...NOT_A_CREDENTIAL}
           spellCheck={false}
           placeholder="Acme Engineering"
           maxLength={100}
@@ -1027,6 +1026,7 @@ function CreateFields({
           type="text"
           name="slug"
           autoComplete="off"
+          {...NOT_A_CREDENTIAL}
           spellCheck={false}
           placeholder="acme-engineering"
           pattern="[a-z0-9][a-z0-9-]*"
