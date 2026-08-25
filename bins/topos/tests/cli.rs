@@ -77,6 +77,7 @@ fn run_in(home: &Path, claude: &Path, args: &[&str]) -> (bool, serde_json::Value
     let out = Command::new(bin())
         .env("TOPOS_HOME", home)
         .env("CLAUDE_CONFIG_DIR", claude)
+        .env_remove("CLAUDECODE")
         .current_dir(work_dir(home))
         .args(args)
         .output()
@@ -93,6 +94,7 @@ fn run_raw(home: &Path, args: &[&str], debug: bool) -> std::process::Output {
     let mut cmd = Command::new(bin());
     cmd.env("TOPOS_HOME", home)
         .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+        .env_remove("CLAUDECODE")
         .current_dir(work_dir(home))
         .args(args);
     if debug {
@@ -390,6 +392,7 @@ fn end_to_end_claude_code_adopt_writes_no_hook_and_pull_is_silent() {
     let out = Command::new(bin())
         .env("TOPOS_HOME", &home)
         .env("CLAUDE_CONFIG_DIR", &claude)
+        .env_remove("CLAUDECODE")
         .args(["pull", "--quiet"])
         .output()
         .expect("spawn topos pull");
@@ -428,6 +431,7 @@ fn status_names_the_built_in_on_the_terminal_where_no_manifest_governs_the_machi
             .env("TOPOS_HOME", &topos_home)
             .env("HOME", &disc_home)
             .env("CLAUDE_CONFIG_DIR", &claude)
+            .env_remove("CLAUDECODE")
             .env("TOPOS_NO_UPDATE_CHECK", "1")
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("CODEX_HOME")
@@ -496,6 +500,7 @@ fn run_disc_at(
         .env("HOME", disc_home)
         .current_dir(cwd)
         .env("CLAUDE_CONFIG_DIR", claude)
+        .env_remove("CLAUDECODE")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CODEX_HOME")
         .env_remove("HERMES_HOME")
@@ -976,6 +981,7 @@ fn sweep_raw_unseeded(
         .env("HOME", disc_home)
         .current_dir(disc_home)
         .env("CLAUDE_CONFIG_DIR", claude)
+        .env_remove("CLAUDECODE")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CODEX_HOME")
         .env_remove("HERMES_HOME")
@@ -1364,6 +1370,7 @@ fn a_home_reached_through_a_symlink_lists_one_spelling() {
         .env("TOPOS_HOME", scratch.join("topos"))
         .env("HOME", &link)
         .env("CLAUDE_CONFIG_DIR", scratch.join(".claude-isolated"))
+        .env_remove("CLAUDECODE")
         .current_dir(work_dir(&scratch))
         .args(["list", "--untracked"])
         .output()
@@ -1404,6 +1411,7 @@ fn the_machine_file_prints_as_itself_under_a_symlinked_home() {
             .env_remove("TOPOS_HOME")
             .env("HOME", &link)
             .env("CLAUDE_CONFIG_DIR", scratch.join(".claude-isolated"))
+            .env_remove("CLAUDECODE")
             .current_dir(link.join("cwd"))
             .args(args)
             .output()
@@ -1440,6 +1448,7 @@ fn a_gone_stderr_reader_silences_only_stderr() {
     let mut child = Command::new(bin())
         .env("TOPOS_HOME", &home)
         .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+        .env_remove("CLAUDECODE")
         // The debug channel puts a line on stderr BEFORE the envelope reaches stdout, which is the
         // exact order that made a shared latch swallow the answer.
         .env("TOPOS_DEBUG", "1")
@@ -1478,6 +1487,7 @@ fn the_document_flags_print_their_bytes_and_touch_nothing() {
             .env("TOPOS_HOME", &sidecar)
             .env("HOME", &home)
             .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+            .env_remove("CLAUDECODE")
             .current_dir(work_dir(&home))
             .args(args)
             .output()
@@ -1581,6 +1591,7 @@ fn a_reader_that_leaves_ends_the_run_cleanly() {
             .env("TOPOS_HOME", &home)
             .env("HOME", &home)
             .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+            .env_remove("CLAUDECODE")
             .current_dir(work_dir(&home))
             .args(args)
             .stdout(std::process::Stdio::piped())
@@ -1627,6 +1638,7 @@ fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
             .env("TOPOS_HOME", &home)
             .env("HOME", &home)
             .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+            .env_remove("CLAUDECODE")
             .env_remove("TOPOS_DEBUG")
             .current_dir(work_dir(&home))
             .args(args)
@@ -3147,6 +3159,118 @@ fn add_runs_the_pick_rule_before_anything_lands() {
     );
     let _ = std::fs::remove_dir_all(&rig.root);
     let _ = std::fs::remove_dir_all(&one.root);
+}
+
+/// **A machine with no agent installed is not asked anything.** There is nothing to choose from,
+/// so nothing is picked, nothing is placed, and the verbs go on doing the rest of their work:
+/// a build box that holds no agent at all still has to run `topos install` and record rows. The
+/// answer is one sentence, said once per run — on stderr where the receipt has no line for it,
+/// as the receipt's own first line for `init`, and as a coded line under `--json`.
+#[test]
+fn zero_installed_agents_is_not_an_ask() {
+    let rig = pick_rig("no-agent-installed", &[]);
+    rig.write_manifest("schema = 1\n");
+    let said = "No agent topos knows is installed here; nothing placed.\n";
+
+    // `install`: exit 0, the sentence once, no pick file, nothing in any agent folder.
+    let out = rig.run(&["install"]);
+    assert!(
+        out.status.success(),
+        "install goes on: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    assert!(rig.project_pick().is_none() && rig.machine_pick().is_none());
+
+    // `add`: the row IS recorded — the manifest is the demand, and demand does not need an agent.
+    let hello = rig.root.join("hello");
+    std::fs::create_dir_all(&hello).unwrap();
+    std::fs::write(
+        hello.join("SKILL.md"),
+        "---\nname: hello\ndescription: says hello\n---\nHello.\n",
+    )
+    .unwrap();
+    let out = rig.run(&["add", hello.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "the add goes through: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    assert!(
+        std::fs::read_to_string(rig.project.join("topos.toml"))
+            .unwrap()
+            .contains("hello"),
+        "the row is recorded"
+    );
+    assert!(rig.project_pick().is_none() && rig.machine_pick().is_none());
+    // Nothing an agent reads was written, in the checkout or under `$HOME`.
+    for dir in [".claude", ".codex", ".cursor", ".agents", ".opencode"] {
+        assert!(!rig.project.join(dir).exists(), "{dir} in the checkout");
+        assert!(!rig.home.join(dir).exists(), "{dir} under HOME");
+    }
+
+    // `init` in a folder of its own: the receipt says the manifest it wrote, then the sentence
+    // in place of a `Using` line.
+    let fresh = rig.root.join("fresh");
+    std::fs::create_dir_all(fresh.join(".git")).unwrap();
+    let out = rig.run_at(&fresh, &["init"], &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let receipt = String::from_utf8_lossy(&out.stdout);
+    assert!(receipt.starts_with("Created "), "{receipt}");
+    assert!(receipt.ends_with(said), "{receipt}");
+    assert_eq!(
+        receipt.matches("nothing placed").count(),
+        1,
+        "said once: {receipt}"
+    );
+    assert!(fresh.join("topos.toml").exists(), "the manifest is written");
+    assert!(String::from_utf8_lossy(&out.stderr).is_empty());
+
+    // `--json`: the one document carries the same sentence as a coded line, and the run is `ok`.
+    let fresh2 = rig.root.join("fresh2");
+    std::fs::create_dir_all(fresh2.join(".git")).unwrap();
+    let out = rig.run_at(&fresh2, &["--json", "init"], &[]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        v["messages"][0],
+        serde_json::json!({
+            "code": "NO_AGENT_INSTALLED",
+            "kind": "disclosure",
+            "text": "No agent topos knows is installed here; nothing placed."
+        }),
+        "{v}"
+    );
+    assert_eq!(v["data"]["pick"]["agents"], serde_json::json!([]), "{v}");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// **`add` checks its SOURCE before the pick rule.** A path that is not on this machine is
+/// refused with its own code, on a machine with several agents and no pick: the pick rule
+/// records a decision, so it must not run — and answer about agents — for a command that was
+/// never going to place a byte.
+#[test]
+fn add_refuses_a_missing_source_before_the_pick_rule() {
+    let rig = pick_rig("add-missing-source", &["claude-code", "codex"]);
+    rig.write_manifest("schema = 1\n");
+    let (status, v) = rig.json(&["--json", "add", "./nope"]);
+    assert_eq!(status.code(), Some(1), "{v}");
+    assert_eq!(v["error"]["code"], "SOURCE_MISSING", "{v}");
+    assert!(
+        rig.project_pick().is_none() && rig.machine_pick().is_none(),
+        "a refusal picks nothing"
+    );
+    // The machine spelling answers the same way.
+    let (status, v) = rig.json(&["--json", "add", "-g", "./nope"]);
+    assert_eq!(status.code(), Some(1), "{v}");
+    assert_eq!(v["error"]["code"], "SOURCE_MISSING", "{v}");
+    let _ = std::fs::remove_dir_all(&rig.root);
 }
 
 /// An MCP row whose own `dest` names an UNPICKED agent's file gets no entry (topos never touches

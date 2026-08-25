@@ -999,12 +999,35 @@ pub(crate) fn remove(
 // The pick a reconcile needs — `install` / `update` with none.
 // =================================================================================================
 
+/// What the pick rule did at a scope that had no pick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PickDerived {
+    /// A pick already stood here. Nothing was recorded, nothing to say.
+    Stood,
+    /// Recorded this run — the effective pick, for the caller to say.
+    Recorded(Vec<String>),
+    /// No agent topos knows is installed here. Nothing was recorded (a pick naming nobody is a
+    /// decision nobody made), the verb goes on and places nothing, and the caller says so.
+    NoneInstalled,
+}
+
+/// The sentence a scope with no installed agent earns, said once per run: nothing was picked,
+/// so nothing was placed. ONE string wherever it is said — stderr for a verb whose receipt has
+/// no line for it, the `init` receipt's own first line, [`no_agent_installed_line`] on `--json`.
+pub(crate) const NO_AGENT_INSTALLED: &str =
+    "No agent topos knows is installed here; nothing placed.";
+
+/// [`NO_AGENT_INSTALLED`] as the machine-readable line a `--json` envelope carries.
+pub(crate) fn no_agent_installed_line() -> Message {
+    crate::message::disclosure("NO_AGENT_INSTALLED", NO_AGENT_INSTALLED.to_owned())
+}
+
 /// Before a verb lands anything at `scope` with no effective pick (`install`, `update`, `init`,
 /// every `add`): one agent installed here is the pick (recorded at that scope, then reread, so
 /// the converge reads what the file says, and the caller says so); several are asked for per
-/// `ask`. `Ok(Some(slugs))` when a pick was recorded this run; `Ok(None)` when one already stood.
-/// The quiet hook sweep never calls this: it asks nothing, derives nothing and places nothing
-/// for a scope with no pick.
+/// `ask`; none at all is [`PickDerived::NoneInstalled`] — not an ask, not a refusal, and no file
+/// written. The quiet hook sweep never calls this: it asks nothing, derives nothing and places
+/// nothing for a scope with no pick.
 ///
 /// # Errors
 /// [`ClientError::PickRequired`] from the ask; an unreadable pick file; the pick write.
@@ -1012,9 +1035,9 @@ pub(crate) fn derive_pick_if_missing(
     ctx: &Ctx<'_>,
     scope: &PickScope,
     ask: &AskInputs,
-) -> Result<Option<Vec<String>>, ClientError> {
+) -> Result<PickDerived, ClientError> {
     if agents_pick::effective(ctx.fs, &ctx.layout, project_dir(scope))?.is_some() {
-        return Ok(None);
+        return Ok(PickDerived::Stood);
     }
     let installed = installed_slugs(ctx, scope);
     let inputs = AskInputs {
@@ -1022,8 +1045,13 @@ pub(crate) fn derive_pick_if_missing(
         ..*ask
     };
     let chosen = agents_ask::choose(&installed, &inputs)?;
-    agents_pick::write(ctx.fs, &ctx.layout, scope, &AgentsPick::new(chosen))?;
-    Ok(agents_pick::effective(ctx.fs, &ctx.layout, project_dir(scope))?.map(|e| e.pick.agents))
+    if chosen.is_empty() {
+        return Ok(PickDerived::NoneInstalled);
+    }
+    agents_pick::write(ctx.fs, &ctx.layout, scope, &AgentsPick::new(chosen.clone()))?;
+    let effective = agents_pick::effective(ctx.fs, &ctx.layout, project_dir(scope))?
+        .map_or(chosen, |e| e.pick.agents);
+    Ok(PickDerived::Recorded(effective))
 }
 
 /// The pick the `status` panel shows for the scope `project_dir` stands for. `status` never

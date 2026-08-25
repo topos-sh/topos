@@ -6,7 +6,13 @@
 //! terminal (an agent, a script, a pipe) or `--json`: nothing is asked — the installed list rides
 //! a [`ClientError::PickRequired`] answer (exit 2) whose way out is `topos init -a <agent>`, so
 //! the caller picks by name. A terminal gets one numbered prompt, read from stdin, no new
-//! dependency. Nothing installed at all is the same answer as "cannot ask": pick by name.
+//! dependency.
+//!
+//! NO agent installed is NOT an ask. There is nothing to choose from, so nothing is chosen and
+//! nothing is recorded: the verb proceeds, places nothing, and says so. Only a machine that holds
+//! several agents can leave the question open. A build box with no agent at all still has to run
+//! `topos install --frozen` and edit its manifest, and a refusal there would fail its CI on a
+//! question nobody can answer.
 //!
 //! Detection feeds this module and nothing else that writes ([`crate::agents_pick`] explains
 //! why). The caller persists whatever is chosen BEFORE it reconciles, then reads it back.
@@ -28,11 +34,12 @@ pub(crate) struct AskInputs {
     pub global: bool,
 }
 
-/// Choose the pick for a scope with none, from the agents installed on this machine.
+/// Choose the pick for a scope with none, from the agents installed on this machine. An empty
+/// answer means there was nothing to choose from — see the module docs.
 ///
 /// # Errors
-/// [`ClientError::PickRequired`] when several (or no) agents are installed and no prompt can be
-/// put: stdin is not a terminal, or `--json` was asked, or the prompt got no usable answer.
+/// [`ClientError::PickRequired`] when several agents are installed and no prompt can be put:
+/// stdin is not a terminal, or `--json` was asked, or the prompt got no usable answer.
 pub(crate) fn choose(installed: &[String], inputs: &AskInputs) -> Result<Vec<String>, ClientError> {
     choose_with(installed, inputs, prompt_on_terminal)
 }
@@ -44,6 +51,11 @@ pub(crate) fn choose_with(
     inputs: &AskInputs,
     prompt: impl FnOnce(&[String]) -> Option<String>,
 ) -> Result<Vec<String>, ClientError> {
+    // Nothing installed: no question, and no pick either. A file naming nobody would be a
+    // decision nobody made, so the caller records none and says what happened.
+    if installed.is_empty() {
+        return Ok(Vec::new());
+    }
     if let [one] = installed {
         return Ok(vec![one.clone()]);
     }
@@ -51,9 +63,6 @@ pub(crate) fn choose_with(
         installed: installed.to_vec(),
         global: inputs.global,
     };
-    if installed.is_empty() {
-        return Err(refused());
-    }
     if inputs.in_claude_code {
         return Ok(vec!["claude-code".to_owned()]);
     }
@@ -152,17 +161,34 @@ mod tests {
             ..PIPED
         };
         assert!(choose_with(&installed, &json, |_| panic!("json: no prompt")).is_err());
-        // Nothing installed cannot be chosen from either; the `-g` spelling rides through.
-        let global = AskInputs {
-            global: true,
-            ..PIPED
-        };
-        let err = choose_with(&[], &global, |_| panic!("nothing to prompt")).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "no agents picked yet on this machine. No agent topos knows is installed on this \
-             machine. Pick with: topos init -g -a <agent>"
-        );
+    }
+
+    /// **Nothing installed is not an ask.** There is no list to choose from and nothing to place,
+    /// so the answer is the empty pick — never a refusal a build box cannot answer.
+    #[test]
+    fn nothing_installed_is_not_an_ask() {
+        for inputs in [
+            PIPED,
+            AskInputs {
+                global: true,
+                ..PIPED
+            },
+            AskInputs {
+                stdin_tty: true,
+                ..PIPED
+            },
+            AskInputs {
+                json: true,
+                ..PIPED
+            },
+        ] {
+            assert!(
+                choose_with(&[], &inputs, |_| panic!("nothing to prompt"))
+                    .unwrap()
+                    .is_empty(),
+                "{inputs:?}"
+            );
+        }
     }
 
     #[test]

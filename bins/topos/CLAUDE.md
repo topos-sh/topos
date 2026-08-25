@@ -205,11 +205,16 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   the reduced pick LAST; a project without a file of its own is materialized from the effective
   set first; `derive_pick_if_missing` is what `install`/`update` and every `add` arm run before
   landing anything at a scope with no pick — one installed agent is recorded and said, several
-  are asked for; the quiet sweep never calls it, and derives nothing at either scope; what the
-  reconcile could not do rides `PickReceipt` (its lines, the failed count, the removed rows) and
-  decides the exit status like `update`'s), `agents_ask` (the ask: one installed → it; `CLAUDECODE` → claude-code;
-  piped or `--json` → `PickRequired`, exit 2, with the installed list on the envelope; a
-  terminal → one numbered prompt on stdin), `fmt`, `uninstall`, `builtin` (the embedded
+  are asked for, NONE installed records nothing and answers `NoneInstalled`, which the verb says
+  once (`NO_AGENT_INSTALLED`) and goes on: it places nothing and still writes the manifest, so a
+  box with no agent runs `install --frozen` and records rows. `add` asks its SOURCE first — a
+  path that is not here is refused with its own code, because the pick rule records a decision
+  and a refusal lands nothing. The quiet sweep never calls it, and derives nothing at either
+  scope; what the reconcile could not do rides `PickReceipt` (its lines, the failed count, the
+  removed rows) and decides the exit status like `update`'s), `agents_ask` (the ask: one
+  installed → it; `CLAUDECODE` → claude-code; piped or `--json` → `PickRequired`, exit 2, with
+  the installed list on the envelope; a terminal → one numbered prompt on stdin; nothing
+  installed → the empty pick, never a question), `fmt`, `uninstall`, `builtin` (the embedded
   meta-skill from `skills/topos/`),
   `self_update` (minisign-gated via `release`), `version_check`, `arm` (the TRIGGER half of the
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the

@@ -578,12 +578,7 @@ fn run_command(
                 cmd_name,
                 result,
                 render::init_tty,
-                |d| {
-                    d.pick
-                        .as_ref()
-                        .map(|p| p.warnings.clone())
-                        .unwrap_or_default()
-                },
+                |d| d.pick.as_ref().map(pick_lines).unwrap_or_default(),
                 &diag,
             )
         }
@@ -616,7 +611,7 @@ fn run_command(
                     cmd_name,
                     result,
                     render::pick_receipt_tty,
-                    |p| p.warnings.clone(),
+                    pick_lines,
                     &diag,
                 )
             }
@@ -766,6 +761,14 @@ fn run_command(
             global,
             yes,
         } => {
+            // THE SOURCE COMES FIRST. A path that is not on this machine is refused by the arm
+            // below with its own `SOURCE_MISSING`, and a refusal lands nothing — so the pick
+            // rule, which RECORDS a decision, must not run ahead of it and answer a different
+            // question ("which agents?") about a command that was never going to place a byte.
+            let source_is_here = !matches!(
+                crate::source::classify(&source),
+                crate::source::SourceSpec::LocalPath(ref p) if !p.exists()
+            );
             // THE PICK, before any add arm records a row or lands a byte: the scope the row
             // would land in (the machine with `-g`, else the checkout whose `topos.toml` covers
             // the working directory) gets the same rule `install` runs when nothing is picked
@@ -773,10 +776,19 @@ fn run_command(
             // `--json` is exit 2 naming `topos init -a`. Nothing is half-done on a refusal: the
             // row is not written. Outside any project without `-g` there is no scope to pick
             // for, and the arms below refuse the add on their own terms.
-            if let Some(scope) = ops::agents::scope_here(&ctx, global)
-                && let Err(e) = derive_pick_and_say(&ctx, &scope, json, global)
-            {
-                return emit_err(json, cmd_name, &e, &diag);
+            if source_is_here && let Some(scope) = ops::agents::scope_here(&ctx, global) {
+                match derive_pick_and_say(&ctx, &scope, json, global) {
+                    // The add receipt has no line for a disclosure raised before it ran, so the
+                    // sentence rides stderr under `--json` as well (the helper already said it
+                    // on every other mode's) — where this run's other pre-op diagnostics, the
+                    // recovery lines and the migration seed, already go.
+                    Ok(lines) => {
+                        for line in &lines {
+                            errln!("{}", line.text);
+                        }
+                    }
+                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
+                }
             }
             // The `-a`/`--dest` SELECTION, verbatim — resolved per arm below (a skill source
             // freezes skills folders, an MCP source config files).
@@ -1749,13 +1761,18 @@ fn run_command(
             // project pick registered the hook that fired it. A scope with no pick gets nothing
             // placed, silently.
             let project_here = ops::agent_hooks::cwd_project(&ctx);
+            // A scope with NO agent installed is not a refusal either: the sweep runs, converges
+            // the manifest, places nothing for any agent, and says so. A build box with no agent
+            // on it still has to run `topos install --frozen`.
+            let mut pick_disclosures: Vec<topos_types::Message> = Vec::new();
             if !(quiet || keep_mine || goback_target.is_some()) {
                 let scope = match (global, project_here.clone()) {
                     (false, Some(dir)) => crate::agents_pick::PickScope::Project(dir),
                     _ => crate::agents_pick::PickScope::Machine,
                 };
-                if let Err(e) = derive_pick_and_say(&ctx, &scope, json, global) {
-                    return emit_err(json, cmd_name, &e, &diag);
+                match derive_pick_and_say(&ctx, &scope, json, global) {
+                    Ok(lines) => pick_disclosures = lines,
+                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
                 }
             }
             let result = if keep_mine || goback_target.is_some() {
@@ -1816,6 +1833,13 @@ fn run_command(
                     },
                 )
             };
+            // The pick rule's own disclosure rides the sweep's message channel, so `--json`
+            // carries it in the one document it prints (every other mode already said it on
+            // stderr, which is why this list is empty there).
+            let result = result.map(|mut out| {
+                out.disclosures.extend(pick_disclosures);
+                out
+            });
             // The bare sweep also re-syncs the BUILT-IN `topos` skill (force-synced to this
             // binary; the durable opt-out honored inside) — and it runs HERE, after the reconcile,
             // not before it. The reconcile refuses a run WHOLE when a manifest it would drive
@@ -2129,18 +2153,42 @@ pub(crate) fn resolve_web_origin(env_override: Option<String>) -> String {
 
 /// [`ops::agents::derive_pick_if_missing`] at `scope` with this invocation's ask, saying the
 /// `Using …` line on stderr when a pick was recorded this run (the receipt stays stdout's).
+///
+/// A scope with NO agent installed is the other thing this rule can find, and it is said rather
+/// than refused: the sentence rides stderr like every other pre-op diagnostic. Under `--json`,
+/// whose stdout is one document, it comes back as a coded line instead, for the caller to put on
+/// the envelope — a caller whose receipt carries no lines says it on stderr there too.
 fn derive_pick_and_say(
     ctx: &Ctx<'_>,
     scope: &crate::agents_pick::PickScope,
     json: bool,
     global: bool,
-) -> Result<(), ClientError> {
-    if let Some(agents) =
-        ops::agents::derive_pick_if_missing(ctx, scope, &ask_inputs(json, global))?
-    {
-        errln!("{}", render::using_line(&agents, scope));
+) -> Result<Vec<topos_types::Message>, ClientError> {
+    match ops::agents::derive_pick_if_missing(ctx, scope, &ask_inputs(json, global))? {
+        ops::agents::PickDerived::Stood => Ok(Vec::new()),
+        ops::agents::PickDerived::Recorded(agents) => {
+            errln!("{}", render::using_line(&agents, scope));
+            Ok(Vec::new())
+        }
+        ops::agents::PickDerived::NoneInstalled if json => {
+            Ok(vec![ops::agents::no_agent_installed_line()])
+        }
+        ops::agents::PickDerived::NoneInstalled => {
+            errln!("{}", ops::agents::NO_AGENT_INSTALLED);
+            Ok(Vec::new())
+        }
     }
-    Ok(())
+}
+
+/// The lines a pick receipt puts on the `--json` envelope: the reconcile's own, plus the
+/// disclosure a scope with no picked agent earns. The TTY receipt leads with that same sentence,
+/// so each surface says it exactly once.
+fn pick_lines(p: &topos_types::results::PickReceipt) -> Vec<topos_types::Message> {
+    let mut lines = p.warnings.clone();
+    if p.agents.is_empty() {
+        lines.push(ops::agents::no_agent_installed_line());
+    }
+    lines
 }
 
 /// The finisher for a verb that carries a [`topos_types::results::PickReceipt`] (`init`, `agents
