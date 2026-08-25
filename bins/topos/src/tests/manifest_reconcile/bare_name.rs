@@ -927,7 +927,7 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
         Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
         Ok(_) => panic!("no topos.toml covers this folder — the subscribe must refuse"),
     }
-    ops::init(&ctx, false, None).expect("the folder's manifest");
+    ops::create_manifest(&ctx, false, None).expect("the folder's manifest");
 
     // The composition root's own hand-off: the resolved reference goes through the ORDINARY
     // reference arm, so the row, the delivery, and the receipt shape are the spelled-out ones.

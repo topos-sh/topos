@@ -443,7 +443,7 @@ impl SessionInstall {
     ) -> Result<AddData, String> {
         self.with_ctx(cwd, |ctx| {
             if !global {
-                ops::init(ctx, false, None).map_err(err_str)?;
+                ops::create_manifest(ctx, false, None).map_err(err_str)?;
             }
             let connect = connect_session(self.fetch_cache_home());
             match ops::add_reference(
@@ -472,7 +472,7 @@ impl SessionInstall {
     /// manifest first, exactly as a person would.
     pub fn adopt_dir(&self, dir: &Path, cwd: Option<&Path>) -> Result<AddData, String> {
         self.with_ctx(cwd, |ctx| {
-            ops::init(ctx, false, None).map_err(err_str)?;
+            ops::create_manifest(ctx, false, None).map_err(err_str)?;
             let mut data = ops::add(ctx, dir).map_err(err_str)?;
             ops::note_added_path(ctx, &mut data, dir, false).map_err(err_str)?;
             Ok(data)

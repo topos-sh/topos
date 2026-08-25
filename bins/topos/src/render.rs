@@ -67,6 +67,12 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
                 .collect();
             serde_json::json!({ "copies": copies })
         }
+        // The pick that could not be asked for: the list to choose from, and the one command
+        // that records the choice.
+        ClientError::PickRequired { installed, global } => serde_json::json!({
+            "installed": installed,
+            "next": crate::error::pick_command(*global),
+        }),
         _ => serde_json::json!({}),
     };
     JsonEnvelope {
@@ -247,6 +253,18 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 retry_machine_wide(command, argv),
             ),
         ],
+        // No pick: the one way out is naming an agent, at the scope that asked.
+        ClientError::PickRequired { global, .. } => {
+            let mut argv: Vec<String> = vec!["topos".into(), "init".into()];
+            if *global {
+                argv.push("-g".into());
+            }
+            argv.extend(["-a".into(), "<agent>".into()]);
+            vec![crate::actions::next_action(
+                ActionCode::from("PICK_AGENTS".to_owned()),
+                argv,
+            )]
+        }
         // "upgrade topos" in prose is `topos self-update` structurally — but only when the format
         // is genuinely NEWER than this build. A format below the floor has no reader in any build,
         // so no runnable action is offered.
@@ -751,8 +769,13 @@ pub(crate) fn session_logout_tty(data: &topos_types::results::LogoutData) -> Str
     s
 }
 
-/// The `init` receipt — the manifest's path, whether it was created, and the honest travel note.
+/// The `init` receipt. With a pick applied it is the pick receipt alone (what topos now uses
+/// here and what landed for it); otherwise the manifest's path, whether it was created, and the
+/// honest travel note.
 pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
+    if let Some(pick) = &data.pick {
+        return pick_receipt_tty(pick);
+    }
     let mut out = if data.created {
         format!(
             "Created {} — record skills with `topos add`; `topos update` reconciles agents in \
@@ -766,6 +789,233 @@ pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
         out.push_str(&format!("\nNote: {note}."));
     }
     out
+}
+
+/// A list of names as a sentence spells it: `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// The scope words a pick receipt uses: `in this project` / `on this machine`.
+fn pick_where(scope: &str) -> &'static str {
+    if scope == "machine" {
+        "on this machine"
+    } else {
+        "in this project"
+    }
+}
+
+/// The one line a run that derived the pick says: `Using Claude Code and Codex in this project.`
+pub(crate) fn using_line(agents: &[String], scope: &crate::agents_pick::PickScope) -> String {
+    let scope = match scope {
+        crate::agents_pick::PickScope::Machine => "machine",
+        crate::agents_pick::PickScope::Project(_) => "project",
+    };
+    format!(
+        "Using {} {}.",
+        and_list(&crate::ops::agents::display_names(agents)),
+        pick_where(scope)
+    )
+}
+
+/// The pick receipt (`init -a`, `agents add`): what topos uses here, what landed for it, the
+/// hooks, the `.gitignore` word, and the installed agents it left alone.
+pub(crate) fn pick_receipt_tty(p: &topos_types::results::PickReceipt) -> String {
+    let mut s = format!(
+        "Using {} {}.",
+        and_list(&crate::ops::agents::display_names(&p.agents)),
+        pick_where(&p.scope)
+    );
+    let skills = (p.skills > 0).then(|| {
+        format!(
+            "{} to {}",
+            counted(p.skills, "skill"),
+            and_list(&p.skills_dirs)
+        )
+    });
+    let servers = (p.mcp_servers > 0).then(|| {
+        format!(
+            "{} to {}",
+            counted(p.mcp_servers, "MCP server"),
+            and_list(&p.mcp_files)
+        )
+    });
+    match (skills, servers) {
+        (Some(a), Some(b)) => s.push_str(&format!("\nInstalled {a}, {b}.")),
+        (Some(a), None) | (None, Some(a)) => s.push_str(&format!("\nInstalled {a}.")),
+        (None, None) => {}
+    }
+    if !p.hook_files.is_empty() {
+        let hooks: Vec<String> = p
+            .hook_files
+            .iter()
+            .map(|h| match &h.note {
+                Some(note) => format!("{} ({note})", h.file),
+                None => h.file.clone(),
+            })
+            .collect();
+        s.push_str(&format!("\nAuto-update hooks: {}.", hooks.join(", ")));
+    }
+    for note in &p.hook_notes {
+        s.push_str(&format!("\n{note}"));
+    }
+    if !p.gitignored.is_empty() {
+        s.push_str(&format!(
+            "\nAdded to .gitignore: {}.",
+            p.gitignored.join(", ")
+        ));
+    }
+    if let Some(hint) = &p.gitignore_hint {
+        s.push_str(&format!(
+            "\nNew files are not ignored by git. To keep them out: {hint}"
+        ));
+    }
+    if !p.untouched.is_empty() {
+        s.push_str(&format!(
+            "\nOther agents on this machine, untouched: {}.",
+            p.untouched.join(", ")
+        ));
+    }
+    s
+}
+
+/// `topos agents` on a terminal: the pick where you stand, what is installed on this machine,
+/// the two commands that change it, and (only where something is off) a picked agent's hook.
+pub(crate) fn agents_tty(d: &topos_types::results::AgentsData) -> String {
+    let flag = crate::error::scope_flag(d.scope == "machine");
+    let this = if d.scope == "machine" {
+        "This machine"
+    } else {
+        "This project"
+    };
+    let mut s = match (&d.pick_path, &d.source) {
+        (Some(path), Some(source)) => {
+            let from = if d.scope == "project" && source == "machine" {
+                format!("from {path}")
+            } else {
+                path.clone()
+            };
+            format!("{this} ({from}): {}", d.agents.join(", "))
+        }
+        _ => format!("{this}: no agents picked yet: topos init{flag} -a <agent>"),
+    };
+    if !d.installed.is_empty() {
+        s.push_str(&format!(
+            "\nInstalled on this machine: {}",
+            d.installed.join(", ")
+        ));
+    }
+    if d.pick_path.is_some() {
+        s.push_str(&format!(
+            "\nChange: topos agents add{flag} <agent> · topos agents remove{flag} <agent>"
+        ));
+    }
+    if !d.gitignored.is_empty() {
+        s.push_str(&format!(
+            "\nAdded to .gitignore: {}.",
+            d.gitignored.join(", ")
+        ));
+    }
+    for h in &d.hooks {
+        match h.armed {
+            Some(false) => s.push_str(&format!(
+                "\n{}: auto-update hook not registered: topos agents add{flag} {}",
+                h.agent, h.agent
+            )),
+            None => {
+                if let Some(note) = &h.note {
+                    s.push_str(&format!("\n{note}"));
+                }
+            }
+            Some(true) => {}
+        }
+    }
+    s
+}
+
+/// The lines an `agents remove` describe and receipt share: what leaves, one per line.
+fn agents_loss_lines(d: &topos_types::results::AgentsChanged) -> Vec<String> {
+    let mut lines: Vec<String> = d.removed_dirs.clone();
+    lines.extend(
+        d.removed_files
+            .iter()
+            .map(|f| format!("the MCP entries in {f}")),
+    );
+    lines.extend(
+        d.hooks
+            .iter()
+            .map(|h| format!("{h} (the auto-update hook entry)")),
+    );
+    lines
+}
+
+/// `agents remove` without `--yes`: the loss first, then the way to apply.
+pub(crate) fn agents_remove_describe_tty(d: &topos_types::results::AgentsChanged) -> String {
+    let flag = crate::error::scope_flag(d.scope == "machine");
+    let mut s = format!(
+        "This removes {} from {}. It deletes:",
+        d.removed.join(", "),
+        pick_where(&d.scope)
+            .trim_start_matches("on ")
+            .trim_start_matches("in ")
+    );
+    for line in agents_loss_lines(d) {
+        s.push_str(&format!("\n  {line}"));
+    }
+    if !d.untouched.is_empty() {
+        s.push_str(&format!(
+            "\nKept, another picked agent reads it: {}.",
+            d.untouched.join(", ")
+        ));
+    }
+    s.push_str(&format!(
+        "\nRe-run with --yes: topos agents remove{flag} {} --yes",
+        d.removed.join(" ")
+    ));
+    s
+}
+
+/// `agents remove --yes`: what left, what stayed, and the pick that stands now.
+pub(crate) fn agents_remove_applied_tty(d: &topos_types::results::AgentsChanged) -> String {
+    let where_ = pick_where(&d.scope)
+        .trim_start_matches("on ")
+        .trim_start_matches("in ");
+    let lines = agents_loss_lines(d);
+    let mut s = if lines.is_empty() {
+        format!(
+            "Removed {} from {}. Nothing topos wrote for it was here.",
+            d.removed.join(", "),
+            where_
+        )
+    } else {
+        format!("Removed {} from {}. Deleted:", d.removed.join(", "), where_)
+    };
+    for line in lines {
+        s.push_str(&format!("\n  {line}"));
+    }
+    if !d.untouched.is_empty() {
+        s.push_str(&format!(
+            "\nKept, another picked agent reads it: {}.",
+            d.untouched.join(", ")
+        ));
+    }
+    if !d.kept.is_empty() {
+        s.push_str(&format!("\nKept, edited by you: {}.", d.kept.join(", ")));
+    }
+    if d.agents.is_empty() {
+        s.push_str(&format!("\nNo agents picked for {where_} now."));
+    } else {
+        s.push_str(&format!(
+            "\nAgents {}: {}",
+            pick_where(&d.scope),
+            d.agents.join(", ")
+        ));
+    }
+    s
 }
 
 /// The FIRST line of every add receipt: what was added, and which of the two files now asks for
@@ -2532,6 +2782,10 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             }
         }
     }
+    // The agents this panel's scope picks — the lead every row below is about. No pick yet is
+    // said with the one command that records one; a machine that predates the pick shows what
+    // its registered hooks say, marked as such.
+    s.push_str(&format!("\n{}", agents_lead(d)));
     // The scope bodies: the governing file leads, then the regimes (machine scope), the notes
     // verbatim, and the attention counts — nothing pending is said out loud.
     for scope in &d.scopes {
@@ -2611,6 +2865,34 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
         }
     }
     s
+}
+
+/// The status panel's agents line: `Agents (this project, .topos/agents.json): a, b`.
+fn agents_lead(d: &topos_types::results::StatusData) -> String {
+    let in_project = d.scopes.iter().any(|s| s.scope == "project");
+    let this = if in_project {
+        "this project"
+    } else {
+        "this machine"
+    };
+    match (d.agents_source.as_deref(), d.agents_path.as_deref()) {
+        (Some("legacy"), _) => format!(
+            "Agents ({this}): {} (from registered hooks; the next update records this)",
+            d.agents.join(", ")
+        ),
+        (Some(source), Some(path)) => {
+            let from = if in_project && source == "machine" {
+                format!("from {path}")
+            } else {
+                path.to_owned()
+            };
+            format!("Agents ({this}, {from}): {}", d.agents.join(", "))
+        }
+        _ => format!(
+            "Agents ({this}): no agents picked yet: topos init{} -a <agent>",
+            crate::error::scope_flag(!in_project)
+        ),
+    }
 }
 
 /// A duration ago, in the coarsest honest unit: "just now" under a minute, then minutes, hours,
@@ -5113,6 +5395,24 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
     if let ClientError::AmbiguousSource { .. } | ClientError::AlreadyAdded { .. } = err {
         return safe_message(err);
     }
+    // The pick that could not be asked for is the same case: the list IS the answer, and the
+    // command under it records the choice. Three lines a person reads top to bottom.
+    if let ClientError::PickRequired { installed, global } = err {
+        let list = if installed.is_empty() {
+            "No agent topos knows is installed on this machine.".to_owned()
+        } else {
+            format!("Installed on this machine: {}", installed.join(", "))
+        };
+        return format!(
+            "No agents picked yet {}.\n{list}\nPick with: {}",
+            if *global {
+                "on this machine"
+            } else {
+                "in this project"
+            },
+            crate::error::pick_command(*global)
+        );
+    }
     // A manifest refusal (any grammar fault in a user-authored file) closes with the one line
     // that says the load stopped BEFORE anything moved — the file was only read (the `--json`
     // envelope is untouched: its `message` stays the single-sentence teaching). A refused
@@ -5228,7 +5528,10 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
     }
     if matches!(
         err,
-        ClientError::PlacementsDiverged { .. } | ClientError::PublishBehind { .. }
+        ClientError::PlacementsDiverged { .. }
+            | ClientError::PublishBehind { .. }
+            // The pick answer already ends in its one command.
+            | ClientError::PickRequired { .. }
     ) {
         return None;
     }
@@ -9852,6 +10155,137 @@ mod tests {
         );
     }
 
+    /// The two receipts the spec spells byte for byte: `init -a claude-code -a codex` and
+    /// `topos agents`, over the shapes the verbs produce for them.
+    #[test]
+    fn the_pick_receipt_and_the_agents_list_are_the_spec_copy() {
+        use super::{agents_tty, init_tty, pick_receipt_tty};
+        use topos_types::results::{AgentsData, PickHook, PickReceipt, StatusTrigger};
+        let receipt = PickReceipt {
+            scope: "project".to_owned(),
+            agents: vec!["claude-code".to_owned(), "codex".to_owned()],
+            pick_path: ".topos/agents.json".to_owned(),
+            skills: 4,
+            skills_dirs: vec![".claude/skills".to_owned(), ".agents/skills".to_owned()],
+            mcp_servers: 1,
+            mcp_files: vec![".mcp.json".to_owned(), ".codex/config.toml".to_owned()],
+            hook_files: vec![
+                PickHook {
+                    agent: "claude-code".to_owned(),
+                    file: ".claude/settings.local.json".to_owned(),
+                    note: None,
+                },
+                PickHook {
+                    agent: "codex".to_owned(),
+                    file: ".codex/hooks.json".to_owned(),
+                    note: Some("Codex runs it once you trust this repo".to_owned()),
+                },
+            ],
+            hook_notes: Vec::new(),
+            untouched: vec!["cursor".to_owned()],
+            gitignore_hint: Some("topos init --gitignore".to_owned()),
+            gitignored: Vec::new(),
+        };
+        assert_eq!(
+            pick_receipt_tty(&receipt),
+            "Using Claude Code and Codex in this project.\n\
+             Installed 4 skills to .claude/skills and .agents/skills, 1 MCP server to .mcp.json \
+             and .codex/config.toml.\n\
+             Auto-update hooks: .claude/settings.local.json, .codex/hooks.json (Codex runs it \
+             once you trust this repo).\n\
+             New files are not ignored by git. To keep them out: topos init --gitignore\n\
+             Other agents on this machine, untouched: cursor."
+        );
+        // The same receipt rides `init` whole: the file line is not printed over it.
+        let init = topos_types::results::InitData {
+            manifest: "/repo/topos.toml".to_owned(),
+            created: true,
+            note: None,
+            pick: Some(receipt.clone()),
+        };
+        assert_eq!(init_tty(&init), pick_receipt_tty(&receipt));
+        // A machine pick with nothing landed yet, one agent with no hook at this scope, and
+        // the folders just ignored: every optional line earns its place.
+        let bare = PickReceipt {
+            scope: "machine".to_owned(),
+            agents: vec!["gemini-cli".to_owned()],
+            pick_path: "~/.topos/agents.json".to_owned(),
+            skills: 0,
+            skills_dirs: Vec::new(),
+            mcp_servers: 0,
+            mcp_files: Vec::new(),
+            hook_files: Vec::new(),
+            hook_notes: vec![
+                "no per-project auto-update for gemini-cli; `topos update`, or pick gemini-cli \
+                 with -g"
+                    .to_owned(),
+            ],
+            untouched: Vec::new(),
+            gitignore_hint: None,
+            gitignored: vec![".gemini/".to_owned()],
+        };
+        assert_eq!(
+            pick_receipt_tty(&bare),
+            "Using Gemini CLI on this machine.\n\
+             no per-project auto-update for gemini-cli; `topos update`, or pick gemini-cli \
+             with -g\n\
+             Added to .gitignore: .gemini/."
+        );
+
+        let registered = |agent: &str| StatusTrigger {
+            agent: agent.to_owned(),
+            armed: Some(true),
+            note: None,
+            last_run_age_ms: None,
+        };
+        let mut agents = AgentsData {
+            scope: "project".to_owned(),
+            pick_path: Some(".topos/agents.json".to_owned()),
+            source: Some("project".to_owned()),
+            agents: vec!["claude-code".to_owned(), "codex".to_owned()],
+            installed: vec![
+                "claude-code".to_owned(),
+                "codex".to_owned(),
+                "cursor".to_owned(),
+                "gemini-cli".to_owned(),
+            ],
+            hooks: vec![registered("claude-code"), registered("codex")],
+            gitignored: Vec::new(),
+        };
+        assert_eq!(
+            agents_tty(&agents),
+            "This project (.topos/agents.json): claude-code, codex\n\
+             Installed on this machine: claude-code, codex, cursor, gemini-cli\n\
+             Change: topos agents add <agent> · topos agents remove <agent>"
+        );
+        // A hook that is not registered earns its line; an inherited pick names its file.
+        agents.hooks[1].armed = Some(false);
+        agents.source = Some("machine".to_owned());
+        agents.pick_path = Some("~/.topos/agents.json".to_owned());
+        assert_eq!(
+            agents_tty(&agents),
+            "This project (from ~/.topos/agents.json): claude-code, codex\n\
+             Installed on this machine: claude-code, codex, cursor, gemini-cli\n\
+             Change: topos agents add <agent> · topos agents remove <agent>\n\
+             codex: auto-update hook not registered: topos agents add codex"
+        );
+        // The machine scope, with no pick: the one command.
+        let none = AgentsData {
+            scope: "machine".to_owned(),
+            pick_path: None,
+            source: None,
+            agents: Vec::new(),
+            installed: vec!["cursor".to_owned()],
+            hooks: Vec::new(),
+            gitignored: Vec::new(),
+        };
+        assert_eq!(
+            agents_tty(&none),
+            "This machine: no agents picked yet: topos init -g -a <agent>\n\
+             Installed on this machine: cursor"
+        );
+    }
+
     #[test]
     fn status_tty_renders_both_connection_faces() {
         use topos_types::results::{
@@ -9920,6 +10354,9 @@ mod tests {
                 },
             ],
             forge: Vec::new(),
+            agents: Vec::new(),
+            agents_source: None,
+            agents_path: None,
         };
         let text = status_tty(&connected);
         assert!(text.contains("topos 0.1.0"), "{text}");

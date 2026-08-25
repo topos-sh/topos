@@ -570,7 +570,6 @@ impl<'a> ScopeEntries<'a> {
     }
 
     /// Every row, as `(index key, bundle id, row)`.
-    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &String, &EntryPlacement)> {
         self.rows.iter().map(|(k, (b, e))| (k, b, e))
     }

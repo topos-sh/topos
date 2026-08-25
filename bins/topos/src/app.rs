@@ -367,6 +367,12 @@ fn run_command(
                     now_ms: i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX),
                 },
             );
+            // The pick the panel leads with — the same scope the rows were probed at. `status`
+            // never seeds, so a machine that predates the pick shows its legacy record as such.
+            let pick = ops::agents::status_pick(&ctx, project.as_deref());
+            data.agents = pick.agents;
+            data.agents_source = pick.source;
+            data.agents_path = pick.path;
             data
         });
         return finish_status(json, cmd_name, result, bare, argv);
@@ -432,7 +438,10 @@ fn run_command(
         Command::Add { .. }
         | Command::Update { .. }
         | Command::Publish { .. }
-        | Command::Revert { .. } => match identity::load_or_create_device_id(&fs, &layout) {
+        | Command::Revert { .. }
+        // `init -a` and `agents add` drive a scope reconcile of their own.
+        | Command::Init { .. }
+        | Command::Agents { .. } => match identity::load_or_create_device_id(&fs, &layout) {
             Ok(d) => d,
             Err(e) => return emit_err(json, cmd_name, &e, &diag),
         },
@@ -530,15 +539,65 @@ fn run_command(
         Command::Status { .. } => unreachable!("status dispatches before state recovery"),
         // Dispatched at the top of this function — a protocol stream starts before any of this.
         Command::Relay { .. } => unreachable!("relay dispatches before every other surface"),
-        // `init` — create this folder's `topos.toml`, or (with `-g`) materialize the global
-        // manifest (idempotent; a no-op receipt when the file exists).
-        Command::Init { global, workspace } => finish(
-            json,
-            cmd_name,
-            ops::init(&ctx, global, workspace.as_deref()),
-            render::init_tty,
-            &diag,
-        ),
+        // `init [-a <agent>]... [--gitignore]` — create this folder's `topos.toml`, or (with
+        // `-g`) materialize the global manifest (idempotent; the file half is a no-op when it
+        // exists), then pick the agents and land everything for them. The ask reads the three
+        // facts only the composition root holds: stdin's terminal-ness, the agent announcing
+        // itself in the environment, and `--json`.
+        Command::Init {
+            global,
+            workspace,
+            agent,
+            gitignore,
+        } => {
+            let git = crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress));
+            let result = ops::init(
+                &ctx,
+                &connect_session_transports,
+                Some(&git as &dyn crate::git_source::GitTarballSource),
+                &ops::InitRequest {
+                    global,
+                    workspace: workspace.as_deref(),
+                    agents: &agent,
+                    gitignore,
+                    ask: ask_inputs(json, global),
+                },
+            );
+            finish(json, cmd_name, result, render::init_tty, &diag)
+        }
+        // `agents [add|remove] [-g] [--gitignore]` — the pick where you stand.
+        Command::Agents {
+            cmd,
+            global,
+            gitignore,
+        } => match cmd {
+            None => finish(
+                json,
+                cmd_name,
+                ops::agents::list(&ctx, global, gitignore),
+                render::agents_tty,
+                &diag,
+            ),
+            Some(crate::cli::AgentsCmd::Add { agent }) => {
+                let git =
+                    crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress));
+                let result = ops::agents::add(
+                    &ctx,
+                    &connect_session_transports,
+                    Some(&git as &dyn crate::git_source::GitTarballSource),
+                    global,
+                    &agent,
+                    gitignore,
+                );
+                finish(json, cmd_name, result, render::pick_receipt_tty, &diag)
+            }
+            Some(crate::cli::AgentsCmd::Remove { agent, yes }) => finish_agents_remove(
+                json,
+                cmd_name,
+                ops::agents::remove(&ctx, global, &agent, yes),
+                &diag,
+            ),
+        },
         // `fmt [-g]` — rewrite the target manifest into the normal form (atomic write on change).
         Command::Fmt { global } => finish(
             json,
@@ -1632,6 +1691,38 @@ fn run_command(
                 .eq(&1)
                 .then(|| targets[0].clone())
                 .filter(|t| t.split_once('@').is_some_and(|(_, r)| !r.is_empty()));
+            // THE PICK, before the reconcile drives a scope with none: one installed agent is
+            // recorded as the pick (and said), several are asked for — piped or `--json`, the
+            // answer is exit 2 naming `topos init -a`; the quiet hook sweep asks nothing and
+            // places nothing for a scope it cannot pick for. Recorded at the driven scope, then
+            // read back by the reconcile like any pick.
+            if !(keep_mine || goback_target.is_some()) {
+                let project = ops::agent_hooks::cwd_project(&ctx);
+                let driven: Vec<crate::agents_pick::PickScope> = match (quiet, global, project) {
+                    (true, _, Some(dir)) => vec![
+                        crate::agents_pick::PickScope::Machine,
+                        crate::agents_pick::PickScope::Project(dir),
+                    ],
+                    (false, false, Some(dir)) => {
+                        vec![crate::agents_pick::PickScope::Project(dir)]
+                    }
+                    _ => vec![crate::agents_pick::PickScope::Machine],
+                };
+                for scope in driven {
+                    match ops::agents::derive_pick_if_missing(
+                        &ctx,
+                        &scope,
+                        &ask_inputs(json, global),
+                        quiet,
+                    ) {
+                        Ok(Some(agents)) if !quiet => {
+                            errln!("{}", render::using_line(&agents, &scope));
+                        }
+                        Ok(_) => {}
+                        Err(e) => return emit_err(json, cmd_name, &e, &diag),
+                    }
+                }
+            }
             let result = if keep_mine || goback_target.is_some() {
                 if targets.len() > 1 {
                     Err(ClientError::InvalidArgument(
@@ -1972,6 +2063,52 @@ pub(crate) fn resolve_web_origin(env_override: Option<String>) -> String {
     match env_override {
         Some(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_owned(),
         _ => DEFAULT_WEB_ORIGIN.to_owned(),
+    }
+}
+
+/// The three facts the agents ask decides on, read where only the composition root can: whether
+/// stdin is a terminal a prompt can be read from, whether Claude Code announced itself in the
+/// environment, and whether `--json` holds stdout to one document.
+fn ask_inputs(json: bool, global: bool) -> ops::agents_ask::AskInputs {
+    use std::io::IsTerminal;
+    ops::agents_ask::AskInputs {
+        stdin_tty: std::io::stdin().is_terminal(),
+        in_claude_code: std::env::var_os("CLAUDECODE").is_some(),
+        json,
+        global,
+    }
+}
+
+/// `agents remove`'s finisher — the loss-led describe / the applied receipt, the same two-phase
+/// envelope shape every gated removal answers with.
+fn finish_agents_remove(
+    json: bool,
+    command: &str,
+    result: Result<ops::agents::AgentsOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::agents::AgentsOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                outln!("{}", render::to_json(&envelope));
+            } else {
+                outln!("{}", render::agents_remove_describe_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::agents::AgentsOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                outln!("{}", render::agents_remove_applied_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 
@@ -3614,7 +3751,9 @@ impl Diag<'_> {
 }
 
 fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> ExitCode {
-    let logged = diag.note(command, err);
+    // A pick that could not be asked for is an answer, not a fault: nothing to log, no
+    // `details:` pointer under it.
+    let logged = !matches!(err, ClientError::PickRequired { .. }) && diag.note(command, err);
     if json {
         outln!(
             "{}",
@@ -3633,6 +3772,11 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
         if logged {
             errln!("details: {}", diag.log_path.display());
         }
+    }
+    // A pick that could not be asked for is a usage-shaped answer, like clap's own: exit 2, so
+    // a script tells "name an agent" apart from a failure.
+    if let ClientError::PickRequired { .. } = err {
+        return ExitCode::from(2);
     }
     ExitCode::FAILURE
 }

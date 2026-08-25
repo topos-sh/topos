@@ -38,10 +38,6 @@ pub(crate) fn absence_note(agent: &str) -> String {
 /// Install the hook of every picked agent at `scope`. Best-effort per agent: a degraded row is
 /// reported, never an aborted round. Returns the rows this run attempted, and the picked agents
 /// that have no hook at this scope.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by init -a and the agents verbs")
-)]
 pub(crate) fn install_for<'s>(
     home: &Path,
     scope: &TriggerScope,
@@ -62,7 +58,6 @@ pub(crate) fn install_for<'s>(
 
 /// Remove the hook of every named agent at `scope` — what `agents remove` runs for the agents
 /// leaving the pick. Surgical and idempotent per adapter (a foreign artifact is never touched).
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by the agents verbs"))]
 pub(crate) fn remove_for<'s>(
     home: &Path,
     scope: &TriggerScope,

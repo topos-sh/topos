@@ -71,7 +71,6 @@ impl AgentsPick {
     }
 
     /// The wildcard pick: every agent installed on this machine.
-    #[cfg_attr(not(test), expect(dead_code, reason = "built by init -a '*'"))]
     pub(crate) fn everything() -> Self {
         Self::new(vec![WILDCARD.to_owned()])
     }
@@ -87,10 +86,6 @@ impl AgentsPick {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PickScope {
     Machine,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "named by init -a and the agents verbs")
-    )]
     Project(PathBuf),
 }
 
@@ -339,6 +334,25 @@ pub(crate) fn seed_from_legacy(fs: &dyn FsOps, layout: &Layout) -> Option<Vec<St
         let _ = fs.remove_file(&record);
     }
     Some(agents)
+}
+
+/// The agents the legacy trigger record marks `registered` — what `status` shows on a machine
+/// that predates the pick (it never seeds: the read-only promise), until the first verb that
+/// composes the full context records them as the pick. Empty with no record.
+pub(crate) fn legacy_registered(fs: &dyn FsOps, layout: &Layout) -> Vec<String> {
+    fs.read_opt(&layout.trigger_registration_path())
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<LegacyRegistrations>(&bytes).ok())
+        .map(|doc| {
+            doc.agents
+                .into_iter()
+                .filter(|(_, row)| row.registered)
+                .map(|(slug, _)| slug)
+                .filter(|slug| slug != WILDCARD && validate(std::slice::from_ref(slug)).is_ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Every agent holding an MCP entry in this store's custody: each keyed bundle's rows read where

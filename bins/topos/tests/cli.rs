@@ -1691,3 +1691,911 @@ fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// =================================================================================================
+// The agents pick: `init -a`, `agents`, the ask, and the scopes with no pick.
+// =================================================================================================
+
+/// A hermetic machine for the pick tests: a `$HOME` holding exactly the agents `installed` names
+/// (their detect dirs, empty), topos's own store at `$HOME/.topos`, and one git checkout beside
+/// it. Every run stands in the checkout unless told otherwise.
+struct PickRig {
+    root: PathBuf,
+    home: PathBuf,
+    project: PathBuf,
+}
+
+fn detect_dir(slug: &str) -> &'static str {
+    match slug {
+        "claude-code" => ".claude",
+        "codex" => ".codex",
+        "cursor" => ".cursor",
+        "gemini-cli" => ".gemini",
+        "opencode" => ".config/opencode",
+        other => panic!("no detect dir known for {other}"),
+    }
+}
+
+fn pick_rig(tag: &str, installed: &[&str]) -> PickRig {
+    let root = scratch(tag);
+    let home = root.join("home");
+    for slug in installed {
+        std::fs::create_dir_all(home.join(detect_dir(slug))).unwrap();
+    }
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    PickRig {
+        root,
+        home,
+        project,
+    }
+}
+
+impl PickRig {
+    fn topos_home(&self) -> PathBuf {
+        self.home.join(".topos")
+    }
+
+    /// Run `topos` in `cwd` over this machine: `$HOME` is the rig's, `$TOPOS_HOME` its store,
+    /// every per-harness override scrubbed, stdin closed (never a terminal).
+    fn run_at(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+        let mut cmd = Command::new(bin());
+        cmd.env("TOPOS_HOME", self.topos_home())
+            .env("HOME", &self.home)
+            .env("CLAUDE_CONFIG_DIR", self.home.join(".claude"))
+            .env("TOPOS_NO_UPDATE_CHECK", "1")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("CODEX_HOME")
+            .env_remove("HERMES_HOME")
+            .env_remove("VIBE_HOME")
+            .env_remove("AUTOHAND_HOME")
+            .env_remove("APPDATA")
+            .env_remove("FLATPAK_XDG_CONFIG_HOME")
+            .env_remove("CLAUDECODE")
+            .env_remove("TOPOS_DEBUG")
+            .stdin(std::process::Stdio::null())
+            .current_dir(cwd)
+            .args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("spawn topos")
+    }
+
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        self.run_at(&self.project, args, &[])
+    }
+
+    fn stdout(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert!(
+            out.status.success(),
+            "{args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn json(&self, args: &[&str]) -> (std::process::ExitStatus, serde_json::Value) {
+        let out = self.run(args);
+        let value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            panic!(
+                "non-JSON stdout for {args:?}: {}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        });
+        (out.status, value)
+    }
+
+    fn project_pick(&self) -> Option<serde_json::Value> {
+        std::fs::read(self.project.join(".topos").join("agents.json"))
+            .ok()
+            .map(|b| serde_json::from_slice(&b).unwrap())
+    }
+
+    fn machine_pick(&self) -> Option<serde_json::Value> {
+        std::fs::read(self.topos_home().join("agents.json"))
+            .ok()
+            .map(|b| serde_json::from_slice(&b).unwrap())
+    }
+
+    fn write_machine_pick(&self, agents: &[&str]) {
+        std::fs::create_dir_all(self.topos_home()).unwrap();
+        std::fs::write(
+            self.topos_home().join("agents.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({"schema_version": 1, "agents": agents}))
+                .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_project_pick(&self, agents: &[&str]) {
+        std::fs::create_dir_all(self.project.join(".topos")).unwrap();
+        std::fs::write(
+            self.project.join(".topos").join("agents.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({"schema_version": 1, "agents": agents}))
+                .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A project manifest with no rows (the template `init` writes), by hand.
+    fn write_manifest(&self, body: &str) {
+        std::fs::write(self.project.join("topos.toml"), body).unwrap();
+    }
+
+    /// Every file under `dir`, relative and sorted, minus anything under a `skip` prefix.
+    fn files_under(dir: &Path, skip: &[&str]) -> Vec<String> {
+        fn walk(base: &Path, d: &Path, skip: &[&str], out: &mut Vec<String>) {
+            let Ok(rd) = std::fs::read_dir(d) else { return };
+            for entry in rd {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if skip
+                    .iter()
+                    .any(|s| rel == *s || rel.starts_with(&format!("{s}/")))
+                {
+                    continue;
+                }
+                if entry.file_type().unwrap().is_dir() {
+                    walk(base, &path, skip, out);
+                } else {
+                    out.push(rel);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, skip, &mut out);
+        out.sort();
+        out
+    }
+}
+
+fn agents_of(pick: &serde_json::Value) -> Vec<String> {
+    pick["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The spec's file set, exactly: `init -a claude-code -a codex` in a fresh checkout on a machine
+/// with cursor installed too writes the manifest, the pick, the two picked agents' skills
+/// folders (the built-in bundle, same bytes in both), their two project hooks, and NOTHING else —
+/// nothing for cursor in the checkout, nothing under any agent dir in the home.
+#[test]
+fn init_with_agents_writes_exactly_the_spec_file_set() {
+    let rig = pick_rig("init-spec", &["claude-code", "codex", "cursor"]);
+    let home_before = PickRig::files_under(&rig.home, &[".topos"]);
+    assert!(home_before.is_empty(), "the agent dirs start empty");
+
+    let receipt = rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    assert_eq!(
+        receipt,
+        "Using Claude Code and Codex in this project.\n\
+         Installed 1 skill to .claude/skills and .agents/skills.\n\
+         Auto-update hooks: .claude/settings.local.json, .codex/hooks.json (Codex runs it once \
+         you trust this repo).\n\
+         New files are not ignored by git. To keep them out: topos init --gitignore\n\
+         Other agents on this machine, untouched: cursor.\n"
+    );
+
+    // The checkout, minus topos's own store and git: exactly the spec table's files.
+    let files = PickRig::files_under(&rig.project, &[".topos/state", ".git"]);
+    let claude_copy: Vec<String> = files
+        .iter()
+        .filter(|f| f.starts_with(".claude/skills/topos/"))
+        .map(|f| f.trim_start_matches(".claude/skills/topos/").to_owned())
+        .collect();
+    let codex_copy: Vec<String> = files
+        .iter()
+        .filter(|f| f.starts_with(".agents/skills/topos/"))
+        .map(|f| f.trim_start_matches(".agents/skills/topos/").to_owned())
+        .collect();
+    assert!(
+        claude_copy.contains(&"SKILL.md".to_owned()),
+        "the built-in landed: {files:?}"
+    );
+    assert_eq!(claude_copy, codex_copy, "the same bytes into every folder");
+    let rest: Vec<&String> = files
+        .iter()
+        .filter(|f| {
+            !f.starts_with(".claude/skills/topos/") && !f.starts_with(".agents/skills/topos/")
+        })
+        .collect();
+    assert_eq!(
+        rest,
+        [
+            ".claude/settings.local.json",
+            ".codex/hooks.json",
+            ".topos/.gitignore",
+            ".topos/agents.json",
+            "topos.toml",
+        ],
+        "{files:?}"
+    );
+    assert!(
+        !rig.project.join(".cursor").exists(),
+        "an unpicked agent gets no folder"
+    );
+    assert!(
+        !rig.project.join(".gitignore").exists(),
+        "never edited unasked"
+    );
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "codex"]
+    );
+    assert!(
+        rig.machine_pick().is_none(),
+        "a project pick writes no machine pick"
+    );
+    // Nothing under any agent dir in the home (the pick is the project's).
+    assert!(
+        PickRig::files_under(&rig.home, &[".topos"]).is_empty(),
+        "{:?}",
+        PickRig::files_under(&rig.home, &[".topos"])
+    );
+    // Idempotent: the same receipt, the same files.
+    let again = rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    assert_eq!(again, receipt);
+    assert_eq!(
+        PickRig::files_under(&rig.project, &[".topos/state", ".git"]),
+        files
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn init_on_an_existing_manifest_only_adds_the_pick() {
+    let rig = pick_rig("init-existing", &["claude-code", "cursor"]);
+    let manifest = "# a teammate's file\nschema = 1\n";
+    rig.write_manifest(manifest);
+    let (status, v) = rig.json(&["--json", "init", "-a", "claude-code"]);
+    assert!(status.success(), "{v}");
+    assert_eq!(v["command"], "init");
+    assert_eq!(v["data"]["created"], false, "{v}");
+    assert_eq!(
+        v["data"]["pick"]["agents"],
+        serde_json::json!(["claude-code"])
+    );
+    assert_eq!(v["data"]["pick"]["scope"], "project");
+    assert_eq!(
+        v["data"]["pick"]["untouched"],
+        serde_json::json!(["cursor"])
+    );
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join("topos.toml")).unwrap(),
+        manifest,
+        "the file stays byte-identical"
+    );
+    assert_eq!(agents_of(&rig.project_pick().unwrap()), ["claude-code"]);
+    assert!(rig.project.join(".claude/skills/topos/SKILL.md").exists());
+    assert!(rig.project.join(".claude/settings.local.json").exists());
+    assert!(!rig.project.join(".cursor").exists());
+    // A second agent JOINS the pick on a file of its own.
+    let (status, v) = rig.json(&["--json", "init", "-a", "cursor"]);
+    assert!(status.success(), "{v}");
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "cursor"]
+    );
+    assert!(rig.project.join(".cursor/skills/topos/SKILL.md").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn agents_lists_the_pick_and_the_installed_agents() {
+    let rig = pick_rig(
+        "agents-list",
+        &["claude-code", "codex", "cursor", "gemini-cli"],
+    );
+    rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    assert_eq!(
+        rig.stdout(&["agents"]),
+        "This project (.topos/agents.json): claude-code, codex\n\
+         Installed on this machine: claude-code, codex, cursor, gemini-cli\n\
+         Change: topos agents add <agent> · topos agents remove <agent>\n"
+    );
+    let (status, v) = rig.json(&["--json", "agents"]);
+    assert!(status.success());
+    assert_eq!(v["command"], "agents");
+    assert_eq!(v["data"]["scope"], "project");
+    assert_eq!(v["data"]["source"], "project");
+    assert_eq!(v["data"]["pick_path"], ".topos/agents.json");
+    assert_eq!(
+        v["data"]["agents"],
+        serde_json::json!(["claude-code", "codex"])
+    );
+    assert_eq!(
+        v["data"]["installed"],
+        serde_json::json!(["claude-code", "codex", "cursor", "gemini-cli"])
+    );
+    let hooks: Vec<(&str, bool)> = v["data"]["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| (h["agent"].as_str().unwrap(), h["armed"] == true))
+        .collect();
+    assert_eq!(hooks, [("claude-code", true), ("codex", true)], "{v}");
+    // Outside any project: the machine pick, or the one line saying there is none.
+    let out = rig.run_at(&rig.home, &["agents"], &[]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "This machine: no agents picked yet: topos init -g -a <agent>\n\
+         Installed on this machine: claude-code, codex, cursor, gemini-cli\n"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn agents_add_extends_and_installs() {
+    let rig = pick_rig("agents-add", &["claude-code", "codex", "cursor"]);
+    rig.stdout(&["init", "-a", "claude-code"]);
+    let receipt = rig.stdout(&["agents", "add", "cursor"]);
+    assert!(
+        receipt.starts_with("Using Claude Code and Cursor in this project.\n"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("Auto-update hooks: .claude/settings.local.json, .cursor/hooks.json"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("To keep them out: topos agents --gitignore"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.ends_with("Other agents on this machine, untouched: codex.\n"),
+        "{receipt}"
+    );
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "cursor"]
+    );
+    assert!(rig.project.join(".cursor/skills/topos/SKILL.md").exists());
+    let hooks: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(rig.project.join(".cursor/hooks.json")).unwrap())
+            .unwrap();
+    assert_eq!(hooks["version"], 1, "{hooks}");
+    assert!(!rig.project.join(".codex").exists());
+    // Outside a project, `add` without `-g` has no file to edit.
+    let (status, v) = {
+        let out = rig.run_at(&rig.home, &["--json", "agents", "add", "codex"], &[]);
+        (
+            out.status,
+            serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+        )
+    };
+    assert!(!status.success());
+    assert_eq!(v["error"]["code"], "NO_MANIFEST", "{v}");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// A project with one MCP server row, picked for claude-code and codex.
+fn mcp_project(rig: &PickRig) {
+    let server = rig.project.join("weather");
+    std::fs::create_dir_all(&server).unwrap();
+    std::fs::write(
+        server.join("server.json"),
+        r#"{"name":"io.github.acme/weather","description":"Conditions for a named place.",
+        "version":"1.4.0","remotes":[{"type":"streamable-http",
+        "url":"https://weather.acme.example/mcp"}]}"#,
+    )
+    .unwrap();
+    rig.write_manifest("schema = 1\n\n[mcp]\nweather = { path = \"./weather\", kind = \"mcp\" }\n");
+}
+
+#[test]
+fn agents_remove_without_yes_describes_the_loss() {
+    let rig = pick_rig("agents-remove-describe", &["claude-code", "codex"]);
+    mcp_project(&rig);
+    let receipt = rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    assert!(
+        receipt.contains("1 MCP server to .mcp.json"),
+        "the server landed for the picked agents: {receipt}"
+    );
+    let before = PickRig::files_under(&rig.project, &[".git"]);
+
+    let describe = rig.stdout(&["agents", "remove", "codex"]);
+    assert!(
+        describe.starts_with(
+            "This removes codex from this project. It deletes:\n  .agents/skills/topos\n"
+        ),
+        "{describe}"
+    );
+    assert!(
+        describe.contains("  .codex/hooks.json (the auto-update hook entry)\n"),
+        "{describe}"
+    );
+    assert!(
+        describe.ends_with("Re-run with --yes: topos agents remove codex --yes\n"),
+        "{describe}"
+    );
+    assert_eq!(
+        PickRig::files_under(&rig.project, &[".git"]),
+        before,
+        "a describe changes nothing"
+    );
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "codex"]
+    );
+    let (status, v) = rig.json(&["--json", "agents", "remove", "codex"]);
+    assert!(status.success(), "{v}");
+    assert_eq!(v["data"]["describe"]["applied"], false, "{v}");
+    assert_eq!(
+        v["data"]["describe"]["removed"],
+        serde_json::json!(["codex"])
+    );
+    assert_eq!(
+        v["data"]["describe"]["agents"],
+        serde_json::json!(["claude-code"])
+    );
+    assert_eq!(
+        v["data"]["describe"]["removed_dirs"],
+        serde_json::json!([".agents/skills/topos"])
+    );
+    assert_eq!(
+        v["data"]["describe"]["hooks"],
+        serde_json::json!([".codex/hooks.json"])
+    );
+    assert_eq!(v["next_actions"][0]["code"], "APPLY_DESCRIBED");
+    assert_eq!(
+        v["next_actions"][0]["argv"],
+        serde_json::json!(["topos", "agents", "remove", "codex", "--yes"])
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
+    let rig = pick_rig("agents-remove-apply", &["claude-code", "codex"]);
+    mcp_project(&rig);
+    rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    let mcp_json = std::fs::read_to_string(rig.project.join(".mcp.json")).unwrap();
+    assert!(mcp_json.contains("weather"), "{mcp_json}");
+    let codex_config = rig.project.join(".codex/config.toml");
+    let codex_had_entry = std::fs::read_to_string(&codex_config)
+        .map(|t| t.contains("weather"))
+        .unwrap_or(false);
+
+    let receipt = rig.stdout(&["agents", "remove", "codex", "--yes"]);
+    assert!(
+        receipt.starts_with("Removed codex from this project. Deleted:\n  .agents/skills/topos\n"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("  .codex/hooks.json (the auto-update hook entry)\n"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.ends_with("Agents in this project: claude-code\n"),
+        "{receipt}"
+    );
+    if codex_had_entry {
+        assert!(
+            receipt.contains("the MCP entries in .codex/config.toml"),
+            "{receipt}"
+        );
+        assert!(
+            !std::fs::read_to_string(&codex_config)
+                .map(|t| t.contains("weather"))
+                .unwrap_or(false),
+            "codex's entry left"
+        );
+    }
+    assert!(
+        !rig.project.join(".agents/skills/topos").exists(),
+        "the copy is gone"
+    );
+    // The hook ENTRY leaves; the shared hooks file it was merged into is kept, as every
+    // surgical scrub keeps it.
+    let hooks = std::fs::read_to_string(rig.project.join(".codex/hooks.json")).unwrap();
+    assert!(!hooks.contains("topos"), "the hook entry is gone: {hooks}");
+    assert!(
+        rig.project.join(".claude/skills/topos/SKILL.md").exists(),
+        "claude-code keeps its copy"
+    );
+    assert!(rig.project.join(".claude/settings.local.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join(".mcp.json")).unwrap(),
+        mcp_json,
+        "claude-code's entry stays byte-identical"
+    );
+    assert_eq!(agents_of(&rig.project_pick().unwrap()), ["claude-code"]);
+    // Removing the last picked agent leaves an empty pick, spelled out.
+    let receipt = rig.stdout(&["agents", "remove", "claude-code", "--yes"]);
+    assert!(
+        receipt.ends_with("No agents picked for this project now.\n"),
+        "{receipt}"
+    );
+    assert!(!rig.project.join(".claude/skills/topos").exists());
+    let hooks = std::fs::read_to_string(rig.project.join(".claude/settings.local.json")).unwrap();
+    assert!(!hooks.contains("topos"), "{hooks}");
+    assert!(
+        !rig.project.join(".mcp.json").exists(),
+        "a wholly-owned config file leaves with its last entry"
+    );
+    assert!(agents_of(&rig.project_pick().unwrap()).is_empty());
+    // A slug not in the pick is refused by name; nothing changes.
+    let (status, v) = rig.json(&["--json", "agents", "remove", "cursor"]);
+    assert!(!status.success());
+    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{v}");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn agents_remove_on_an_inherited_pick_materializes_first() {
+    let rig = pick_rig(
+        "agents-remove-inherited",
+        &["claude-code", "codex", "cursor"],
+    );
+    rig.write_machine_pick(&["claude-code", "codex"]);
+    rig.write_manifest("schema = 1\n");
+    assert!(rig.project_pick().is_none());
+    // Nothing was ever placed for codex here, so there is no loss and no gate.
+    let receipt = rig.stdout(&["agents", "remove", "codex"]);
+    assert!(
+        receipt
+            .starts_with("Removed codex from this project. Nothing topos wrote for it was here.\n"),
+        "{receipt}"
+    );
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code"],
+        "the effective set, materialized, minus the removed agent"
+    );
+    assert_eq!(
+        agents_of(&rig.machine_pick().unwrap()),
+        ["claude-code", "codex"],
+        "the machine pick is untouched"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn agents_remove_on_a_wildcard_pick_materializes_first() {
+    let rig = pick_rig(
+        "agents-remove-wildcard",
+        &["claude-code", "codex", "cursor"],
+    );
+    rig.write_manifest("schema = 1\n");
+    rig.write_project_pick(&["*"]);
+    let receipt = rig.stdout(&["agents", "remove", "cursor"]);
+    assert!(
+        receipt.starts_with("Removed cursor from this project."),
+        "{receipt}"
+    );
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "codex"],
+        "the wildcard is spelled out as what is installed, minus the removed agent"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_remove_leaves_the_pick_when_cleanup_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = pick_rig("agents-remove-fails", &["claude-code", "codex"]);
+    rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    // The copy's parent is made read-only, so deleting the copy fails.
+    let agents_dir = rig.project.join(".agents/skills");
+    let copy = agents_dir.join("topos");
+    assert!(copy.exists());
+    std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let out = rig.run(&["agents", "remove", "codex", "--yes"]);
+    let restore = || {
+        let _ = std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o755));
+    };
+    if out.status.success() {
+        restore();
+        panic!(
+            "the removal must fail when a copy cannot be deleted: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    restore();
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "codex"],
+        "the pick is written last, so a failed cleanup leaves it: {stderr}"
+    );
+    assert!(copy.exists(), "the copy is still there");
+    assert!(!stderr.is_empty(), "the failure is said");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn gitignore_append_is_idempotent() {
+    let rig = pick_rig("gitignore", &["claude-code", "codex"]);
+    std::fs::write(rig.project.join(".gitignore"), "node_modules\n").unwrap();
+    let receipt = rig.stdout(&["init", "-a", "claude-code", "-a", "codex", "--gitignore"]);
+    assert!(
+        receipt.contains("Added to .gitignore: .claude/, .mcp.json, .codex/, .agents/.\n"),
+        "{receipt}"
+    );
+    assert!(!receipt.contains("not ignored by git"), "{receipt}");
+    let expected = "node_modules\n.claude/\n.mcp.json\n.codex/\n.agents/\n";
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
+        expected
+    );
+    // Again: nothing appended, nothing said about it, and no hint either (they are ignored).
+    let again = rig.stdout(&["init", "-a", "claude-code", "-a", "codex", "--gitignore"]);
+    assert!(!again.contains("Added to .gitignore"), "{again}");
+    assert!(!again.contains("not ignored by git"), "{again}");
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
+        expected
+    );
+    // `topos agents --gitignore` is the same append over the standing pick.
+    let listed = rig.stdout(&["agents", "--gitignore"]);
+    assert!(!listed.contains("Added to .gitignore"), "{listed}");
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
+        expected
+    );
+    assert!(
+        !rig.project.join(".git/info/exclude").exists(),
+        "never touched"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn gitignore_is_refused_with_global() {
+    let rig = pick_rig("gitignore-global", &["claude-code"]);
+    let (status, v) = rig.json(&["--json", "init", "-g", "-a", "claude-code", "--gitignore"]);
+    assert!(!status.success());
+    assert_eq!(v["error"]["code"], "GITIGNORE_NEEDS_PROJECT", "{v}");
+    assert!(
+        !rig.topos_home().join("topos.toml").exists(),
+        "nothing was written"
+    );
+    assert!(rig.machine_pick().is_none());
+    let (status, v) = rig.json(&["--json", "agents", "-g", "--gitignore"]);
+    assert!(!status.success());
+    assert_eq!(v["error"]["code"], "GITIGNORE_NEEDS_PROJECT", "{v}");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn the_non_tty_ask_exits_2_with_the_list_and_json_shape() {
+    let rig = pick_rig("ask-piped", &["claude-code", "cursor"]);
+    let out = rig.run(&["init"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "No agents picked yet in this project.\n\
+         Installed on this machine: claude-code, cursor\n\
+         Pick with: topos init -a <agent>\n"
+    );
+    assert!(out.stdout.is_empty());
+    assert!(
+        !rig.project.join("topos.toml").exists(),
+        "nothing is written on a refused ask"
+    );
+    assert!(rig.project_pick().is_none());
+    let (status, v) = rig.json(&["--json", "init"]);
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "PICK_REQUIRED", "{v}");
+    assert_eq!(
+        v["data"],
+        serde_json::json!({"installed": ["claude-code", "cursor"], "next": "topos init -a <agent>"})
+    );
+    assert_eq!(v["next_actions"][0]["code"], "PICK_AGENTS");
+    assert_eq!(
+        v["next_actions"][0]["argv"],
+        serde_json::json!(["topos", "init", "-a", "<agent>"])
+    );
+    // The machine scope spells its way out with `-g`.
+    let (status, v) = rig.json(&["--json", "init", "-g"]);
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(v["data"]["next"], "topos init -g -a <agent>", "{v}");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn inside_claude_code_the_ask_picks_claude_code_silently() {
+    let rig = pick_rig("ask-claudecode", &["claude-code", "cursor"]);
+    let out = rig.run_at(&rig.project, &["init"], &[("CLAUDECODE", "1")]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("Using Claude Code in this project.\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Other agents on this machine, untouched: cursor.\n"),
+        "{stdout}"
+    );
+    assert_eq!(agents_of(&rig.project_pick().unwrap()), ["claude-code"]);
+    assert!(rig.project.join("topos.toml").exists());
+    assert!(!rig.project.join(".cursor").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn one_installed_agent_is_used_and_said() {
+    let rig = pick_rig("ask-one", &["cursor"]);
+    let receipt = rig.stdout(&["init"]);
+    assert!(
+        receipt.starts_with("Using Cursor in this project.\n"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("Auto-update hooks: .cursor/hooks.json.\n"),
+        "{receipt}"
+    );
+    assert!(!receipt.contains("untouched"), "{receipt}");
+    assert_eq!(agents_of(&rig.project_pick().unwrap()), ["cursor"]);
+    assert!(rig.project.join(".cursor/skills/topos/SKILL.md").exists());
+    // The same rule for the machine scope: `init -g` on a one-agent machine picks it.
+    let receipt = rig.stdout(&["init", "-g"]);
+    assert!(
+        receipt.starts_with("Using Cursor on this machine.\n"),
+        "{receipt}"
+    );
+    assert_eq!(agents_of(&rig.machine_pick().unwrap()), ["cursor"]);
+    assert!(rig.home.join(".cursor/skills/topos/SKILL.md").exists());
+    assert!(rig.home.join(".cursor/hooks.json").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn a_fresh_clone_uses_the_machine_pick() {
+    let rig = pick_rig("fresh-clone", &["claude-code", "cursor"]);
+    rig.write_machine_pick(&["claude-code"]);
+    // A clone: the manifest names one machine-local MCP server (the one bundle a checkout
+    // converges from its own bytes, no workspace needed); no project pick of its own.
+    mcp_project(&rig);
+    let out = rig.run(&["install"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("Using "),
+        "a standing pick is not re-announced"
+    );
+    let mcp_json = std::fs::read_to_string(rig.project.join(".mcp.json"))
+        .expect("the machine pick's agent gets the project's server entry");
+    assert!(mcp_json.contains("weather"), "{mcp_json}");
+    assert!(
+        !rig.project.join(".cursor").exists(),
+        "the unpicked agent gets nothing"
+    );
+    assert!(
+        rig.project_pick().is_none(),
+        "the clone inherits; no file of its own is born"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn install_in_a_project_with_no_pick_exits_2_naming_init() {
+    let rig = pick_rig("install-no-pick", &["claude-code", "cursor"]);
+    rig.write_manifest("schema = 1\n");
+    let out = rig.run(&["install"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Pick with: topos init -a <agent>"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("claude-code, cursor"), "{stderr}");
+    let (status, v) = rig.json(&["--json", "update"]);
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(v["error"]["code"], "PICK_REQUIRED", "{v}");
+    assert_eq!(v["data"]["next"], "topos init -a <agent>");
+    assert!(rig.project_pick().is_none() && rig.machine_pick().is_none());
+    assert!(!rig.project.join(".claude").exists() && !rig.project.join(".cursor").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn the_quiet_hook_sweep_with_no_pick_stays_silent() {
+    let rig = pick_rig("quiet-no-pick", &["claude-code", "cursor"]);
+    rig.write_manifest("schema = 1\n");
+    let out = rig.run(&["update", "--quiet", "--ttl", "0", "--hook", "claude-code"]);
+    assert!(
+        out.status.success(),
+        "a session-start sweep always exits 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("picked"),
+        "nothing is asked: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(rig.project_pick().is_none() && rig.machine_pick().is_none());
+    assert!(!rig.project.join(".claude").exists() && !rig.project.join(".cursor").exists());
+    assert!(
+        PickRig::files_under(&rig.home, &[".topos"]).is_empty(),
+        "nothing placed under the home either"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn status_lists_only_picked_agents() {
+    let rig = pick_rig("status-picked", &["claude-code", "cursor"]);
+    rig.stdout(&["init", "-a", "claude-code"]);
+    let tty = rig.stdout(&["status"]);
+    assert!(
+        tty.contains("\nAgents (this project, .topos/agents.json): claude-code\n"),
+        "{tty}"
+    );
+    assert!(
+        tty.contains("auto-update triggers:\n  claude-code: "),
+        "{tty}"
+    );
+    assert!(
+        !tty.contains("cursor"),
+        "an unpicked agent is not a row: {tty}"
+    );
+    let (status, v) = rig.json(&["--json", "status"]);
+    assert!(status.success());
+    assert_eq!(
+        v["data"]["agents"],
+        serde_json::json!(["claude-code"]),
+        "{v}"
+    );
+    assert_eq!(v["data"]["agents_source"], "project");
+    assert_eq!(v["data"]["agents_path"], ".topos/agents.json");
+    let rows: Vec<&str> = v["data"]["triggers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["agent"].as_str().unwrap())
+        .collect();
+    assert_eq!(rows, ["claude-code"]);
+    // With no pick at all, the panel says so and names the command.
+    let bare = pick_rig("status-no-pick", &["claude-code", "cursor"]);
+    bare.write_manifest("schema = 1\n");
+    let tty = bare.stdout(&["status"]);
+    assert!(
+        tty.contains("\nAgents (this project): no agents picked yet: topos init -a <agent>\n"),
+        "{tty}"
+    );
+    assert!(!tty.contains("auto-update triggers"), "{tty}");
+    let tty = bare.stdout(&["status", "-g"]);
+    assert!(
+        tty.contains("\nAgents (this machine): no agents picked yet: topos init -g -a <agent>\n"),
+        "{tty}"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+    let _ = std::fs::remove_dir_all(&bare.root);
+}

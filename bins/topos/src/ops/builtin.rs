@@ -310,10 +310,6 @@ pub(crate) fn ensure_builtin(ctx: &Ctx<'_>) -> Result<BuiltinSync, ClientError> 
 ///
 /// # Errors
 /// The store's containment refusal; otherwise as [`ensure_builtin`].
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "run by init -a and the agents verbs in a project")
-)]
 pub(crate) fn ensure_builtin_in_project(
     ctx: &Ctx<'_>,
     project_dir: &std::path::Path,

@@ -171,6 +171,14 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::results::InitData)),
         ),
         (
+            "agents-data",
+            emit(schemars::schema_for!(topos_types::results::AgentsData)),
+        ),
+        (
+            "agents-changed-data",
+            emit(schemars::schema_for!(topos_types::results::AgentsChanged)),
+        ),
+        (
             "fmt-data",
             emit(schemars::schema_for!(topos_types::results::FmtData)),
         ),
@@ -445,15 +453,15 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::{ConflictPathKind, ConflictReason};
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ChangeSummary, ClaimReceipt, ClaimState, ClaimTwin, ConflictHolds,
-        ConflictPathReport, ConflictPlacement, DestChange, DiffData, DiffPatchInfo, DiffSource,
-        EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport,
-        ProtectData, PublishData, PublishDescribeData, PublishGate, PublishNoChangesData,
-        PublishResult, PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData,
-        RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SetDelivery,
-        SignInPath, SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary,
-        StatusTrigger, Surface, TargetOutcome, VerifyData, VerifyState, WorkspaceRef,
-        WorkspaceSyncReport,
+        AddData, AgentsChanged, AgentsData, ChangeSummary, ClaimReceipt, ClaimState, ClaimTwin,
+        ConflictHolds, ConflictPathReport, ConflictPlacement, DestChange, DiffData, DiffPatchInfo,
+        DiffSource, EnrollmentPending, InitData, InviteReadData, ListData, LogData, LoginData,
+        LogoutData, MergeReport, PickHook, PickReceipt, ProtectData, PublishData,
+        PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult, PublishedMatch,
+        PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem, RemoveKind,
+        ReviewIndexData, ReviewIndexEntry, ScopeDraft, SetDelivery, SignInPath, SkillEntry,
+        SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger, Surface,
+        TargetOutcome, VerifyData, VerifyState, WorkspaceRef, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -2116,8 +2124,161 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 error: None,
                 gone: false,
             }],
+            // The agents picked where the panel stands: this project's own file.
+            agents: vec!["claude-code".to_owned(), "openclaw".to_owned()],
+            agents_source: Some("project".to_owned()),
+            agents_path: Some(".topos/agents.json".to_owned()),
         })
         .expect("StatusData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `init -a claude-code -a codex` — first setup in a project: the file is born and the pick
+    // applied (the skills and one MCP server landed for both agents, both hooks registered,
+    // the `.gitignore` hint, the installed agent left alone).
+    let init_with_pick = JsonEnvelope {
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
+        command: "init".to_owned(),
+        ok: true,
+        data: serde_json::to_value(InitData {
+            manifest: "/repo/topos.toml".to_owned(),
+            created: true,
+            note: Some(
+                "this is the file every `topos add` in this folder records into — `add` \
+                 writes rows, never a new manifest"
+                    .to_owned(),
+            ),
+            pick: Some(PickReceipt {
+                scope: "project".to_owned(),
+                agents: vec!["claude-code".to_owned(), "codex".to_owned()],
+                pick_path: ".topos/agents.json".to_owned(),
+                skills: 4,
+                skills_dirs: vec![".claude/skills".to_owned(), ".agents/skills".to_owned()],
+                mcp_servers: 1,
+                mcp_files: vec![".mcp.json".to_owned(), ".codex/config.toml".to_owned()],
+                hook_files: vec![
+                    PickHook {
+                        agent: "claude-code".to_owned(),
+                        file: ".claude/settings.local.json".to_owned(),
+                        note: None,
+                    },
+                    PickHook {
+                        agent: "codex".to_owned(),
+                        file: ".codex/hooks.json".to_owned(),
+                        note: Some("Codex runs it once you trust this repo".to_owned()),
+                    },
+                ],
+                hook_notes: Vec::new(),
+                untouched: vec!["cursor".to_owned()],
+                gitignore_hint: Some("topos init --gitignore".to_owned()),
+                gitignored: Vec::new(),
+            }),
+        })
+        .expect("InitData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `topos agents` inside a project with a pick of its own: both picked agents' hooks
+    // registered, two more agents installed and untouched.
+    let agents_list = JsonEnvelope {
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
+        command: "agents".to_owned(),
+        ok: true,
+        data: serde_json::to_value(AgentsData {
+            scope: "project".to_owned(),
+            pick_path: Some(".topos/agents.json".to_owned()),
+            source: Some("project".to_owned()),
+            agents: vec!["claude-code".to_owned(), "codex".to_owned()],
+            installed: vec![
+                "claude-code".to_owned(),
+                "codex".to_owned(),
+                "cursor".to_owned(),
+                "gemini-cli".to_owned(),
+            ],
+            hooks: vec![
+                StatusTrigger {
+                    agent: "claude-code".to_owned(),
+                    armed: Some(true),
+                    note: None,
+                    last_run_age_ms: Some(120_000),
+                },
+                StatusTrigger {
+                    agent: "codex".to_owned(),
+                    armed: Some(true),
+                    note: None,
+                    last_run_age_ms: None,
+                },
+            ],
+            gitignored: Vec::new(),
+        })
+        .expect("AgentsData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `topos agents remove codex` — the loss-led describe: what leaves (the copies, the MCP
+    // entries, the hook), what another picked agent keeps, and the `--yes` apply.
+    let agents_remove_describe = JsonEnvelope {
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
+        command: "agents".to_owned(),
+        ok: true,
+        data: serde_json::json!({
+            "describe": AgentsChanged {
+                scope: "project".to_owned(),
+                removed: vec!["codex".to_owned()],
+                agents: vec!["claude-code".to_owned()],
+                pick_path: ".topos/agents.json".to_owned(),
+                applied: false,
+                removed_dirs: vec![
+                    ".agents/skills/deploy".to_owned(),
+                    ".agents/skills/topos".to_owned(),
+                ],
+                removed_files: vec![".codex/config.toml".to_owned()],
+                hooks: vec![".codex/hooks.json".to_owned()],
+                untouched: Vec::new(),
+                kept: Vec::new(),
+            }
+        }),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("APPLY_DESCRIBED".to_owned()),
+            argv(&["topos", "agents", "remove", "codex", "--yes"]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
+    // `topos agents remove codex --yes` — applied: one edited copy kept in place, the pick
+    // reduced last.
+    let agents_remove_applied = JsonEnvelope {
+        schema_version: topos_types::WIRE_SCHEMA_VERSION,
+        command: "agents".to_owned(),
+        ok: true,
+        data: serde_json::to_value(AgentsChanged {
+            scope: "project".to_owned(),
+            removed: vec!["codex".to_owned()],
+            agents: vec!["claude-code".to_owned()],
+            pick_path: ".topos/agents.json".to_owned(),
+            applied: true,
+            removed_dirs: vec![".agents/skills/topos".to_owned()],
+            removed_files: vec![".codex/config.toml".to_owned()],
+            hooks: vec![".codex/hooks.json".to_owned()],
+            untouched: Vec::new(),
+            kept: vec![".agents/skills/deploy".to_owned()],
+        })
+        .expect("AgentsChanged serializes"),
         warnings: vec![],
         messages: vec![],
         next_actions: vec![],
@@ -2323,6 +2484,16 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/delivery.ok", emit_json(&delivery_ok)),
         ("json/delivery.pending", emit_json(&delivery_pending)),
         ("json/remove.describe", emit_json(&remove_describe)),
+        ("json/init.with-pick", emit_json(&init_with_pick)),
+        ("json/agents.list", emit_json(&agents_list)),
+        (
+            "json/agents.remove.describe",
+            emit_json(&agents_remove_describe),
+        ),
+        (
+            "json/agents.remove.applied",
+            emit_json(&agents_remove_applied),
+        ),
         ("json/remove.ok", emit_json(&remove_ok)),
         ("json/protect.describe", emit_json(&protect_describe)),
         ("json/verify.responding", emit_json(&verify_responding)),

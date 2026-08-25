@@ -3,6 +3,12 @@
   "command": "status",
   "ok": true,
   "data": {
+    "agents": [
+      "claude-code",
+      "openclaw"
+    ],
+    "agents_path": ".topos/agents.json",
+    "agents_source": "project",
     "forge": [
       {
         "answered_at": 1750000000000,

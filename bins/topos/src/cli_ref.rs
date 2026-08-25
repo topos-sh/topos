@@ -26,12 +26,13 @@ use topos_harness::registry::{self, KnownHarness};
 /// line sitting in a reader's own MCP config, with no entry of their own to look up. A verb the
 /// binary shows in `--help` belongs on the page that promises to be the same text. The render
 /// asserts the cover both ways now, so the next verb cannot repeat it.
-const SELF_SCOPED: [&str; 15] = [
+const SELF_SCOPED: [&str; 16] = [
     "status",
     "login",
     "logout",
     "workspace",
     "init",
+    "agents",
     "fmt",
     "add",
     "remove",

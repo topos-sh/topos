@@ -4,6 +4,27 @@
   "description": "`status` result — the health panel: the binary version, the server + signed-in state, the\nsessions, the auto-update trigger states, and per shown SCOPE what governs it and what needs\nattention. NO skill inventory — that is `list`'s. Computed ENTIRELY from local state (no\nnetwork). **The stable shape** (see the section note: it replaced the pre-1.0 item table\noutright); additive-only from here.",
   "type": "object",
   "properties": {
+    "agents": {
+      "description": "The agents picked where the panel stands (the project's effective pick, or the machine's\nunder `-g`), as the pick file spells them. Empty = no pick yet. **Additive.**",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "agents_path": {
+      "description": "The pick file `agents` was read from, as a person reads it. Absent with no pick or a\nlegacy record. **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agents_source": {
+      "description": "Where `agents` comes from: `\"project\"`, `\"machine\"`, or `\"legacy\"` (the hooks an earlier\nbuild registered, not yet recorded as a pick). Absent with no pick. **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "forge": {
       "description": "The last auto-update check of every external source the shown scopes name.",
       "type": "array",
@@ -48,7 +69,7 @@
       "type": "boolean"
     },
     "triggers": {
-      "description": "Per-agent auto-update trigger state, probed READ-ONLY over the detected agents (nothing is\narmed or repaired by `status`).",
+      "description": "Per-agent auto-update trigger state, probed READ-ONLY over the picked agents (nothing is\nregistered or repaired by `status`).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/StatusTrigger"
@@ -247,7 +268,7 @@
       ]
     },
     "StatusTrigger": {
-      "description": "One detected agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of\nthe same artifact the arming sweep manages. **INFERRED** (additive-only).",
+      "description": "One picked agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of\nthe same artifact the arming sweep manages. **INFERRED** (additive-only).",
       "type": "object",
       "properties": {
         "agent": {

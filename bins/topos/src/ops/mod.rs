@@ -24,6 +24,8 @@
 mod add;
 mod add_mcp;
 pub(crate) mod agent_hooks;
+pub(crate) mod agents;
+pub(crate) mod agents_ask;
 mod arm;
 mod auth;
 mod builtin;
@@ -94,7 +96,10 @@ pub(crate) use builtin::{
 };
 pub(crate) use diff::{DiffBudget, diff, reset_preview_diff};
 pub(crate) use fmt::fmt_manifest;
-pub(crate) use init::init;
+pub(crate) use init::{InitRequest, init};
+// The file half alone — the fixture rigs mint a project manifest to record into.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub(crate) use init::create_manifest;
 pub(crate) use inventory::ScopeView;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListOutcome, ListRequest, list_with};
