@@ -166,6 +166,32 @@ export async function requireMemberInScope(
   return memberInScope(actor, params);
 }
 
+/**
+ * THE MEMBER-ONLY PAGE guard — requireMemberInScope's twin for the HTML face, differing in one
+ * thing: a SIGNED-OUT visitor gets the uniform 404, not a bounce to /login.
+ *
+ * A workspace address is members-only in every face, and the bundle face already answered a
+ * stranger with the house 404 — the same answer a mistyped path gets. A sibling page under the
+ * same bundle that bounced to /login instead handed a signed-out visitor a second, different
+ * answer for the same address family, and read as an invitation to sign in to a workspace they
+ * have no seat in. Nothing is read before the refusal, so it stays existence-blind by
+ * construction: real slug and invented slug get the same body.
+ *
+ * Actions keep requireMemberInScope. A person who is signed out mid-form has somewhere to go, and
+ * a POST is not an address anybody probes.
+ */
+export async function memberPageInScope(
+  request: Request,
+  params: { ws?: string },
+): Promise<ScopedMember> {
+  assertSameOrigin(request);
+  const actor = actorFromSession(await getAuth().api.getSession({ headers: request.headers }));
+  if (actor === null) {
+    notFound();
+  }
+  return memberInScope(actor, params);
+}
+
 /** requireMemberInScope, then the owner gate — for pages owner-gated from the top. 404 below owner. */
 export async function requireOwnerInScope(
   request: Request,
