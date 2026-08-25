@@ -5,7 +5,7 @@ import { BrowseEmpty, BrowseShell } from "@/components/browse/shell";
 import { ViewToggle } from "@/components/browse/view-toggle";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { Card, Chip } from "@/components/ui";
-import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope, notFound } from "@/lib/auth/guards.server";
 import { baseOf, bundleNameOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { isVersionRef, resolveVersionRef } from "@/lib/db/queries.custody.server";
@@ -57,7 +57,8 @@ type FileContent =
  * One file of a version, rendered inline: markdown as sanitized HTML, code as sanitized highlighted
  * HTML (both under a Rendered | Raw toggle), everything else as an escaped <pre>. The async render
  * runs HERE in the loader (a route component fetches and renders nothing itself). Guard order
- * mirrors the review page (requireMember → id shape → catalog probe), and the version id is
+ * mirrors the bundle face (membership → id shape → catalog probe), with the same house 404 for a
+ * signed-out visitor that the bundle page gives, and the version id is
  * addressed exactly as the listing above it is: the full 64-hex form or a unique prefix of at
  * least eight hex characters. The path is rebuilt from the
  * splat and used ONLY as a manifest lookup key — never as a filesystem path — so there is no
@@ -66,7 +67,7 @@ type FileContent =
  * card.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const ws = workspace.id;
   const base = baseOf(params);
   const skill = bundleNameOf(params);

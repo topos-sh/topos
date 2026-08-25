@@ -175,3 +175,69 @@ describe("a device-lane API route (/channels) — the uniform wire 404, status A
     expect(real).toEqual(await probe(WS_REAL));
   });
 });
+
+/**
+ * THE BUNDLE'S OWN SUB-PAGES — one address family, one answer.
+ *
+ * `/<ws>/skills/<bundle>` answered a signed-out visitor with the house 404, but its three
+ * siblings — a version, a file inside that version, and the history — bounced to /login instead.
+ * Every one of those was still existence-blind on its own (the bounce is constant), but the app
+ * had two different answers for one address family, and the bounce read as an invitation to sign
+ * in to a workspace the visitor has no seat in. They now answer exactly what the bundle page
+ * answers, to the byte.
+ */
+describe("a bundle's sub-pages — the same refusal the bundle page gives", () => {
+  const VERSION = "6ce009dd52c7";
+
+  const pages: [string, () => Promise<{ loader: unknown }>, Record<string, string>][] = [
+    ["the bundle page", () => import("@/routes/skill-current"), {}],
+    ["a version's files", () => import("@/routes/version-files"), { versionId: VERSION }],
+    [
+      "one file in a version",
+      () => import("@/routes/file-view"),
+      { versionId: VERSION, "*": "SKILL.md" },
+    ],
+    ["the history", () => import("@/routes/skill-history"), {}],
+  ];
+
+  async function probe(
+    load: () => Promise<{ loader: unknown }>,
+    ws: string,
+    extra: Record<string, string>,
+  ): Promise<{ status: number; body: string }> {
+    const { loader } = await load();
+    return outcome(() =>
+      (loader as RouteFn)({
+        request: pageRequest(`/${ws}/skills/release-guide`),
+        params: { ws, skill: "release-guide", ...extra },
+      }),
+    );
+  }
+
+  for (const [what, load, extra] of pages) {
+    it(`${what}: an ANONYMOUS visitor gets the 404 on a real slug and an invented one alike`, async () => {
+      session = null;
+      const real = await probe(load, "acme", extra);
+      const unknown = await probe(load, "no-such-team", extra);
+      expect(real.status).toBe(404);
+      expect(real).toEqual(unknown);
+    });
+
+    it(`${what}: a signed-in NON-MEMBER gets that same 404`, async () => {
+      session = { user: { id: "u_stranger", name: "Stranger", email: "stranger@example.com" } };
+      const real = await probe(load, "acme", extra);
+      expect(real.status).toBe(404);
+      expect(real).toEqual(await probe(load, "no-such-team", extra));
+    });
+  }
+
+  it("answers all four addresses with the SAME body — no shape says more than another", async () => {
+    session = null;
+    const answers = await Promise.all(
+      pages.map(async ([, load, extra]) => await probe(load, "acme", extra)),
+    );
+    for (const answer of answers) {
+      expect(answer).toEqual(answers[0]);
+    }
+  });
+});

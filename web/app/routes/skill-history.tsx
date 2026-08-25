@@ -7,6 +7,7 @@ import { SkillTabs } from "@/components/skill/skill-tabs";
 import { noFilesRefusal } from "@/lib/api/genesis.server";
 import { requireTypedName } from "@/lib/auth/ceremony.server";
 import {
+  memberPageInScope,
   notFound,
   requireMemberInScope,
   requireReviewer,
@@ -73,9 +74,11 @@ interface RevertActionData {
 /**
  * The bundle's History tab — the first-parent version walk as its own shareable route (a sibling
  * of Current and Proposals), carrying the `?from=` cursor for Show-older / second-parent paging.
- * Same guard-then-probe order as every bundle page: requireMember before any data, then the DB
+ * Same guard-then-probe order as every bundle page: membership before any data — a signed-out
+ * visitor gets the house 404 the bundle page gives, never a bounce to /login — then the DB
  * catalog probe as the uniform 404 (an unknown NAME) and the kind fence, with an honest empty body
- * when the name exists but nothing is published yet.
+ * when the name exists but nothing is published yet. The ACTION keeps the login bounce: somebody
+ * whose session lapsed mid-form has somewhere to go.
  *
  * The walk runs HERE in the loader (the pure walk from history.server.ts, its metadata fetcher
  * on the internal custody lane over the immutable skillId) so HistorySection renders as a plain
@@ -84,7 +87,7 @@ interface RevertActionData {
  * HEX64-gated here.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const ws = workspace.id;
   const base = baseOf(params);
   const skill = bundleNameOf(params);

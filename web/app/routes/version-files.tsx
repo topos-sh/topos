@@ -4,7 +4,7 @@ import { BrowseShell } from "@/components/browse/shell";
 import { VersionFiles } from "@/components/browse/version-files";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { ShortId } from "@/components/ui";
-import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope, notFound } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
@@ -30,8 +30,10 @@ export function meta({
  *
  * Because this page can address any historical version, "current" is NOT the DB catalog row — it
  * is a LIVE comparison against the vault's pointer (`custodyCurrent`), which VersionFiles renders
- * as `currentChip`. Guard order mirrors the review page: requireMember first, a cheap shape check
- * on the version id, then the DB catalog probe (an unknown NAME is the uniform 404). Every vault
+ * as `currentChip`. Guard order mirrors the bundle face: membership first — and a signed-out
+ * visitor gets the house 404 there, not a bounce to /login, because this address is members-only
+ * in every face — then a cheap shape check on the version id, then the DB catalog probe (an
+ * unknown NAME is the uniform 404). Every vault
  * read rides the internal custody lane and keys on the immutable `skillId` — authorization
  * already happened in the guard.
  *
@@ -41,7 +43,7 @@ export function meta({
  * is the form a person copies, and it opens. An ambiguous or unmatched prefix is the uniform 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const ws = workspace.id;
   const base = baseOf(params);
   const skill = bundleNameOf(params);
