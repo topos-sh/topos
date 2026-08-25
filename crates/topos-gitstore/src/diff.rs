@@ -9,7 +9,8 @@
 //! Lines are compared **byte-exactly** (a line is split inclusive of its `\n`, so a trailing-newline
 //! change is a real difference). A **mode** change (e.g. `chmod +x`) is surfaced even with identical
 //! content — it changes the `bundle_digest`, so the diff must not hide it. A non-UTF-8 file renders as
-//! `Binary files … differ`; a missing trailing newline renders the standard `\ No newline at end of file`.
+//! `Binary file b/… added` / `Binary file a/… removed` / `Binary files … differ`, matching the side it
+//! is on; a missing trailing newline renders the standard `\ No newline at end of file`.
 
 use std::ops::Range;
 
@@ -138,7 +139,15 @@ fn file_diff(path: &str, old: Option<DiffFile<'_>>, new: Option<DiffFile<'_>>) -
     let old_lines = old_bytes.map(split_lines);
     let new_lines = new_bytes.map(split_lines);
     if matches!(old_lines, Some(None)) || matches!(new_lines, Some(None)) {
-        out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+        // A binary note says the SAME thing about the file the text headers do: whether it was
+        // added, removed, or changed. `Binary files a/… and b/… differ` over a file that exists
+        // on ONE side names a side that has nothing on it — the reader goes looking for an `a/`
+        // copy that never existed. One line, one truth per side.
+        out.push_str(&match (old.is_some(), new.is_some()) {
+            (true, true) => format!("Binary files a/{path} and b/{path} differ\n"),
+            (false, _) => format!("Binary file b/{path} added\n"),
+            (_, false) => format!("Binary file a/{path} removed\n"),
+        });
         return out;
     }
     let old_lines = old_lines.flatten().unwrap_or_default();
@@ -457,6 +466,34 @@ mod tests {
         );
         // The same answer whichever side is unsorted — and the same as with both sorted.
         assert_eq!(unified_diff(&draft, &base).matches("--- a/").count(), 2);
+    }
+
+    #[test]
+    fn an_added_binary_names_only_the_side_it_is_on() {
+        // A file that exists only on the draft side is an ADDITION — the note must not name an
+        // `a/` copy for the reader to go looking for (the text renderer says `--- /dev/null` for
+        // the same shape).
+        let draft = [f("assets/big.bin", FileMode::Regular, &[0x00, 0xff])];
+        let out = unified_diff(&[], &draft);
+        assert_eq!(out, "Binary file b/assets/big.bin added\n", "{out}");
+    }
+
+    #[test]
+    fn a_removed_binary_names_only_the_side_it_is_on() {
+        let base = [f("assets/big.bin", FileMode::Regular, &[0x00, 0xff])];
+        let out = unified_diff(&base, &[]);
+        assert_eq!(out, "Binary file a/assets/big.bin removed\n", "{out}");
+    }
+
+    #[test]
+    fn a_changed_binary_still_names_both_sides() {
+        let base = [f("assets/big.bin", FileMode::Regular, &[0x00, 0xff])];
+        let draft = [f("assets/big.bin", FileMode::Regular, &[0x01, 0xfe])];
+        let out = unified_diff(&base, &draft);
+        assert_eq!(
+            out, "Binary files a/assets/big.bin and b/assets/big.bin differ\n",
+            "{out}"
+        );
     }
 
     #[test]
