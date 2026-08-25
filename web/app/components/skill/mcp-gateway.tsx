@@ -39,6 +39,9 @@ export interface McpGatewayUsageSession {
   /** How the calls ended. The two add up to `calls`. */
   ok: number;
   failed: number;
+  /** WHY the failed ones failed — the ledger's own outcome names with their counts, biggest
+   *  first, summing to `failed`. Empty when nothing failed. */
+  failures: { kind: string; count: number }[];
   /** The distinct tools this session called, alphabetical — empty where the ledger holds only
    *  non-tool methods (initialize, a listing), which the row says once instead of a dash column. */
   tools: string[];
@@ -339,6 +342,39 @@ function ToolsSection({ view }: { view: McpGatewayView }) {
 }
 
 /**
+ * THE LEDGER'S OUTCOME NAMES, said the way a person would say them. The gateway owns the set (its
+ * own CHECK constraint), so an unknown one is shown as itself with its underscores opened out
+ * rather than dropped — a failure kind this tier has not learned about yet is still a fact.
+ */
+const FAILURE_WORDS: Record<string, string> = {
+  denied_tool: "tool not allowed",
+  no_credential: "no sign-in",
+  unauthorized: "sign-in refused",
+  upstream_error: "server error",
+};
+
+function failureWord(kind: string): string {
+  return FAILURE_WORDS[kind] ?? kind.replaceAll("_", " ");
+}
+
+/**
+ * ONE ROW'S OUTCOME CELL: `12 ok · 3 failed (2 no sign-in, 1 server error)`.
+ *
+ * The parenthetical is the whole reason this column is worth reading. "3 failed" is a number
+ * nobody can act on — a tool the workspace switched off, a sign-in nobody connected and a server
+ * that is down are three different problems with three different fixes, and the ledger already
+ * knows which is which.
+ */
+function outcomeLine(row: McpGatewayUsageSession): string {
+  const counts = `${row.ok} ok · ${row.failed} failed`;
+  if (row.failures.length === 0) {
+    return counts;
+  }
+  const why = row.failures.map((f) => `${f.count} ${failureWord(f.kind)}`).join(", ");
+  return `${counts} (${why})`;
+}
+
+/**
  * THE ONE LINE ABOVE THE TABLE — how much there is, and where in it you are standing. The count is
  * the WHOLE ledger, not this page: a reader who sees five rows must not read that as five machines.
  */
@@ -428,9 +464,7 @@ function UsageSection({ view }: { view: McpGatewayView }) {
                       <td className="py-1.5 pr-3 text-ink">{row.person}</td>
                       <td className="py-1.5 pr-3 text-dim">{row.machine}</td>
                       <td className="py-1.5 pr-3 text-dim tabular-nums">{row.calls}</td>
-                      <td className="py-1.5 pr-3 text-dim">
-                        {row.ok} ok · {row.failed} failed
-                      </td>
+                      <td className="py-1.5 pr-3 text-dim">{outcomeLine(row)}</td>
                       <td className="py-1.5 pr-3 font-mono text-[13px] text-dim">
                         {row.tools.length === 0 ? "—" : row.tools.join(", ")}
                       </td>
