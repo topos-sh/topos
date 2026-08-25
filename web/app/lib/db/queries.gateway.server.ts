@@ -368,6 +368,11 @@ export interface McpUsageSessionRow {
   /** How many ended `ok`, and how many ended any other way. The two add up to `calls`. */
   ok: number;
   failed: number;
+  /** WHY the failed ones failed — the ledger's own outcome names with their counts, biggest
+   *  first. Empty when nothing failed, and it always sums to `failed`. "3 failed" alone is a
+   *  number nobody can act on: a tool the workspace switched off and a server that is down are
+   *  different problems with different fixes. */
+  failures: { kind: string; count: number }[];
   /** The distinct tools this session called, alphabetical. EMPTY where the ledger holds only
    *  non-tool methods (initialize, a listing) — the table says so once per row rather than
    *  carrying a column of dashes. */
@@ -388,6 +393,17 @@ export interface McpUsagePage {
 
 /** One page of the Usage table. A number, not a "recent window" — the ledger is reachable whole. */
 export const MCP_USAGE_PAGE_SIZE = 25;
+
+/** The per-kind failure counts, biggest first and ties broken by name so a row never reorders
+ *  itself between two reads of the same data. */
+function failureKindsOf(stored: unknown): { kind: string; count: number }[] {
+  if (stored === null || typeof stored !== "object") {
+    return [];
+  }
+  return Object.entries(stored as Record<string, number>)
+    .map(([kind, count]) => ({ kind, count: Number(count) }))
+    .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
+}
 
 /**
  * THE USAGE TABLE'S ONE READ — every session that has called this server, one row each, newest
@@ -435,8 +451,22 @@ export async function mcpUsageSessions(
       FROM gateway.usage_event e
       WHERE e.workspace_id = ${actor.workspaceId} AND e.server_id = ${serverId}
       GROUP BY e.session_id, e.user_id
+    ),
+    -- WHY the failures failed, counted per kind. The gateway owns the set of outcome names (its
+    -- own CHECK constraint), so this reads whatever is there rather than naming them here: a kind
+    -- added upstream shows up as itself instead of vanishing into a total.
+    per_failure AS (
+      SELECT session_id, user_id, jsonb_object_agg(outcome, n) AS kinds
+      FROM (
+        SELECT e.session_id, e.user_id, e.outcome, count(*)::int AS n
+        FROM gateway.usage_event e
+        WHERE e.workspace_id = ${actor.workspaceId} AND e.server_id = ${serverId}
+          AND e.outcome <> 'ok'
+        GROUP BY e.session_id, e.user_id, e.outcome
+      ) counted
+      GROUP BY session_id, user_id
     )
-    SELECT g.session_id, g.calls, g.ok, g.failed, g.tools,
+    SELECT g.session_id, g.calls, g.ok, g.failed, g.tools, f.kinds AS failure_kinds,
            (extract(epoch from g.first_at) * 1000)::bigint AS first_call_ms,
            (extract(epoch from g.last_at) * 1000)::bigint AS last_call_ms,
            -- The display rule, spelled the way every other raw-SQL reader here spells it: the
@@ -444,6 +474,7 @@ export async function mcpUsageSessions(
            COALESCE(NULLIF(btrim(u.name), ''), u.email, 'former member') AS person,
            COALESCE(s.display_name, 'a removed machine') AS machine
     FROM per_session g
+    LEFT JOIN per_failure f ON f.session_id = g.session_id AND f.user_id = g.user_id
     LEFT JOIN web."user" u ON u.id = g.user_id
     LEFT JOIN web.cli_session s ON s.id = g.session_id
     ORDER BY g.last_at DESC, g.session_id DESC
@@ -456,6 +487,7 @@ export async function mcpUsageSessions(
     calls: Number(row.calls),
     ok: Number(row.ok),
     failed: Number(row.failed),
+    failures: failureKindsOf(row.failure_kinds),
     tools: (row.tools as string[] | null) ?? [],
     firstCallMs: Number(row.first_call_ms),
     lastCallMs: Number(row.last_call_ms),

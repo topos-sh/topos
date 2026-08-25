@@ -182,6 +182,13 @@ describe("aggregating the ledger per session", () => {
       // Distinct and alphabetical — five calls, two tools named once each.
       tools: ["create_issue", "search"],
     });
+    // WHY they failed, not just how many: one call the tool policy refused and one the server
+    // broke on are different problems, and the counts sum to `failed`.
+    expect(laptop?.failures).toEqual([
+      { kind: "denied_tool", count: 1 },
+      { kind: "upstream_error", count: 1 },
+    ]);
+    expect(runner?.failures).toEqual([]);
     // The stretch the row covers, not the moment one call landed.
     expect(laptop?.firstCallMs).toBeLessThan(laptop?.lastCallMs ?? 0);
     expect(runner?.lastCallMs).toBeGreaterThan(laptop?.lastCallMs ?? 0);
@@ -195,6 +202,26 @@ describe("aggregating the ledger per session", () => {
     expect(page.sessions).toHaveLength(1);
     expect(page.sessions[0]?.tools).toEqual([]);
     expect(page.sessions[0]).toMatchObject({ calls: 2, ok: 1, failed: 1 });
+    expect(page.sessions[0]?.failures).toEqual([{ kind: "no_credential", count: 1 }]);
+  });
+
+  it("orders the failure kinds by how many, so the biggest problem reads first", async () => {
+    await seedSession(db, "cs_flaky", ws, MEMBER.id, "active", "flaky box");
+    for (let i = 0; i < 3; i += 1) {
+      await call(SERVER, "cs_flaky", MEMBER.id, "search", "upstream_error", 40 + i);
+    }
+    await call(SERVER, "cs_flaky", MEMBER.id, "create_issue", "denied_tool", 39);
+    await call(SERVER, "cs_flaky", MEMBER.id, null, "unauthorized", 38);
+
+    const page = await (await dal()).mcpUsageSessions(member(), SERVER);
+    const flaky = page.sessions.find((row) => row.sessionId === "cs_flaky");
+    expect(flaky?.failed).toBe(5);
+    // Biggest first; the two ones tie and break by name, so the row never reorders itself.
+    expect(flaky?.failures).toEqual([
+      { kind: "upstream_error", count: 3 },
+      { kind: "denied_tool", count: 1 },
+      { kind: "unauthorized", count: 1 },
+    ]);
   });
 
   it("stands in for a gone account and a removed machine rather than dropping the row", async () => {
@@ -320,6 +347,10 @@ function usageRow(overrides: Record<string, unknown>) {
     calls: 5,
     ok: 3,
     failed: 2,
+    failures: [
+      { kind: "no_credential", count: 2 },
+      { kind: "upstream_error", count: 1 },
+    ],
     tools: ["create_issue", "search"],
     firstCallMs: Date.now() - 3_600_000,
     lastCallMs: Date.now() - 60_000,
@@ -338,7 +369,8 @@ describe("what the Usage table renders", () => {
     expect(html).toContain("84 sessions, newest activity first — page 2 of 4.");
     // Two rows for two sessions, whatever the call count on them.
     expect(html.match(/data-testid="mcp-usage-cs_/g)).toHaveLength(2);
-    expect(html).toContain("3 ok · 2 failed");
+    // The cell names the kinds: "3 failed" alone is a number nobody can act on.
+    expect(html).toContain("3 ok · 2 failed (2 no sign-in, 1 server error)");
     expect(html).toContain("create_issue, search");
   });
 
@@ -354,9 +386,20 @@ describe("what the Usage table renders", () => {
     expect(html).not.toContain('data-testid="mcp-usage-pager"');
   });
 
+  it("says only the counts for a session where nothing failed", async () => {
+    const html = await renderPanel({
+      sessions: [usageRow({ calls: 4, ok: 4, failed: 0, failures: [] })],
+      page: 1,
+      pageCount: 1,
+      total: 1,
+    });
+    expect(html).toContain("4 ok · 0 failed");
+    expect(html).not.toContain("4 ok · 0 failed (");
+  });
+
   it("says `—` once for a session that called no tools, not a column of them", async () => {
     const html = await renderPanel({
-      sessions: [usageRow({ tools: [], calls: 2, ok: 2, failed: 0 })],
+      sessions: [usageRow({ tools: [], calls: 2, ok: 2, failed: 0, failures: [] })],
       page: 1,
       pageCount: 1,
       total: 1,
