@@ -354,6 +354,12 @@ fn diff_entries(body: &str) -> Vec<(String, &'static str)> {
         if let Some(rest) = line.strip_prefix("Binary files a/") {
             let path = rest.split(" and b/").next().unwrap_or_default();
             out.push((path.to_owned(), "modified"));
+        } else if let Some(rest) = line.strip_prefix("Binary file b/") {
+            let path = rest.strip_suffix(" added").unwrap_or(rest);
+            out.push((path.to_owned(), "added"));
+        } else if let Some(rest) = line.strip_prefix("Binary file a/") {
+            let path = rest.strip_suffix(" removed").unwrap_or(rest);
+            out.push((path.to_owned(), "deleted"));
         } else if let Some(old) = line.strip_prefix("--- ") {
             let new = lines
                 .next()
