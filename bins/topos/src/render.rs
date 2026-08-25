@@ -4357,6 +4357,11 @@ pub(crate) fn pull_tty(
         }
         best.values().map(|&(i, _)| i).collect()
     };
+    // A config-file sub-line is a fact about THE FILE, not about the bundle whose row it happens
+    // to sit under: three servers landing in one `.mcp.json` printed
+    // `~/.claude/skills/topos-mcp/.mcp.json: created — …` three times, the same sentence about the
+    // same file. Each distinct one is said once per receipt, under the first row that reaches it.
+    let mut file_lines_said: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut rows: Vec<(String, String, Vec<String>)> = data
         .skills
         .iter()
@@ -4430,7 +4435,9 @@ pub(crate) fn pull_tty(
                 s.harnesses
                     .iter()
                     .filter(|h| wrote || !mcp_state_settled(h))
-                    .map(|h| mcp_agent_line(h, wrote)),
+                    .map(|h| mcp_agent_line(h, wrote))
+                    .filter(|line| file_lines_said.insert(line.clone()))
+                    .collect::<Vec<_>>(),
             );
             Some((lead, line, extra))
         })
@@ -7541,6 +7548,56 @@ mod tests {
             0,
             0,
         )
+    }
+
+    /// Three connected servers landing in ONE `.mcp.json`. The sub-line under each row is a fact
+    /// about the FILE — `…/.mcp.json: created — loads next session; …` — so a run that installed
+    /// three said the same sentence about the same file three times. It is said once, under the
+    /// first row that reaches it; every row still names the file it landed in.
+    #[test]
+    fn one_config_file_says_what_happened_to_it_once() {
+        use topos_types::results::TargetOutcome;
+        const FILE: &str = "~/.claude/skills/topos-mcp/.mcp.json";
+        let server = |name: &str| PullSkill {
+            action: PullAction::Installed,
+            destinations: vec![FILE.to_owned()],
+            ..mcp_row(
+                name,
+                vec![agent_state(
+                    "claude-code",
+                    Some(FILE),
+                    TargetOutcome::Created,
+                    Some("loads next session"),
+                )],
+            )
+        };
+        let out = pull_tty(
+            &PullData {
+                skills: vec![server("deepwiki"), server("linear"), server("sentry")],
+                proposals_awaiting: 0,
+                notices: Vec::new(),
+                sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
+                triggers: Vec::new(),
+                scope: None,
+            },
+            &[],
+            &[],
+            &[],
+            &[],
+            0,
+            0,
+        );
+        assert_eq!(
+            out.matches(&format!("{FILE}: created")).count(),
+            1,
+            "one file, one sentence about it: {out}"
+        );
+        // Every server still says where it landed.
+        for name in ["deepwiki", "linear", "sentry"] {
+            assert!(out.contains(&format!("+ {name}")), "{out}");
+        }
+        assert_eq!(out.matches(FILE).count(), 4, "{out}");
     }
 
     /// A SETTLED mcp row is as quiet as a settled skill row. Every surface is either current or
