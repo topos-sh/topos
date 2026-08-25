@@ -146,6 +146,37 @@ impl Rig {
         )
         .unwrap();
     }
+    /// A SECOND login on the same host — the two-workspace machine the resolution rules are
+    /// about. No default is set by this (a `topos workspace use` is the only thing that stars
+    /// one), so a machine seeded with both is exactly the ambiguous case.
+    pub(super) fn seed_other_session(&self, workspace_id: &str, workspace_name: &str) {
+        sessions::upsert_session(
+            &self.fs,
+            &self.layout(),
+            Session {
+                host: HOST.into(),
+                base_url: format!("https://{HOST}/api"),
+                workspace_id: workspace_id.into(),
+                workspace_name: workspace_name.into(),
+                display_name: workspace_name.into(),
+                session_id: format!("sn_{workspace_name}"),
+                credential: "cred-2".into(),
+                status: SESSION_ACTIVE.into(),
+                logged_in_at: 2,
+            },
+        )
+        .unwrap();
+    }
+    /// Unstar the machine default: several live logins and nothing saying which one commands act
+    /// on. Reached by a sessions file this build did not write (an older topos, a hand edit) —
+    /// and the one state a lookup must REFUSE in rather than guess or scan.
+    pub(super) fn clear_default(&self) {
+        let path = self.layout().sessions_path();
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc.as_object_mut().unwrap().remove("default");
+        std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    }
     /// Write the GLOBAL manifest (`~/.topos/topos.toml`) — the person scope's complete recipe.
     pub(super) fn write_global(&self, body: &str) {
         let home = self.layout().home().to_path_buf();
@@ -529,8 +560,20 @@ impl DirectorySource for FakeDirectory {
     fn proposals_index(&self, _ws: &str) -> Result<WireProposalIndex, ClientError> {
         unreachable!()
     }
-    fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
-        unreachable!()
+    fn skill_log(&self, _ws: &str, skill_id: &str) -> Result<WireSkillLog, ClientError> {
+        // A catalog with no PLANE history: `log`'s plane half reaches this fake now that it takes
+        // the bundle's own workspace lane instead of building the whole session universe (whose
+        // `me` read this fake refuses). An empty history leaves the local log exactly as it was.
+        self.check_reachable()?;
+        Ok(WireSkillLog {
+            skill_id: skill_id.to_owned(),
+            name: String::new(),
+            kind: "skill".to_owned(),
+            status: "active".to_owned(),
+            base_name: None,
+            versions: Vec::new(),
+            proposals: Vec::new(),
+        })
     }
     fn protect_skill(&self, _ws: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
         unreachable!()
@@ -595,6 +638,24 @@ pub(super) fn connect<'a>(
         directory: Box::new(dir.clone()),
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
+    }
+}
+
+/// The same connector, RECORDING which workspaces a verb built a lane for — the one way to prove
+/// a lookup acted on one workspace instead of sweeping every login.
+pub(super) fn connect_recording<'a>(
+    plane: &'a FakePlane,
+    dir: &'a FakeDirectory,
+    seen: &'a Mutex<Vec<String>>,
+) -> impl Fn(&Session) -> ops::SessionTransports + 'a {
+    move |s: &Session| {
+        seen.lock().unwrap().push(s.workspace_id.clone());
+        ops::SessionTransports {
+            plane: Box::new(plane.clone()),
+            directory: Box::new(dir.clone()),
+            contribute: Box::new(NoContribute),
+            governance: Box::new(NoGovernance),
+        }
     }
 }
 

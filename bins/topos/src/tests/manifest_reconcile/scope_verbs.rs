@@ -537,7 +537,7 @@ fn diff_and_log_resolve_a_project_stores_copy() {
     // `log` walks the PROJECT store's git history (the version the sweep applied there).
     let sessions = connect(&plane, &dir);
     let connectors = ops::LogConnectors { session: &sessions };
-    let out = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    let out = ops::log(&ctx, &connectors, "deploy", None, ops::RowPage::unlimited()).unwrap();
     let versions: Vec<&str> = out
         .events
         .iter()
@@ -744,7 +744,7 @@ fn reads_from_inside_a_project_answer_the_project_copy() {
 
     let sessions = connect(&plane, &dir2);
     let connectors = ops::LogConnectors { session: &sessions };
-    let out = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    let out = ops::log(&ctx, &connectors, "deploy", None, ops::RowPage::unlimited()).unwrap();
     let versions: Vec<String> = out
         .events
         .iter()
@@ -805,7 +805,7 @@ fn a_project_copys_log_names_the_workspace_whose_last_exchange_failed() {
     };
     let sessions = connect(&plane, &dir);
     let connectors = ops::LogConnectors { session: &sessions };
-    let data = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    let data = ops::log(&ctx, &connectors, "deploy", None, ops::RowPage::unlimited()).unwrap();
     let fault = data.sync_fault.clone().expect("the fault reaches `log`");
     assert_eq!(
         fault.workspace, WS_NAME,
@@ -830,7 +830,7 @@ fn a_project_copys_log_names_the_workspace_whose_last_exchange_failed() {
     // The server comes back: the note goes with the fault.
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     sweep(&rig.ctx_at(Some(&proj.0)), &plane, &dir);
-    let data = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    let data = ops::log(&ctx, &connectors, "deploy", None, ops::RowPage::unlimited()).unwrap();
     assert!(data.sync_fault.is_none());
     assert!(
         !crate::render::log_tty(&data).contains("did not succeed"),
@@ -1571,4 +1571,220 @@ fn revert_tells_a_demanded_unapplied_row_apart_from_a_name_it_never_heard_of() {
     // Both still branch as the one refusal an agent already knows.
     assert_eq!(demanded.code(), "NO_SUCH_SKILL");
     assert_eq!(unknown.code(), "NO_SUCH_SKILL");
+}
+
+// =================================================================================================
+// ONE workspace per command. A bundle this machine already tracks names its own workspace, so a
+// lookup about it reads that one and no other; a name nothing tracks falls to the resolution
+// (`--workspace` → `TOPOS_WORKSPACE` → the machine default → the sole login) and refuses, naming
+// the choices, rather than asking every server in turn.
+// =================================================================================================
+
+/// `log` on a TRACKED bundle reads exactly the workspace that delivered it — even on a machine
+/// signed into two workspaces with no default set. Before this it built the whole session
+/// universe twice and narrated `reading <host>/<ws>` for a workspace holding no copy of the
+/// bundle at all.
+#[test]
+fn log_on_a_tracked_bundle_reads_only_its_own_workspace() {
+    let rig = Rig::new("ws-one-log");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let proj = project_custody("ws-one-log-repo", &rig, &plane, &dir);
+    // A SECOND login, joined after the bundle landed and never made the default.
+    rig.seed_other_session("w_ops", "ops");
+    // The production follow seam (built from the delivery cache the sweep wrote) is what maps this
+    // copy back to the workspace it came from.
+    let cache_follow = ops::CacheFollow::load(&rig.fs, &rig.layout());
+    let ctx = Ctx {
+        follow: &cache_follow,
+        ..rig.ctx_at(Some(&proj.0))
+    };
+
+    let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let sessions = connect_recording(&plane, &dir, &seen);
+    let connectors = ops::LogConnectors { session: &sessions };
+    ops::log(&ctx, &connectors, "deploy", None, ops::RowPage::unlimited())
+        .expect("a tracked bundle's history needs no workspace pick");
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![WS.to_owned()],
+        "only the workspace the bundle came from is read"
+    );
+}
+
+/// A name nothing here tracks, on a machine with two logins and no default: the refusal names the
+/// workspaces and BOTH ways out, and not one server is dialed on the way to saying so.
+#[test]
+fn an_untracked_name_refuses_with_the_pick_and_dials_nothing() {
+    let rig = Rig::new("ws-one-refuse");
+    rig.seed_session();
+    rig.seed_other_session("w_ops", "ops");
+    rig.clear_default();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let sessions = connect_recording(&plane, &dir, &seen);
+    let connectors = ops::LogConnectors { session: &sessions };
+    let err = ops::log(
+        &ctx,
+        &connectors,
+        "nothing-here",
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .expect_err("two logins and no default is a pick, not a guess");
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("you are logged into 2 workspaces")
+            && message.contains(WS_NAME)
+            && message.contains("ops"),
+        "the refusal names the workspaces: {message}"
+    );
+    assert!(
+        message.contains("topos --workspace <name>")
+            && message.contains("topos workspace use <name>"),
+        "the refusal carries both runnable ways out: {message}"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "nothing is dialed before the pick is made: {:?}",
+        seen.lock().unwrap()
+    );
+}
+
+/// The SAME untracked name with the workspace named: the pick is made, so exactly that workspace
+/// is read — the flag beats the missing default rather than widening the search.
+#[test]
+fn an_untracked_name_with_a_named_workspace_reads_only_that_one() {
+    let rig = Rig::new("ws-one-named");
+    rig.seed_session();
+    rig.seed_other_session("w_ops", "ops");
+    rig.clear_default();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let sessions = connect_recording(&plane, &dir, &seen);
+    let connectors = ops::LogConnectors { session: &sessions };
+    let err = ops::log(
+        &ctx,
+        &connectors,
+        "nothing-here",
+        Some("ops"),
+        ops::RowPage::unlimited(),
+    )
+    .expect_err("the name still resolves to nothing");
+    assert!(
+        matches!(err, ClientError::NoSuchSkill { .. }),
+        "the answer is the not-found, not a workspace pick: {err:?}"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["w_ops".to_owned()],
+        "the named workspace, and only it, is read"
+    );
+}
+
+/// `list --remote` is a LOOKUP, so it reads the workspace this machine acts on — the starred
+/// default here — and names the other login in one closing line instead of printing its catalog
+/// too. Before this it dialed every server and stacked their catalogs.
+#[test]
+fn list_remote_reads_the_default_and_names_the_other_login() {
+    let rig = Rig::new("ws-one-remote");
+    rig.seed_session();
+    rig.seed_other_session("w_ops", "ops");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let v = one_file(b"# deploy\n");
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+
+    let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let connect = |s: &Session| -> Box<dyn crate::plane::DirectorySource> {
+        seen.lock().unwrap().push(s.workspace_id.clone());
+        Box::new(dir.clone())
+    };
+    let out = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            remote: true,
+            ..ops::ListRequest::default()
+        },
+        None,
+        Some(&connect),
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![WS.to_owned()],
+        "the catalog view reads the workspace it acts on, and only it"
+    );
+    let addresses: Vec<String> = out
+        .data
+        .remote
+        .iter()
+        .map(|w| w.workspace.address())
+        .collect();
+    assert_eq!(addresses, vec![format!("{HOST}/{WS_NAME}")]);
+    let also: Vec<&str> = out
+        .data
+        .also_signed_in
+        .iter()
+        .map(|w| w.name.as_str())
+        .collect();
+    assert_eq!(also, vec!["ops"], "the other login is named, not read");
+
+    let tty = crate::render::list_tty(&out);
+    assert!(
+        tty.contains("also logged into: ops — `topos list --remote --workspace ops`"),
+        "the closing line is the command that shows the other one: {tty}"
+    );
+}
+
+/// The same machine with `--workspace` naming the OTHER login: that one is read, and the closing
+/// line names the default instead — the flag beats the default in both directions.
+#[test]
+fn list_remote_with_a_named_workspace_reads_that_one() {
+    let rig = Rig::new("ws-one-remote-named");
+    rig.seed_session();
+    rig.seed_other_session("w_ops", "ops");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let connect = |s: &Session| -> Box<dyn crate::plane::DirectorySource> {
+        seen.lock().unwrap().push(s.workspace_id.clone());
+        Box::new(dir.clone())
+    };
+    let out = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            remote: true,
+            workspace: Some("w_ops".to_owned()),
+            ..ops::ListRequest::default()
+        },
+        None,
+        Some(&connect),
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec!["w_ops".to_owned()]);
+    let also: Vec<&str> = out
+        .data
+        .also_signed_in
+        .iter()
+        .map(|w| w.name.as_str())
+        .collect();
+    assert_eq!(also, vec![WS_NAME]);
 }

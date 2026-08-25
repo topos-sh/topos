@@ -587,9 +587,15 @@ pub struct ListData {
     /// Full untracked discoveries (only under `--untracked`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub untracked: Vec<UntrackedEntry>,
-    /// Per-workspace catalog view (only under `--remote`).
+    /// Per-workspace catalog view (only under `--remote`). ONE workspace — the one the
+    /// invocation acts on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote: Vec<RemoteWorkspace>,
+    /// The OTHER workspaces this machine is signed into, present only under `--remote`. The
+    /// catalog view acts on one workspace; this names the rest so none of them is invisible, and
+    /// the TTY closes the view with the spelling that shows theirs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_signed_in: Vec<WorkspaceRef>,
     /// The one-skill deep dive (`list <name>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<ListDetail>,

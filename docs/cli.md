@@ -129,7 +129,7 @@ These work before or after any command.
 | Flag | What it does |
 |---|---|
 | `--json` | Print one JSON object instead of human text — for agents and scripts. Never prompts |
-| `--workspace <WORKSPACE>` | Pick which workspace to act in when this machine is logged into more than one. Takes the workspace's name or id. With a single login it is inferred |
+| `--workspace <WORKSPACE>` | Pick which workspace to act in when this machine is logged into more than one. Takes the workspace's name or id, and beats the machine default (`topos workspace use <name>`) for this one command. A command always acts on ONE workspace, never all of them: a bundle this machine already tracks acts on the workspace it came from, and anything else acts on the one this flag, `TOPOS_WORKSPACE`, or the default names. With a single login it is inferred |
 
 ## Documents topos prints
 

@@ -328,8 +328,10 @@ commands with `-g`), the applied `version`, any `pin`, and the `placements` on d
 manages answers with `managed: false` plus the `folders` of unmanaged copies found on disk (exit
 `0` — "not managed" is the answer, and `topos add <folder>` is the way to change it). `-a <agent>` fills
 `agent_view` instead — one harness's skills directories exactly as that agent reads them, spanning
-both scopes — and `--remote` fills `remote` with each connected workspace's channels and skills,
-annotated with this machine's adoption state. A skill can legitimately have two independent copies,
+both scopes — and `--remote` fills `remote` with ONE workspace's channels and skills, annotated
+with this machine's adoption state: the workspace the invocation acts on. Every other login rides
+in `also_signed_in` (`{host, name}`) rather than being read; ask for one of those with
+`--workspace <name>`. A skill can legitimately have two independent copies,
 one for the project and one for the person, with separate drafts. `publish` resolves between them:
 the copy you stand in when it holds edits, otherwise the other one when THAT does — and whenever
 the bytes come from outside the scope you stand in, `from_placement` names the folder and

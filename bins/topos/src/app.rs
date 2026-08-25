@@ -1575,7 +1575,7 @@ fn run_command(
             finish_log(
                 json,
                 cmd_name,
-                ops::log(&ctx, &connectors, &skill, page),
+                ops::log(&ctx, &connectors, &skill, workspace.as_deref(), page),
                 &skill,
                 page,
                 &diag,

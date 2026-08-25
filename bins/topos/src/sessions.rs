@@ -178,9 +178,13 @@ impl Sessions {
             }),
             [only] => Ok(only),
             _ => Err(ClientError::WorkspaceSelection(format!(
-                "this machine is logged into more than one workspace ({}) — `topos workspace \
-                 use <name>` sets the default, or pass `--workspace <name>` for one command",
-                self.names().join(", ")
+                "you are logged into {} workspaces ({}) — pick one: `topos --workspace <name> \
+                 …`, or set a default: `topos workspace use <name>`",
+                live.len(),
+                live.iter()
+                    .map(|s| s.workspace_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))),
         }
     }

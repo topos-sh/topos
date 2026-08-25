@@ -471,6 +471,7 @@ fn an_overwritten_edit_is_kept_in_the_store_and_named_on_no_surface() {
         &ctx,
         &ops::LogConnectors { session: &nosess },
         "topos",
+        None,
         crate::ops::RowPage::unlimited(),
     )
     .unwrap();
