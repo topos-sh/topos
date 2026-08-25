@@ -67,8 +67,10 @@ Every trigger runs the same base sweep, registered in whatever form the agent ac
 topos install --quiet
 ```
 
-Claude Code's line adds a short flag naming itself, which is how that agent opts into the extra
-answer below; every other trigger runs the sweep unadorned.
+What lands in the agent's config is that sweep plus a **marker** naming the agent it was written
+for. The marker is how Topos recognises its own entry on a later run, and Claude Code's is also
+what opts that agent into the extra answer below. It is not a flag you type, and it is not the
+same on every agent.
 
 The sweep self-throttles (default 300 seconds), so a trigger can fire on every session event
 cheaply. It always covers **both** sets — your machine-wide one and any `topos.toml` covering the
@@ -154,13 +156,16 @@ ignores itself whole. Every delivered skill folder carries a one-line `.gitignor
 way `node_modules` does. Topos writes nothing under `.git/`, and never touches an ignore file you
 wrote.
 
-Committing those folders instead is a fine choice. The hook line is the same on every agent and is
-safe in a repo other people clone: without the `topos` binary on `PATH` it does nothing, and it
-exits `0` either way.
+Committing those folders instead is a fine choice. The hook line is safe in a repo other people
+clone: without the `topos` binary on `PATH` it does nothing, and it exits `0` either way. It is the
+sweep, a `command -v topos` guard, an exit-`0` tail, and the agent's marker. Cursor's, for instance:
 
 ```bash
-command -v topos >/dev/null 2>&1 && topos install --quiet || true
+command -v topos >/dev/null 2>&1 && topos install --quiet --from cursor || true
 ```
+
+Commit it exactly as Topos wrote it. Each agent's marker is its own, and a retyped line is one
+Topos no longer recognises as its own entry.
 
 To ignore the agents' folders whole, ask for it once. It is off by default, and it is the only
 time Topos edits a `.gitignore`:
