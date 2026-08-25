@@ -398,8 +398,12 @@ function ActiveSessions({
   return (
     <section aria-labelledby="sessions-heading" className="space-y-6">
       <div className="space-y-2">
+        {/* "Sessions", not "Active sessions": the list holds every session that is not waiting for
+            approval, and a session the workspace has not heard from in a while is in it, chip and
+            all. The counts line under the page title is the qualifier — it says how many of these
+            are active, stale, never-reported or expired, and it must add up to what is below. */}
         <SectionHeading>
-          <span id="sessions-heading">Active sessions</span>
+          <span id="sessions-heading">Sessions</span>
         </SectionHeading>
         {isOwner && (
           <p className="text-faint text-sm leading-relaxed">
