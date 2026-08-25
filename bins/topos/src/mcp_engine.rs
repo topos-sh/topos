@@ -492,6 +492,25 @@ pub(crate) fn converge(
                     *i,
                     agent_state(h.slug, w.state, Some(w.note.as_str()), None),
                 );
+                // The row's own `dest` named an agent nobody picked here: a standing fact, said
+                // on every run with the command that changes it (the row's state line alone
+                // goes quiet once the row settles), and counted `not placed` when the row lands
+                // nowhere else.
+                if w.reason == crate::placement::WithheldReason::NotPicked {
+                    let global = io.project_root.is_none();
+                    note_standing(
+                        "MCP_AGENT_NOT_PICKED",
+                        format!(
+                            "not placed in {slug}: {slug} is not one of this {}'s agents. Add \
+                             it: topos agents add{} {slug}",
+                            if global { "machine" } else { "project" },
+                            crate::error::scope_flag(global),
+                            slug = h.slug,
+                        ),
+                        *i,
+                    );
+                    capability_gaps.insert(*i);
+                }
             }
         }
         // WHERE this surface's file is. A harness some plan REACHES answers with the plan's own

@@ -22,8 +22,10 @@ use std::path::{Path, PathBuf};
 
 use topos_harness::registry::{self, KnownHarness, SkillScope};
 use topos_harness::triggers::{self, TriggerScope};
-use topos_types::TriggerState;
-use topos_types::results::{AgentsChanged, AgentsData, PickHook, PickReceipt};
+use topos_types::results::{
+    AgentsChanged, AgentsData, PickHook, PickReceipt, PickRemoved, PullAction,
+};
+use topos_types::{Message, TriggerState};
 
 use crate::agents_pick::{self, AgentsPick, PickScope, PickSource, WILDCARD};
 use crate::ctx::Ctx;
@@ -140,12 +142,12 @@ fn expand(ctx: &Ctx<'_>, scope: &PickScope, pick: &AgentsPick) -> Vec<String> {
 /// (a project inherits the machine pick; the machine inherits nothing).
 fn current_pick(ctx: &Ctx<'_>, scope: &PickScope) -> Result<(AgentsPick, bool), ClientError> {
     let own = agents_pick::path_for(&ctx.layout, scope);
-    if let Some(pick) = agents_pick::read(ctx.fs, &own)? {
+    if let Some(pick) = agents_pick::read(ctx.fs, &own, matches!(scope, PickScope::Machine))? {
         return Ok((pick, true));
     }
     let inherited = match scope {
         PickScope::Project(_) => {
-            agents_pick::read(ctx.fs, &agents_pick::machine_path(&ctx.layout))?
+            agents_pick::read(ctx.fs, &agents_pick::machine_path(&ctx.layout), true)?
                 .map(|pick| expand(ctx, scope, &pick))
                 .unwrap_or_default()
         }
@@ -186,7 +188,8 @@ fn untouched(ctx: &Ctx<'_>, scope: &PickScope, picked: &[&'static KnownHarness])
 ///
 /// # Errors
 /// [`ClientError::GitignoreNeedsProject`] for `--gitignore` with `-g` (or outside a project);
-/// an unreadable pick file; the `.gitignore` write.
+/// an unreadable pick file; the `.gitignore` write (a `.gitignore` that is a symlink out of the
+/// checkout is a line on the receipt, not a refusal).
 pub(crate) fn list(
     ctx: &Ctx<'_>,
     global: bool,
@@ -215,6 +218,7 @@ pub(crate) fn list(
         .filter(|slug| !agents_pick::is_known(slug))
         .cloned()
         .collect();
+    let mut warnings: Vec<Message> = Vec::new();
     let gitignored = if gitignore {
         let PickScope::Project(dir) = &scope else {
             return Err(ClientError::GitignoreNeedsProject);
@@ -223,7 +227,15 @@ pub(crate) fn list(
             .as_ref()
             .map(|e| resolve_at(ctx, &scope, &e.pick))
             .unwrap_or_default();
-        gitignore_append(ctx.fs, dir, &gitignore_entries_for(&rows))?
+        if gitignore_within(dir) {
+            gitignore_append(ctx.fs, dir, &gitignore_entries_for(&rows))?
+        } else {
+            warnings.push(crate::message::advisory(
+                GITIGNORE_NOT_EDITED,
+                GITIGNORE_SYMLINK_LINE.to_owned(),
+            ));
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
@@ -241,6 +253,7 @@ pub(crate) fn list(
         installed: installed_slugs(ctx, &scope),
         hooks: agent_hooks::probe_effective(ctx, project_dir(&scope), &evidence),
         gitignored,
+        warnings,
     })
 }
 
@@ -321,6 +334,13 @@ pub(crate) fn set_for_init(
 /// the `.gitignore` lines. Idempotent. `gitignore_hint` is the command the receipt offers when
 /// the new files are not ignored by git.
 ///
+/// What the reconcile could not do rides the receipt, never the floor: its failure and advisory
+/// lines, the bundles it could not carry forward, and the rows it removed are carried on
+/// [`PickReceipt`] (the caller exits non-zero on a failure line, as `update` does), the built-in
+/// placement's refused roots join those lines, and a `.gitignore` that is a symlink out of the
+/// checkout is one more line rather than an abort after the pick, the copies and the hooks
+/// already landed.
+///
 /// # Errors
 /// The reconcile's refusals (a manifest the grammar refuses, an unmatched target); the built-in
 /// placement's store failures; the `.gitignore` write.
@@ -339,8 +359,8 @@ pub(crate) fn apply_pick(
     let picked = resolve_at(ctx, scope, &pick);
 
     // 1. The scope's reconcile: skills and MCP entries land for the picked agents, exactly as a
-    //    `topos install` would place them.
-    super::reconcile::manifest_update(
+    //    `topos install` would place them. Its outcome is the receipt's, not dropped.
+    let out = super::reconcile::manifest_update(
         ctx,
         connect,
         git,
@@ -356,14 +376,34 @@ pub(crate) fn apply_pick(
             lock: LockMode::Install,
         },
     )?;
-    // 2. The built-in bundle, at the pick's own scope.
-    match scope {
-        PickScope::Machine => {
-            super::builtin::ensure_builtin(ctx)?;
+    let removed: Vec<PickRemoved> = out
+        .data
+        .skills
+        .iter()
+        .filter(|s| s.action == PullAction::Removed && !s.destinations.is_empty())
+        .map(|s| PickRemoved {
+            bundle: s.display.clone().unwrap_or_else(|| s.skill.clone()),
+            destinations: s.destinations.clone(),
+        })
+        .collect();
+    let failed_bundles = u64::try_from(out.failed_bundles.len()).unwrap_or(u64::MAX);
+    let mut warnings: Vec<Message> = out.warnings;
+    let mut note = |line: Message| {
+        if !warnings.contains(&line) {
+            warnings.push(line);
         }
-        PickScope::Project(dir) => {
-            super::builtin::ensure_builtin_in_project(ctx, dir)?;
-        }
+    };
+    for line in out.advisories {
+        note(line);
+    }
+    // 2. The built-in bundle, at the pick's own scope. A root the containment rail refused is
+    //    a placement that did not happen, said on the receipt like the reconcile's own.
+    let sync = match scope {
+        PickScope::Machine => super::builtin::ensure_builtin(ctx)?,
+        PickScope::Project(dir) => super::builtin::ensure_builtin_in_project(ctx, dir)?,
+    };
+    for line in sync.refused {
+        note(line);
     }
     // 3. The hooks, for exactly the picked agents at this scope.
     let mut hook_files: Vec<PickHook> = Vec::new();
@@ -409,12 +449,21 @@ pub(crate) fn apply_pick(
         hook_notes.extend(absent.into_iter().map(|a| a.note));
     }
     // 4. `.gitignore`, only when asked; else the one hint line when the files are not ignored.
+    //    A `.gitignore` that is a symlink out of the checkout is not edited, and says so here:
+    //    the pick, the copies and the hooks above already landed, so this is a line, not a fault.
     let entries = gitignore_entries_for(&picked);
     let mut gitignored = Vec::new();
     let mut hint = None;
     if let PickScope::Project(dir) = scope {
         if gitignore {
-            gitignored = gitignore_append(ctx.fs, dir, &entries)?;
+            if gitignore_within(dir) {
+                gitignored = gitignore_append(ctx.fs, dir, &entries)?;
+            } else {
+                note(crate::message::advisory(
+                    GITIGNORE_NOT_EDITED,
+                    GITIGNORE_SYMLINK_LINE.to_owned(),
+                ));
+            }
         } else if super::init::inside_a_git_repo(ctx.fs, dir)
             && !gitignore_missing(ctx.fs, dir, &entries).is_empty()
         {
@@ -436,6 +485,9 @@ pub(crate) fn apply_pick(
         untouched: untouched(ctx, scope, &picked),
         gitignore_hint: hint,
         gitignored,
+        removed,
+        warnings,
+        failed_bundles,
     })
 }
 
@@ -947,11 +999,12 @@ pub(crate) fn remove(
 // The pick a reconcile needs — `install` / `update` with none.
 // =================================================================================================
 
-/// Before a reconcile drives `scope` with no effective pick: one agent installed here is the pick
-/// (recorded at that scope, then reread, so the reconcile reads what the file says); several are
-/// asked for per `ask`; under `quiet` (the hook sweep) nothing is asked and nothing is placed.
-/// `Ok(Some(slugs))` when a pick was recorded this run; `Ok(None)` when one already stood, or
-/// none could be derived quietly.
+/// Before a verb lands anything at `scope` with no effective pick (`install`, `update`, `init`,
+/// every `add`): one agent installed here is the pick (recorded at that scope, then reread, so
+/// the converge reads what the file says, and the caller says so); several are asked for per
+/// `ask`. `Ok(Some(slugs))` when a pick was recorded this run; `Ok(None)` when one already stood.
+/// The quiet hook sweep never calls this: it asks nothing, derives nothing and places nothing
+/// for a scope with no pick.
 ///
 /// # Errors
 /// [`ClientError::PickRequired`] from the ask; an unreadable pick file; the pick write.
@@ -959,15 +1012,11 @@ pub(crate) fn derive_pick_if_missing(
     ctx: &Ctx<'_>,
     scope: &PickScope,
     ask: &AskInputs,
-    quiet: bool,
 ) -> Result<Option<Vec<String>>, ClientError> {
     if agents_pick::effective(ctx.fs, &ctx.layout, project_dir(scope))?.is_some() {
         return Ok(None);
     }
     let installed = installed_slugs(ctx, scope);
-    if quiet && installed.len() != 1 {
-        return Ok(None);
-    }
     let inputs = AskInputs {
         global: matches!(scope, PickScope::Machine),
         ..*ask
@@ -1083,22 +1132,32 @@ fn gitignore_missing(fs: &dyn FsOps, project_dir: &Path, entries: &[String]) -> 
         .collect()
 }
 
+/// The receipt line for a `.gitignore` that is a symlink out of the checkout, and its code.
+const GITIGNORE_SYMLINK_LINE: &str = "`.gitignore` is a symlink out of this checkout; not edited";
+const GITIGNORE_NOT_EDITED: &str = "GITIGNORE_NOT_EDITED";
+
+/// Whether the checkout's `.gitignore` resolves inside it (absent counts: it would be created
+/// there). A symlink out of the checkout is never written through.
+fn gitignore_within(project_dir: &Path) -> bool {
+    crate::placement::within_project(project_dir, &project_dir.join(".gitignore"))
+}
+
 /// Append the entries `.gitignore` does not hold yet, one per line, creating the file when
 /// absent. Idempotent: a second run with the same entries writes nothing. Never touches
 /// `.git/info/exclude`, never edits an existing line. Returns what was appended.
 ///
 /// # Errors
 /// A `.gitignore` that does not resolve inside the checkout (a symlink out of it) refuses with
-/// [`ClientError::PlacementUnsupported`]; the write failure.
+/// [`ClientError::PlacementUnsupported`] carrying [`GITIGNORE_SYMLINK_LINE`]; the write failure.
 pub(crate) fn gitignore_append(
     fs: &dyn FsOps,
     project_dir: &Path,
     entries: &[String],
 ) -> Result<Vec<String>, ClientError> {
     let path = project_dir.join(".gitignore");
-    if !crate::placement::within_project(project_dir, &path) {
+    if !gitignore_within(project_dir) {
         return Err(ClientError::PlacementUnsupported {
-            reason: crate::placement::escape_line(".gitignore", &path),
+            reason: GITIGNORE_SYMLINK_LINE.to_owned(),
         });
     }
     let missing = gitignore_missing(fs, project_dir, entries);

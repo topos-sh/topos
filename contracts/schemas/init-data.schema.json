@@ -36,6 +36,40 @@
     "created"
   ],
   "$defs": {
+    "Message": {
+      "description": "One message: the machine-readable code (when the producer has one), what kind of thing it is,\nand the ONE sentence a person reads. `text` never carries the code — a code is a lookup key,\nnot prose, and the TTY prints `text` alone.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The stable SCREAMING_SNAKE code an agent branches on. Absent where the producer has no\ncode (a decision, a paging fact) — an open vocabulary, exactly like `WireError.code`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "text": {
+          "description": "The line a person reads. Complete on its own; no code, no Rust type name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ]
+    },
+    "MessageKind": {
+      "description": "What a [`Message`] IS, so a consumer never has to infer it from wording. `failure` is the only\nkind that says something did not happen; `decision` is a bundle waiting on a person; `advisory`\nannotates something that still worked; `disclosure` states a fact about work that succeeded.",
+      "type": "string",
+      "enum": [
+        "failure",
+        "decision",
+        "advisory",
+        "disclosure"
+      ]
+    },
     "PickHook": {
       "description": "One picked agent's auto-update hook, as an `init` / `agents add` receipt names it.\n**INFERRED** (additive-only).",
       "type": "object",
@@ -71,6 +105,12 @@
           "items": {
             "type": "string"
           }
+        },
+        "failed_bundles": {
+          "description": "How many bundles the reconcile could not carry forward this run. **Additive.**",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "gitignore_hint": {
           "description": "The command that adds the picked agents' folders to `.gitignore`, offered when the\nproject is in a git repository and they are not ignored yet.",
@@ -117,6 +157,13 @@
           "description": "The pick file, as a person reads it.",
           "type": "string"
         },
+        "removed": {
+          "description": "The bundle rows the scope's reconcile removed this run (a row the manifest no longer\ncarries), with the folders or config files that left. **Additive.**",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PickRemoved"
+          }
+        },
         "scope": {
           "description": "`\"project\"` or `\"machine\"`.",
           "type": "string"
@@ -140,6 +187,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "warnings": {
+          "description": "The lines the reconcile and the built-in placement raised: a bundle that could not be\ncarried forward, a project root the containment rail refused, a `.gitignore` that could\nnot be edited. The same channel `update` prints; a `failure` line makes the run exit\nnon-zero exactly as `update` does. **Additive.**",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Message"
+          }
         }
       },
       "required": [
@@ -148,6 +202,26 @@
         "pick_path",
         "skills",
         "mcp_servers"
+      ]
+    },
+    "PickRemoved": {
+      "description": "One bundle row a pick run's reconcile removed, and where its copies or entries left.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "description": "The bundle, as a person reads it (workspace-qualified where it came from one).",
+          "type": "string"
+        },
+        "destinations": {
+          "description": "The folders or config files that left.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "bundle"
       ]
     }
   }

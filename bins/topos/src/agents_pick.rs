@@ -125,12 +125,22 @@ pub(crate) fn path_for(layout: &Layout, scope: &PickScope) -> PathBuf {
     }
 }
 
-/// Read one pick file; `None` when absent.
+/// Read one pick file; `None` when absent. `global` says which file it is, for the refusal.
 ///
 /// # Errors
-/// As [`crate::doc::read_doc`]: an unreadable or newer-schema file fails closed.
-pub(crate) fn read(fs: &dyn FsOps, path: &Path) -> Result<Option<AgentsPick>, ClientError> {
-    crate::doc::read_doc(fs, path)
+/// [`ClientError::PickUnreadable`] naming the file and the scope when the document cannot be
+/// parsed; otherwise as [`crate::doc::read_doc`] (a newer-schema file fails closed toward
+/// `self-update`, a read failure is the filesystem's). Nothing is guessed over a pick topos
+/// cannot read.
+pub(crate) fn read(
+    fs: &dyn FsOps,
+    path: &Path,
+    global: bool,
+) -> Result<Option<AgentsPick>, ClientError> {
+    crate::doc::read_doc(fs, path).map_err(|e| match e {
+        ClientError::Corrupt(reason) => ClientError::PickUnreadable { global, reason },
+        other => other,
+    })
 }
 
 /// Write a pick at `scope`, atomically. Only the document's SHAPE is checked here (the wildcard
@@ -206,7 +216,7 @@ pub(crate) fn effective(
 ) -> Result<Option<Effective>, ClientError> {
     if let Some(dir) = project_dir {
         let path = project_path(dir);
-        if let Some(pick) = read(fs, &path)? {
+        if let Some(pick) = read(fs, &path, false)? {
             return Ok(Some(Effective {
                 pick,
                 source: PickSource::Project(path),
@@ -214,7 +224,7 @@ pub(crate) fn effective(
         }
     }
     let path = machine_path(layout);
-    Ok(read(fs, &path)?.map(|pick| Effective {
+    Ok(read(fs, &path, true)?.map(|pick| Effective {
         pick,
         source: PickSource::Machine(path),
     }))
@@ -613,7 +623,7 @@ mod tests {
         let carried = AgentsPick::new(vec!["claude-code".to_owned(), "old-agent".to_owned()]);
         write(&rig.fs, &rig.layout(), &PickScope::Machine, &carried).unwrap();
         assert_eq!(
-            read(&rig.fs, &machine_path(&rig.layout()))
+            read(&rig.fs, &machine_path(&rig.layout()), true)
                 .unwrap()
                 .unwrap()
                 .agents,
@@ -772,7 +782,9 @@ mod tests {
 
         let seeded = seed_from_legacy(&rig.fs, &layout, None).expect("something to carry");
         assert_eq!(seeded, ["claude-code", "codex", "cursor", "zed"]);
-        let pick = read(&rig.fs, &machine_path(&layout)).unwrap().unwrap();
+        let pick = read(&rig.fs, &machine_path(&layout), true)
+            .unwrap()
+            .unwrap();
         assert_eq!(pick.agents, ["claude-code", "codex", "cursor", "zed"]);
         assert!(!record.exists(), "the legacy record is gone");
         assert!(
@@ -784,7 +796,7 @@ mod tests {
         legacy_record(&layout, &[("gemini-cli", true)]);
         assert!(seed_from_legacy(&rig.fs, &layout, None).is_none());
         assert_eq!(
-            read(&rig.fs, &machine_path(&layout))
+            read(&rig.fs, &machine_path(&layout), true)
                 .unwrap()
                 .unwrap()
                 .agents,
@@ -806,7 +818,7 @@ mod tests {
         let record = legacy_record(&layout, &[("cursor", true)]);
         assert!(seed_from_legacy(&rig.fs, &layout, None).is_none());
         assert_eq!(
-            read(&rig.fs, &machine_path(&layout))
+            read(&rig.fs, &machine_path(&layout), true)
                 .unwrap()
                 .unwrap()
                 .agents,
@@ -888,7 +900,7 @@ mod tests {
             ["aider-desk", "gemini-cli"]
         );
         assert_eq!(
-            read(&rig.fs, &machine_path(&layout))
+            read(&rig.fs, &machine_path(&layout), true)
                 .unwrap()
                 .unwrap()
                 .agents,
@@ -936,6 +948,53 @@ mod tests {
         std::fs::write(&path, b"{\"schema_version\": 99, \"agents\": [\"*\"]}\n").unwrap();
         let ctx = rig.ctx();
         assert!(picked_harnesses(&ctx, None).is_empty());
-        assert!(effective(&rig.fs, &rig.layout(), None).is_err());
+        // A newer schema is the upgrade answer, not a corruption.
+        assert!(matches!(
+            effective(&rig.fs, &rig.layout(), None).unwrap_err(),
+            ClientError::UnknownSchemaVersion { found: 99, .. }
+        ));
+        // A file that does not parse names ITSELF and its scope: the fix is a person's edit of
+        // that file, and the sidecar family's fixed sentence would blame topos's own state.
+        std::fs::write(&path, b"{not json").unwrap();
+        let err = effective(&rig.fs, &rig.layout(), None).unwrap_err();
+        assert_eq!(err.code(), "CORRUPT_STATE", "the family's code");
+        let ClientError::PickUnreadable { global, reason } = &err else {
+            panic!("{err:?}");
+        };
+        assert!(*global);
+        assert!(
+            reason.starts_with("missing/invalid schema_version"),
+            "{reason}"
+        );
+        assert!(
+            err.to_string()
+                .starts_with("~/.topos/agents.json is unreadable: missing/invalid schema_version"),
+            "{err}"
+        );
+        assert!(
+            err.to_string().ends_with(". Fix the file or delete it"),
+            "{err}"
+        );
+        // The project's own file, the same way — and it is read first, so a good machine file
+        // behind it changes nothing.
+        std::fs::write(
+            &path,
+            b"{\"schema_version\": 1, \"agents\": [\"claude-code\"]}\n",
+        )
+        .unwrap();
+        let project = project_path(&rig.project.0);
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, b"{\"schema_version\": 1, \"agents\": 5}").unwrap();
+        let err = effective(&rig.fs, &rig.layout(), Some(&rig.project.0)).unwrap_err();
+        assert!(
+            matches!(&err, ClientError::PickUnreadable { global: false, .. }),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string()
+                .starts_with("this project's .topos/agents.json is unreadable: document parse:"),
+            "{err}"
+        );
+        assert!(picked_harnesses(&ctx, Some(&rig.project.0)).is_empty());
     }
 }

@@ -2175,6 +2175,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 untouched: vec!["cursor".to_owned()],
                 gitignore_hint: Some("topos init --gitignore".to_owned()),
                 gitignored: Vec::new(),
+                removed: Vec::new(),
+                warnings: Vec::new(),
+                failed_bundles: 0,
             }),
         })
         .expect("InitData serializes"),
@@ -2218,6 +2221,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 },
             ],
             gitignored: Vec::new(),
+            warnings: Vec::new(),
         })
         .expect("AgentsData serializes"),
         warnings: vec![],

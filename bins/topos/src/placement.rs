@@ -110,6 +110,20 @@ pub(crate) struct WithheldSurface {
     pub state: TargetOutcome,
     /// The note a person reads beside it.
     pub note: String,
+    /// Why, as a fact the converge can act on (the note is prose).
+    pub reason: WithheldReason,
+}
+
+/// Why an entries plan withheld a surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WithheldReason {
+    /// The agent has no config surface of that kind at this scope.
+    NoSurface,
+    /// The surface exists but does not resolve inside the checkout.
+    Escaped,
+    /// The row's own `dest` named the agent, and the agent is not picked at this scope: no
+    /// entry, ever, and the receipt says which command picks it.
+    NotPicked,
 }
 
 impl PlacementPlan {
@@ -606,11 +620,13 @@ pub(crate) fn surface_file(path: &Path, dialect: McpDialect) -> PathBuf {
 /// bundle already stands there. `None` = every MCP-capable harness. Narrowing resolves HERE, once:
 /// a harness outside it earns no target and no withheld line, because the row never asked for it.
 ///
-/// The three outcomes, in the order the surface decides them: an agent outside the PICK ⇒ nothing
-/// at all, not even a line (topos never touches an agent the person did not pick, and a receipt
-/// about one would be noise); no surface at this scope, or one the containment rail refuses ⇒
-/// WITHHELD, disclosed; else an ENTRIES target. An entry standing in an unpicked agent's config is
-/// custody, not demand: the converge's removal arm still reaches it (`crate::mcp_engine`).
+/// The three outcomes, in the order the surface decides them: an agent outside the PICK ⇒ no
+/// entry, ever (topos never touches an agent the person did not pick) — and no line either,
+/// unless the row's own `dest` named that agent's file, in which case the row asked for it and is
+/// owed the answer: WITHHELD, with the command that picks the agent; no surface at this scope, or
+/// one the containment rail refuses ⇒ WITHHELD, disclosed; else an ENTRIES target. An entry
+/// standing in an unpicked agent's config is custody, not demand: the converge's removal arm
+/// still reaches it (`crate::mcp_engine`).
 pub(crate) fn entries_plan(
     ctx: &Ctx<'_>,
     project_root: Option<&Path>,
@@ -641,10 +657,24 @@ pub(crate) fn entries_plan_at(
 ) -> PlacementPlan {
     let mut plan = PlacementPlan::default();
     for h in descriptors {
-        if reach.is_some_and(|r| !r.iter().any(|s| s == h.slug)) {
+        let named = reach.is_some_and(|r| r.iter().any(|s| s == h.slug));
+        if reach.is_some() && !named {
             continue;
         }
         if !picked.contains(h.slug) {
+            // Named by the row's own `dest` and not picked: no entry, and the receipt says why.
+            if named {
+                plan.withheld.push(WithheldSurface {
+                    agent: h.slug.to_owned(),
+                    state: TargetOutcome::Withheld,
+                    note: format!(
+                        "not picked: topos agents add{} {}",
+                        if project_root.is_some() { "" } else { " -g" },
+                        h.slug
+                    ),
+                    reason: WithheldReason::NotPicked,
+                });
+            }
             continue;
         }
         match config_surface(h, home, project_root) {
@@ -652,11 +682,13 @@ pub(crate) fn entries_plan_at(
                 agent: h.slug.to_owned(),
                 state: TargetOutcome::Withheld,
                 note: note.to_owned(),
+                reason: WithheldReason::NoSurface,
             }),
             ConfigSurface::Escaped { .. } => plan.withheld.push(WithheldSurface {
                 agent: h.slug.to_owned(),
                 state: TargetOutcome::Unprovable,
                 note: "the config path does not resolve inside this checkout".to_owned(),
+                reason: WithheldReason::Escaped,
             }),
             ConfigSurface::Ready { file, dialect, .. } => {
                 plan.targets.push(PlannedTarget::Entries(EntriesTarget {

@@ -203,9 +203,11 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   describe unless `--yes`, clean through `reconcile::clean_dest_roots` + `mcp_engine::
   remove_bundle` narrowed to the leaving agents + `agent_hooks::remove_for`, verify, and write
   the reduced pick LAST; a project without a file of its own is materialized from the effective
-  set first; `derive_pick_if_missing` is what `install`/`update` run before driving a scope
-  with no pick — one installed agent is recorded silently, several are asked for, the quiet
-  sweep asks nothing), `agents_ask` (the ask: one installed → it; `CLAUDECODE` → claude-code;
+  set first; `derive_pick_if_missing` is what `install`/`update` and every `add` arm run before
+  landing anything at a scope with no pick — one installed agent is recorded and said, several
+  are asked for; the quiet sweep never calls it, and derives nothing at either scope; what the
+  reconcile could not do rides `PickReceipt` (its lines, the failed count, the removed rows) and
+  decides the exit status like `update`'s), `agents_ask` (the ask: one installed → it; `CLAUDECODE` → claude-code;
   piped or `--json` → `PickRequired`, exit 2, with the installed list on the envelope; a
   terminal → one numbered prompt on stdin), `fmt`, `uninstall`, `builtin` (the embedded
   meta-skill from `skills/topos/`),

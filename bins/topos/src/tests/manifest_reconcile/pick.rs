@@ -217,3 +217,146 @@ fn a_dest_row_is_placed_as_typed_for_an_unpicked_folder() {
         "a row naming its destinations places nowhere else"
     );
 }
+
+/// `init -a` / `agents add` carry the reconcile's outcome on the receipt instead of dropping it:
+/// a row the manifest stopped carrying is a `removed` entry naming what left; a row the
+/// reconcile could not carry forward is a failure line and counts under `failed_bundles`; a
+/// picked agent's skills folder that is a symlink out of the checkout is the built-in
+/// placement's own refusal, on the same receipt; and a `.gitignore` that is a symlink out of the
+/// checkout is one line, after the pick, the copies and the hooks landed, never an abort.
+#[test]
+fn apply_pick_carries_the_reconciles_outcome() {
+    use crate::agents_pick::PickScope;
+    use topos_types::MessageKind;
+    use topos_types::results::PickRemoved;
+
+    let rig = Rig::new("pick-outcome");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.pick(&["claude-code"]);
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let apply = |ctx: &crate::ctx::Ctx<'_>, scope: &PickScope, gitignore: bool| {
+        ops::agents::apply_pick(
+            ctx,
+            &connect(&plane, &dir),
+            None,
+            scope,
+            gitignore,
+            "topos agents --gitignore",
+        )
+    };
+    let receipt = apply(&ctx, &PickScope::Machine, false).unwrap();
+    let placed = rig.skills().join("deploy");
+    assert!(placed.join("SKILL.md").exists(), "{receipt:?}");
+    assert!(receipt.removed.is_empty() && receipt.warnings.is_empty());
+    assert_eq!(receipt.failed_bundles, 0);
+
+    // The feed row dropped: the next pick run removes the copy and SAYS so.
+    rig.write_global("");
+    let receipt = apply(&ctx, &PickScope::Machine, false).unwrap();
+    assert_eq!(
+        receipt.removed,
+        vec![PickRemoved {
+            bundle: format!("@{WS_NAME}/deploy"),
+            destinations: vec![rig.pretty(&placed)],
+        }]
+    );
+    assert!(!placed.exists());
+    // The reconcile's advisory about the dropped feed rides too; nothing failed.
+    assert!(
+        receipt
+            .warnings
+            .iter()
+            .all(|m| m.kind == MessageKind::Advisory),
+        "{:?}",
+        receipt.warnings
+    );
+    assert_eq!(receipt.failed_bundles, 0);
+
+    // A row pointing at a folder that is gone: the failure line rides the receipt and the
+    // bundle is counted, so the caller exits non-zero exactly as `update` would.
+    let proj = project(
+        "pick-outcome-fail",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\nnope = {{ path = \"./nope\" }}\n"),
+    );
+    rig.project_pick(&proj.0, &["claude-code"]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let receipt = apply(&ctx, &PickScope::Project(proj.0.clone()), false).unwrap();
+    assert_eq!(receipt.failed_bundles, 1, "{receipt:?}");
+    let failure = receipt
+        .warnings
+        .iter()
+        .find(|m| m.kind == MessageKind::Failure)
+        .unwrap_or_else(|| panic!("{:?}", receipt.warnings));
+    assert_eq!(failure.code.as_deref(), Some("PATH_MISSING"));
+    assert!(failure.text.contains("./nope"), "{}", failure.text);
+    assert!(
+        proj.0.join(".claude/skills/topos/SKILL.md").exists(),
+        "the built-in still landed for the picked agent"
+    );
+
+    // The picked agent's skills folder is a symlink out of the checkout: the built-in's
+    // placement is refused by the containment rail, and the receipt carries the refusal.
+    let proj = project(
+        "pick-outcome-escape",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n"),
+    );
+    let outside = Scratch::new("pick-outcome-outside");
+    std::os::unix::fs::symlink(&outside.0, proj.0.join(".claude")).unwrap();
+    rig.project_pick(&proj.0, &["claude-code"]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let receipt = apply(&ctx, &PickScope::Project(proj.0.clone()), false).unwrap();
+    let refused = receipt
+        .warnings
+        .iter()
+        .find(|m| m.code.as_deref() == Some("PLACEMENT_ESCAPES_PROJECT"))
+        .unwrap_or_else(|| panic!("{:?}", receipt.warnings));
+    assert!(
+        refused
+            .text
+            .contains("does not resolve inside this checkout (claude-code)"),
+        "{}",
+        refused.text
+    );
+    assert!(
+        tree(&outside.0).is_empty(),
+        "nothing written through the link: {:?}",
+        tree(&outside.0)
+    );
+
+    // `.gitignore` is a symlink out of the checkout: not edited, said as a line; the receipt
+    // itself (and everything it stands for) still comes back.
+    let proj = project(
+        "pick-outcome-gitignore",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n"),
+    );
+    let target = outside.0.join("elsewhere-gitignore");
+    std::fs::write(&target, b"").unwrap();
+    std::os::unix::fs::symlink(&target, proj.0.join(".gitignore")).unwrap();
+    rig.project_pick(&proj.0, &["claude-code"]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let receipt = apply(&ctx, &PickScope::Project(proj.0.clone()), true).unwrap();
+    assert!(receipt.gitignored.is_empty());
+    let line = receipt
+        .warnings
+        .iter()
+        .find(|m| m.code.as_deref() == Some("GITIGNORE_NOT_EDITED"))
+        .unwrap_or_else(|| panic!("{:?}", receipt.warnings));
+    assert_eq!(line.kind, MessageKind::Advisory, "a line, never a failure");
+    assert_eq!(
+        line.text,
+        "`.gitignore` is a symlink out of this checkout; not edited"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"", "byte-identical");
+    assert!(
+        proj.0.join(".claude/skills/topos/SKILL.md").exists(),
+        "the pick landed before the line was said"
+    );
+    assert_eq!(receipt.failed_bundles, 0);
+}

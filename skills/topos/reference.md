@@ -160,7 +160,7 @@ topos status [OPTIONS]
 
 ### `topos login`
 
-Log this machine in to topos. Opens your browser for a one-click approval, where you choose (or create) the workspace to join. The first login to a workspace records its feed line (`[workspaces] "<host>/<workspace>" = "latest"`) in `~/.topos/topos.toml` — from then on, whatever that workspace delivers to you installs for the agents you picked (`topos init -a <agent>`); delete the line (`topos remove -g @<workspace>`) and it stays deleted — login never re-adds it. Login signs in and writes that line, nothing else. Bare `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go straight to it, or paste an invitation link. To join another workspace, log in again — already logged in to that server, it takes no browser.
+Log this machine in to topos. Opens your browser for a one-click approval, where you choose (or create) the workspace to join. The first login to a workspace records its feed line (`[workspaces] "<host>/<workspace>" = "latest"`) in `~/.topos/topos.toml`. From then on, whatever that workspace delivers to you installs for the agents you picked (`topos init -a <agent>`). Delete the line (`topos remove -g @<workspace>`) and it stays deleted: login never re-adds it. Login signs in and writes that line, nothing else. Bare `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go straight to it, or paste an invitation link. To join another workspace, log in again. Already logged in to that server, it takes no browser.
 
 ```
 topos login [OPTIONS] [ADDRESS]
@@ -214,7 +214,7 @@ topos workspace use <NAME>
 
 ### `topos init`
 
-First setup in a project: create its `topos.toml` and pick the agents topos uses here. The file lists the bundles everyone working in this project should have — commit it, and teammates' agents pick up the same set by themselves. `-a <agent>` names an agent to use in this project (repeat it to name several; `-a '*'` is every agent installed on this machine); topos touches only the agents you pick. Also works on an existing `topos.toml` (a teammate's clone): it picks and installs, and the file stays as it is. With no `-a`, the one agent installed here is used; with several, you are asked. With `-g`, the same for your machine-wide set (`~/.topos/topos.toml`, header only — `topos login` writes a workspace's feed line on this machine's first connection, and `topos add -g` records the rest).
+First setup in a project: create its `topos.toml` and pick the agents topos uses here. The file lists the bundles everyone working in this project should have. Commit it, and teammates' agents pick up the same set by themselves. `-a <agent>` names an agent to use in this project (repeat it to name several; `-a '*'` is every agent installed on this machine); topos touches only the agents you pick. Also works on an existing `topos.toml` (a teammate's clone): it picks and installs, and the file stays as it is. With no `-a`, the one agent installed here is used; with several, you are asked. With `-g`, the same for your machine-wide set (`~/.topos/topos.toml`, header only: `topos login` writes a workspace's feed line on this machine's first connection, and `topos add -g` records the rest).
 
 ```
 topos init [OPTIONS]

@@ -484,9 +484,9 @@ fn run_command(
     ) && !quiet_sweep
     {
         errln!(
-            "Using {} on this machine (from the auto-update hooks already registered). Change: \
-             topos agents add|remove -g",
-            agents.join(", ")
+            "Using {} on this machine (from what an earlier topos set up here). Change: topos \
+             agents add|remove -g",
+            ops::agents::display_names(&agents).join(", ")
         );
     }
 
@@ -573,7 +573,19 @@ fn run_command(
                     ask: ask_inputs(json, global),
                 },
             );
-            finish(json, cmd_name, result, render::init_tty, &diag)
+            finish_pick(
+                json,
+                cmd_name,
+                result,
+                render::init_tty,
+                |d| {
+                    d.pick
+                        .as_ref()
+                        .map(|p| p.warnings.clone())
+                        .unwrap_or_default()
+                },
+                &diag,
+            )
         }
         // `agents [add|remove] [-g] [--gitignore]` — the pick where you stand.
         Command::Agents {
@@ -599,7 +611,14 @@ fn run_command(
                     &agent,
                     gitignore,
                 );
-                finish(json, cmd_name, result, render::pick_receipt_tty, &diag)
+                finish_pick(
+                    json,
+                    cmd_name,
+                    result,
+                    render::pick_receipt_tty,
+                    |p| p.warnings.clone(),
+                    &diag,
+                )
             }
             Some(crate::cli::AgentsCmd::Remove { agent, yes }) => finish_agents_remove(
                 json,
@@ -747,6 +766,18 @@ fn run_command(
             global,
             yes,
         } => {
+            // THE PICK, before any add arm records a row or lands a byte: the scope the row
+            // would land in (the machine with `-g`, else the checkout whose `topos.toml` covers
+            // the working directory) gets the same rule `install` runs when nothing is picked
+            // there — one installed agent is used and said, several are asked for, piped or
+            // `--json` is exit 2 naming `topos init -a`. Nothing is half-done on a refusal: the
+            // row is not written. Outside any project without `-g` there is no scope to pick
+            // for, and the arms below refuse the add on their own terms.
+            if let Some(scope) = ops::agents::scope_here(&ctx, global)
+                && let Err(e) = derive_pick_and_say(&ctx, &scope, json, global)
+            {
+                return emit_err(json, cmd_name, &e, &diag);
+            }
             // The `-a`/`--dest` SELECTION, verbatim — resolved per arm below (a skill source
             // freezes skills folders, an MCP source config files).
             let selection = ops::Selection::new(&agent, &dest);
@@ -1712,35 +1743,19 @@ fn run_command(
                 .filter(|t| t.split_once('@').is_some_and(|(_, r)| !r.is_empty()));
             // THE PICK, before the reconcile drives a scope with none: one installed agent is
             // recorded as the pick (and said), several are asked for — piped or `--json`, the
-            // answer is exit 2 naming `topos init -a`; the quiet hook sweep asks nothing and
-            // places nothing for a scope it cannot pick for. Recorded at the driven scope, then
-            // read back by the reconcile like any pick.
+            // answer is exit 2 naming `topos init -a`. Recorded at the driven scope, then read
+            // back by the reconcile like any pick. The quiet hook sweep NEVER derives one, at
+            // either scope: it cannot say so, and nobody picked anything for the machine when a
+            // project pick registered the hook that fired it. A scope with no pick gets nothing
+            // placed, silently.
             let project_here = ops::agent_hooks::cwd_project(&ctx);
-            if !(keep_mine || goback_target.is_some()) {
-                let project = project_here.clone();
-                let driven: Vec<crate::agents_pick::PickScope> = match (quiet, global, project) {
-                    (true, _, Some(dir)) => vec![
-                        crate::agents_pick::PickScope::Machine,
-                        crate::agents_pick::PickScope::Project(dir),
-                    ],
-                    (false, false, Some(dir)) => {
-                        vec![crate::agents_pick::PickScope::Project(dir)]
-                    }
-                    _ => vec![crate::agents_pick::PickScope::Machine],
+            if !(quiet || keep_mine || goback_target.is_some()) {
+                let scope = match (global, project_here.clone()) {
+                    (false, Some(dir)) => crate::agents_pick::PickScope::Project(dir),
+                    _ => crate::agents_pick::PickScope::Machine,
                 };
-                for scope in driven {
-                    match ops::agents::derive_pick_if_missing(
-                        &ctx,
-                        &scope,
-                        &ask_inputs(json, global),
-                        quiet,
-                    ) {
-                        Ok(Some(agents)) if !quiet => {
-                            errln!("{}", render::using_line(&agents, &scope));
-                        }
-                        Ok(_) => {}
-                        Err(e) => return emit_err(json, cmd_name, &e, &diag),
-                    }
+                if let Err(e) = derive_pick_and_say(&ctx, &scope, json, global) {
+                    return emit_err(json, cmd_name, &e, &diag);
                 }
             }
             let result = if keep_mine || goback_target.is_some() {
@@ -2109,6 +2124,59 @@ pub(crate) fn resolve_web_origin(env_override: Option<String>) -> String {
     match env_override {
         Some(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_owned(),
         _ => DEFAULT_WEB_ORIGIN.to_owned(),
+    }
+}
+
+/// [`ops::agents::derive_pick_if_missing`] at `scope` with this invocation's ask, saying the
+/// `Using …` line on stderr when a pick was recorded this run (the receipt stays stdout's).
+fn derive_pick_and_say(
+    ctx: &Ctx<'_>,
+    scope: &crate::agents_pick::PickScope,
+    json: bool,
+    global: bool,
+) -> Result<(), ClientError> {
+    if let Some(agents) =
+        ops::agents::derive_pick_if_missing(ctx, scope, &ask_inputs(json, global))?
+    {
+        errln!("{}", render::using_line(&agents, scope));
+    }
+    Ok(())
+}
+
+/// The finisher for a verb that carries a [`topos_types::results::PickReceipt`] (`init`, `agents
+/// add`) — like [`finish`], with the reconcile's lines on the envelope and the exit status they
+/// decide: a `failure` line (a bundle the reconcile could not carry forward, a refused root) exits
+/// non-zero and says `ok: false`, exactly as [`finish_pull`] does for `update`. `lines_of` reads
+/// the receipt's lines out of the payload; a payload carrying no receipt has none.
+fn finish_pick<T: Serialize>(
+    json: bool,
+    command: &str,
+    result: Result<T, ClientError>,
+    tty: impl Fn(&T) -> String,
+    lines_of: impl Fn(&T) -> Vec<topos_types::Message>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            let messages = lines_of(&data);
+            let failed = sweep_failed(&messages);
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.ok = !failed;
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
+                outln!("{}", render::to_json(&envelope));
+            } else {
+                outln!("{}", tty(&data));
+            }
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 

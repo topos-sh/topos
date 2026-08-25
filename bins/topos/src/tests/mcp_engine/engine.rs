@@ -285,7 +285,9 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
 ///   (this is what keeps the per-agent `not-supported` lines alive now that the converge no longer
 ///   derives them);
 /// - a harness outside the PICK earns neither a target nor a line: topos never touches an agent
-///   the person did not pick, and nothing was withheld from anyone.
+///   the person did not pick, and nothing was withheld from anyone — unless the row's own `dest`
+///   NAMED it, in which case the row asked and is owed the answer: withheld, with the command
+///   that picks the agent, and still no entry.
 #[test]
 fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
     let home = Scratch::new("entries-plan");
@@ -334,6 +336,30 @@ fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
         );
     }
     assert!(proj.entries_for("cursor").is_some());
+
+    // The row's own `dest` names an agent nobody picked: no entry, and the one line that says
+    // why, spelled for the scope (the machine's command carries `-g`).
+    let only_claude: BTreeSet<String> = BTreeSet::from(["claude-code".to_owned()]);
+    let asked = plan_at(&only_claude, None, Some(&["cursor".to_owned()]));
+    assert!(slugs(&asked).is_empty(), "{:?}", slugs(&asked));
+    let w = asked.withheld_for("cursor").expect("disclosed");
+    assert_eq!(
+        (w.state, w.note.as_str(), w.reason),
+        (
+            TargetOutcome::Withheld,
+            "not picked: topos agents add -g cursor",
+            crate::placement::WithheldReason::NotPicked
+        )
+    );
+    let asked = plan_at(&only_claude, Some(&project.0), Some(&["cursor".to_owned()]));
+    assert_eq!(
+        asked.withheld_for("cursor").map(|w| w.note.as_str()),
+        Some("not picked: topos agents add cursor")
+    );
+    // A row that did not name the unpicked agent is still owed nothing about it.
+    let unasked = plan_at(&only_claude, None, None);
+    assert!(unasked.withheld_for("cursor").is_none());
+    assert!(unasked.entries_for("cursor").is_none());
 
     // Nothing picked: no target, and nothing withheld from anyone.
     let cold = Scratch::new("entries-plan-cold");
