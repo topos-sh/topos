@@ -2856,7 +2856,7 @@ fn reconcile_thing<'a>(
                                 // it does on the ordinary arm — the row must not read as a
                                 // healthy install when nothing was placed.
                                 unreachable: narrowing.unreachable,
-                                counted: false,
+                                counted: true,
                             },
                             sweep,
                         );
@@ -2942,7 +2942,7 @@ fn reconcile_thing<'a>(
                         delivered: Some(delivered),
                         reach: narrowing.filter,
                         unreachable: narrowing.unreachable,
-                        counted: false,
+                        counted: true,
                     },
                     sweep,
                 );
@@ -3022,7 +3022,7 @@ fn reconcile_thing<'a>(
                 display: display.clone(),
                 // A skill row's dest is its frozen placement plan.
                 dest: row.fields().dest,
-                counted: false,
+                counted: true,
             };
             sync_workspace_skill(env, sc, run, &st, sweep);
         }
@@ -4304,8 +4304,13 @@ impl RunSteps {
 }
 
 impl Step {
-    /// The activity label for `display` at this position — or the uncounted form when the item came
-    /// from a lone row.
+    /// The activity label for `display` at this position — or the uncounted form for the ONE arm
+    /// that takes no number: the offline converge, which walks the local store after the counting
+    /// pass has already returned. Every row the run CHECKS is counted, whichever source names it
+    /// (an explicit `[skills]`/`[mcp]` row, a channel member, a feed item), so the counter's total
+    /// and the summary's `Checked N bundles` are the same number. They were not: a standalone row
+    /// printed `updating github` with no position, ahead of a `(1 of 7)…(7 of 7)` run that then
+    /// summed `Checked 8 bundles`.
     fn label(step: Option<Self>, display: &str, verb: &str) -> String {
         match step {
             Some(Self { index, total }) => format!("{verb} {display} ({index} of {total})"),
