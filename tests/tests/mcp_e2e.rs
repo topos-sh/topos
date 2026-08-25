@@ -772,8 +772,8 @@ fn the_connected_server_loop_across_six_agents() {
         read_json(&proj.join(".cursor").join("mcp.json"))["mcpServers"][KEY],
         json!({ "url": SERVER_URL })
     );
-    // OpenCode's project config is the checkout ROOT's `opencode.json`, born with its `$schema`.
-    let proj_opencode = proj.join("opencode.json");
+    // OpenCode's project config sits under its own folder, born with its `$schema`.
+    let proj_opencode = proj.join(".opencode").join("opencode.json");
     let proj_oc_text = read(&proj_opencode);
     assert_eq!(
         read_json(&proj_opencode)["mcp"][KEY],

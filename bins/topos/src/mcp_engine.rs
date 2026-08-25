@@ -1863,28 +1863,27 @@ fn converge_surface(
 /// binary's own history, not a fact about the agent — and a downloaded table must never be able to
 /// aim a cleanup at a path of its choosing.
 ///
-/// Claude Code is the one harness with any: its machine entries lived in a topos-owned plugin
-/// FOLDER that renamed every server it carried, and its project entries lived in a `.mcp.json` in
-/// the checkout root. Both are gone from the row; the `.mcp.json` is still reachable by a row's own
-/// `dest`, so the caller skips a retired surface that is the surface in hand.
+/// Two harnesses have any. Claude Code's MACHINE entries lived in a topos-owned plugin FOLDER
+/// that renamed every server it carried. Claude Code's and OpenCode's PROJECT entries lived in a
+/// file at the checkout root — `.mcp.json` and `opencode.json` — and both rows now write inside a
+/// folder of the agent's own instead. Each of those root files is still reachable by a row's own
+/// `dest` (it is that row's `project_dest`), so the caller skips a retired surface that is the
+/// surface in hand.
 fn retired_surfaces(io: &ScopeIo<'_>, h: &KnownHarness) -> Vec<crate::placement::SurfaceAt> {
-    if h.slug != "claude-code" {
-        return Vec::new();
-    }
-    let at = match io.project_root.as_deref() {
-        None => crate::placement::SurfaceAt {
+    let at = match (h.slug, io.project_root.as_deref()) {
+        ("claude-code", None) => crate::placement::SurfaceAt {
             file: plugin_dir::retired_user_dir(&io.home).join(plugin_dir::PLUGIN_MCP_PATH),
             dialect: McpDialect::ClaudePluginDir,
             slot: None,
             in_checkout: false,
         },
-        Some(root) => {
+        ("claude-code" | "opencode", Some(root)) => {
             let Some((rel, dialect)) = h.mcp().and_then(|m| m.project_dest) else {
                 return Vec::new();
             };
             let path = root.join(rel);
-            // The same containment proof any in-checkout path passes before it is read: a
-            // `.mcp.json` reached through a symlink out of the repo is not this checkout's.
+            // The same containment proof any in-checkout path passes before it is read: a root
+            // file reached through a symlink out of the repo is not this checkout's.
             if !crate::placement::within_project(root, &path) {
                 return Vec::new();
             }
@@ -1895,6 +1894,7 @@ fn retired_surfaces(io: &ScopeIo<'_>, h: &KnownHarness) -> Vec<crate::placement:
                 in_checkout: true,
             }
         }
+        _ => return Vec::new(),
     };
     vec![at]
 }

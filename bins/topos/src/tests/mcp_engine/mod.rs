@@ -14,5 +14,6 @@ mod channel;
 mod claude_json;
 mod engine;
 mod marker;
+mod opencode_config;
 mod reconcile;
 mod rig;

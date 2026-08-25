@@ -1156,7 +1156,6 @@ pub(crate) fn gitignore_entries(slug: &str) -> Vec<String> {
         // is never ignored on topos's say-so.
         "claude-code" => owned(&[".claude/"]),
         "cursor" => owned(&[".cursor/"]),
-        "opencode" => owned(&[".opencode/", "opencode.json"]),
         other => {
             let Some(h) = registry::known_harness(other) else {
                 return Vec::new();
@@ -1334,13 +1333,10 @@ mod tests {
     fn the_gitignore_table_names_whole_folders_per_agent() {
         assert_eq!(gitignore_entries("claude-code"), [".claude/"]);
         assert_eq!(gitignore_entries("cursor"), [".cursor/"]);
-        // Codex has no arm of its own: skills, hook and MCP config all sit in `.codex/`, which is
-        // exactly what the generic rule below derives.
+        // Codex and OpenCode have no arm of their own: skills, hook and MCP config all sit under
+        // the agent's one folder, which is exactly what the generic rule below derives.
         assert_eq!(gitignore_entries("codex"), [".codex/"]);
-        assert_eq!(
-            gitignore_entries("opencode"),
-            [".opencode/", "opencode.json"]
-        );
+        assert_eq!(gitignore_entries("opencode"), [".opencode/"]);
         // Every other row: the first segment of its project skills dir, plus its project MCP
         // file's folder (or the file itself at the root).
         assert_eq!(gitignore_entries("gemini-cli"), [".agents/", ".gemini/"]);

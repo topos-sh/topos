@@ -16,7 +16,7 @@
         {
           "agent": "opencode",
           "state": "created",
-          "target": "opencode.json"
+          "target": ".opencode/opencode.json"
         },
         {
           "agent": "claude-code",

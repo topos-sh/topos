@@ -108,18 +108,16 @@ pub(crate) fn mcp_dest_spelling_of(harness: &KnownHarness, scope: ManifestScope)
             })
         }
         // A project `dest` is a path IN THE CHECKOUT — the manifest grammar takes nothing else —
-        // so the spelling is the harness's in-checkout project file: the second one where a
-        // harness has one (Claude Code's `.mcp.json`, beside the machine file the default reach
-        // writes), the only one everywhere else. A harness whose ONLY project surface is a machine
-        // file has no project `dest` spelling at all.
-        ManifestScope::Project => {
-            mcp.project_dest
-                .map(|(rel, _)| rel.to_owned())
-                .or_else(|| match mcp.project?.loc {
-                    registry::McpProjectLoc::InCheckout(rel) => Some(rel.to_owned()),
-                    registry::McpProjectLoc::Machine(_) => None,
-                })
-        }
+        // so the spelling is the file a plain row lands in, whenever that is a path in the
+        // checkout. Claude Code's is its own MACHINE file, which this grammar cannot spell at all;
+        // there the SECOND project file (`.mcp.json`) is what a `dest` writes instead. A harness
+        // with neither has no project `dest` spelling.
+        ManifestScope::Project => match mcp.project.map(|p| p.loc) {
+            Some(registry::McpProjectLoc::InCheckout(rel)) => Some(rel.to_owned()),
+            Some(registry::McpProjectLoc::Machine(_)) | None => {
+                mcp.project_dest.map(|(rel, _)| rel.to_owned())
+            }
+        },
     }
 }
 
@@ -359,6 +357,12 @@ mod tests {
             mcp_dest_spelling("claude-code", ManifestScope::Project).as_deref(),
             Some(".mcp.json")
         );
+        // OpenCode's default project file IS a path in the checkout, so that is its spelling —
+        // the root file beside it is the second one, named only by a `dest` that asks for it.
+        assert_eq!(
+            mcp_dest_spelling("opencode", ManifestScope::Project).as_deref(),
+            Some(".opencode/opencode.json")
+        );
         assert_eq!(mcp_dest_spelling("openclaw", ManifestScope::Project), None);
         // The registry skills roots.
         assert_eq!(
@@ -452,6 +456,16 @@ mod tests {
         assert_eq!(
             mcp_reach_for_dest("./.mcp.json", ManifestScope::Project),
             Some(("claude-code", true))
+        );
+        // OpenCode has two as well: the folder's config a plain row lands in, and the root file
+        // an older topos wrote, which a `dest` can still ask for by name.
+        assert_eq!(
+            mcp_reach_for_dest(".opencode/opencode.json", ManifestScope::Project),
+            Some(("opencode", false))
+        );
+        assert_eq!(
+            mcp_reach_for_dest("opencode.json", ManifestScope::Project),
+            Some(("opencode", true))
         );
         // Every other agent has one project file, and naming it asks for that one.
         assert_eq!(
