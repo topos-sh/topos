@@ -276,6 +276,71 @@ fn the_built_in_lands_in_the_picked_agents_project_dirs() {
     );
 }
 
+/// THE PROJECT SWEEP'S SEAM follows the pick AT ITS SCOPE. A checkout holding a pick of its own
+/// places (and re-places) its copies; one inheriting the machine pick gets nothing in the
+/// checkout and no store minted for it (the copy under the home serves it); and a checkout whose
+/// pick is gone keeps the copy it already holds exactly as it is.
+#[test]
+fn the_project_sweep_places_the_built_in_only_for_the_checkouts_own_pick() {
+    let rig = Rig::new("sweep-seam");
+    rig.pick(&["claude-code"]);
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+
+    let inherited = Scratch::new("sweep-seam-inherited");
+    std::fs::create_dir_all(inherited.0.join(".git")).unwrap();
+    assert!(
+        !ops::ensure_builtin_for_project_pick(&ctx, &inherited.0)
+            .unwrap()
+            .changed
+    );
+    assert!(
+        !inherited.0.join(".claude").exists(),
+        "an inherited machine pick places nothing in the checkout"
+    );
+    assert!(
+        crate::sidecar::existing_project_store(&rig.fs, &inherited.0).is_none(),
+        "and mints no store for it"
+    );
+
+    let own = Scratch::new("sweep-seam-own");
+    std::fs::create_dir_all(own.0.join(".git")).unwrap();
+    crate::agents_pick::write_pick(&crate::agents_pick::project_path(&own.0), &["claude-code"]);
+    assert!(
+        ops::ensure_builtin_for_project_pick(&ctx, &own.0)
+            .unwrap()
+            .changed
+    );
+    let copy = own.0.join(".claude/skills/topos");
+    assert!(copy.join("SKILL.md").exists());
+    assert!(
+        !ops::ensure_builtin_for_project_pick(&ctx, &own.0)
+            .unwrap()
+            .changed,
+        "a rerun is byte-silent"
+    );
+    std::fs::remove_dir_all(&copy).unwrap();
+    assert!(
+        ops::ensure_builtin_for_project_pick(&ctx, &own.0)
+            .unwrap()
+            .changed,
+        "a missing copy is put back"
+    );
+    assert!(copy.join("SKILL.md").exists());
+
+    std::fs::remove_file(crate::agents_pick::project_path(&own.0)).unwrap();
+    assert!(
+        !ops::ensure_builtin_for_project_pick(&ctx, &own.0)
+            .unwrap()
+            .changed
+    );
+    assert!(
+        copy.join("SKILL.md").exists(),
+        "with the pick gone the copy is left exactly as it is"
+    );
+}
+
 /// With NO pick nothing is placed, machine or project: the record is minted, the plan is empty,
 /// and no agent folder is born.
 #[test]

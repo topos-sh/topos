@@ -141,6 +141,61 @@ fn a_project_pick_writes_nothing_under_home() {
     );
 }
 
+/// The PROJECT SWEEP keeps the built-in in place for the checkout's own pick. No manifest row
+/// names it, so the undemanded clean must not read it as a dropped row: the reconcile leaves the
+/// project store's built-in record alone (no `removed` row, the copy standing), under the
+/// hand-run `Here` posture and the hook's both-scopes posture alike, and the sweep's own seam
+/// re-converges it beside the reconcile.
+#[test]
+fn a_project_sweep_keeps_the_built_in_for_the_checkouts_pick() {
+    let (rig, plane, dir) = deploy_rig("i6");
+    let proj = project(
+        "i6-co",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    rig.project_pick(&proj.0, &["claude-code"]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    assert!(
+        ops::ensure_builtin_for_project_pick(&ctx, &proj.0)
+            .unwrap()
+            .changed,
+        "the checkout's own pick places the built-in"
+    );
+    let copy = proj.0.join(".claude/skills/topos");
+    assert!(copy.join("SKILL.md").exists());
+
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        proj.0.join(".claude/skills/deploy/SKILL.md").exists(),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(
+        copy.join("SKILL.md").exists(),
+        "the built-in survives the project clean"
+    );
+    assert!(
+        !out.data.skills.iter().any(|r| r.skill == "topos"),
+        "no row over the built-in: {:?}",
+        out.data.skills
+    );
+    let out = sweep_both(&ctx, &plane, &dir);
+    assert!(copy.join("SKILL.md").exists());
+    assert!(
+        !out.data.skills.iter().any(|r| r.skill == "topos"),
+        "{:?}",
+        out.data.skills
+    );
+    // The sweep's seam puts a missing copy back.
+    std::fs::remove_dir_all(&copy).unwrap();
+    assert!(
+        ops::ensure_builtin_for_project_pick(&ctx, &proj.0)
+            .unwrap()
+            .changed
+    );
+    assert!(copy.join("SKILL.md").exists(), "re-converged");
+}
+
 /// I5: an explicit `dest` folder is placed AS TYPED — an unpicked agent's folder included — and
 /// a row that names its destinations places nowhere else.
 #[test]

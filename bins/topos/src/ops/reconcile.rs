@@ -6940,6 +6940,14 @@ fn clean_undemanded(
         if adopted.contains(id) {
             continue; // reconciled this run — demanded by construction
         }
+        // The BUILT-IN is demanded by the checkout's agents PICK, never by a manifest row, so
+        // "no row mentions it" is the wrong question: the sweep converges it through the project
+        // store beside this reconcile (`builtin::ensure_builtin_for_project_pick`), `agents
+        // remove` retires the leaving agent's copy, and a checkout that lost its pick keeps the
+        // copy it has. The machine clean never reaches it either (it is no delivery and no import).
+        if super::builtin::is_builtin(id) {
+            continue;
+        }
         let Ok(sid) = SkillId::parse(id) else {
             continue;
         };

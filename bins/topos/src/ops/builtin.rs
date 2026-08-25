@@ -319,6 +319,29 @@ pub(crate) fn ensure_builtin_in_project(
     ensure_inner(&sctx, &rendered_bundle()?, ForeignPosture::Freeze)
 }
 
+/// The PROJECT SWEEP's half of the built-in — what `install`/`update` run beside the machine's
+/// [`ensure_builtin`] whenever they drove a checkout: the built-in follows the pick AT ITS SCOPE,
+/// so a checkout holding a pick OF ITS OWN re-converges its copies through the project store
+/// ([`ensure_builtin_in_project`]), exactly as the bare sweep re-syncs the machine's. A checkout
+/// with no file of its own places nothing here: an inherited machine pick is served by the copy
+/// under the home, and with no pick at all nothing is placed and a copy the checkout already
+/// holds is left exactly as it is (the record keeps it; only `agents remove` and `uninstall`
+/// retire it).
+///
+/// # Errors
+/// As [`ensure_builtin_in_project`]; an unreadable pick file fails closed the same way.
+pub(crate) fn ensure_builtin_for_project_pick(
+    ctx: &Ctx<'_>,
+    project_dir: &std::path::Path,
+) -> Result<BuiltinSync, ClientError> {
+    let own_pick = crate::agents_pick::effective(ctx.fs, &ctx.layout, Some(project_dir))?
+        .is_some_and(|e| matches!(e.source, crate::agents_pick::PickSource::Project(_)));
+    if !own_pick {
+        return Ok(BuiltinSync::default());
+    }
+    ensure_builtin_in_project(ctx, project_dir)
+}
+
 /// [`ensure_builtin`] over an explicit bundle — the seam the tests drive a "binary changed" refresh
 /// through (production always renders from the binary and goes through [`ensure_builtin`] /
 /// the restore's adopting call, so this wrapper is test-only).
