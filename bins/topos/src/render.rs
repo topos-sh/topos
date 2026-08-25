@@ -399,6 +399,21 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
             ("remove" | "add", true) => candidate_actions(command, *global, candidates),
             _ => Vec::new(),
         },
+        // A `--frozen` refusal that carries its own ways out: the login that would reach the
+        // workspace carrying a locked version, and the update that would change what the lock
+        // names. Both are RUNTIME values, so they ride from the error's own field as whole
+        // tokens rather than being re-tokenized out of the sentence. A refusal with no such
+        // cure (a plain fault) carries no actions and falls through to the prose mirror below,
+        // where its own `topos install --frozen` re-run is picked up as it always was.
+        ClientError::FrozenStageFailed { actions, .. } if !actions.is_empty() => actions
+            .iter()
+            .map(|argv| {
+                crate::actions::next_action(
+                    ActionCode::from("RUN_COMMAND".to_owned()),
+                    argv.clone(),
+                )
+            })
+            .collect(),
         // Everything else: a refusal whose PROSE names one of the STATIC command spellings
         // mirrors it structurally. Prose text is never tokenized into argv — see the allowlist.
         other => mirror_prose_commands(&safe_message(other)),

@@ -595,6 +595,15 @@ impl Stack {
         format!("{}/{WS_NAME}", self.origin)
     }
 
+    /// Kill the web app and LEAVE it dead — the "nothing is answering right now" fault every CI
+    /// run meets sooner or later, stubbed at the one seam a composed e2e can reach. Everything on
+    /// the machine side is untouched: the session, the store, the committed files. There is no
+    /// restart; the stack is finished after this.
+    pub(crate) fn stop_app(&mut self) {
+        let _ = self.app.child.kill();
+        let _ = self.app.child.wait();
+    }
+
     /// Tear the in-process vault DOWN and stand a BRAND-NEW one up on the SAME loopback address the
     /// running web app already dials: abort the serve task (which drops its listener and every
     /// connection it held), delete EVERY local dir this vault used (the staging roots it ingested

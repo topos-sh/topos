@@ -24,7 +24,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{CliOut, OWNER_EMAIL, Session, Stack, cli_binary, run_cli, start_stack};
+use common::{CliOut, OWNER_EMAIL, Session, Stack, WS_NAME, cli_binary, run_cli, start_stack};
 use serde_json::Value;
 use topos::test_support::SessionInstall;
 
@@ -459,11 +459,13 @@ fn a_frozen_install_on_a_fresh_clone_places_the_locked_versions() {
     );
     assert_eq!(locked_version(&clone).as_deref(), Some(v1.as_str()));
 
-    // ── the refusal a genuine failure gets ──────────────────────────────────────────────────────
-    // A lock naming a version this workspace cannot hand over is the one thing `--frozen` is
-    // still right to refuse. What it owes the reader is a FAULT code (nothing about the argv was
-    // wrong), the word bundle, the state it left behind, and the command to run again.
-    let unserved: String = v1.chars().rev().collect();
+    // ── THE REFUSAL A LOCK NOBODY CAN SERVE GETS ────────────────────────────────────────────────
+    // A version this workspace will never hand over is a SETTLED fact: the same command meets the
+    // same answer forever, and the way out is a login that reaches the workspace carrying it, or
+    // a lock that names something else. It answered `IO_ERROR` / `RETRYABLE_FAILURE` with the
+    // prose "this is often transient — running it again is safe", which is an instruction to loop.
+    let unserved = "deadbeef".repeat(8);
+    assert_ne!(unserved, v1);
     let broken = machine
         .root()
         .canonicalize()
@@ -478,9 +480,112 @@ fn a_frozen_install_on_a_fresh_clone_places_the_locked_versions() {
         .run_in(&broken, &["install", "--frozen", "--json"])
         .refusal("a lock naming an unserved version");
     assert_eq!(
-        refused["error"]["code"], "IO_ERROR",
-        "a run that could not get the bytes is a fault, not a wrong argument: {refused}"
+        refused["error"]["code"], "NOT_FOUND",
+        "the uniform not-found, met one level down at a version id: {refused}"
     );
+    assert_eq!(
+        refused["error"]["outcome"], "PERMANENT_FAILURE",
+        "a re-run meets the identical answer — never the retry class: {refused}"
+    );
+    assert_eq!(refused["error"]["retryable"], false, "{refused}");
+    let text = refused["error"]["context"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.starts_with(&format!("the lock names {BUNDLE}@{}", &unserved[..12])),
+        "the refusal leads with the entry it could not honour: {refused}"
+    );
+    assert!(
+        text.contains("does not serve that version to this login"),
+        "…says what the server answered: {refused}"
+    );
+    assert!(
+        text.contains(&format!("`topos update {BUNDLE}`")) && text.contains("`topos login "),
+        "…and names both cures: {refused}"
+    );
+    assert!(
+        !text.contains("safe to run again"),
+        "nothing here heals on a re-run: {refused}"
+    );
+    let argvs: Vec<Value> = refused["next_actions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| a["argv"].clone())
+        .collect();
+    assert!(
+        argvs.contains(&serde_json::json!(["topos", "update", BUNDLE, "--json"])),
+        "the lock-changing cure rides as argv: {refused}"
+    );
+    assert!(
+        argvs.iter().any(|a| {
+            let tokens: Vec<&str> = a
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            tokens.starts_with(&["topos", "login"])
+                && tokens.get(2).is_some_and(|t| t.contains(WS_NAME))
+        }),
+        "…and so does the login, with the workspace address as ONE token: {refused}"
+    );
+    assert!(
+        !argvs.contains(&serde_json::json!([
+            "topos", "install", "--frozen", "--json"
+        ])),
+        "a permanent refusal never offers its own re-run: {refused}"
+    );
+    assert!(
+        !broken.join(".claude").join("skills").join(BUNDLE).exists(),
+        "the refusal placed nothing"
+    );
+}
+
+/// **A SERVER THAT IS NOT ANSWERING IS THE ONE FROZEN REFUSAL WORTH RETRYING.** The sibling above
+/// pins the permanent half; this is the other, and the split is the whole point — an agent that
+/// reads one outcome for both either loops on a settled lock or gives up on a blip.
+///
+/// The server is killed under a machine whose session, store, and committed files are all exactly
+/// as they were, on a fresh clone with no store of its own to fall back on — the shape a CI runner
+/// meets when the network goes.
+#[test]
+fn a_frozen_install_calls_an_unreachable_server_retryable() {
+    let mut stack = start_stack("lock-truth-fault");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+    let machine = Machine::new("lock-truth-fault");
+    let (_src, project, _copy, v1) =
+        published_into_a_project(&stack, &machine, &owner, "check the region");
+
+    // The clone: the two committed files, no project store — the state `--frozen` exists for.
+    let manifest = std::fs::read_to_string(project.join("topos.toml")).expect("read topos.toml");
+    let lock = std::fs::read_to_string(project.join("topos.lock")).expect("read topos.lock");
+    let clone = machine
+        .root()
+        .canonicalize()
+        .expect("canonical root")
+        .join("clone-dark");
+    std::fs::create_dir_all(clone.join(".git")).expect("a git-shaped checkout");
+    std::fs::write(clone.join("topos.toml"), &manifest).expect("the committed manifest");
+    std::fs::write(clone.join("topos.lock"), &lock).expect("the committed lock");
+    assert_eq!(locked_version(&clone).as_deref(), Some(v1.as_str()));
+
+    // ── the fault ───────────────────────────────────────────────────────────────────────────────
+    stack.stop_app();
+
+    let refused = machine
+        .run_in(&clone, &["install", "--frozen", "--json"])
+        .refusal("a frozen install against a server that stopped answering");
+    assert_eq!(
+        refused["error"]["code"], "IO_ERROR",
+        "a fault is the filesystem family's word, as it always was: {refused}"
+    );
+    assert_eq!(
+        refused["error"]["outcome"], "RETRYABLE_FAILURE",
+        "the one frozen refusal a re-run can get past: {refused}"
+    );
+    assert_eq!(refused["error"]["retryable"], true, "{refused}");
     let text = refused["error"]["context"]["message"]
         .as_str()
         .unwrap_or_default();
@@ -489,8 +594,16 @@ fn a_frozen_install_on_a_fresh_clone_places_the_locked_versions() {
         "the refusal says bundle, and names it: {refused}"
     );
     assert!(
+        text.contains("could not read a connected workspace's list of bundles"),
+        "a server that did not answer is named as one: {refused}"
+    );
+    assert!(
+        !text.contains("no connected catalog serves it"),
+        "…and never as a workspace that has settled the question and does not carry it: {refused}"
+    );
+    assert!(
         text.contains("nothing was placed, so `topos install --frozen` is safe to run again"),
-        "the refusal states the state it left, and the command to run: {refused}"
+        "the state it left, and the command to run: {refused}"
     );
     assert!(
         refused["next_actions"]
@@ -501,7 +614,12 @@ fn a_frozen_install_on_a_fresh_clone_places_the_locked_versions() {
         "the same command rides as argv, not only as prose: {refused}"
     );
     assert!(
-        !broken.join(".claude").join("skills").join(BUNDLE).exists(),
+        !clone.join(".claude").join("skills").join(BUNDLE).exists(),
         "the refusal placed nothing"
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.join("topos.lock")).expect("read the clone's lock"),
+        lock,
+        "…and wrote nothing"
     );
 }

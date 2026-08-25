@@ -240,6 +240,70 @@ fn frozen_refuses_an_uncovered_row_and_writes_nothing() {
     assert!(!proj.0.join(".claude/skills/deploy").exists());
 }
 
+/// A `version` in the lock that is not a version id names nothing any server could ever answer
+/// for, so the SAME command meets the SAME wall forever. The preflight used to fold it into the
+/// one retryable `IO_ERROR` every frozen gap wore, whose prose promised "running it again is
+/// safe" — an instruction a CI agent follows until someone notices the job has been looping.
+/// It is permanent, and the cure is in the file the refusal names.
+#[test]
+fn frozen_refuses_a_malformed_lock_version_permanently_and_names_the_file() {
+    let rig = Rig::new("lock-badid");
+    rig.seed_session();
+    let proj = project(
+        "lock-badid-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v1);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    std::fs::write(
+        proj.0.join("topos.lock"),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[skills.deploy]\nversion = \"nope\"\n"
+        ),
+    )
+    .unwrap();
+
+    let err = install(&ctx, &plane, &dir, ops::LockMode::Frozen)
+        .expect_err("a lock id that is not one refuses");
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{}", err.detail());
+    assert_eq!(
+        err.outcome(),
+        topos_types::TerminalOutcome::PermanentFailure,
+        "re-running cannot change what the file says: {}",
+        err.detail()
+    );
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("topos.lock") && message.contains("[skills.deploy]"),
+        "the refusal names the file and the block to fix: {message}"
+    );
+    assert!(
+        message.contains("topos update deploy"),
+        "…and the command that rewrites it: {message}"
+    );
+    assert!(
+        !message.contains("nope"),
+        "the file's own bytes are never echoed back: {message}"
+    );
+    assert!(
+        !message.contains("safe to run again"),
+        "nothing here heals on a re-run: {message}"
+    );
+    // The TTY drops the retry invitation too — a permanent refusal never says "try it again".
+    let tty = crate::render::err_hint_tty("install", &["--frozen".to_owned()], &err);
+    assert!(
+        !tty.unwrap_or_default().contains("often transient"),
+        "a permanent refusal must not read as a transient one"
+    );
+    assert!(
+        !proj.0.join(".claude/skills/deploy").exists(),
+        "nothing placed"
+    );
+}
+
 #[test]
 fn a_name_overridden_row_keeps_its_lock_entry_through_update() {
     // Harvest writes the lock under the row's KEY; the closeout prune must key the same way —

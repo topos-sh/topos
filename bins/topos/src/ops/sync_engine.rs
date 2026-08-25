@@ -1722,11 +1722,13 @@ fn ensure_local(
     let Some(fetched) = fetch_served(ctx, skill_id, version_id)? else {
         if depth == 0 {
             // The TARGET must be served — a miss here is the ordinary not-served error, never a
-            // silent shallow stop.
-            return Err(ClientError::Plane(format!(
-                "the server does not serve version {}, or not to you",
-                to_hex(&version_id)
-            )));
+            // silent shallow stop. TYPED, because it is PERMANENT: the plane answered, and its
+            // answer is that no such version is served to this login. As a bare transport string
+            // it classified retryable and sent `--frozen` in CI into a loop on a lock entry no
+            // amount of re-running could resolve.
+            return Err(ClientError::VersionNotServed {
+                version: to_hex(&version_id),
+            });
         }
         return Ok(None);
     };
