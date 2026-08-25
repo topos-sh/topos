@@ -203,9 +203,9 @@ fn channel_refusal(
         // The PICK is the person's to make and has to be said out loud. A server that did not
         // answer is a different thing entirely: the probe is best-effort, so the local
         // "no bundle by that name" stands, exactly as it did before this probe existed.
-        Err(
-            e @ (ClientError::WorkspaceSelection(_) | ClientError::SessionRequired { .. }),
-        ) => return Err(e),
+        Err(e @ (ClientError::WorkspaceSelection(_) | ClientError::SessionRequired { .. })) => {
+            return Err(e);
+        }
         Err(_) => return Ok(None),
     };
     let Ok(parsed) = resolve::parse_target(skill) else {

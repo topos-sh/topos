@@ -1000,7 +1000,13 @@ fn remote_view(
     only: Option<&str>,
     connect: SessionDirectory<'_>,
     warnings: &mut Vec<topos_types::Message>,
-) -> Result<(Vec<RemoteWorkspace>, Vec<topos_types::results::WorkspaceRef>), ClientError> {
+) -> Result<
+    (
+        Vec<RemoteWorkspace>,
+        Vec<topos_types::results::WorkspaceRef>,
+    ),
+    ClientError,
+> {
     let live: Vec<&Session> = all.live().collect();
     if live.is_empty() {
         return Err(ClientError::SessionRequired {

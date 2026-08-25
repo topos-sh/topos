@@ -1858,7 +1858,11 @@ fn the_activity_counter_runs_once_across_every_workspace() {
     )
     .unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert_eq!(out.data.skills.len(), 5, "the run converged all five: {out:?}");
+    assert_eq!(
+        out.data.skills.len(),
+        5,
+        "the run converged all five: {out:?}"
+    );
 
     let counted: Vec<String> = crate::progress::captured_lines(&progress)
         .into_iter()
@@ -2038,7 +2042,9 @@ fn auth_status_drops_the_posture_of_a_workspace_this_machine_left() {
     );
     let text = crate::render::auth_status_tty(&data);
     assert!(
-        text.contains(&format!("reporting {HOST}/{WS_NAME}: last report 2023-11-15 22:13")),
+        text.contains(&format!(
+            "reporting {HOST}/{WS_NAME}: last report 2023-11-15 22:13"
+        )),
         "the address and a date, never the id and an epoch: {text}"
     );
 }
