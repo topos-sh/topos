@@ -612,6 +612,18 @@ pub struct ListData {
     /// The last auto-update check of every external source the shown scopes name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forge: Vec<ForgeSource>,
+    /// The agents picked where the panel stands (the project's effective pick, or the machine's
+    /// under `-g`), as the pick file spells them. Empty = no pick yet. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// Where `agents` comes from: `"project"`, `"machine"`, or `"legacy"` (the hooks an earlier
+    /// build registered, not yet recorded as a pick). Absent with no pick. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents_source: Option<String>,
+    /// The pick file `agents` was read from, as a person reads it. Absent with no pick or a
+    /// legacy record. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents_path: Option<String>,
 }
 
 /// One scope section of a [`ListData`] — the rows one manifest delivers. **PINNED.**
@@ -1655,6 +1667,125 @@ pub struct InitData {
     /// A placement note (outside a git repo the file will not travel — stated honestly).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The agents pick this run applied at the manifest's scope, and what landed for it. Absent
+    /// when the run only created (or found) the file and applied no pick. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<PickReceipt>,
+}
+
+/// One picked agent's auto-update hook, as an `init` / `agents add` receipt names it.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct PickHook {
+    /// The registry slug.
+    pub agent: String,
+    /// The hook file, as a person reads it (project-relative, or `~`-abbreviated).
+    pub file: String,
+    /// The step the harness still owes before the hook fires (Codex: trusting the repo), when
+    /// there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// What an `init -a` / `agents add` placed for the pick at one scope. **INFERRED**
+/// (additive-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct PickReceipt {
+    /// `"project"` or `"machine"`.
+    pub scope: String,
+    /// The picked agents' registry slugs, in harness-table order.
+    pub agents: Vec<String>,
+    /// The pick file, as a person reads it.
+    pub pick_path: String,
+    /// How many skill bundles have a copy in a picked agent's skills folder at this scope.
+    pub skills: u64,
+    /// The skills folders those copies sit in (project-relative, or `~`-abbreviated).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills_dirs: Vec<String>,
+    /// How many MCP server bundles have an entry in a picked agent's config at this scope.
+    pub mcp_servers: u64,
+    /// The MCP config files those entries sit in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_files: Vec<String>,
+    /// The auto-update hooks registered for the picked agents at this scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_files: Vec<PickHook>,
+    /// One line per picked agent that reads no hook at this scope (a project pick of an agent
+    /// with no per-project hook).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_notes: Vec<String>,
+    /// The agents installed on this machine that the pick leaves untouched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub untouched: Vec<String>,
+    /// The command that adds the picked agents' folders to `.gitignore`, offered when the
+    /// project is in a git repository and they are not ignored yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitignore_hint: Option<String>,
+    /// The `.gitignore` entries `--gitignore` appended this run (empty when nothing was missing).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gitignored: Vec<String>,
+}
+
+/// `topos agents` — the pick where you stand and what is installed on this machine.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AgentsData {
+    /// `"project"` or `"machine"`.
+    pub scope: String,
+    /// The pick file in force, as a person reads it; absent when no pick stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick_path: Option<String>,
+    /// Where the pick comes from: `"project"` (the project's own file) or `"machine"` (the
+    /// machine file, inherited inside a project). Absent when no pick stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The picked agents' registry slugs, as the file spells them (`"*"` = every installed agent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// Every agent installed on this machine (its detect dir exists), in harness-table order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installed: Vec<String>,
+    /// The auto-update hook state of each picked agent at this scope, probed read-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<StatusTrigger>,
+    /// The `.gitignore` entries `--gitignore` appended this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gitignored: Vec<String>,
+}
+
+/// `topos agents remove` — the describe (`applied: false`) and the applied receipt.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AgentsChanged {
+    /// `"project"` or `"machine"`.
+    pub scope: String,
+    /// The agents leaving the pick.
+    pub removed: Vec<String>,
+    /// The pick after the change (as the file would spell it).
+    pub agents: Vec<String>,
+    /// The pick file, as a person reads it.
+    pub pick_path: String,
+    /// `false` = the describe: nothing has changed yet.
+    pub applied: bool,
+    /// The skill copies that leave (describe) or left (applied), one folder each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_dirs: Vec<String>,
+    /// The MCP config files the leaving agents' entries leave (describe) or left (applied).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_files: Vec<String>,
+    /// The auto-update hook files that leave (describe) or left (applied).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<String>,
+    /// Folders the leaving agents read that STAY, because another picked agent reads them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub untouched: Vec<String>,
+    /// Copies with local edits kept in place (an edited copy is the person's own work).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
 }
 
 /// The `keep it as yours` describe — an `add <name>` that re-forks a RETAINED withdrawn/detached copy
@@ -2784,8 +2915,8 @@ pub struct StatusData {
     /// logged into nothing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<StatusSession>,
-    /// Per-agent auto-update trigger state, probed READ-ONLY over the detected agents (nothing is
-    /// armed or repaired by `status`).
+    /// Per-agent auto-update trigger state, probed READ-ONLY over the picked agents (nothing is
+    /// registered or repaired by `status`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<StatusTrigger>,
     /// The scope bodies shown in full (here-scope; both under `--all`; machine under `-g` and
@@ -2798,6 +2929,18 @@ pub struct StatusData {
     /// The last auto-update check of every external source the shown scopes name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forge: Vec<ForgeSource>,
+    /// The agents picked where the panel stands (the project's effective pick, or the machine's
+    /// under `-g`), as the pick file spells them. Empty = no pick yet. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// Where `agents` comes from: `"project"`, `"machine"`, or `"legacy"` (the hooks an earlier
+    /// build registered, not yet recorded as a pick). Absent with no pick. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents_source: Option<String>,
+    /// The pick file `agents` was read from, as a person reads it. Absent with no pick or a
+    /// legacy record. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents_path: Option<String>,
 }
 
 /// One scope body of a [`StatusData`]: what governs it, the per-workspace regimes (machine
@@ -2922,7 +3065,7 @@ pub enum StatusItemState {
     Unknown,
 }
 
-/// One detected agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of
+/// One picked agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of
 /// the same artifact the arming sweep manages. **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]

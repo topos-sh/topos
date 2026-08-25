@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "command": "agents",
+  "ok": true,
+  "data": {
+    "agents": [
+      "claude-code",
+      "codex"
+    ],
+    "hooks": [
+      {
+        "agent": "claude-code",
+        "armed": true,
+        "last_run_age_ms": 120000
+      },
+      {
+        "agent": "codex",
+        "armed": true
+      }
+    ],
+    "installed": [
+      "claude-code",
+      "codex",
+      "cursor",
+      "gemini-cli"
+    ],
+    "pick_path": ".topos/agents.json",
+    "scope": "project",
+    "source": "project"
+  },
+  "warnings": [],
+  "next_actions": []
+}

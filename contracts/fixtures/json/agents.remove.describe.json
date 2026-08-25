@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "command": "agents",
+  "ok": true,
+  "data": {
+    "describe": {
+      "agents": [
+        "claude-code"
+      ],
+      "applied": false,
+      "hooks": [
+        ".codex/hooks.json"
+      ],
+      "pick_path": ".topos/agents.json",
+      "removed": [
+        "codex"
+      ],
+      "removed_dirs": [
+        ".agents/skills/deploy",
+        ".agents/skills/topos"
+      ],
+      "removed_files": [
+        ".codex/config.toml"
+      ],
+      "scope": "project"
+    }
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "APPLY_DESCRIBED",
+      "argv": [
+        "topos",
+        "agents",
+        "remove",
+        "codex",
+        "--yes"
+      ],
+      "mutates": true
+    }
+  ]
+}

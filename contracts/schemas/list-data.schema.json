@@ -15,6 +15,27 @@
         }
       ]
     },
+    "agents": {
+      "description": "The agents picked where the panel stands (the project's effective pick, or the machine's\nunder `-g`), as the pick file spells them. Empty = no pick yet. **Additive.**",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "agents_path": {
+      "description": "The pick file `agents` was read from, as a person reads it. Absent with no pick or a\nlegacy record. **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agents_source": {
+      "description": "Where `agents` comes from: `\"project\"`, `\"machine\"`, or `\"legacy\"` (the hooks an earlier\nbuild registered, not yet recorded as a pick). Absent with no pick. **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "also_signed_in": {
       "description": "The OTHER workspaces this machine is signed into, present only under `--remote`. The\ncatalog view acts on one workspace; this names the rest so none of them is invisible, and\nthe TTY closes the view with the spelling that shows theirs.",
       "type": "array",

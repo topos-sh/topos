@@ -28,6 +28,14 @@ const SCHEMAS: &[(&str, &str)] = &[
         include_str!("../../../contracts/schemas/add-describe-data.schema.json"),
     ),
     (
+        "agents-changed-data",
+        include_str!("../../../contracts/schemas/agents-changed-data.schema.json"),
+    ),
+    (
+        "agents-data",
+        include_str!("../../../contracts/schemas/agents-data.schema.json"),
+    ),
+    (
         "auth-status-data",
         include_str!("../../../contracts/schemas/auth-status-data.schema.json"),
     ),

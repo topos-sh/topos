@@ -212,9 +212,10 @@ pub(crate) enum Command {
     },
     /// Log this machine in to topos. Opens your browser for a one-click approval, where you
     /// choose (or create) the workspace to join. The first login to a workspace records its feed
-    /// line (`[workspaces] "<host>/<workspace>" = "latest"`) in `~/.topos/topos.toml` — from then on, whatever that
-    /// workspace delivers to you installs here and stays updated by itself; delete the line
-    /// (`topos remove -g @<workspace>`) and it stays deleted — login never re-adds it. Bare
+    /// line (`[workspaces] "<host>/<workspace>" = "latest"`) in `~/.topos/topos.toml` — from then
+    /// on, whatever that workspace delivers to you installs for the agents you picked (`topos
+    /// init -a <agent>`); delete the line (`topos remove -g @<workspace>`) and it stays deleted —
+    /// login never re-adds it. Login signs in and writes that line, nothing else. Bare
     /// `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go
     /// straight to it, or paste an invitation link. To join another workspace, log in again —
     /// already logged in to that server, it takes no browser.
@@ -238,19 +239,48 @@ pub(crate) enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Create a `topos.toml` in this folder. The file lists the skills everyone working in this
-    /// project should have — commit it, and teammates' agents pick up the same set by
-    /// themselves. With `-g`, creates your machine's own `~/.topos/topos.toml` instead, header
-    /// only — `topos login` writes a workspace's feed line on this machine's first connection
-    /// to it, and `topos add -g` records the rest. If the file already exists, nothing changes.
+    /// First setup in a project: create its `topos.toml` and pick the agents topos uses here.
+    /// The file lists the bundles everyone working in this project should have — commit it, and
+    /// teammates' agents pick up the same set by themselves. `-a <agent>` names an agent to use
+    /// in this project (repeat it to name several; `-a '*'` is every agent installed on this
+    /// machine); topos touches only the agents you pick. Also works on an existing `topos.toml`
+    /// (a teammate's clone): it picks and installs, and the file stays as it is. With no `-a`,
+    /// the one agent installed here is used; with several, you are asked. With `-g`, the same
+    /// for your machine-wide set (`~/.topos/topos.toml`, header only — `topos login` writes a
+    /// workspace's feed line on this machine's first connection, and `topos add -g` records the
+    /// rest).
     Init {
-        /// Write the machine-wide file (`~/.topos/topos.toml`) instead of this folder's.
+        /// Write the machine-wide file (`~/.topos/topos.toml`) instead of this folder's, and
+        /// pick agents for your machine-wide set.
         #[arg(long, short = 'g')]
         global: bool,
         /// The workspace this project's bare names use (`<host>/<name>`). Defaults to your
         /// machine default workspace (`topos workspace list`).
         #[arg(long, value_name = "ADDRESS", conflicts_with = "global")]
         workspace: Option<String>,
+        /// An agent to use here (a slug like `claude-code`; repeat for several; `'*'` for every
+        /// agent installed on this machine). `topos agents` lists the slugs.
+        #[arg(long, short = 'a', value_name = "AGENT")]
+        agent: Vec<String>,
+        /// Add the picked agents' folders (`.claude/`, `.codex/`, ...) to this project's
+        /// `.gitignore`. Off by default; topos never edits `.gitignore` otherwise.
+        #[arg(long)]
+        gitignore: bool,
+    },
+    /// The agents topos uses where you stand: the pick for this project (or, with `-g`, for your
+    /// machine-wide set), and which agents are installed on this machine. `add` and `remove`
+    /// change the pick: adding an agent installs this scope's bundles for it and registers its
+    /// auto-update hook; removing one deletes what topos wrote for it (skill copies, MCP
+    /// entries, the hook). Nothing is written for an agent you did not pick.
+    Agents {
+        #[command(subcommand)]
+        cmd: Option<AgentsCmd>,
+        /// The machine-wide pick, even when run inside a project.
+        #[arg(long, short = 'g', global = true)]
+        global: bool,
+        /// Add the picked agents' folders to this project's `.gitignore`. Off by default.
+        #[arg(long, global = true)]
+        gitignore: bool,
     },
     /// Tidy a `topos.toml`: group and sort its lines into the standard layout. Comments
     /// survive; meaning never changes. Formats this folder's file, or your machine-wide one
@@ -641,6 +671,27 @@ pub(crate) enum WorkspaceCmd {
     },
 }
 
+/// The `agents` sub-verbs.
+#[derive(Debug, Subcommand)]
+pub(crate) enum AgentsCmd {
+    /// Add agents to the pick and install this scope's bundles for them.
+    Add {
+        /// The agent(s) to add (a slug like `codex`; `'*'` for every agent installed here).
+        #[arg(required = true, value_name = "AGENT")]
+        agent: Vec<String>,
+    },
+    /// Remove agents from the pick and delete what topos wrote for them. Shows what would go
+    /// first; `--yes` applies.
+    Remove {
+        /// The agent(s) to remove.
+        #[arg(required = true, value_name = "AGENT")]
+        agent: Vec<String>,
+        /// Apply the removal shown by the bare command.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// The `auth` sub-verbs.
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum AuthCmd {
@@ -664,6 +715,7 @@ impl Command {
             Command::Update { .. } => "update",
             Command::Install { .. } => "install",
             Command::Workspace { .. } => "workspace",
+            Command::Agents { .. } => "agents",
             Command::Add { .. } => "add",
             Command::Remove { .. } => "remove",
             Command::List { .. } => "list",

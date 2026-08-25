@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentsData",
+  "description": "`topos agents` — the pick where you stand and what is installed on this machine.\n**INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "agents": {
+      "description": "The picked agents' registry slugs, as the file spells them (`\"*\"` = every installed agent).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "gitignored": {
+      "description": "The `.gitignore` entries `--gitignore` appended this run.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hooks": {
+      "description": "The auto-update hook state of each picked agent at this scope, probed read-only.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StatusTrigger"
+      }
+    },
+    "installed": {
+      "description": "Every agent installed on this machine (its detect dir exists), in harness-table order.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pick_path": {
+      "description": "The pick file in force, as a person reads it; absent when no pick stands.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "description": "`\"project\"` or `\"machine\"`.",
+      "type": "string"
+    },
+    "source": {
+      "description": "Where the pick comes from: `\"project\"` (the project's own file) or `\"machine\"` (the\nmachine file, inherited inside a project). Absent when no pick stands.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "scope"
+  ],
+  "$defs": {
+    "StatusTrigger": {
+      "description": "One picked agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of\nthe same artifact the arming sweep manages. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The registry slug.",
+          "type": "string"
+        },
+        "armed": {
+          "description": "Provable presence of the topos trigger ARTIFACT right now — a footprint read, which is\nwhy every surface built on it says \"registered\" rather than \"armed\": the artifact stands,\nand nothing here watched it fire. Absent = unknowable without a live probe `status`\nrefuses to run (a scheduler that must be dialed to answer).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "last_run_age_ms": {
+          "description": "How long ago this agent's hook last RAN a sweep on this machine (milliseconds), when one\nhas ever been observed — the evidence that turns \"registered\" into \"seen working\". Only\nhooks that name their caller can leave it (`--hook`/`--from`), so absence never proves a\ntrigger dead. **INFERRED** (additive-only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "note": {
+          "description": "A short honesty note (e.g. why `armed` is unknown), when one is needed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent"
+      ]
+    }
+  }
+}

@@ -93,6 +93,10 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
         forge: inventory::forge_sources(ctx, &shown),
         scopes,
         machine_summary,
+        // The pick rides in from the composition root beside the trigger rows (same scope).
+        agents: Vec::new(),
+        agents_source: None,
+        agents_path: None,
     })
 }
 

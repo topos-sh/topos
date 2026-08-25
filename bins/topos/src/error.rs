@@ -1208,6 +1208,60 @@ pub(crate) enum ClientError {
     /// closes with `nothing changed`, because nothing was read past the argv.
     #[error("{0}")]
     SelectionRefused(String),
+    /// No agents are picked at the scope a verb would place into, and the pick cannot be asked
+    /// for (several agents are installed, and stdin is not a terminal or `--json` was asked).
+    /// `installed` is what the machine holds, so the list a person or an agent chooses from
+    /// rides the answer; `global` spells the way out for the machine scope. Exit status 2: a
+    /// usage-shaped answer, not a failure — nothing was read past the pick.
+    #[error("{}", pick_required_message(installed, *global))]
+    PickRequired {
+        installed: Vec<String>,
+        global: bool,
+    },
+    /// `--gitignore` asked beside `-g`: the flag edits a project's `.gitignore`, and the machine
+    /// scope has none.
+    #[error(
+        "--gitignore edits this project's .gitignore and has no meaning with -g. Drop one of the \
+         two"
+    )]
+    GitignoreNeedsProject,
+    /// `agents remove` could not clean everything topos wrote for an agent, so the agent STAYS
+    /// in the pick (the pick is written last, only after the cleanup is verified). `left` names
+    /// what still stands.
+    #[error("{}", remove_incomplete_message(agent, left))]
+    AgentRemoveIncomplete { agent: String, left: Vec<String> },
+}
+
+/// The [`ClientError::PickRequired`] sentence: the fact, the installed list (or its absence),
+/// and the one command that answers it.
+fn pick_required_message(installed: &[String], global: bool) -> String {
+    let where_ = if global {
+        "on this machine"
+    } else {
+        "in this project"
+    };
+    let list = if installed.is_empty() {
+        "No agent topos knows is installed on this machine.".to_owned()
+    } else {
+        format!("Installed on this machine: {}.", installed.join(", "))
+    };
+    format!(
+        "no agents picked yet {where_}. {list} Pick with: {}",
+        pick_command(global)
+    )
+}
+
+/// The way out of [`ClientError::PickRequired`], spelled for the scope.
+pub(crate) fn pick_command(global: bool) -> String {
+    format!("topos init{} -a <agent>", scope_flag(global))
+}
+
+fn remove_incomplete_message(agent: &str, left: &[String]) -> String {
+    format!(
+        "{agent} stays picked: topos could not remove everything it wrote for it. Still there: \
+         {}. Fix that, then run the command again",
+        left.join(", ")
+    )
 }
 
 impl ClientError {
@@ -1382,6 +1436,11 @@ impl ClientError {
             ClientError::UnknownAgent { .. } => "UNKNOWN_AGENT",
             // A selection the arm refuses whole shares the argument-shaped code.
             ClientError::SelectionRefused(_) => "INVALID_ARGUMENT",
+            // No pick where one is needed: the agent reads `data.installed` and picks.
+            ClientError::PickRequired { .. } => "PICK_REQUIRED",
+            ClientError::GitignoreNeedsProject => "GITIGNORE_NEEDS_PROJECT",
+            // A cleanup that left something standing: the pick is unchanged, the message names it.
+            ClientError::AgentRemoveIncomplete { .. } => "AGENT_REMOVE_INCOMPLETE",
         }
     }
 

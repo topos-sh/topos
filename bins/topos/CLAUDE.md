@@ -184,7 +184,21 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   manifest at all.
 - `ops/` — the verbs: `add`, `remove`, `reconcile` (update), `sync_engine`, `publish`, `review`,
   `revert`, `protect`, `invite`, `login`/`loopback`, `status`, `auth`, `list`, `diff`, `log`,
-  `init`, `fmt`, `uninstall`, `builtin` (the embedded meta-skill from `skills/topos/`),
+  `init` (the manifest's birth AND the pick half: `-a` names the agents at that scope and
+  `agents::apply_pick` lands everything for them — the scope's reconcile, the built-in bundle at
+  that scope, the hooks, the optional `.gitignore` lines; no `-a` and no pick is `agents_ask`),
+  `agents` (`topos agents [add|remove]`: the pick where you stand, what is installed — the ONE
+  reader of detection beside the ask — and each picked agent's hook state; `add` = write the
+  pick then `apply_pick`; `remove` = compute the loss while the old pick is authoritative,
+  describe unless `--yes`, clean through `reconcile::clean_dest_roots` + `mcp_engine::
+  remove_bundle` narrowed to the leaving agents + `agent_hooks::remove_for`, verify, and write
+  the reduced pick LAST; a project without a file of its own is materialized from the effective
+  set first; `derive_pick_if_missing` is what `install`/`update` run before driving a scope
+  with no pick — one installed agent is recorded silently, several are asked for, the quiet
+  sweep asks nothing), `agents_ask` (the ask: one installed → it; `CLAUDECODE` → claude-code;
+  piped or `--json` → `PickRequired`, exit 2, with the installed list on the envelope; a
+  terminal → one numbered prompt on stdin), `fmt`, `uninstall`, `builtin` (the embedded
+  meta-skill from `skills/topos/`),
   `self_update` (minisign-gated via `release`), `version_check`, `arm` (the TRIGGER half of the
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
   machine root + ports the whole-machine set resolves under, so `artifacts` (the uninstall

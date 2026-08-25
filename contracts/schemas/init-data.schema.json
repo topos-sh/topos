@@ -18,10 +18,137 @@
         "string",
         "null"
       ]
+    },
+    "pick": {
+      "description": "The agents pick this run applied at the manifest's scope, and what landed for it. Absent\nwhen the run only created (or found) the file and applied no pick. **Additive.**",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PickReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
     "manifest",
     "created"
-  ]
+  ],
+  "$defs": {
+    "PickHook": {
+      "description": "One picked agent's auto-update hook, as an `init` / `agents add` receipt names it.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The registry slug.",
+          "type": "string"
+        },
+        "file": {
+          "description": "The hook file, as a person reads it (project-relative, or `~`-abbreviated).",
+          "type": "string"
+        },
+        "note": {
+          "description": "The step the harness still owes before the hook fires (Codex: trusting the repo), when\nthere is one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "file"
+      ]
+    },
+    "PickReceipt": {
+      "description": "What an `init -a` / `agents add` placed for the pick at one scope. **INFERRED**\n(additive-only).",
+      "type": "object",
+      "properties": {
+        "agents": {
+          "description": "The picked agents' registry slugs, in harness-table order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "gitignore_hint": {
+          "description": "The command that adds the picked agents' folders to `.gitignore`, offered when the\nproject is in a git repository and they are not ignored yet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gitignored": {
+          "description": "The `.gitignore` entries `--gitignore` appended this run (empty when nothing was missing).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hook_files": {
+          "description": "The auto-update hooks registered for the picked agents at this scope.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PickHook"
+          }
+        },
+        "hook_notes": {
+          "description": "One line per picked agent that reads no hook at this scope (a project pick of an agent\nwith no per-project hook).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mcp_files": {
+          "description": "The MCP config files those entries sit in.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mcp_servers": {
+          "description": "How many MCP server bundles have an entry in a picked agent's config at this scope.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "pick_path": {
+          "description": "The pick file, as a person reads it.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "`\"project\"` or `\"machine\"`.",
+          "type": "string"
+        },
+        "skills": {
+          "description": "How many skill bundles have a copy in a picked agent's skills folder at this scope.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "skills_dirs": {
+          "description": "The skills folders those copies sit in (project-relative, or `~`-abbreviated).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "untouched": {
+          "description": "The agents installed on this machine that the pick leaves untouched.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "scope",
+        "agents",
+        "pick_path",
+        "skills",
+        "mcp_servers"
+      ]
+    }
+  }
 }

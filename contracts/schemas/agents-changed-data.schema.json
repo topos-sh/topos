@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentsChanged",
+  "description": "`topos agents remove` — the describe (`applied: false`) and the applied receipt.\n**INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "agents": {
+      "description": "The pick after the change (as the file would spell it).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "applied": {
+      "description": "`false` = the describe: nothing has changed yet.",
+      "type": "boolean"
+    },
+    "hooks": {
+      "description": "The auto-update hook files that leave (describe) or left (applied).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "kept": {
+      "description": "Copies with local edits kept in place (an edited copy is the person's own work).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pick_path": {
+      "description": "The pick file, as a person reads it.",
+      "type": "string"
+    },
+    "removed": {
+      "description": "The agents leaving the pick.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "removed_dirs": {
+      "description": "The skill copies that leave (describe) or left (applied), one folder each.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "removed_files": {
+      "description": "The MCP config files the leaving agents' entries leave (describe) or left (applied).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "scope": {
+      "description": "`\"project\"` or `\"machine\"`.",
+      "type": "string"
+    },
+    "untouched": {
+      "description": "Folders the leaving agents read that STAY, because another picked agent reads them too.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "scope",
+    "removed",
+    "agents",
+    "pick_path",
+    "applied"
+  ]
+}

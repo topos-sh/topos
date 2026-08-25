@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "command": "init",
+  "ok": true,
+  "data": {
+    "created": true,
+    "manifest": "/repo/topos.toml",
+    "note": "this is the file every `topos add` in this folder records into — `add` writes rows, never a new manifest",
+    "pick": {
+      "agents": [
+        "claude-code",
+        "codex"
+      ],
+      "gitignore_hint": "topos init --gitignore",
+      "hook_files": [
+        {
+          "agent": "claude-code",
+          "file": ".claude/settings.local.json"
+        },
+        {
+          "agent": "codex",
+          "file": ".codex/hooks.json",
+          "note": "Codex runs it once you trust this repo"
+        }
+      ],
+      "mcp_files": [
+        ".mcp.json",
+        ".codex/config.toml"
+      ],
+      "mcp_servers": 1,
+      "pick_path": ".topos/agents.json",
+      "scope": "project",
+      "skills": 4,
+      "skills_dirs": [
+        ".claude/skills",
+        ".agents/skills"
+      ],
+      "untouched": [
+        "cursor"
+      ]
+    }
+  },
+  "warnings": [],
+  "next_actions": []
+}
