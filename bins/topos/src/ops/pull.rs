@@ -543,16 +543,17 @@ pub(crate) fn reset(
         };
         // The draft delta vs current — the exact bytes a reset drops, read from the copy resolved
         // above (never re-resolved: a second pass could answer with the other scope's copy and
-        // describe a loss nobody is about to take). DIVERGENT copies cannot render one diff (that
-        // freeze is exactly what `--reset` is the named way out of), so the loss is disclosed as
-        // the frozen set instead of failing the reset. UNCAPPED deliberately: a loss disclosure
-        // must never truncate what would be discarded.
-        let drop_diff = match super::diff_resolved(
+        // describe a loss nobody is about to take). Read in the direction the RESET runs: `a` is
+        // this copy (what goes away), `b` is the version that lands — a preview that read the
+        // other way told a person the opposite of what `--yes` was about to do. DIVERGENT copies
+        // cannot render one diff (that freeze is exactly what `--reset` is the named way out of),
+        // so the loss is disclosed as the frozen set instead of failing the reset. UNCAPPED
+        // deliberately: a loss disclosure must never truncate what would be discarded.
+        let drop_diff = match super::reset_preview_diff(
             ctx,
             layout,
             id,
             lock,
-            None,
             super::DiffBudget::unlimited(),
             sel,
         ) {

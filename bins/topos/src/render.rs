@@ -2029,6 +2029,10 @@ fn agent_view_tty(view: &AgentView) -> String {
 /// The sentence states the loss plainly and stops — the delta printed under it is the argument,
 /// and a shouted word above a diff a person is already reading only makes the surface sound
 /// anxious. The receipt below reads in the same voice.
+///
+/// It names BOTH halves of the swap, because the diff under it does: a reset takes your copy away
+/// and puts the team's version there, so the line says which way it runs rather than naming only
+/// the version — over a diff whose `-` lines are yours and whose `+` lines are the team's.
 pub(crate) fn reset_describe_tty(
     items: &[topos_types::results::ResetData],
     yes_argv: &[String],
@@ -2037,12 +2041,12 @@ pub(crate) fn reset_describe_tty(
     for item in items {
         match &item.dest {
             Some(dest) => s.push_str(&format!(
-                "Reset '{}' in {dest} — discard local edits to {}:\n",
+                "Reset '{}' in {dest} — your edits go away, the team's {} lands:\n",
                 item.skill,
                 short(&item.to_version)
             )),
             None => s.push_str(&format!(
-                "Reset '{}' — discard local edits to {}:\n",
+                "Reset '{}' — your edits go away, the team's {} lands:\n",
                 item.skill,
                 short(&item.to_version)
             )),
@@ -10800,6 +10804,66 @@ mod tests {
         assert!(
             resolution_next_actions(&data(vec![row_with(None)])).is_empty(),
             "a merge that was never stopped had no exit to finish it"
+        );
+    }
+
+    /// The `--reset` PREVIEW reads the way the apply runs. A reset replaces your copy with the
+    /// team's version, so the header names both halves of that swap and the delta under it puts
+    /// your edits on the `-` side and the landing version on the `+` side. It used to print
+    /// `discard local edits to <v>` over a diff whose deletions were the team's incoming lines
+    /// and whose additions were the edits about to be destroyed — the preview saying the opposite
+    /// of what `--yes` does.
+    #[test]
+    fn the_reset_preview_reads_the_way_the_apply_runs() {
+        let item = |dest: Option<&str>| topos_types::results::ResetData {
+            skill: "r2-smoke".to_owned(),
+            workspace_id: None,
+            workspace: None,
+            to_version: "233c617a96d2".to_owned() + &"0".repeat(52),
+            // `a` is this copy (what goes away); `b` is the version that lands.
+            drop_diff: "--- a/nonce.txt\n+++ b/nonce.txt\n@@ -1,1 +1,1 @@\n-090e320e048f99d7\n\
+                        +bab8474e7087d628\n"
+                .to_owned(),
+            applied: false,
+            dest: dest.map(str::to_owned),
+            others_kept: Vec::new(),
+            global: false,
+            hand_merge: None,
+            merge: None,
+        };
+        let argv = ["topos", "update", "r2-smoke", "--reset", "--yes"]
+            .map(str::to_owned)
+            .to_vec();
+
+        let whole = super::reset_describe_tty(&[item(None)], &argv);
+        assert!(
+            whole.starts_with(
+                "Reset 'r2-smoke' — your edits go away, the team's 233c617a96d2 \
+                               lands:\n"
+            ),
+            "{whole}"
+        );
+        // The direction, stated as the diff itself states it.
+        let dropped: Vec<&str> = whole
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+            .collect();
+        let landing: Vec<&str> = whole
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+            .collect();
+        assert_eq!(dropped, ["-090e320e048f99d7"], "{whole}");
+        assert_eq!(landing, ["+bab8474e7087d628"], "{whole}");
+        // A narrowed reset says the same thing about the one folder it takes.
+        let one = super::reset_describe_tty(&[item(Some("~/.claude/skills/r2-smoke"))], &argv);
+        assert!(
+            one.starts_with(
+                "Reset 'r2-smoke' in ~/.claude/skills/r2-smoke — your edits go away, the team's \
+                 233c617a96d2 lands:\n"
+            ),
+            "{one}"
         );
     }
 

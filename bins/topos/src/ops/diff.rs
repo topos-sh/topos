@@ -91,16 +91,31 @@ pub(crate) fn diff(
     diff_resolved(ctx, &layout, &id, &lock, r#ref, budget, sel)
 }
 
-/// [`diff`] over an ALREADY-RESOLVED copy — the entry the reset describe uses, so the loss it
-/// discloses is measured against exactly the store the discard will act on (a second, independent
-/// resolution could land on the other scope's copy and describe bytes nobody is about to lose).
-/// Every store/doc/scan read rides the OWNING layout; the plane and follow seams are machine-level
-/// and stay as they are.
+/// WHICH WAY a bare draft ↔ current diff reads — the two verbs that print one want opposite
+/// orders, and a unified diff only means something when `a` is the state that goes away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiffSides {
+    /// `topos diff`: `a` is the team's current, `b` is your copy — so the `+` lines are YOUR
+    /// edits, which is what "show me my change" means.
+    CurrentToDraft,
+    /// The `--reset` preview: `a` is your copy (what goes away), `b` is the team's version (what
+    /// lands). A reset REPLACES your copy with the team's, so the preview has to read the way the
+    /// apply runs. Printed in the other order it said the opposite of what `--yes` does: the
+    /// team's incoming lines rendered as deletions and the edits about to be destroyed as
+    /// additions.
+    DraftToCurrent,
+}
+
+/// [`diff`] over an ALREADY-RESOLVED copy — the shape [`reset_preview_diff`] shares, so a loss
+/// disclosure is measured against exactly the store the discard will act on (a second,
+/// independent resolution could land on the other scope's copy and describe bytes nobody is about
+/// to lose). Every store/doc/scan read rides the OWNING layout; the plane and follow seams are
+/// machine-level and stay as they are.
 /// The `-a`/`--dest` selector narrows the RIGHT-HAND side only. The left side stays what it always
 /// is — the applied base — so two `--dest` runs answer against the same ruler and are directly
 /// comparable, which is what makes them a substitute for the copy-vs-copy grammar this deliberately
 /// does not invent.
-pub(crate) fn diff_resolved(
+fn diff_resolved(
     ctx: &Ctx<'_>,
     layout: &sidecar::Layout,
     id: &crate::id::SkillId,
@@ -113,7 +128,7 @@ pub(crate) fn diff_resolved(
     let sp = layout.published(id);
 
     let Some(reference) = r#ref else {
-        return diff_draft_vs_current(&sctx, &sp, lock, budget, sel);
+        return diff_draft_vs_current(&sctx, &sp, lock, budget, sel, DiffSides::CurrentToDraft);
     };
 
     // Parse the ref: `<a>..<b>` is a range; otherwise a single endpoint compared against `current` (so a
@@ -141,6 +156,26 @@ pub(crate) fn diff_resolved(
         dest: None,
         skill: None,
     })
+}
+
+/// The `--reset` preview's LOSS diff over an already-resolved copy: the same bare draft ↔ current
+/// read `diff` makes, in the direction a reset runs ([`DiffSides::DraftToCurrent`]) — `a` is the
+/// copy about to be discarded, `b` is the version about to land.
+///
+/// # Errors
+/// As [`diff_resolved`]: a scan/store failure, a placement freeze, or a transport fault reading
+/// the workspace's live current.
+pub(crate) fn reset_preview_diff(
+    ctx: &Ctx<'_>,
+    layout: &sidecar::Layout,
+    id: &crate::id::SkillId,
+    lock: &Lock,
+    budget: DiffBudget,
+    sel: &super::Selection,
+) -> Result<DiffData, ClientError> {
+    let sctx = super::pull::ctx_with_layout(ctx, layout);
+    let sp = layout.published(id);
+    diff_draft_vs_current(&sctx, &sp, lock, budget, sel, DiffSides::DraftToCurrent)
 }
 
 /// Apply a byte budget to per-file diff sections: emit LEADING whole sections while the running
@@ -192,6 +227,7 @@ fn diff_draft_vs_current(
     lock: &Lock,
     budget: DiffBudget,
     sel: &super::Selection,
+    sides: DiffSides,
 ) -> Result<DiffData, ClientError> {
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
@@ -259,7 +295,13 @@ fn diff_draft_vs_current(
             bytes: &f.bytes,
         })
         .collect();
-    let sections = unified_diff_sections(&base_files, &draft_files);
+    // `a` is always the side that GOES AWAY: for `diff` that is the team's current (your edits
+    // read as `+`), for the reset preview it is your copy (your edits read as `-`, and the
+    // version that lands reads as `+`).
+    let sections = match sides {
+        DiffSides::CurrentToDraft => unified_diff_sections(&base_files, &draft_files),
+        DiffSides::DraftToCurrent => unified_diff_sections(&draft_files, &base_files),
+    };
     let (diff, truncated, files) = apply_budget(sections, budget);
 
     Ok(DiffData {

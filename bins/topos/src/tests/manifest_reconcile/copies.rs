@@ -847,6 +847,13 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
         "the loss shown is THIS copy's: {}",
         items[0].drop_diff
     );
+    // …and it reads the way the reset RUNS: this copy is `a` (it goes away), the version that
+    // lands is `b`. Printed the other way the preview said the opposite of what `--yes` does.
+    assert!(
+        items[0].drop_diff.contains("-native edit") && items[0].drop_diff.contains("+base"),
+        "your edits are the deletions, the landing version the additions: {}",
+        items[0].drop_diff
+    );
     // The SENTENCES around that delta say the same thing it does. The consent surface names the
     // one folder it takes and states, in the same breath, that the other copy keeps its edits —
     // a describe claiming the whole bundle's edits would be asking for the wrong yes.
@@ -863,11 +870,12 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
     let described_tty = crate::render::reset_describe_tty(items, yes_argv);
     assert!(
         described_tty.starts_with(
-            "Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy — discard \
-             local edits to "
+            "Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy — your edits go away, \
+             the team's "
         ),
         "{described_tty}"
     );
+    assert!(described_tty.contains(" lands:\n"), "{described_tty}");
     assert!(!described_tty.contains("DISCARDS"), "{described_tty}");
     assert!(
         described_tty
