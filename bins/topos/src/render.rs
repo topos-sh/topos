@@ -5295,7 +5295,7 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
             extra.push(format!("  topos update{g} {name} --keep-mine"));
             extra.push("take the team's version instead, dropping yours:".to_owned());
             extra.push(format!("  topos update{g} {name} --reset"));
-            extra.push("you cannot publish this skill until you pick one".to_owned());
+            extra.push("you cannot publish this bundle until you pick one".to_owned());
             // WHY it stopped, in the reader's own terms — read off the RECORDED reason, exactly as
             // the by-hand line above is. Unrelated histories compared no line at all (there is no
             // fork point to compare from), so the lead may not say lines were changed twice; it
@@ -7304,7 +7304,7 @@ mod tests {
         );
         assert!(out.contains("  topos update api-notes --reset\n"), "{out}");
         assert!(
-            out.contains("you cannot publish this skill until you pick one"),
+            out.contains("you cannot publish this bundle until you pick one"),
             "{out}"
         );
         // Held says it is pinned by a local go-back and how to resume.
@@ -9457,7 +9457,7 @@ mod tests {
              \x20     topos update coolify-deploy --keep-mine\n\
              \x20   take the team's version instead, dropping yours:\n\
              \x20     topos update coolify-deploy --reset\n\
-             \x20   you cannot publish this skill until you pick one\n\
+             \x20   you cannot publish this bundle until you pick one\n\
              Checked 1 bundle: 1 waiting on you."
         );
 
@@ -9483,7 +9483,7 @@ mod tests {
              \x20     topos update -g coolify-deploy --keep-mine\n\
              \x20   take the team's version instead, dropping yours:\n\
              \x20     topos update -g coolify-deploy --reset\n\
-             \x20   you cannot publish this skill until you pick one\n\
+             \x20   you cannot publish this bundle until you pick one\n\
              Checked 1 bundle: 1 waiting on you."
         );
 
