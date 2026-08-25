@@ -39,11 +39,22 @@ test.describe("the public landing page", () => {
     await expect(page.locator('a[href="/app"]').first()).toBeVisible();
   });
 
-  test("signed-out visits to the app bounce to login", async ({ page }) => {
-    // A member page under the shell: the cookie middleware bounces a signed-out visitor to /login.
+  test("a signed-out visitor gets the house 404 at a workspace page, and /login only where there is something to sign in for", async ({
+    page,
+  }) => {
+    // A WORKSPACE address is members-only in every face: the same uniform miss a mistyped path
+    // gets, so nothing about it confirms what exists. The shell's optimistic cookie check runs
+    // before any loader, so it is this answer a signed-out person actually meets.
     await page.goto("/members");
-    await page.waitForURL((u) => u.pathname === "/login");
+    await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
+    await page.goto("/skills/browse-runbook/history");
+    await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
+
+    // The door into the product, and a page that is a PERSON'S rather than a workspace's, both
+    // still send a signed-out visitor somewhere they can act.
     await page.goto("/app");
+    await page.waitForURL((u) => u.pathname === "/login");
+    await page.goto("/account/sessions");
     await page.waitForURL((u) => u.pathname === "/login");
   });
 

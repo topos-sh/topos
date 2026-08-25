@@ -2,7 +2,12 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, redirect, useActionData, useLoaderData } from "react-router";
 import { McpConnectForm } from "@/components/skill/mcp-gateway";
 import { buttonClasses, PageHeader } from "@/components/ui";
-import { notFound, requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
+import {
+  memberPageInScope,
+  notFound,
+  requireMemberInScope,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { baseForKind, bundleNameOf, bundlePath } from "@/lib/bundle-base";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { mcpServerFace } from "@/lib/db/queries.mcp-catalog.server";
@@ -28,7 +33,7 @@ export function meta({ params }: { params: { server?: string } }) {
  * action, never trusted from the query. The default is the person's own sign-in.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   if (gatewayLane() === null) {
     notFound();
   }

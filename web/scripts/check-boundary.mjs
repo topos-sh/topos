@@ -373,13 +373,13 @@ const SESSIONLESS_ROUTES = new Set([
   // The lane's catch-all answers the constant uniform 404 — it reads nothing.
   "api.v1.$",
 ]);
-// The guard family: the request-level require* mints, memberPageInScope (the member-only PAGE
-// guard, which answers a signed-out visitor with the house 404 instead of the /login bounce), and
-// memberInScope — the one membership-or-404 resolution the face modules call on their signed-in
-// arm (their anonymous arm resolves the session itself, teaser-or-404, so the require* wrappers
-// cannot front them).
+// The guard family: the request-level require* mints, the PAGE guards (memberPageInScope /
+// ownerPageInScope, which answer a signed-out visitor with the house 404 instead of the /login
+// bounce), and memberInScope — the one membership-or-404 resolution the face modules call on their
+// signed-in arm (their anonymous arm resolves the session itself, teaser-or-404, so the require*
+// wrappers cannot front them).
 const GUARD_CALL =
-  /\b(?:require(?:SessionActorPreBody|SessionActor|ReadActor|Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer)|memberPageInScope|memberInScope)\s*\(/;
+  /\b(?:require(?:SessionActorPreBody|SessionActor|ReadActor|Session|MemberInScope|Member|OwnerInScope|ShellActor|WorkspaceOwner|Reviewer)|memberPageInScope|ownerPageInScope|memberInScope)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;
 for (const { rel, text, base } of files) {
   if (!rel.startsWith(ROUTES_DIR)) {

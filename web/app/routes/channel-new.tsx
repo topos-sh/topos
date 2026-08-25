@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData } from "react-router";
 import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
-import { requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope, requireMemberInScope } from "@/lib/auth/guards.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { type ChannelCreateOutcome, createChannel } from "@/lib/db/queries.channels.server";
 import { useSubmittingIntent } from "@/lib/pending";
@@ -19,7 +19,7 @@ export function meta({ params }: { params: { ws?: string } }) {
  * mint a group. The loader just guards; the form lives below.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  await requireMemberInScope(request, params);
+  await memberPageInScope(request, params);
   return null;
 }
 

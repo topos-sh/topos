@@ -11,7 +11,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { webNewDestination } from "@/lib/api/genesis.server";
-import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
+import {
+  memberPageInScope,
+  requireMemberInScope,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { bundlePath } from "@/lib/bundle-base";
 import { channelsOf } from "@/lib/db/queries.channels.server";
 import {
@@ -59,7 +63,7 @@ export function meta() {
  * anything is written.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const [channels, servers] = await Promise.all([channelsOf(actor), connectableMcpServers(actor)]);
   return {
     wsName: workspace.name,

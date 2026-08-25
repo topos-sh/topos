@@ -2,7 +2,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { relativeTime } from "@/components/format";
 import { buttonClasses, Card, PageHeader, SectionHeading, ShortId } from "@/components/ui";
-import { requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope } from "@/lib/auth/guards.server";
 import { type VisibleSession, visibleSessionsOf } from "@/lib/db/queries.sessions.server";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -22,7 +22,7 @@ export function meta() {
  * rather than illustration.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { actor } = await requireMemberInScope(request, params);
+  const { actor } = await memberPageInScope(request, params);
   return { sessions: await visibleSessionsOf(actor) };
 }
 

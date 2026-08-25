@@ -5,7 +5,11 @@ import { relativeTime, shortDevice } from "@/components/format";
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
+import {
+  memberPageInScope,
+  requireMemberInScope,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { approveSession, ownerRemoveSession, rejectSession } from "@/lib/db/identity.server";
 import {
@@ -34,7 +38,7 @@ export function meta({ params }: { params: { ws?: string } }) {
  * sessions stay self-service on the account page too.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { actor } = await requireMemberInScope(request, params);
+  const { actor } = await memberPageInScope(request, params);
   const view = await workspaceSessions(actor);
   // Service machines (CI runners on a machine token) are workspace facts, not a person's — they
   // ride only the whole-workspace view the reviewer+ roles see.

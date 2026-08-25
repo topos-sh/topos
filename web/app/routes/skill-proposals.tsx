@@ -3,7 +3,7 @@ import { redirect, useLoaderData } from "react-router";
 import { type ProposalListItem, ProposalsSection } from "@/components/skill/proposals-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
+import { memberPageInScope, notFound } from "@/lib/auth/guards.server";
 import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { proposalsOf, skillIndexRow } from "@/lib/db/queries.server";
@@ -26,7 +26,7 @@ export function meta({ params }: { params: { skill?: string; server?: string } }
  * count) and the open list agree by construction — they read the same table.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor } = await requireMemberInScope(request, params);
+  const { workspace, actor } = await memberPageInScope(request, params);
   const base = baseOf(params);
   const skill = bundleNameOf(params);
   const row = await skillIndexRow(actor, skill);

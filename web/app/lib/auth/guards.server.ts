@@ -9,6 +9,7 @@ import {
   workspaceByName,
 } from "@/lib/db/identity.server";
 import { MACHINE_TOKEN_PREFIX, tokenActor } from "@/lib/db/queries.tokens.server";
+import { destinationPathname } from "@/lib/destination-path";
 import { personDisplay } from "@/lib/person-display";
 import { publicOrigin } from "@/lib/plane/public-base.server";
 import { getAuth } from "./server";
@@ -149,10 +150,14 @@ export async function memberInScope(
 }
 
 /**
- * The workspace-scoped guard for member-only loaders/actions: session FIRST (an anonymous or
+ * The workspace-scoped guard for member-only ACTIONS: session FIRST (an anonymous or
  * invalid-session request bounces to the constant /login BEFORE any workspace read, so a real
  * slug and an invented one answer byte-identically), then the one memberInScope resolution
  * (unknown slug and non-member land the same uniform 404).
+ *
+ * PAGES use memberPageInScope instead — a signed-out visitor at a `/<ws>…` address gets the house
+ * 404, not an invitation to sign in. An action is not an address anybody probes, and somebody
+ * whose session lapsed mid-form has somewhere to go, so the bounce is right here.
  */
 export async function requireMemberInScope(
   request: Request,
@@ -170,12 +175,13 @@ export async function requireMemberInScope(
  * THE MEMBER-ONLY PAGE guard — requireMemberInScope's twin for the HTML face, differing in one
  * thing: a SIGNED-OUT visitor gets the uniform 404, not a bounce to /login.
  *
- * A workspace address is members-only in every face, and the bundle face already answered a
- * stranger with the house 404 — the same answer a mistyped path gets. A sibling page under the
- * same bundle that bounced to /login instead handed a signed-out visitor a second, different
- * answer for the same address family, and read as an invitation to sign in to a workspace they
- * have no seat in. Nothing is read before the refusal, so it stays existence-blind by
- * construction: real slug and invented slug get the same body.
+ * EVERY `/<ws>…` page runs this. A workspace address is members-only in every face, so a stranger
+ * gets the answer a mistyped path gets, and gets it identically whether or not the workspace, the
+ * channel, the bundle or the version behind it exists. Pages that bounced to /login instead were
+ * each blind on their own (the bounce is constant), but they gave one address family two answers,
+ * and the one a person actually met read as an invitation to sign in to a workspace they hold no
+ * seat in. Nothing is read before the refusal, so the blind holds by construction: real slug and
+ * invented slug get the same body.
  *
  * Actions keep requireMemberInScope. A person who is signed out mid-form has somewhere to go, and
  * a POST is not an address anybody probes.
@@ -190,6 +196,58 @@ export async function memberPageInScope(
     notFound();
   }
   return memberInScope(actor, params);
+}
+
+/**
+ * WHAT A SIGNED-OUT VISITOR GETS under the signed-in shell — and it is not one answer.
+ *
+ * A workspace page is a members-only ADDRESS: the house 404, byte-identical for a workspace that
+ * exists and a slug nobody ever registered, so nothing about it confirms what exists. Sending that
+ * visitor to /login instead was a second answer for one address family, and it read as an
+ * invitation to sign in to a workspace they hold no seat in.
+ *
+ * `personalPaths` are the destination paths under the calling layout that belong to a PERSON
+ * rather than a workspace (their own session list; creating a workspace). Those have nothing to
+ * hide and somewhere to send you, so they keep the bounce. The layout owns that list — it is the
+ * one module that knows its own children — and the DESTINATION path is what decides, because a
+ * client-side arrival asks for `<path>.data` and it is the same page either way.
+ */
+export function refuseShellSignedOut(request: Request, personalPaths: ReadonlySet<string>): never {
+  if (personalPaths.has(destinationPathname(request).replace(/\/+$/, ""))) {
+    throw redirect("/login");
+  }
+  notFound();
+}
+
+/**
+ * THE SIGNED-IN SHELL'S OWN GUARD: the acting person, or the refusal above. The shell is chrome
+ * and never authorizes anything — every child re-derives admission from the seat table — but it
+ * cannot render without knowing WHO, and whatever it answers a signed-out visitor is the answer
+ * that visitor meets, so it has to be the same one its children give.
+ */
+export async function requireShellActor(
+  request: Request,
+  personalPaths: ReadonlySet<string>,
+): Promise<UserActor> {
+  assertSameOrigin(request);
+  const actor = actorFromSession(await getAuth().api.getSession({ headers: request.headers }));
+  if (actor === null) {
+    refuseShellSignedOut(request, personalPaths);
+  }
+  return actor;
+}
+
+/** memberPageInScope, then the owner gate — for a PAGE owner-gated from the top. Signed-out and
+ *  below-owner land the same house 404, which is the whole of what this address ever says. */
+export async function ownerPageInScope(
+  request: Request,
+  params: { ws?: string },
+): Promise<{ workspace: ScopedWorkspace; actor: OwnerActor }> {
+  const { workspace, actor } = await memberPageInScope(request, params);
+  if (actor.role !== "owner") {
+    notFound();
+  }
+  return { workspace, actor: actor as OwnerActor };
 }
 
 /** requireMemberInScope, then the owner gate — for pages owner-gated from the top. 404 below owner. */

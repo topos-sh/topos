@@ -8,9 +8,9 @@ import { SkillTabs } from "@/components/skill/skill-tabs";
 import { buttonClasses, Card, SectionHeading } from "@/components/ui";
 import {
   notFound,
+  ownerPageInScope,
   requireMember,
   requireMemberInScope,
-  requireOwnerInScope,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
 import {
@@ -60,7 +60,7 @@ type ProtectionChoice = "inherit" | "open" | "reviewed";
  * house 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { workspace, actor: owner } = await requireOwnerInScope(request, params);
+  const { workspace, actor: owner } = await ownerPageInScope(request, params);
   const base = baseOf(params);
   const skill = params.server ?? params.skill;
   if (!skill) {
