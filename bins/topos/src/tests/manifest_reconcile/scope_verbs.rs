@@ -1927,3 +1927,59 @@ fn revert_under_a_feed_row_names_the_update_instead_of_claiming_a_miss() {
         "the fix rides as a runnable argv",
     );
 }
+
+/// A machine-wide `topos.toml` this build refuses: `list -g` names the bad row precisely, and
+/// `revert -g` used to answer `no tracked bundle` — the same machine giving two different answers
+/// about one file, and sending a person to hunt for a bundle when the fix was a line in a file.
+#[test]
+fn revert_surfaces_the_manifest_error_its_listing_would_print() {
+    let rig = Rig::new("zq-revert-bad-manifest");
+    rig.seed_session();
+    // The exact hand-edit a person makes: a bare name where the machine-wide file spells keys in
+    // full.
+    rig.write_global("[skills]\ndeploy = \"latest\"\n");
+    let ctx = rig.ctx_at(None);
+    let no_contribute = |_: &str, _: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        unreachable!("the copy is resolved before any write lane is built")
+    };
+    let no_session = |_: &Session| -> ops::SessionTransports {
+        unreachable!("the copy is resolved before any workspace read")
+    };
+    let good = "a".repeat(64);
+    let err = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &no_contribute,
+            session: &no_session,
+        },
+        "deploy",
+        &good,
+        false,
+        None,
+        ops::StoreScope::Machine,
+    )
+    .expect_err("an unreadable recipe is not a missing bundle");
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("`deploy` is a bare name"),
+        "the refusal is the one the listing prints, naming the row: {message}"
+    );
+
+    // And the listing itself agrees, word for word about the row.
+    let listed = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            view: ops::ScopeView::Machine,
+            ..ops::ListRequest::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .expect_err("the same file, the same refusal");
+    assert_eq!(
+        crate::render::safe_message(&listed),
+        message,
+        "one file, one answer"
+    );
+}

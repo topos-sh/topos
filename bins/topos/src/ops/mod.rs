@@ -559,6 +559,15 @@ fn resolve_followed_skill_in_scope(
 /// named 'r2-smoke'` — the same machine contradicting itself, with no next step even though ONE
 /// command turns the row into a copy. So the demand is asked about before a miss is claimed.
 pub(crate) fn unapplied_or_unknown(ctx: &Ctx<'_>, name: &str, scope: StoreScope) -> ClientError {
+    // A manifest this build REFUSES is not "nothing is tracked here": it is a file with one bad
+    // line in it, and `list` names the line. Swallowing that read and answering the miss sent a
+    // person hunting for a missing bundle when the fix was a row in a file the verb had already
+    // failed to read — the same machine giving two different answers about one file.
+    if let Err(e) = inventory::read_sources(ctx)
+        .and_then(|(all, cache)| inventory::resolve(ctx, &all, &cache).map(|_| ()))
+    {
+        return e;
+    }
     match demanded_but_unapplied(ctx, name, scope) {
         Some(global) => ClientError::NotAppliedHere {
             name: name.to_owned(),
