@@ -120,6 +120,67 @@ describe("the code lookup is the DEFAULT arm, not a named one", () => {
   });
 });
 
+/**
+ * THE TWO THINGS A PERSON DOES TO THIS FIELD BY ACCIDENT.
+ *
+ * Clicking "Look up" with nothing typed threw the framework's bare 400, which the root boundary
+ * renders as the house fault screen — a page that says neither what went wrong nor what to do.
+ * From the person's side the form simply stopped working. It now answers on the form, in the
+ * sentence the page already opens with.
+ *
+ * And the field took any amount of text, so a stray paste — a whole command line, a URL, a log
+ * excerpt — went to the lookup as though it might be a code. A code is `XXXX-XXXX` and nothing
+ * longer can be one, so anything longer is the ordinary miss, told free: it is not a guess of the
+ * code space, so it must not spend the belt that guards it.
+ */
+describe("the code field refuses what cannot be a code, in the page", () => {
+  it("says what to do when the submit carried no code", async () => {
+    const empty = await postVerify({ code: "" });
+    expect(statusOf(empty)).toBe(400);
+    expect(bodyOf(empty)).toEqual({
+      kind: "refused",
+      error: "Enter the code your terminal shows",
+    });
+    // Whitespace is nothing typed, whatever the field's own validation makes of it.
+    expect(bodyOf(await postVerify({ code: "   " }))).toEqual({
+      kind: "refused",
+      error: "Enter the code your terminal shows",
+    });
+  });
+
+  it("answers a paste far longer than a code with the ordinary miss", async () => {
+    await seedUser(db, "u_paste", "Paster", "paster@example.com");
+    await seatUser(db, wsId, "u_paste", "member");
+    session = { user: { id: "u_paste", name: "Paster", email: "paster@example.com" } };
+
+    const pasted = "topos login --workspace acme # AB29-CD34";
+    expect(pasted.length).toBeGreaterThan(9);
+    // Eleven of them — one more than the belt's whole burst. Every one is the same honest miss,
+    // because none of them ever asked the belt for a token.
+    for (let i = 0; i < 11; i++) {
+      expect(await postVerify({ code: pasted })).toEqual({ kind: "miss" });
+    }
+
+    // The belt is untouched, so a real code still resolves on the very next submission.
+    const identity = await import("@/lib/db/identity.server");
+    const flow = await identity.startLoginFlow("pasted-box", null);
+    expect(await postVerify({ code: flow.userCode })).toMatchObject({
+      kind: "resolved",
+      pending: { requestedName: "pasted-box" },
+    });
+  });
+
+  it("still looks up a code of exactly the right length", async () => {
+    session = { user: { id: "u_own", name: "Owner", email: "owner@example.com" } };
+    const identity = await import("@/lib/db/identity.server");
+    const flow = await identity.startLoginFlow("edge-box", null);
+    expect(flow.userCode).toHaveLength(9);
+    expect(await postVerify({ code: flow.userCode })).toMatchObject({ kind: "resolved" });
+    // One character past the shape is not a code, whatever it starts with.
+    expect(await postVerify({ code: `${flow.userCode}X` })).toEqual({ kind: "miss" });
+  });
+});
+
 describe("the guessing belt is spent by lookups alone, and says so on the form", () => {
   it("the eleventh lookup answers on the page; an approval after ten still lands", async () => {
     // The belt keys on the acting PERSON, so this case runs as its own — a fresh burst of ten.
