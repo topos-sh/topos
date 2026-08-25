@@ -606,6 +606,13 @@ const STATIC_PROSE_COMMANDS: &[(&str, &str, &[&str])] = &[
         &["topos", "update", "-g", "--json"],
     ),
     ("topos self-update", "UPDATE_CLI", &["topos", "self-update"]),
+    // The frozen install's own re-run. A `--frozen` refusal places nothing, so the command that
+    // refused is exactly the one to run again — the machine-readable half of saying so.
+    (
+        "topos install --frozen",
+        "RUN_COMMAND",
+        &["topos", "install", "--frozen", "--json"],
+    ),
 ];
 
 /// Mirror the STATIC `topos …` commands an error's shown PROSE names into structural next

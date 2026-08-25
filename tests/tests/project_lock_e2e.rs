@@ -366,3 +366,142 @@ fn a_stopped_merge_leaves_the_lock_at_the_version_the_copy_holds() {
         "once the copy holds the team's version, so does the lock"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ③ A FRESH CLONE: the two committed files are ALL a checkout has — `--frozen` builds the rest.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/// **THE `npm ci` PROPERTY, ON A REAL CLONE.** A project's own store is gitignored whole
+/// (`.topos/.gitignore` holds `*`), so what a teammate's `git clone` actually leaves on disk is
+/// exactly two topos files: `topos.toml` and `topos.lock`. A frozen install there has to create
+/// whatever local store it needs and place exactly the versions the lock names — the whole point
+/// of committing the file. It refuses only when the lock and the manifest disagree, or a locked
+/// version cannot be fetched.
+///
+/// The team publishes a newer version the clone's lock does not name, so "it installed something"
+/// is not enough to pass: the bytes that land must be the LOCKED ones.
+#[test]
+fn a_frozen_install_on_a_fresh_clone_places_the_locked_versions() {
+    let stack = start_stack("lock-truth-clone");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+    let machine = Machine::new("lock-truth-clone");
+    let (src, project, copy, v1) =
+        published_into_a_project(&stack, &machine, &owner, "check the region");
+
+    // The team moves on WITHOUT this project — so the clone has something to be right about.
+    write_bundle(&src, &body("check the region and the account"));
+    let v2 = version_of(
+        &machine
+            .run_in(
+                machine.root(),
+                &["publish", BUNDLE, "--yes", "-m", "v2", "--json"],
+            )
+            .data("the team's v2"),
+    );
+    assert_ne!(v1, v2);
+    assert_eq!(
+        locked_version(&project).as_deref(),
+        Some(v1.as_str()),
+        "the project never took v2, so its committed lock still names v1"
+    );
+
+    // ── the clone: the two committed files, and nothing else ────────────────────────────────────
+    let manifest = std::fs::read_to_string(project.join("topos.toml")).expect("read topos.toml");
+    let lock = std::fs::read_to_string(project.join("topos.lock")).expect("read topos.lock");
+    let clone = machine
+        .root()
+        .canonicalize()
+        .expect("canonical root")
+        .join("clone");
+    std::fs::create_dir_all(clone.join(".git")).expect("a git-shaped checkout");
+    std::fs::write(clone.join("topos.toml"), &manifest).expect("the committed manifest");
+    std::fs::write(clone.join("topos.lock"), &lock).expect("the committed lock");
+    assert!(
+        !clone.join(".topos").exists(),
+        "a real clone carries no project store — that is the state under test"
+    );
+
+    let frozen = machine.run_in(&clone, &["install", "--frozen", "--json"]);
+    assert_eq!(
+        frozen.code, 0,
+        "a fresh clone is the state --frozen exists for: {} {}",
+        frozen.stdout, frozen.stderr
+    );
+    let placed_row = frozen.data("the frozen install on the fresh clone");
+
+    // The bytes: exactly what the lock records, byte-identical to the copy the author's checkout
+    // holds — not the version the workspace serves today.
+    let landed = row(&placed_row, BUNDLE)["destinations"][0]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| clone.join(".claude").join("skills").join(BUNDLE));
+    let landed = if landed.is_absolute() {
+        landed
+    } else {
+        clone.join(landed)
+    };
+    assert_eq!(
+        placed_text(&landed),
+        body("check the region"),
+        "--frozen places the version topos.lock names: {placed_row}"
+    );
+    assert_eq!(
+        placed_text(&landed),
+        placed_text(&copy),
+        "the clone reproduces the author's checkout byte for byte"
+    );
+
+    // The committed file is untouched: an install never moves a lock entry.
+    assert_eq!(
+        std::fs::read_to_string(clone.join("topos.lock")).expect("read the clone's lock"),
+        lock,
+        "--frozen never rewrites the file it was given"
+    );
+    assert_eq!(locked_version(&clone).as_deref(), Some(v1.as_str()));
+
+    // ── the refusal a genuine failure gets ──────────────────────────────────────────────────────
+    // A lock naming a version this workspace cannot hand over is the one thing `--frozen` is
+    // still right to refuse. What it owes the reader is a FAULT code (nothing about the argv was
+    // wrong), the word bundle, the state it left behind, and the command to run again.
+    let unserved: String = v1.chars().rev().collect();
+    let broken = machine
+        .root()
+        .canonicalize()
+        .expect("canonical root")
+        .join("clone-broken");
+    std::fs::create_dir_all(broken.join(".git")).expect("a git-shaped checkout");
+    std::fs::write(broken.join("topos.toml"), &manifest).expect("the committed manifest");
+    std::fs::write(broken.join("topos.lock"), lock.replace(&v1, &unserved))
+        .expect("a lock naming a version nobody serves");
+
+    let refused = machine
+        .run_in(&broken, &["install", "--frozen", "--json"])
+        .refusal("a lock naming an unserved version");
+    assert_eq!(
+        refused["error"]["code"], "IO_ERROR",
+        "a run that could not get the bytes is a fault, not a wrong argument: {refused}"
+    );
+    let text = refused["error"]["context"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.contains(&format!("could not stage bundle {BUNDLE}")),
+        "the refusal says bundle, and names it: {refused}"
+    );
+    assert!(
+        text.contains("nothing was placed, so `topos install --frozen` is safe to run again"),
+        "the refusal states the state it left, and the command to run: {refused}"
+    );
+    assert!(
+        refused["next_actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|a| a["argv"] == serde_json::json!(["topos", "install", "--frozen", "--json"])),
+        "the same command rides as argv, not only as prose: {refused}"
+    );
+    assert!(
+        !broken.join(".claude").join("skills").join(BUNDLE).exists(),
+        "the refusal placed nothing"
+    );
+}
