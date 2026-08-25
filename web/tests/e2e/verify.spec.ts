@@ -85,16 +85,62 @@ test.describe("signed out", () => {
   });
 });
 
+/** The lookups this page posted — one per submission that actually left the browser. */
+function countLookups(page: Page): () => number {
+  let posts = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname.startsWith("/verify")) {
+      posts += 1;
+    }
+  });
+  return () => posts;
+}
+
 test("ENTER in the code field looks the request up — exactly as the button does", async ({
   page,
 }) => {
   // The keyboard is how a code gets typed: hands are already on it. Enter must be the Look up
-  // click, not a second, emptier page.
+  // click, not a second, emptier page. ONE Enter, on a page loaded moments ago: the first
+  // submission has to be the one that lands — a person who has to type a code twice has already
+  // been told, wrongly, that the code was refused.
+  const lookups = countLookups(page);
   const flow = await startLoginFlow(page, "e2e-keyboard");
   await page.goto("/verify");
   await page.getByLabel("Code").fill(flow.user_code);
   await page.getByLabel("Code").press("Enter");
   await expect(page.getByText("\u201ce2e-keyboard\u201d", { exact: true })).toBeVisible();
+  expect(lookups()).toBe(1);
+});
+
+test("ONE Enter on a freshly loaded page answers a code that names nothing", async ({ page }) => {
+  // The same first-submission rule on the arm a mistyped code takes: one Enter, one lookup, and
+  // the answer in the page. The field keeps what was typed, so a correction is an edit rather
+  // than a re-type.
+  const lookups = countLookups(page);
+  await page.goto("/verify");
+  await page.getByLabel("Code").fill("ZZ99-ZZ99");
+  await page.getByLabel("Code").press("Enter");
+  await expect(page.getByText("No pending request for that code")).toBeVisible();
+  expect(lookups()).toBe(1);
+  expect(await page.getByLabel("Code").inputValue()).toBe("ZZ99-ZZ99");
+});
+
+test("the code field declares itself, so a password manager leaves it alone", async ({ page }) => {
+  // A login-approval code is typed off ANOTHER screen seconds after it appeared — it is not a
+  // saved credential, and no password manager has anything to offer for it. `autocomplete="off"`
+  // does not say that: password managers ignore the hint by design, read a lone text field in a
+  // form as a sign-in field, and mount their own menu over it. That menu then takes the first
+  // keypress, so the first Enter after a page load goes to the menu instead of the form: nothing
+  // leaves the browser, nothing appears in the page, and only a second try gets through.
+  //
+  // These four attributes are the whole vocabulary for saying "not yours": the platform hint for
+  // what the field IS, and the opt-out each of the three common managers documents.
+  await page.goto("/verify");
+  const field = page.getByLabel("Code");
+  await expect(field).toHaveAttribute("autocomplete", "one-time-code");
+  await expect(field).toHaveAttribute("data-1p-ignore", "true");
+  await expect(field).toHaveAttribute("data-lpignore", "true");
+  await expect(field).toHaveAttribute("data-bwignore", "true");
 });
 
 test("an unknown code is an honest in-page state, never a 404", async ({ page }) => {
