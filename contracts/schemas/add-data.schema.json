@@ -316,7 +316,7 @@
       ]
     },
     "DestChange": {
-      "description": "The destination set of a STANDING row, changed by an add. Destinations EXTEND: what the row\nalready recorded stays, and what this add named joins it.",
+      "description": "The destination set of a STANDING row that already named destinations, changed by an add.\nThose EXTEND: what the row recorded stays, and what this add named joins it. A row that named\nnone is replaced instead of extended, and carries no change here.",
       "type": "object",
       "properties": {
         "added": {
@@ -325,10 +325,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "default_reach": {
-          "description": "Whether the row the add wrote carries the `\"*\"` destination — the token standing for the\nrow's default reach. `true` means the added destinations are ADDITIONS on top of everything\nthe row already reached, so nothing stopped being implied.",
-          "type": "boolean"
         }
       },
       "required": [

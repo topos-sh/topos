@@ -2599,3 +2599,55 @@ fn status_lists_only_picked_agents() {
     let _ = std::fs::remove_dir_all(&rig.root);
     let _ = std::fs::remove_dir_all(&bare.root);
 }
+
+/// `add -a <agent>` NAMES AGENTS THIS SCOPE PICKED — it narrows the pick, never widens it. An
+/// agent outside it refuses with the command that picks it, on both surfaces, and nothing lands
+/// in that agent's folder.
+#[test]
+fn add_dash_a_outside_the_pick_refuses_naming_agents_add() {
+    let rig = pick_rig("add-not-picked", &["claude-code", "codex"]);
+    rig.stdout(&["init", "-a", "claude-code"]);
+    let src = rig.project.join("src/writer");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: writer\ndescription: writes it down\n---\n\nWrite it down.\n",
+    )
+    .unwrap();
+
+    let (status, v) = rig.json(&["--json", "add", "./src/writer", "-a", "codex"]);
+    assert!(!status.success(), "{v}");
+    assert_eq!(v["error"]["code"], "AGENT_NOT_PICKED", "{v}");
+    assert_eq!(
+        v["error"]["context"]["message"],
+        "codex is not one of this project's agents. Add it: topos agents add codex",
+        "{v}"
+    );
+    assert_eq!(v["next_actions"][0]["code"], "PICK_AGENTS", "{v}");
+    assert_eq!(
+        v["next_actions"][0]["argv"],
+        serde_json::json!(["topos", "agents", "add", "codex"]),
+        "{v}"
+    );
+    assert!(
+        !rig.project.join(".agents/skills/writer").exists(),
+        "the unpicked agent's folder was never written into"
+    );
+
+    // The TTY closes the way every argv refusal does — nothing was read past the flags.
+    let out = rig.run(&["add", "./src/writer", "-a", "codex"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "error: codex is not one of this project's agents. Add it: topos agents add codex"
+        ) && stderr.contains("nothing changed"),
+        "{stderr}"
+    );
+
+    // The agent this project DID pick lands the copy.
+    let (status, v) = rig.json(&["--json", "add", "./src/writer", "-a", "claude-code"]);
+    assert!(status.success(), "{v}");
+    assert!(rig.project.join(".claude/skills/writer/SKILL.md").is_file());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}

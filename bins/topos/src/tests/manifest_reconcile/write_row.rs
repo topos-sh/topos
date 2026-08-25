@@ -116,10 +116,6 @@ fn destinations_extend_on_a_re_add_and_the_undo_takes_back_only_the_new_ones() {
         Some(vec!["~/.cursor/skills".to_owned()]),
         "the receipt names ONLY what it added"
     );
-    assert!(
-        data.dest_change.as_ref().is_some_and(|c| !c.default_reach),
-        "the row already named destinations, so there is no default reach to disclose"
-    );
     assert_eq!(
         data.undo,
         vec![
@@ -168,10 +164,11 @@ fn destinations_extend_on_a_re_add_and_the_undo_takes_back_only_the_new_ones() {
 }
 
 #[test]
-fn the_first_destination_on_a_row_that_reached_everywhere_keeps_that_reach() {
-    // A row with NO `dest` reaches every agent, now and later. The add joins the new entry to the
-    // `"*"` token that stands for that reach — never to a list of the folders one machine held on
-    // one day, which would stop every agent installed after today.
+fn the_first_destination_on_a_row_that_reached_everywhere_replaces_that_reach() {
+    // A row with NO `dest` reaches the agents this scope picked. Naming a folder says where the
+    // bundle goes, so the row lands with exactly that — the ask is not folded into a token that
+    // would keep every other agent receiving. What the row reached CHANGED, so the write is a
+    // replacement: no destination-only receipt, and the undo re-spells the prior value.
     let rig = Rig::new("dest-star");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -187,67 +184,62 @@ fn the_first_destination_on_a_row_that_reached_everywhere_keeps_that_reach() {
     let before = std::fs::read_to_string(&manifest).unwrap();
 
     let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
-    let change = data.dest_change.clone().expect("a destination-only act");
-    assert_eq!(change.added, vec!["~/.cursor/skills".to_owned()]);
-    assert!(change.default_reach, "the row still stands for its reach");
+    assert!(
+        data.dest_change.is_none(),
+        "the row's reach was replaced, not added to: {:?}",
+        data.dest_change
+    );
     let text = std::fs::read_to_string(&manifest).unwrap();
     assert!(
-        text.contains("dest = [\"*\", \"~/.cursor/skills\"]"),
-        "the token sorts first and the new entry joins it: {text}"
+        text.contains("dest = [\"~/.cursor/skills\"]"),
+        "exactly the folder that was named, and no token: {text}"
     );
 
-    // The inverse SUBTRACTS what this add put there — and lands the file back byte for byte,
-    // because a row left standing for nothing but its default reach IS the `"*"` row it was.
+    // The inverse RE-SPELLS the row as it stood — the only command that verifiably restores it.
+    // Subtracting the one destination would take the row (which predates this add) with it.
     assert_eq!(
         data.undo,
         vec![
             "topos".to_owned(),
-            "remove".to_owned(),
+            "add".to_owned(),
             "-g".to_owned(),
-            "deploy".to_owned(),
-            "--dest".to_owned(),
-            "~/.cursor/skills".to_owned(),
+            reference.clone(),
         ],
         "{:?}",
         data.undo
     );
-    match ops::remove_global(
-        &ctx,
-        &connect(&plane, &dir),
-        &["deploy".into()],
-        None,
-        false,
-        &sel(&[], &["~/.cursor/skills"]),
-    )
-    .unwrap()
-    {
-        ops::RemoveOutcome::Applied(_) => {}
-        other => panic!("the undo applies immediately: {other:?}"),
-    }
+    assert!(
+        data.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("the undo restores it"),
+        "{:?}",
+        data.note
+    );
+    applied_add(&ctx, &plane, &dir, &reference);
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         before,
-        "add and its undo are exact inverses over the file"
+        "add and its printed undo are exact inverses over the file"
     );
 
-    // A PINNED row is the same story: the pin is what the row says beyond its reach, so the
-    // collapse hands back the pin row itself, not a table spelling the pin and a lone token.
-    let pinned = format!("[skills]\n\"{reference}\" = \"{}\"\n", "a".repeat(64));
+    // A PINNED row is the same story, and its restore carries the pin.
+    let pin = "a".repeat(64);
+    let pinned = format!("[skills]\n\"{reference}\" = \"{pin}\"\n");
     rig.write_global(&pinned);
-    applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
-    match ops::remove_global(
-        &ctx,
-        &connect(&plane, &dir),
-        &["deploy".into()],
-        None,
-        false,
-        &sel(&[], &["~/.cursor/skills"]),
-    )
-    .unwrap()
-    {
-        ops::RemoveOutcome::Applied(_) => {}
-        other => panic!("the undo applies immediately: {other:?}"),
-    }
+    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            "-g".to_owned(),
+            format!("{reference}@{pin}"),
+        ],
+        "{:?}",
+        data.undo
+    );
+    applied_add(&ctx, &plane, &dir, &format!("{reference}@{pin}"));
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), pinned);
 }
 

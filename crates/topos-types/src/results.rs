@@ -1422,8 +1422,9 @@ pub struct ClaimTwin {
     pub removed: bool,
 }
 
-/// The destination set of a STANDING row, changed by an add. Destinations EXTEND: what the row
-/// already recorded stays, and what this add named joins it.
+/// The destination set of a STANDING row that already named destinations, changed by an add.
+/// Those EXTEND: what the row recorded stays, and what this add named joins it. A row that named
+/// none is replaced instead of extended, and carries no change here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -1432,11 +1433,6 @@ pub struct ClaimTwin {
 pub struct DestChange {
     /// The destinations this add ADDED, in the order the row now spells them.
     pub added: Vec<String>,
-    /// Whether the row the add wrote carries the `"*"` destination — the token standing for the
-    /// row's default reach. `true` means the added destinations are ADDITIONS on top of everything
-    /// the row already reached, so nothing stopped being implied.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub default_reach: bool,
 }
 
 /// The describe a bare `add` of a git source returns: the source, what was discovered in it, and

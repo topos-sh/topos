@@ -953,7 +953,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_resolved: Vec::new(),
             dest_change: Some(DestChange {
                 added: vec!["~/.cursor/skills".to_owned()],
-                default_reach: true,
             }),
             claim: None,
             unchanged: false,

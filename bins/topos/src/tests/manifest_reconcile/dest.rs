@@ -282,6 +282,8 @@ fn a_project_dest_row_places_inside_the_checkout_at_the_named_folder() {
 #[test]
 fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
     let (rig, plane, dir, v) = add_rig("dest-add");
+    // THE PREMISE: codex is one of this machine's agents, so `-a codex` may name it.
+    rig.pick(&["claude-code", "codex"]);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -328,6 +330,8 @@ fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
 #[test]
 fn an_agent_selected_add_whose_delivery_fails_does_not_claim_installed() {
     let rig = Rig::new("dest-add-offline");
+    // THE PREMISE: codex is one of this machine's agents, so `-a codex` may name it.
+    rig.pick(&["claude-code", "codex"]);
     rig.seed_session();
     let v = one_file(b"# deploy\n");
     // The catalog answers (the add resolves the name), but the plane serves NOTHING — no
@@ -377,6 +381,8 @@ fn an_agent_selected_add_whose_delivery_fails_does_not_claim_installed() {
 #[test]
 fn a_same_named_local_rows_report_does_not_prove_the_workspace_add() {
     let rig = Rig::new("dest-add-foreign-proof");
+    // THE PREMISE: codex is one of this machine's agents, so `-a codex` may name it.
+    rig.pick(&["claude-code", "codex"]);
     rig.seed_session();
     let v = one_file(b"# deploy\n");
     // The catalog answers (the add resolves the name), but the plane serves NOTHING — no
@@ -475,6 +481,8 @@ impl DirectorySource for ChannelsDropAfterFirst {
 #[test]
 fn a_channel_add_whose_expansion_fails_does_not_borrow_the_feeds_proof() {
     let rig = Rig::new("dest-add-channel-fail");
+    // THE PREMISE: codex is one of this machine's agents, so `-a codex` may name it.
+    rig.pick(&["claude-code", "codex"]);
     rig.seed_session();
     let v = one_file(b"# other\n");
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_other", &v);
@@ -555,6 +563,8 @@ fn a_channel_add_whose_expansion_fails_does_not_borrow_the_feeds_proof() {
 #[test]
 fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() {
     let rig = Rig::new("dest-add-merged");
+    // THE PREMISE: codex is one of this machine's agents, so `-a codex` may name it.
+    rig.pick(&["claude-code", "codex"]);
     rig.seed_session();
     let v1 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n\nsteps\n")]);
     let v2 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy v2\n\nsteps\n")]);
@@ -623,6 +633,8 @@ fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() 
 #[test]
 fn an_agent_selected_add_whose_reconcile_conflicts_names_the_standing_state() {
     let rig = Rig::new("dest-add-conflicted");
+    // THE PREMISE: codex is one of this machine's agents, so `-a codex` may name it.
+    rig.pick(&["claude-code", "codex"]);
     rig.seed_session();
     let v1 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n\nsteps\n")]);
     let v2 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy THEIRS\n\nsteps\n")]);
@@ -985,10 +997,11 @@ fn narrowing_a_no_dest_row_freezes_the_remainder() {
 }
 
 /// A row the subtraction leaves standing for nothing but its DEFAULT REACH SETTLES to the plain
-/// `"*"` value row — the normal form's own spelling of that reach — so the file lands back exactly
-/// where the `-a` add found it. It is never DROPPED: a row that predates the add is not the add's
-/// to delete, and the printed undo would then destroy a demand somebody else wrote. Holds whether
-/// or not a set line beside it delivers the same bundle.
+/// `"*"` value row — the normal form's own spelling of that reach. It is never DROPPED: a row that
+/// predates the add is not the add's to delete, and the printed undo would then destroy a demand
+/// somebody else wrote. The premise is a row CARRYING the token (a hand-written freeze, or the row
+/// a set-delivered ask births): an add over it extends, and the subtraction hands the token back.
+/// Holds whether or not a set line beside it delivers the same bundle.
 #[test]
 fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_and_alone() {
     let rig = Rig::new("dest-collapse");
@@ -1009,16 +1022,18 @@ fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_an
             }],
         }],
     );
-    // The CHANNEL line delivers it; the explicit row beside it is what the `-a` add extends.
+    // The CHANNEL line delivers it; the explicit row beside it CARRIES the token, and that is
+    // what the `--dest` add extends.
     let channel = format!("[channels]\n\"{HOST}/{WS_NAME}/everyone\" = \"latest\"\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     rig.write_global(&format!(
-        "{channel}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+        "{channel}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\"] }}\n"
     ));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
 
-    let beside_set = std::fs::read_to_string(&manifest).unwrap();
+    // Where the row settles: the plain value row, the normal form's own spelling of that reach.
+    let beside_set = format!("{channel}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
     let added = applied_dest_add(
         &ctx,
         &plane,
@@ -1030,7 +1045,14 @@ fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_an
         added
             .dest_change
             .as_ref()
-            .is_some_and(|c| c.default_reach && c.added == vec!["~/dest-x".to_owned()])
+            .is_some_and(|c| c.added == vec!["~/dest-x".to_owned()]),
+        "{:?}",
+        added.dest_change
+    );
+    assert!(
+        std::fs::read_to_string(&manifest)
+            .unwrap()
+            .contains(r#"dest = ["*", "~/dest-x"]"#)
     );
     // While a channel line carries the bundle too, a bare name names two removals (the row, and
     // the line's member) and `remove` asks which — so the receipt's undo keeps the CANONICAL
@@ -1058,13 +1080,15 @@ fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_an
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         beside_set,
-        "the row settled back onto the plain `\"*\"` spelling — byte for byte what the add found"
+        "the row settled back onto the plain `\"*\"` spelling"
     );
 
     // WITHOUT the set line, the same round trip lands the same way: the row is the only demand
     // there is, and a subtraction is not what ends a demand.
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"*\"] }}\n"
+    ));
     let alone = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
-    rig.write_global(&alone);
     let added = applied_dest_add(
         &ctx,
         &plane,
@@ -1081,7 +1105,7 @@ fn a_row_left_at_its_default_reach_settles_to_the_plain_row_beside_a_set_line_an
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         alone,
-        "the row stays — spelled the way the add found it"
+        "the row stays — settled onto the reach it still holds"
     );
 }
 
@@ -1124,9 +1148,9 @@ fn run_printed_undo(
 }
 
 /// THE ROUND TRIP UNDER A FEED LINE, byte for byte: a bundle the workspace feed delivers AND that
-/// holds its own `= "*"` row, an `add --dest`, then the exact undo the receipt printed. The row
-/// predates the add, so the file has to come back exactly as it was — the copy at the de-listed
-/// folder leaves in that same invocation, and the row keeps every agent it had.
+/// holds its own row naming a folder, an `add --dest`, then the exact undo the receipt printed.
+/// The row predates the add, so the file has to come back exactly as it was — the copy at the
+/// de-listed folder leaves in that same invocation, and the row keeps the folder it had.
 #[test]
 fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_byte() {
     let rig = Rig::new("dest-collapse-feed");
@@ -1136,7 +1160,9 @@ fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_by
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let feed = format!("[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n");
-    let both = format!("{feed}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
+    let both = format!(
+        "{feed}\n[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\"] }}\n"
+    );
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     rig.write_global(&both);
@@ -1144,7 +1170,7 @@ fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_by
     let native = rig.skills().join("deploy/SKILL.md");
     assert!(
         native.exists(),
-        "the premise: the row's default reach stands"
+        "the premise: the folder the row names holds the copy"
     );
 
     let folder = rig.home.0.join("dest-x/deploy");
@@ -1158,7 +1184,7 @@ fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_by
     assert!(
         std::fs::read_to_string(&manifest)
             .unwrap()
-            .contains(r#"dest = ["*", "~/dest-x"]"#)
+            .contains(r#"dest = ["~/.claude/skills", "~/dest-x"]"#)
     );
     assert!(folder.join("SKILL.md").exists(), "{added:?}");
 
@@ -1171,7 +1197,7 @@ fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_by
     // THE COPY LEFT WITH THE DESTINATION, in the invocation that de-listed it — the receipt's
     // claim, and the folder on disk, agree.
     assert!(!folder.exists(), "the de-listed copy is gone");
-    assert!(native.exists(), "everything the row still reaches stands");
+    assert!(native.exists(), "the folder the row still names stands");
     assert_eq!(
         undone.uninstalled.first().map(|u| u.destinations.clone()),
         Some(vec!["~/dest-x".to_owned()]),
@@ -1185,19 +1211,19 @@ fn a_feed_delivered_rows_dest_add_and_its_printed_undo_land_the_file_byte_for_by
     );
 }
 
-/// AN ADD ASKING FOR WHAT THE ROW ALREADY REACHES ASKS FOR NOTHING. A row standing for its default
-/// reach already places in the folder the ask names, so `-a <that agent>` records nothing — the
-/// ordinary redundancy no-op — and the file is untouched. Recording it would have made the
-/// receipt's own undo a NARROWING: the subtraction bites the token and freezes the row to a list.
+/// AN ADD NAMING A DESTINATION THE ROW ALREADY RECORDS ASKS FOR NOTHING — the ordinary redundancy
+/// no-op, and the file is untouched. `-a <agent>` resolves to that agent's own folder, so naming a
+/// picked agent whose folder the row already spells is exactly that case.
 #[test]
-fn an_add_naming_a_destination_the_default_reach_already_holds_changes_nothing() {
+fn an_add_naming_a_picked_agents_folder_already_recorded_changes_nothing() {
     let (rig, plane, dir, v) = add_rig("dest-in-reach");
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
-    let row = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
+    // THE PREMISE: the row names claude-code's own folder, and the copy stands there.
+    let row =
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\"] }}\n");
     rig.write_global(&row);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    // THE PREMISE: the row's default reach already holds claude-code's own folder.
     assert!(rig.skills().join("deploy/SKILL.md").exists());
     assert_eq!(rig.pretty(&rig.skills()), "~/.claude/skills");
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
@@ -1218,7 +1244,7 @@ fn an_add_naming_a_destination_the_default_reach_already_holds_changes_nothing()
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         before,
-        "the row already reaches claude-code — nothing was written"
+        "the row already records claude-code's folder — nothing was written"
     );
 
     // A MIXED ask records the half that is a real addition and says only that.
@@ -1234,11 +1260,13 @@ fn an_add_naming_a_destination_the_default_reach_already_holds_changes_nothing()
     assert_eq!(
         change.added,
         vec!["~/dest-x".to_owned()],
-        "the in-reach agent asked for nothing; the folder is the whole change"
+        "the recorded folder asked for nothing; the new one is the whole change"
     );
     let text = std::fs::read_to_string(&manifest).unwrap();
-    assert!(text.contains("dest = [\"*\", \"~/dest-x\"]"), "{text}");
-    assert!(!text.contains(".claude/skills"), "{text}");
+    assert!(
+        text.contains("dest = [\"~/.claude/skills\", \"~/dest-x\"]"),
+        "{text}"
+    );
 }
 
 /// ONE VOICE PER RECEIPT. An add whose inline converge really PLACED folders printed the install
@@ -1249,19 +1277,15 @@ fn an_add_naming_a_destination_the_default_reach_already_holds_changes_nothing()
 fn an_add_whose_converge_placed_folders_says_installed_and_never_nothing_changed() {
     let (rig, plane, dir, v) = add_rig("dest-two-voices");
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
-    // The row stands for its default reach and has been delivered once — the active agent's folder
-    // holds the copy.
-    let row = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
+    // The row already names THREE folders, claude-code's among them, and nothing has been
+    // delivered yet — so this add has nothing to record and three folders to write.
+    let row = format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+         \"~/.codex/skills\", \"~/.agents/skills\"] }}\n"
+    );
     rig.write_global(&row);
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    assert!(rig.skills().join("deploy/SKILL.md").exists());
-    // TWO MORE AGENTS APPEAR since that sweep — one with its own skills root, one the shared
-    // folder covers. The token answers detection again, so this add's converge has folders to
-    // write while the file has nothing to record.
-    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
-    std::fs::create_dir_all(rig.home.0.join(".cline")).unwrap();
 
     let data = applied_selected_add(
         &ctx,
@@ -1271,21 +1295,26 @@ fn an_add_whose_converge_placed_folders_says_installed_and_never_nothing_changed
         &["claude-code"],
         &[],
     );
-    // The ask was already inside the row's reach, so the FILE is untouched …
+    // The ask was already on the row, so the FILE is untouched …
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), row);
     // … and the converge placed the copies, so the answer is the install and nothing else.
     assert!(!data.unchanged, "{data:?}");
-    // EVERY FOLDER THIS RUN WROTE — the two the new agents needed. The one that already held the
-    // copy is not something this run did, exactly as the update receipt's own column reads it.
+    // EVERY FOLDER THIS RUN WROTE, not just the one the ask spelled.
+    let mut wrote = data.dest.clone();
+    wrote.sort();
     assert_eq!(
-        data.dest,
-        vec!["~/.agents/skills".to_owned(), "~/.codex/skills".to_owned()],
+        wrote,
+        vec![
+            "~/.agents/skills".to_owned(),
+            "~/.claude/skills".to_owned(),
+            "~/.codex/skills".to_owned(),
+        ],
     );
     assert!(rig.home.0.join(".codex/skills/deploy/SKILL.md").exists());
     assert!(rig.home.0.join(".agents/skills/deploy/SKILL.md").exists());
     assert_eq!(
         crate::render::add_tty(&data),
-        format!("+ @{WS_NAME}/deploy   installed (2 folders)\nsource: {HOST}/{WS_NAME}/deploy")
+        format!("+ @{WS_NAME}/deploy   installed (3 folders)\nsource: {HOST}/{WS_NAME}/deploy")
     );
 }
 
@@ -1502,10 +1531,9 @@ fn a_set_delivered_add_naming_a_folder_no_agent_owns_births_the_row_carrying_the
     assert_eq!(
         crate::render::add_tty(&data),
         format!(
-            "added ~/prompts/skills to @{WS_NAME}/deploy's destinations\n(it keeps reaching every \
-             agent — \"*\" holds its default reach)\nsource: {HOST}/{WS_NAME}/deploy\nnote: this \
-             line is new — delete it from the manifest to hand the bundle back to \
-             channels/everyone alone."
+            "added ~/prompts/skills to @{WS_NAME}/deploy's destinations\nsource: \
+             {HOST}/{WS_NAME}/deploy\nnote: this line is new — delete it from the manifest to \
+             hand the bundle back to channels/everyone alone."
         )
     );
 }
@@ -1517,6 +1545,9 @@ fn a_set_delivered_add_naming_a_folder_no_agent_owns_births_the_row_carrying_the
 #[test]
 fn a_set_delivered_add_whose_converge_fails_says_the_failure_and_never_nothing_changed() {
     let (rig, plane, _dir, _v) = channel_delivered_rig("set-converge-fails", &["claude-code"]);
+    // codex joins the pick AFTER that first delivery, so its folder holds nothing yet — what the
+    // failed converge below cannot fill.
+    rig.pick(&["claude-code", "codex"]);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     // The workspace moves to a version whose bytes this plane cannot serve: the converge the add
     // runs fails THIS bundle, in the sweep's own words.
@@ -1761,6 +1792,8 @@ fn a_feed_add_states_what_this_machine_now_takes_exactly_once() {
 #[test]
 fn a_forge_import_unions_agent_and_dest_selectors() {
     let (rig, plane, dir, _v) = add_rig("dest-forge-union");
+    // THE PREMISE: codex is one of this machine's agents, so `-a codex` may name it.
+    rig.pick(&["claude-code", "codex"]);
     rig.write_global("[skills]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let git = FakeGit::new(build_repo_targz(
@@ -1802,6 +1835,149 @@ fn a_forge_import_unions_agent_and_dest_selectors() {
     assert!(
         text.contains(r#"dest = ["~/.codex/skills", "~/team-skills"]"#),
         "the union rides the row: {text}"
+    );
+}
+
+/// `-a '*'` ON A REMOTE IMPORT IS THE PICK'S OWN BREADTH, never detection. An agent installed here
+/// but left out of the pick gets nothing, and a picked agent this machine has not installed yet
+/// gets its folder — which is the whole rule this build is built around.
+#[test]
+fn remote_add_star_expands_to_the_pick_not_detection() {
+    let (rig, plane, dir, _v) = add_rig("dest-forge-star");
+    // Cursor is INSTALLED here and NOT picked; codex is picked and not installed.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    rig.pick(&["claude-code", "codex"]);
+    rig.write_global("[skills]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/deploy/SKILL.md", b"# deploy v1\n")],
+    ));
+    match ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &["deploy".to_owned()],
+        &["*".to_owned()],
+        &[],
+        true,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddManyOutcome::Applied(items) => {
+            let mut dests: Vec<String> = items.iter().flat_map(|i| i.dest.clone()).collect();
+            dests.sort();
+            dests.dedup();
+            assert_eq!(
+                dests,
+                vec!["~/.claude/skills".to_owned(), "~/.codex/skills".to_owned()],
+                "one slot per PICKED agent"
+            );
+        }
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    assert!(rig.home.0.join(".claude/skills/deploy/SKILL.md").exists());
+    assert!(rig.home.0.join(".codex/skills/deploy/SKILL.md").exists());
+    assert!(
+        !rig.home.0.join(".cursor/skills").exists(),
+        "the installed agent nobody picked was never written into"
+    );
+}
+
+/// `-a` NAMES AGENTS YOU PICKED — it narrows the pick, and cannot widen it. An agent outside the
+/// pick refuses with the command that picks it, and nothing is written.
+#[test]
+fn add_dash_a_outside_the_pick_refuses_naming_agents_add() {
+    let (rig, plane, dir, v) = add_rig("dest-not-picked");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    rig.pick(&["claude-code"]);
+    let row = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
+    rig.write_global(&row);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+
+    let err = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "AGENT_NOT_PICKED", "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "codex is not one of this machine's agents. Add it: topos agents add -g codex"
+    );
+    assert_eq!(
+        crate::render::err_tty(&err),
+        "error: codex is not one of this machine's agents. Add it: topos agents add -g codex\n\
+         nothing changed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        row,
+        "nothing was read past the argv"
+    );
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+}
+
+/// `-a` ON A ROW THAT NAMED NO DESTINATIONS SETS IT to exactly those folders: the bundle stops
+/// going to the picked agents the ask left out, and their copies leave in the same invocation.
+/// (Before the pick existed an add could only ever widen, so the ask joined a `"*"` token.)
+#[test]
+fn add_dash_a_on_an_existing_row_sets_exactly_those_folders() {
+    let (rig, plane, dir, v) = add_rig("dest-set-exactly");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    rig.pick(&["claude-code", "codex"]);
+    let row = format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n");
+    rig.write_global(&row);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    // THE PREMISE: the row reaches both picked agents.
+    let claude = rig.home.0.join(".claude/skills/deploy/SKILL.md");
+    let codex = rig.home.0.join(".codex/skills/deploy");
+    assert!(claude.exists() && codex.join("SKILL.md").exists());
+
+    let data = applied_selected_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        &["claude-code"],
+        &[],
+    );
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(r#"dest = ["~/.claude/skills"]"#) && !text.contains(r#""*""#),
+        "exactly the named folder, and no token: {text}"
+    );
+    assert!(claude.exists(), "the named agent keeps its copy");
+    assert!(
+        !codex.exists(),
+        "the picked agent the ask left out loses its copy in the same invocation"
+    );
+    assert!(
+        data.dest_change.is_none(),
+        "the row's reach was replaced, not added to: {:?}",
+        data.dest_change
+    );
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            "-g".to_owned(),
+            format!("{HOST}/{WS_NAME}/deploy"),
+        ],
+        "the inverse re-spells the row as it stood: {:?}",
+        data.undo
     );
 }
 

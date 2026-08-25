@@ -609,26 +609,31 @@ fn a_standing_folder_with_a_destination_extends_that_folders_own_row() {
     };
     assert_eq!(planned, folder);
 
-    // The row named NO destinations, so the new one joins the token standing for its reach.
+    // The row named NO destinations, so this ask SETS what it reaches: exactly the named folder,
+    // and the inverse re-spells the row's prior value rather than subtracting the only entry
+    // (which would take the row with it).
     let selection = ops::dest_select::Selection::new(&[], &["~/.cursor/skills".to_owned()]);
     let data = ops::extend_folder_dest(&ctx, &scope, &folder, &selection)
         .unwrap()
         .expect("the folder is tracked here");
-    let change = data.dest_change.clone().expect("the row gained a folder");
-    assert_eq!(change.added, vec!["~/.cursor/skills".to_owned()]);
-    assert!(change.default_reach, "the row kept what it already reached");
+    assert!(
+        data.dest_change.is_none(),
+        "the row's reach was replaced, not added to: {:?}",
+        data.dest_change
+    );
     assert_eq!(
         data.undo,
         vec![
             "topos".to_owned(),
-            "remove".to_owned(),
+            "add".to_owned(),
             "-g".to_owned(),
             folder.display().to_string(),
-            "--dest".to_owned(),
-            "~/.cursor/skills".to_owned(),
         ],
-        "the inverse subtracts exactly what this add put on the row"
+        "the inverse restores the row as it stood"
     );
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(text.contains("dest = [\"~/.cursor/skills\"]"), "{text}");
     // No adopt happened, so nothing was armed and no version was minted a second time.
     assert!(data.currency.is_none());
     assert_eq!(data.version_id, adopted.version_id);
@@ -649,7 +654,8 @@ fn a_standing_folder_with_a_destination_extends_that_folders_own_row() {
         again.note
     );
 
-    // A SECOND destination joins the first — neither replaces the other.
+    // A SECOND destination joins the first — a row that already names destinations EXTENDS, and
+    // the receipt names what it gained.
     let more = ops::dest_select::Selection::new(&[], &["~/.zed/skills".to_owned()]);
     let data = ops::extend_folder_dest(&ctx, &scope, &folder, &more)
         .unwrap()
@@ -657,6 +663,12 @@ fn a_standing_folder_with_a_destination_extends_that_folders_own_row() {
     assert_eq!(
         data.dest_change.expect("a second folder").added,
         vec!["~/.zed/skills".to_owned()]
+    );
+    assert_eq!(
+        data.undo.last().map(String::as_str),
+        Some("~/.zed/skills"),
+        "the inverse subtracts exactly what this add put on the row: {:?}",
+        data.undo
     );
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();

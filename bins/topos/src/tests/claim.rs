@@ -902,13 +902,13 @@ fn an_add_that_changed_nothing_leads_with_that_and_nothing_else() {
 }
 
 #[test]
-fn a_dest_a_row_already_reaches_is_recorded_without_costing_the_row_its_reach() {
-    // A row that names NO destinations reaches EVERY agent. Naming one it already reaches is a
-    // request to keep reaching it whatever detection says tomorrow — so the entry is recorded,
-    // beside the DEFAULT-REACH token that holds everything the row had. What the extend must never
-    // do is write the current resolved set back as the row's destinations: the file would change
-    // shape and an agent set up tomorrow would stop receiving.
-    let rig = Rig::new("already-reached");
+fn a_dest_on_a_row_that_named_none_sets_it_to_exactly_that_folder() {
+    // A row that names NO destinations reaches the agents the person picked. Naming a folder tells
+    // it where this bundle goes, and the row lands with exactly that — no token, no resolved set
+    // written out behind the ask. The act REPLACED what the row reached, so it is not reported as
+    // an addition, and its undo re-spells the prior value instead of subtracting one entry (which
+    // would take the whole row with it).
+    let rig = Rig::new("named-none");
     let source = rig.folder("pr-describe", "# pr\n");
     let added = rig.adopt(&source);
     let id = added.skill_id.clone().unwrap();
@@ -940,18 +940,20 @@ fn a_dest_a_row_already_reaches_is_recorded_without_costing_the_row_its_reach() 
 
     let after = rig.manifest();
     assert!(
-        after.contains("dest = [\"*\", \"~/agents\"]"),
-        "the entry joins the token, and NOTHING else was written out: {after}"
+        after.contains("dest = [\"~/agents\"]"),
+        "the row records exactly the folder that was named: {after}"
     );
     assert!(!after.contains("agents/pr-describe"), "{after}");
-    assert!(!data.unchanged, "the row gained a destination");
-    let change = data.dest_change.clone().expect("a destination-only act");
-    assert_eq!(change.added, vec!["~/agents".to_owned()]);
-    assert!(change.default_reach, "the row still reaches every agent");
+    assert!(!data.unchanged, "the row was written");
+    assert!(
+        data.dest_change.is_none(),
+        "this replaced the row's reach — it is not an addition to a set: {:?}",
+        data.dest_change
+    );
     assert_eq!(
-        data.undo.last().map(String::as_str),
-        Some("~/agents"),
-        "the inverse subtracts exactly the entry this add recorded: {:?}",
+        data.undo.get(..2).map(<[String]>::to_vec),
+        Some(vec!["topos".to_owned(), "add".to_owned()]),
+        "the inverse re-spells the row's prior value: {:?}",
         data.undo
     );
 

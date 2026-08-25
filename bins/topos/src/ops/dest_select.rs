@@ -7,6 +7,13 @@
 //! literal form, dialect-checked like a hand-written dest entry. The union (agents first, then
 //! literals, deduped in spelling order) is the destination set.
 //!
+//! ON AN `add`, `-a` STAYS INSIDE THE PICK. The agents pick says which agents topos touches at a
+//! scope; `-a` narrows that set to some of its members and never widens it, because widening
+//! would write into an agent the person did not pick. [`Selection::check_picked`] is the gate,
+//! asked at every add call site once the target scope is resolved — an outside slug refuses with
+//! the command that picks it (`topos agents add <slug>`). `remove -a` asks nothing: subtracting
+//! a destination takes bytes away, which is safe wherever they stand.
+//!
 //! An unknown slug refuses BEFORE anything is read past the argv (`unknown agent: … — known: …`,
 //! the TTY closing with `nothing changed`); the known list is the real registry's slugs,
 //! alphabetical, an ellipsis past a handful. The reverse map ([`undo_tail`]) is what receipts use
@@ -127,6 +134,45 @@ impl Selection {
             }
         }
         Ok(out)
+    }
+
+    /// **The pick gate on `add -a`.** Every `-a` slug must be one of the agents in force at the
+    /// scope the row lands in ([`crate::agents_pick`]): `-a` picks some of them, and an agent
+    /// outside the pick is one topos may not write into at all. The refusal names the command
+    /// that picks it, so the way out is one paste.
+    ///
+    /// Asked AFTER the destination resolution ([`Selection::skill_entries`] /
+    /// [`Selection::mcp_entries`]), so a slug the registry does not know still refuses as an
+    /// unknown agent with the table's own list, and a known slug with nothing at this scope still
+    /// refuses with that. `--dest` folders are not asked about: a folder a person typed is
+    /// literal, and no agent owns it by definition.
+    ///
+    /// The fan-out token (`-a '*'`) is not a slug — the one arm that takes it expands it against
+    /// this same pick — so it passes through untouched.
+    ///
+    /// # Errors
+    /// [`ClientError::AgentNotPicked`] for the first slug outside the pick.
+    pub(crate) fn check_picked(
+        &self,
+        ctx: &Ctx<'_>,
+        target: &super::manifest_edit::EditTarget,
+    ) -> Result<(), ClientError> {
+        if self.agents.is_empty() {
+            return Ok(());
+        }
+        let global = target.scope == ManifestScope::Global;
+        let project_dir = (!global).then_some(target.dir.as_path());
+        let picked = crate::agents_pick::picked_slugs(ctx, project_dir);
+        for slug in &self.agents {
+            if slug == crate::agents_pick::WILDCARD || picked.contains(slug) {
+                continue;
+            }
+            return Err(ClientError::AgentNotPicked {
+                agent: slug.clone(),
+                add_argv: crate::error::agents_add_argv(slug, global),
+            });
+        }
+        Ok(())
     }
 
     /// The destination set a bundle of `kind` resolves to at `scope` — the ONE resolution both

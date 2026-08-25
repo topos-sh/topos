@@ -74,19 +74,25 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   the bundle (`matches the published current` / `edited` / `edited differently`, proved by digest
   or withheld) and closes with the one `topos add <folder> [--as <bundle>]` — a runnable claim
   still rides the agent surface for every folder a version EXPLAINS, and never for one it does
-  not. **AN `add` NEVER NARROWS:** `-a <agent>`/`--dest <folder>` EXTEND the row's `dest` (the
-  `ops/dest_select` resolution: `-a` is registry/descriptor sugar for the scope-correct folder or
-  config file; unknown slugs refuse with the registry list, closing `nothing changed`), and on a
-  row that named none they join the reserved **`"*"` token** (`manifest/dest`'s `DEFAULT_REACH`) —
-  the row's DEFAULT REACH, recomputed at plan time on every run (`placement::dest_reach_plan` over
-  `default_reach_plan`; for an MCP row the token is simply the unnarrowed reach), with named
-  entries placed regardless of detection as ever. On a row standing for that reach, an asked entry
-  the reach ALREADY holds (`manifest_edit::reach_already_held`, over the same `default_reach_roots`
-  the collapse consults) records nothing — recording it would make the printed undo a narrowing —
-  and an ask that drops whole is the ordinary `nothing changed`. The normal form sorts `"*"`
-  first, collapses duplicates, and spells a row whose only field is `dest = ["*"]` as the plain
-  `"*"` value; the token is ROW GRAMMAR alone — `--dest '*'` refuses at the argv and a channel's
-  `mcp_dest` refuses it at load.
+  not. **`-a` STAYS INSIDE THE PICK, and says exactly where a bundle goes:** `-a <agent>` is
+  registry/descriptor sugar for the scope-correct folder or config file (the `ops/dest_select`
+  resolution: unknown slugs refuse with the registry list, closing `nothing changed`; a slug
+  outside the effective pick at the scope the row lands in refuses `AGENT_NOT_PICKED`, naming
+  `topos agents add [-g] <slug>` — the gate every add call site asks once its target is resolved,
+  and `remove -a` asks nothing). On a row that ALREADY names destinations, `-a`/`--dest` EXTEND
+  its `dest` and the receipt names what it gained (`remove --dest <new>` is the exact inverse). On
+  a row that named NONE — one reaching the agents you picked — the ask REPLACES what the row
+  reaches: the row lands with exactly those folders, the picked agents left out lose their copies
+  on that same converge, and the undo is the prior value's own restore (`topos add <ref>[@<pin>]`),
+  never a subtraction that would delete a row the add did not create. The reserved **`"*"` token**
+  (`manifest/dest`'s `DEFAULT_REACH`) is what a row spells to reach the whole pick, recomputed at
+  plan time on every run (`placement::dest_reach_plan` over `default_reach_plan`; for an MCP row
+  the token is simply the unnarrowed reach), with named entries placed regardless of detection as
+  ever — but no add SEEDS it any more: it rides a hand-written row, the set-delivered birth below,
+  and the `remove` collapse. The normal form sorts `"*"` first, collapses duplicates, and spells a
+  row whose only field is `dest = ["*"]` as the plain `"*"` value; the token is ROW GRAMMAR alone —
+  `--dest '*'` refuses at the argv and a channel's `mcp_dest` refuses it at load. On a REMOTE
+  import `-a '*'` fans out over the picked agents that take skills at that scope, never detection.
   A `-a`/`--dest` on a bundle the invoked scope has NO row for and a channel or feed line
   provably delivers (`manifest_edit::set_delivering`) writes NO row
   at all — one could only narrow what the set reaches — and converges that bundle's placements in
