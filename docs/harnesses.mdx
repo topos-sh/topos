@@ -30,6 +30,10 @@ silently. A run that cannot ask, because it is piped or uses `--json`, prints th
 installed agents and stops with exit `2`, naming `topos init -a <agent>`. In a fresh clone with no
 pick of its own, your machine pick applies.
 
+With no agent installed at all there is nothing to ask about, so Topos asks nothing. The command
+runs, records what you asked it to record, places nothing, and says so. Pick an agent later and
+the next run places everything for it.
+
 ## Three tiers of support
 
 What Topos can do for an agent, once you have picked it:

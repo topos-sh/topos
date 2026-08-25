@@ -102,6 +102,9 @@ pub(crate) fn init(
         // the folders are appended.
         !existing || req.gitignore
     } else {
+        // No pick anywhere, and none named: the rule decides. A machine with no agent topos
+        // knows records nothing and still gets its manifest — the receipt says what it did
+        // instead of what it placed.
         agents::derive_pick_if_missing(ctx, &scope, &req.ask)?;
         true
     };

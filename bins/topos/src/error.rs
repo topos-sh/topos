@@ -1211,7 +1211,8 @@ pub(crate) enum ClientError {
     /// No agents are picked at the scope a verb would place into, and the pick cannot be asked
     /// for (several agents are installed, and stdin is not a terminal or `--json` was asked).
     /// `installed` is what the machine holds, so the list a person or an agent chooses from
-    /// rides the answer; `global` spells the way out for the machine scope. Exit status 2: a
+    /// rides the answer — never empty, because a machine with no agent installed is not asked
+    /// anything; `global` spells the way out for the machine scope. Exit status 2: a
     /// usage-shaped answer, not a failure — nothing was read past the pick.
     #[error("{}", pick_required_message(installed, *global))]
     PickRequired {
@@ -1248,21 +1249,17 @@ pub(crate) enum ClientError {
     },
 }
 
-/// The [`ClientError::PickRequired`] sentence: the fact, the installed list (or its absence),
-/// and the one command that answers it.
+/// The [`ClientError::PickRequired`] sentence: the fact, the installed list, and the one command
+/// that answers it.
 fn pick_required_message(installed: &[String], global: bool) -> String {
     let where_ = if global {
         "on this machine"
     } else {
         "in this project"
     };
-    let list = if installed.is_empty() {
-        "No agent topos knows is installed on this machine.".to_owned()
-    } else {
-        format!("Installed on this machine: {}.", installed.join(", "))
-    };
     format!(
-        "no agents picked yet {where_}. {list} Pick with: {}",
+        "no agents picked yet {where_}. Installed on this machine: {}. Pick with: {}",
+        installed.join(", "),
         pick_command(global)
     )
 }

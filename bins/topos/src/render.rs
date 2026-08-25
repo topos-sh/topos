@@ -779,7 +779,13 @@ pub(crate) fn session_logout_tty(data: &topos_types::results::LogoutData) -> Str
 /// here and what landed for it); otherwise the manifest's path, whether it was created, and the
 /// honest travel note.
 pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
-    if let Some(pick) = &data.pick {
+    // The pick receipt IS the answer when agents were picked — it names the manifest's own
+    // folders. With NOTHING picked (no agent installed here) it says only what did not happen,
+    // so the manifest line leads and the receipt follows it: `init` did write the file, and
+    // that half is what the person came for.
+    if let Some(pick) = &data.pick
+        && !pick.agents.is_empty()
+    {
         return pick_receipt_tty(pick);
     }
     let mut out = if data.created {
@@ -793,6 +799,10 @@ pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
     };
     if let Some(note) = &data.note {
         out.push_str(&format!("\nNote: {note}."));
+    }
+    if let Some(pick) = &data.pick {
+        out.push('\n');
+        out.push_str(&pick_receipt_tty(pick));
     }
     out
 }
@@ -831,11 +841,18 @@ pub(crate) fn using_line(agents: &[String], scope: &crate::agents_pick::PickScop
 /// The pick receipt (`init -a`, `agents add`): what topos uses here, what landed for it, the
 /// hooks, the `.gitignore` word, and the installed agents it left alone.
 pub(crate) fn pick_receipt_tty(p: &topos_types::results::PickReceipt) -> String {
-    let mut s = format!(
-        "Using {} {}.",
-        and_list(&crate::ops::agents::display_names(&p.agents)),
-        pick_where(&p.scope)
-    );
+    // Nothing picked because nothing is installed: the receipt leads with THAT, in place of a
+    // "Using" line with no name in it. The lines below still print what did happen (a manifest
+    // was written, a `.gitignore` may have been edited) — there is simply nothing placed.
+    let mut s = if p.agents.is_empty() {
+        crate::ops::agents::NO_AGENT_INSTALLED.to_owned()
+    } else {
+        format!(
+            "Using {} {}.",
+            and_list(&crate::ops::agents::display_names(&p.agents)),
+            pick_where(&p.scope)
+        )
+    };
     let skills = (p.skills > 0).then(|| {
         format!(
             "{} to {}",
@@ -5421,11 +5438,7 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
     // The pick that could not be asked for is the same case: the list IS the answer, and the
     // command under it records the choice. Three lines a person reads top to bottom.
     if let ClientError::PickRequired { installed, global } = err {
-        let list = if installed.is_empty() {
-            "No agent topos knows is installed on this machine.".to_owned()
-        } else {
-            format!("Installed on this machine: {}", installed.join(", "))
-        };
+        let list = format!("Installed on this machine: {}", installed.join(", "));
         return format!(
             "No agents picked yet {}.\n{list}\nPick with: {}",
             if *global {
