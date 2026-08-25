@@ -7,18 +7,21 @@
 //! stands for every agent installed on this machine, resolved at run time against detection
 //! ([`registry::detected_harnesses`]); it stands ALONE, never beside a named agent.
 //!
-//! ## The effective pick
+//! ## Two scopes, independent
 //!
-//! In a project: the project file, else the machine file, else none. Machine-wide (`-g`): the
-//! machine file alone. NO pick means NOTHING is placed (no folder, no config entry): a pick is
-//! explicit, and detection serves only the wildcard's expansion and the questions that name what
-//! is installed. A picked agent is written whether or not its detect dir exists.
+//! A project's pick is its own file and NOTHING else; the machine's pick is the machine file and
+//! nothing else. Neither falls back to the other, ever: a list someone recorded for their machine
+//! does not govern a checkout they never picked agents for, and a checkout's list never reaches
+//! the machine. NO pick at the scope being acted on means NOTHING is placed there (no folder, no
+//! config entry): a pick is explicit, and detection serves only the wildcard's expansion and the
+//! sentences that name what is installed. A picked agent is written whether or not its detect dir
+//! exists.
 //!
 //! ## Consumers
 //!
 //! Every writer asks ONE of two shapes: [`picked_harnesses`] (the rows, table order) for the dir
-//! planners, [`picked_slugs`] (the set) for the config-entry planners. Both answer the effective
-//! pick for the scope the caller names, read from the ctx's MACHINE store
+//! planners, [`picked_slugs`] (the set) for the config-entry planners. Each names ONE scope and
+//! gets that scope's answer, read from the ctx's MACHINE store
 //! ([`crate::sidecar::Layout::machine_home`]) whichever store the ctx itself stands in. The
 //! planners are infallible, so an unreadable pick file counts as no pick there (nothing placed,
 //! fail closed); [`effective`] hands the error to the verbs that show the pick.
@@ -204,8 +207,9 @@ fn wildcard_alone(agents: &[String]) -> Result<(), ClientError> {
     Ok(())
 }
 
-/// The pick in force: the project's own file when `project_dir` names a checkout that has one,
-/// else the machine file, else `None`.
+/// The pick in force at ONE scope: `Some(dir)` reads that checkout's own file and nothing else,
+/// `None` reads the machine file and nothing else. There is no fallback between them — a project
+/// with no file of its own has no pick, whatever the machine picked.
 ///
 /// # Errors
 /// As [`read`].
@@ -214,20 +218,22 @@ pub(crate) fn effective(
     layout: &Layout,
     project_dir: Option<&Path>,
 ) -> Result<Option<Effective>, ClientError> {
-    if let Some(dir) = project_dir {
-        let path = project_path(dir);
-        if let Some(pick) = read(fs, &path, false)? {
-            return Ok(Some(Effective {
+    match project_dir {
+        Some(dir) => {
+            let path = project_path(dir);
+            Ok(read(fs, &path, false)?.map(|pick| Effective {
                 pick,
                 source: PickSource::Project(path),
-            }));
+            }))
+        }
+        None => {
+            let path = machine_path(layout);
+            Ok(read(fs, &path, true)?.map(|pick| Effective {
+                pick,
+                source: PickSource::Machine(path),
+            }))
         }
     }
-    let path = machine_path(layout);
-    Ok(read(fs, &path, true)?.map(|pick| Effective {
-        pick,
-        source: PickSource::Machine(path),
-    }))
 }
 
 /// The registry rows a pick names, in TABLE order, deduplicated: the wildcard expands to the
@@ -249,9 +255,9 @@ pub(crate) fn resolve(
     rows.into_iter().filter(|h| h.slug != UNIVERSAL).collect()
 }
 
-/// **The dir planners' question**: the rows the effective pick names for the scope `project_dir`
-/// stands for (`None` = the machine scope), over the ctx's machine store. Empty with no machine
-/// roots (nothing to resolve against), with no pick, or with a pick that cannot be read.
+/// **The dir planners' question**: the rows the pick at the scope `project_dir` stands for names
+/// (`None` = the machine scope), over the ctx's machine store. Empty with no machine roots
+/// (nothing to resolve against), with no pick AT THAT SCOPE, or with a pick that cannot be read.
 pub(crate) fn picked_harnesses(
     ctx: &Ctx<'_>,
     project_dir: Option<&Path>,
@@ -518,28 +524,33 @@ mod tests {
         rows.iter().map(|h| h.slug).collect()
     }
 
+    /// **The two scopes are independent.** A machine pick governs the machine and nothing else; a
+    /// project's own file governs that checkout and nothing else; neither falls back to the other.
     #[test]
-    fn a_project_pick_wins_over_the_machine_pick() {
-        let rig = Rig::new("project-wins");
+    fn each_scope_answers_its_own_file_alone() {
+        let rig = Rig::new("independent");
         let ctx = rig.ctx();
         let machine = AgentsPick::new(vec!["claude-code".to_owned()]);
         write(&rig.fs, &rig.layout(), &PickScope::Machine, &machine).unwrap();
 
-        // Machine file alone: the project inherits it, and `-g` reads it.
-        let inherited = effective(&rig.fs, &rig.layout(), Some(&rig.project.0))
+        // The machine file alone: the machine scope has a pick, the project has none.
+        let found = effective(&rig.fs, &rig.layout(), None)
             .unwrap()
-            .expect("the machine pick reaches the project");
-        assert_eq!(inherited.pick, machine);
+            .expect("the machine file is the machine pick");
+        assert_eq!(found.pick, machine);
         assert_eq!(
-            inherited.source,
+            found.source,
             PickSource::Machine(rig.layout().home().join(PICK_FILE))
         );
-        assert_eq!(
-            slugs(&picked_harnesses(&ctx, Some(&rig.project.0))),
-            ["claude-code"]
+        assert!(
+            effective(&rig.fs, &rig.layout(), Some(&rig.project.0))
+                .unwrap()
+                .is_none(),
+            "a machine pick never reaches a project"
         );
+        assert!(picked_harnesses(&ctx, Some(&rig.project.0)).is_empty());
 
-        // A project file of its own outranks it, for the project only.
+        // A project file of its own governs the project, and only the project.
         let project = AgentsPick::new(vec!["codex".to_owned(), "cursor".to_owned()]);
         let path = write(
             &rig.fs,
@@ -570,12 +581,9 @@ mod tests {
             "the machine scope never reads a project file"
         );
 
-        // A project with no file of its own still inherits the machine pick.
-        let other = Scratch::new("project-wins-other");
-        assert_eq!(
-            slugs(&picked_harnesses(&ctx, Some(&other.0))),
-            ["claude-code"]
-        );
+        // Another checkout with no file of its own picks nobody.
+        let other = Scratch::new("independent-other");
+        assert!(picked_harnesses(&ctx, Some(&other.0)).is_empty());
     }
 
     #[test]
@@ -702,10 +710,7 @@ mod tests {
         let sctx = crate::ops::ctx_with_layout(&ctx, &store);
         assert_eq!(sctx.layout.machine_home(), rig.layout().home());
         assert_eq!(machine_path(&sctx.layout), machine_path(&rig.layout()));
-        assert_eq!(
-            slugs(&picked_harnesses(&sctx, Some(&rig.project.0))),
-            ["claude-code"]
-        );
+        assert_eq!(slugs(&picked_harnesses(&sctx, None)), ["claude-code"]);
         // A raw project layout nobody re-rooted into answers its own root: no machine document
         // lives there, so it finds no pick rather than someone else's.
         let raw = sidecar::project_store_layout(&rig.project.0);
@@ -828,8 +833,8 @@ mod tests {
     }
 
     /// Nothing to carry — no record, or a record with only failed rows and no MCP custody — seeds
-    /// nothing and writes no pick (an empty pick would silence the ask). The record's question is
-    /// closed either way.
+    /// nothing and writes no pick (an empty pick would silence the pick rule). The record's
+    /// question is closed either way.
     #[test]
     fn the_seed_writes_nothing_when_there_is_nothing_to_carry() {
         let rig = Rig::new("seed-empty");
@@ -975,8 +980,8 @@ mod tests {
             err.to_string().ends_with(". Fix the file or delete it"),
             "{err}"
         );
-        // The project's own file, the same way — and it is read first, so a good machine file
-        // behind it changes nothing.
+        // The project's own file, the same way — and it is the only file that scope reads, so a
+        // good machine file beside it changes nothing.
         std::fs::write(
             &path,
             b"{\"schema_version\": 1, \"agents\": [\"claude-code\"]}\n",

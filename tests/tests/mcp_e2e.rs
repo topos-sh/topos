@@ -103,6 +103,12 @@ impl Install {
         self.rig.root()
     }
 
+    /// The person's own pick FOR THAT CHECKOUT — personal and git-ignored, so a clone never
+    /// carries one and a checkout without one places nothing.
+    fn pick_in_project(&self, project_dir: &Path) {
+        self.rig.pick_in_project(project_dir);
+    }
+
     fn home(&self) -> PathBuf {
         self.rig.root().join("home")
     }
@@ -735,6 +741,7 @@ fn the_connected_server_loop_across_six_agents() {
     // ── 9. PROJECT scope: the four project surfaces, and no user config ─────────────────────────
     let proj = dev.root().join("proj");
     std::fs::create_dir_all(proj.join(".git")).expect("a git checkout");
+    dev.pick_in_project(&proj);
     dev.run(&proj, &["init", "--json"]).data("init");
     dev.run(&proj, &["add", &format!("@acme/{BUNDLE}"), "--json"])
         .data("add (project scope)");
@@ -1050,11 +1057,14 @@ fn promote_second_revision(stack: &Stack) -> String {
     revision
 }
 
-/// A checkout: a git-shaped dir holding the two committed files, exactly as a clone would.
-fn checkout(at: &Path, manifest: &str, lock: &str) -> PathBuf {
+/// A checkout: a git-shaped dir holding the two committed files, exactly as a clone would, plus
+/// the person's own pick for it (personal and git-ignored, so a clone never carries one; a
+/// checkout with no pick places nothing).
+fn checkout(install: &Install, at: &Path, manifest: &str, lock: &str) -> PathBuf {
     std::fs::create_dir_all(at.join(".git")).expect("a git-shaped checkout");
     std::fs::write(at.join("topos.toml"), manifest).expect("the committed manifest");
     std::fs::write(at.join("topos.lock"), lock).expect("the committed lock");
+    install.pick_in_project(at);
     at.to_path_buf()
 }
 
@@ -1077,6 +1087,7 @@ fn a_committed_lock_installs_the_mcp_revision_it_names() {
         .expect("canonical root")
         .join("api");
     std::fs::create_dir_all(proj.join(".git")).expect("a git-shaped project");
+    author.pick_in_project(&proj);
     author.run(&proj, &["init", "--json"]).data("init");
     let added = author
         .run(&proj, &["add", "--kind", "mcp", REGISTRY_NAME, "--json"])
@@ -1102,6 +1113,7 @@ fn a_committed_lock_installs_the_mcp_revision_it_names() {
     login(&stack, &dev, &owner);
     settle_trigger_registration(&dev);
     let clone = checkout(
+        &dev,
         &dev.root()
             .canonicalize()
             .expect("canonical root")

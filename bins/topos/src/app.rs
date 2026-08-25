@@ -551,9 +551,8 @@ fn run_command(
         Command::Relay { .. } => unreachable!("relay dispatches before every other surface"),
         // `init [-a <agent>]... [--gitignore]` — create this folder's `topos.toml`, or (with
         // `-g`) materialize the global manifest (idempotent; the file half is a no-op when it
-        // exists), then pick the agents and land everything for them. The ask reads the three
-        // facts only the composition root holds: stdin's terminal-ness, the agent announcing
-        // itself in the environment, and `--json`.
+        // exists), then pick the agents and land everything for them. The pick rule reads the one
+        // fact only the composition root holds: the agent announcing itself in the environment.
         Command::Init {
             global,
             workspace,
@@ -570,7 +569,7 @@ fn run_command(
                     workspace: workspace.as_deref(),
                     agents: &agent,
                     gitignore,
-                    ask: ask_inputs(json, global),
+                    ask: ask_inputs(),
                 },
             );
             finish_pick(
@@ -2175,7 +2174,7 @@ fn derive_pick_and_say(
 
 /// [`derive_pick_and_say`] for a run that may be `--frozen`.
 ///
-/// A frozen run asks nothing, so an ambiguous machine is not a refusal here either: it is the
+/// A frozen run derives nothing, so an ambiguous machine is not a refusal here either: it is the
 /// same kind of fact as an agentless one, said the same way and on the same channel, and the run
 /// goes on to fetch and verify everything the lock names. A CI box has no pick and cannot get one
 /// from a clone, and a pipeline must not fail on a question no runner can answer.
@@ -2186,7 +2185,7 @@ fn derive_pick_and_say_frozen(
     global: bool,
     frozen: bool,
 ) -> Result<Vec<topos_types::Message>, ClientError> {
-    let ask = ask_inputs_frozen(json, global, frozen);
+    let ask = ask_inputs_frozen(frozen);
     match ops::agents::derive_pick_if_missing(ctx, scope, &ask)? {
         ops::agents::PickDerived::Stood => Ok(Vec::new()),
         ops::agents::PickDerived::Recorded(agents) => {
@@ -2256,21 +2255,17 @@ fn finish_pick<T: Serialize>(
     }
 }
 
-/// The three facts the agents ask decides on, read where only the composition root can: whether
-/// stdin is a terminal a prompt can be read from, whether Claude Code announced itself in the
-/// environment, and whether `--json` holds stdout to one document.
-fn ask_inputs(json: bool, global: bool) -> ops::agents_ask::AskInputs {
-    ask_inputs_frozen(json, global, false)
+/// The one fact about the environment the pick rule decides on, read where only the composition
+/// root can: whether Claude Code announced itself.
+fn ask_inputs() -> ops::agents_ask::AskInputs {
+    ask_inputs_frozen(false)
 }
 
-/// [`ask_inputs`] for a run that may be `--frozen` — the one invocation shape that never asks.
-fn ask_inputs_frozen(json: bool, global: bool, frozen: bool) -> ops::agents_ask::AskInputs {
-    use std::io::IsTerminal;
+/// [`ask_inputs`] for a run that may be `--frozen` — the one invocation shape that derives no
+/// pick from an ambiguous machine.
+fn ask_inputs_frozen(frozen: bool) -> ops::agents_ask::AskInputs {
     ops::agents_ask::AskInputs {
-        stdin_tty: std::io::stdin().is_terminal(),
         in_claude_code: std::env::var_os("CLAUDECODE").is_some(),
-        json,
-        global,
         frozen,
     }
 }

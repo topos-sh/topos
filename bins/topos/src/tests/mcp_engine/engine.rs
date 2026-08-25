@@ -90,6 +90,7 @@ fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() 
     let proj = Scratch::new("withheld-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
     std::fs::create_dir_all(proj.0.join(".cursor")).unwrap();
+    rig.project_pick(&proj.0, &["cursor", "openclaw"]);
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
         format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = {{ dest = [\"./.cursor/mcp.json\"] }}\n"),

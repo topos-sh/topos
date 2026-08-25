@@ -250,13 +250,14 @@ fn frozen_refuses_an_uncovered_row_and_writes_nothing() {
 fn a_frozen_install_with_no_pick_reads_fetched_and_places_nothing() {
     let rig = Rig::new("lock-frozen-nopick");
     rig.seed_session();
-    // The runner picked nobody: an empty pick is what a clone with no `.topos/agents.json` and no
-    // machine pick converges to, and it plans no placement anywhere.
+    // The runner picked nobody: an empty pick is what a clone converges to, and it plans no
+    // placement anywhere. Both scopes, because neither reads the other's file.
     rig.pick(&[]);
     let proj = project(
         "lock-frozen-nopick-proj",
         &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
+    rig.project_pick(&proj.0, &[]);
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v1 = one_file(b"# v1\n");
     let plane = FakePlane::new(log).with_version("s_deploy", &v1);

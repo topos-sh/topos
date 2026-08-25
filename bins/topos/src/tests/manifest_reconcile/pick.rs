@@ -83,11 +83,13 @@ fn a_pick_of_claude_code_writes_nothing_under_cursor_or_codex_dirs() {
         assert_eq!(was, is, "{name} is untouched");
     }
 
-    // The same pick, in a project: the checkout's own `.cursor/` and `.codex/` stay empty.
+    // The same pick, in a project: the checkout's own `.cursor/` and `.codex/` stay empty. The
+    // pick is the checkout's own — the machine's never reaches it.
     let proj = project(
         "i1-co",
         &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
     );
+    rig.project_pick(&proj.0, &["claude-code"]);
     for d in [".cursor", ".codex"] {
         std::fs::create_dir_all(proj.0.join(d)).unwrap();
     }

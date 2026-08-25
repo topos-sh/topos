@@ -3,19 +3,20 @@
 //!
 //! The pick ([`crate::agents_pick`]) is the one new state: `<project>/.topos/agents.json` for a
 //! project, `<machine store>/agents.json` for the machine. `list` shows the pick in force, what is
-//! installed on this machine (the ONE reader of detection beside the ask), and each picked agent's
-//! hook state. `add` writes the pick, then [`apply_pick`] lands everything for it through the
-//! ordinary engine: the scope's manifest reconcile (skills and MCP entries for the picked agents),
-//! the built-in `topos` bundle at that scope, the auto-update hooks, and the optional `.gitignore`
-//! lines. `remove` is the inverse, and a LOSS: it computes what leaves while the OLD pick is still
-//! authoritative, describes it unless `--yes`, cleans and verifies, and writes the reduced pick
-//! LAST, atomically, so a failed cleanup leaves the pick exactly as it was and the receipt says
-//! what is still there.
+//! installed on this machine (the ONE reader of detection beside the pick rule), and each picked
+//! agent's hook state. `add` writes the pick, then [`apply_pick`] lands everything for it through
+//! the ordinary engine: the scope's manifest reconcile (skills and MCP entries for the picked
+//! agents), the built-in `topos` bundle at that scope, the auto-update hooks, and the optional
+//! `.gitignore` lines. `remove` is the inverse, and a LOSS: it computes what leaves while the OLD
+//! pick is still authoritative, describes it unless `--yes`, cleans and verifies, and writes the
+//! reduced pick LAST, atomically, so a failed cleanup leaves the pick exactly as it was and the
+//! receipt says what is still there.
 //!
-//! A project `add`/`remove` on a project that has no file of its own first MATERIALIZES the
-//! effective set (the machine pick, the wildcard expanded to the agents installed here) into the
-//! project file, then applies the delta; a `["*"]` file is materialized the same way. A named
-//! pick is explicit from then on: what the file spells is what topos touches.
+//! Each scope's file stands alone: a project starts from its own file or from nobody, never from
+//! the machine's list, and the machine never reads a checkout's. A `["*"]` file is MATERIALIZED
+//! into the agents installed here before a `remove` shrinks it, so what the cleanup reads and
+//! what the reduced file says are one list. A named pick is explicit from then on: what the file
+//! spells is what topos touches.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -137,23 +138,14 @@ fn expand(ctx: &Ctx<'_>, scope: &PickScope, pick: &AgentsPick) -> Vec<String> {
     out
 }
 
-/// The pick a project edit starts from (gate: materialize first). `(pick, had_own_file)`: the
-/// scope's own file when it has one; else the effective set the scope inherits, spelled out
-/// (a project inherits the machine pick; the machine inherits nothing).
+/// The pick an edit starts from. `(pick, had_own_file)`: the scope's own file when it has one,
+/// else the pick of nobody — a scope never starts from another scope's list.
 fn current_pick(ctx: &Ctx<'_>, scope: &PickScope) -> Result<(AgentsPick, bool), ClientError> {
     let own = agents_pick::path_for(&ctx.layout, scope);
-    if let Some(pick) = agents_pick::read(ctx.fs, &own, matches!(scope, PickScope::Machine))? {
-        return Ok((pick, true));
+    match agents_pick::read(ctx.fs, &own, matches!(scope, PickScope::Machine))? {
+        Some(pick) => Ok((pick, true)),
+        None => Ok((AgentsPick::new(Vec::new()), false)),
     }
-    let inherited = match scope {
-        PickScope::Project(_) => {
-            agents_pick::read(ctx.fs, &agents_pick::machine_path(&ctx.layout), true)?
-                .map(|pick| expand(ctx, scope, &pick))
-                .unwrap_or_default()
-        }
-        PickScope::Machine => Vec::new(),
-    };
-    Ok((AgentsPick::new(inherited), false))
 }
 
 /// `current` plus `added`: the wildcard asked for is the whole pick (it stands alone); a
@@ -752,7 +744,7 @@ pub(crate) fn remove(
             "name the agents to remove; `topos agents` lists the pick".into(),
         ));
     }
-    let (current, had_own) = current_pick(ctx, &scope)?;
+    let (current, _) = current_pick(ctx, &scope)?;
     let standing = expand(ctx, &scope, &current);
     let where_ = match scope {
         PickScope::Machine => "this machine's",
@@ -802,10 +794,10 @@ pub(crate) fn remove(
         return Ok(AgentsOutcome::Described { data, yes_argv });
     }
 
-    // The old pick stays authoritative through the cleanup. A project inheriting its pick (or
-    // holding the wildcard) first gets the SAME set spelled out in its own file, so what the
-    // cleanup reads and what the reduced file will say are one list.
-    if !had_own || current.is_wildcard() {
+    // The old pick stays authoritative through the cleanup. A scope holding the wildcard first
+    // gets the SAME set spelled out in its own file, so what the cleanup reads and what the
+    // reduced file will say are one list.
+    if current.is_wildcard() {
         agents_pick::write(
             ctx.fs,
             &ctx.layout,
@@ -1071,16 +1063,20 @@ pub(crate) fn no_pick_line(global: bool) -> Message {
     crate::message::disclosure("NO_PICK", no_pick(global))
 }
 
-/// Before a verb lands anything at `scope` with no effective pick (`install`, `update`, `init`,
+/// Before a verb lands anything at `scope` with no pick OF ITS OWN (`install`, `update`, `init`,
 /// every `add`): one agent installed here is the pick (recorded at that scope, then reread, so
-/// the converge reads what the file says, and the caller says so); several are asked for per
-/// `ask`; none at all is [`PickDerived::NoneInstalled`] — not an ask, not a refusal, and no file
-/// written. A `--frozen` run never reaches the ask: several installed agents are
-/// [`PickDerived::NotPicked`], on the same terms. The quiet hook sweep never calls this: it asks nothing, derives nothing and places
-/// nothing for a scope with no pick.
+/// the converge reads what the file says, and the caller says so); several installed and none
+/// picked is [`ClientError::PickRequired`], which names them and the command; none at all is
+/// [`PickDerived::NoneInstalled`] — not a question, not a refusal, and no file written. A
+/// `--frozen` run never reaches the refusal: several installed agents are
+/// [`PickDerived::NotPicked`], on the same terms. The quiet hook sweep never calls this: it
+/// derives nothing and places nothing for a scope with no pick.
+///
+/// The scope decides which pick file counts and which way out is spelled: a project's own file
+/// for a project, the machine file for `-g`, never the other.
 ///
 /// # Errors
-/// [`ClientError::PickRequired`] from the ask; an unreadable pick file; the pick write.
+/// [`ClientError::PickRequired`]; an unreadable pick file; the pick write.
 pub(crate) fn derive_pick_if_missing(
     ctx: &Ctx<'_>,
     scope: &PickScope,
@@ -1090,17 +1086,14 @@ pub(crate) fn derive_pick_if_missing(
         return Ok(PickDerived::Stood);
     }
     let installed = installed_slugs(ctx, scope);
-    let inputs = AskInputs {
-        global: matches!(scope, PickScope::Machine),
-        ..*ask
-    };
-    // FROZEN never asks and never guesses. One installed agent is not a question and stays the
+    let global = matches!(scope, PickScope::Machine);
+    // FROZEN never refuses and never guesses. One installed agent is not a question and stays the
     // pick; an ambiguous machine gets no pick at all, because the answer would otherwise depend
     // on which runner the pipeline landed on.
-    if inputs.frozen && installed.len() > 1 {
+    if ask.frozen && installed.len() > 1 {
         return Ok(PickDerived::NotPicked);
     }
-    let chosen = agents_ask::choose(&installed, &inputs)?;
+    let chosen = agents_ask::choose(&installed, ask, global)?;
     if chosen.is_empty() {
         return Ok(PickDerived::NoneInstalled);
     }
@@ -1110,8 +1103,10 @@ pub(crate) fn derive_pick_if_missing(
     Ok(PickDerived::Recorded(effective))
 }
 
-/// The pick the `status` panel shows for the scope `project_dir` stands for. `status` never
-/// seeds, so a machine that predates the pick still shows what its legacy record holds.
+/// The pick the `status` panel shows for the scope `project_dir` stands for — that scope's own
+/// file, never another's. `status` never seeds, so a MACHINE that predates the pick still shows
+/// what its legacy record holds; a project shows its own file or nothing, because the legacy
+/// record is the machine's and never governed a checkout.
 pub(crate) fn status_pick(ctx: &Ctx<'_>, project_dir: Option<&Path>) -> PickStatus {
     match agents_pick::effective(ctx.fs, &ctx.layout, project_dir) {
         Ok(Some(e)) => {
@@ -1127,7 +1122,9 @@ pub(crate) fn status_pick(ctx: &Ctx<'_>, project_dir: Option<&Path>) -> PickStat
                 path: Some(pretty_at(ctx, &scope, path)),
             }
         }
-        Ok(None) => {
+        // The legacy record is the MACHINE's, so it answers only the machine scope. A project
+        // with no file of its own says so instead of showing a list that never governed here.
+        Ok(None) if project_dir.is_none() => {
             let legacy = agents_pick::legacy_registered(ctx.fs, &ctx.layout);
             if legacy.is_empty() {
                 PickStatus::default()
@@ -1139,6 +1136,7 @@ pub(crate) fn status_pick(ctx: &Ctx<'_>, project_dir: Option<&Path>) -> PickStat
                 }
             }
         }
+        Ok(None) => PickStatus::default(),
         Err(_) => PickStatus::default(),
     }
 }

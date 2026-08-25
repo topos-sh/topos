@@ -68,6 +68,7 @@ fn a_pinned_reference_delivers_its_version_and_publish_to_never_mints_a_channel(
     let dev_cwd = dev.root().canonicalize().expect("canonical root");
     let proj = dev_cwd.join("proj");
     std::fs::create_dir_all(proj.join(".git")).expect("a git checkout");
+    dev.pick_in_project(&proj);
     let pinned_ref = format!("@{WS_NAME}/pinme@{v1}");
     let added = dev
         .add_reference(&pinned_ref, false, Some(&proj))
@@ -194,6 +195,7 @@ fn a_claim_retires_the_twin_a_real_delivery_placed_beside_it() {
     let dev_cwd = dev.root().canonicalize().expect("canonical root");
     let proj = dev_cwd.join("proj");
     std::fs::create_dir_all(proj.join(".git")).expect("a git checkout");
+    dev.pick_in_project(&proj);
     let mine = proj.join(".claude").join("skills").join("twinny");
     // Their own copy of the same bundle, with a note of their own beside it — so it is NOT
     // byte-identical to what the workspace publishes, and the delivery cannot simply adopt it.

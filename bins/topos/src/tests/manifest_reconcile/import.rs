@@ -616,6 +616,8 @@ fn a_committed_topos_symlink_refuses_the_project_store() {
     let rig = Rig::new("store-escape");
     let proj = project("store-escape-proj", "[skills]\n");
     let outside = Scratch::new("store-escape-outside");
+    // The committed symlink IS the store's place, so the rig's own `.topos` goes first.
+    std::fs::remove_dir_all(proj.0.join(".topos")).unwrap();
     std::os::unix::fs::symlink(&outside.0, proj.0.join(".topos")).unwrap();
     let err = crate::sidecar::ensure_project_store(&rig.fs, &proj.0).unwrap_err();
     assert_eq!(err.code(), "PLACEMENT_UNSUPPORTED", "{err:?}");

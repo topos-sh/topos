@@ -50,20 +50,24 @@ fn work_dir(home: &Path) -> PathBuf {
     dir
 }
 
-/// The machine's agents pick, seeded ONCE per `$TOPOS_HOME` as every agent installed here (the
-/// hermetic homes decide what is installed) — a run that never picked would place nothing. A test
-/// about the pick itself writes the file first; the seed never overwrites one.
+/// The agents pick, seeded ONCE per `$TOPOS_HOME` as every agent installed here (the hermetic
+/// homes decide what is installed) — a run that never picked would place nothing. BOTH scopes,
+/// because neither reads the other's file: the machine's under `$TOPOS_HOME`, and the working
+/// directory's own, so a run that stands in a project scope has a pick there too. A test about
+/// the pick itself writes the file first; the seed never overwrites one.
 fn seed_pick(topos_home: &Path) {
-    let path = topos_home.join("agents.json");
-    if path.exists() {
-        return;
+    const PICK: &[u8] = b"{\n  \"schema_version\": 1,\n  \"agents\": [\n    \"*\"\n  ]\n}\n";
+    let machine = topos_home.join("agents.json");
+    if !machine.exists() {
+        std::fs::create_dir_all(topos_home).expect("the sidecar home");
+        std::fs::write(&machine, PICK).expect("the agents pick");
     }
-    std::fs::create_dir_all(topos_home).expect("the sidecar home");
-    std::fs::write(
-        &path,
-        b"{\n  \"schema_version\": 1,\n  \"agents\": [\n    \"*\"\n  ]\n}\n",
-    )
-    .expect("the agents pick");
+    let store = work_dir(topos_home).join(".topos");
+    let project = store.join("agents.json");
+    if !project.exists() {
+        std::fs::create_dir_all(&store).expect("the project store");
+        std::fs::write(&project, PICK).expect("the project's agents pick");
+    }
 }
 
 fn run(home: &Path, args: &[&str]) -> (bool, serde_json::Value) {
@@ -1705,7 +1709,7 @@ fn verify_exits_with_the_verdicts_own_code_and_keeps_one_for_a_refusal() {
 }
 
 // =================================================================================================
-// The agents pick: `init -a`, `agents`, the ask, and the scopes with no pick.
+// The agents pick: `init -a`, `agents`, the pick rule, and the scopes with no pick.
 // =================================================================================================
 
 /// A hermetic machine for the pick tests: a `$HOME` holding exactly the agents `installed` names
@@ -2322,32 +2326,35 @@ fn agents_remove_keeps_a_folder_holding_anything_of_yours() {
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
+/// **A project's pick is its own, and `agents remove` says so.** With a machine pick standing and
+/// no project file, this checkout picks nobody: there is no agent here to remove, and the machine
+/// pick is never edited from inside a project.
 #[test]
-fn agents_remove_on_an_inherited_pick_materializes_first() {
+fn agents_remove_in_a_project_with_no_pick_of_its_own_refuses() {
     let rig = pick_rig(
-        "agents-remove-inherited",
+        "agents-remove-no-project-pick",
         &["claude-code", "codex", "cursor"],
     );
     rig.write_machine_pick(&["claude-code", "codex"]);
     rig.write_manifest("schema = 1\n");
     assert!(rig.project_pick().is_none());
-    // Nothing was ever placed for codex here, so there is no loss and no gate.
-    let receipt = rig.stdout(&["agents", "remove", "codex"]);
+    let out = rig.run(&["agents", "remove", "codex"]);
+    assert!(!out.status.success());
     assert!(
-        receipt
-            .starts_with("Removed codex from this project. Nothing topos wrote for it was here.\n"),
-        "{receipt}"
+        String::from_utf8_lossy(&out.stderr)
+            .contains("codex is not one of this project's agents; `topos agents` lists them"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        agents_of(&rig.project_pick().unwrap()),
-        ["claude-code"],
-        "the effective set, materialized, minus the removed agent"
-    );
+    assert!(rig.project_pick().is_none(), "no file was minted");
     assert_eq!(
         agents_of(&rig.machine_pick().unwrap()),
         ["claude-code", "codex"],
         "the machine pick is untouched"
     );
+    // `-g` is how the machine's own list is edited.
+    rig.stdout(&["agents", "remove", "-g", "codex", "--yes"]);
+    assert_eq!(agents_of(&rig.machine_pick().unwrap()), ["claude-code"]);
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
@@ -2565,9 +2572,12 @@ fn gitignore_is_refused_with_global() {
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
+/// **The refusal names the installed agents and the command.** Two lines, byte for byte, and the
+/// same two whether a person or an agent typed it — topos never prompts. The `-g` spelling is the
+/// machine scope's own.
 #[test]
-fn the_non_tty_ask_exits_2_with_the_list_and_json_shape() {
-    let rig = pick_rig("ask-piped", &["claude-code", "cursor"]);
+fn the_refusal_names_the_installed_agents_and_the_command() {
+    let rig = pick_rig("refusal-copy", &["claude-code", "codex", "cursor"]);
     let out = rig.run(&["init"]);
     assert_eq!(
         out.status.code(),
@@ -2577,16 +2587,32 @@ fn the_non_tty_ask_exits_2_with_the_list_and_json_shape() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "No agents picked yet in this project.\n\
-         Installed on this machine: claude-code, cursor\n\
-         Pick with: topos init -a <agent>\n"
+        "Several agents are installed here: claude-code, codex, cursor.\n\
+         Pick with: topos init -a claude-code [-a codex]\n"
     );
     assert!(out.stdout.is_empty());
     assert!(
         !rig.project.join("topos.toml").exists(),
-        "nothing is written on a refused ask"
+        "nothing is written on a refusal"
     );
     assert!(rig.project_pick().is_none());
+    // The machine scope: the same first line, its own second.
+    let out = rig.run(&["init", "-g"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Several agents are installed here: claude-code, codex, cursor.\n\
+         Pick with: topos init -g -a claude-code [-a codex]\n"
+    );
+    assert!(rig.machine_pick().is_none());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// The `--json` envelope is unchanged: the code, the installed list, the one command, and the
+/// runnable `PICK_AGENTS` action — all at exit 2.
+#[test]
+fn the_json_refusal_carries_the_list_and_the_command() {
+    let rig = pick_rig("refusal-json", &["claude-code", "cursor"]);
     let (status, v) = rig.json(&["--json", "init"]);
     assert_eq!(status.code(), Some(2));
     assert_eq!(v["ok"], false);
@@ -2607,8 +2633,45 @@ fn the_non_tty_ask_exits_2_with_the_list_and_json_shape() {
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
+/// **Every entry point answers the same way.** `init`, `install`, `update` and `add` all record a
+/// decision before they place anything, so with several agents installed and none picked here
+/// each one exits 2 with the same two lines and writes nothing.
 #[test]
-fn inside_claude_code_the_ask_picks_claude_code_silently() {
+fn several_agents_and_no_pick_exits_2_on_every_entry_point() {
+    let rig = pick_rig("no-pick-every-verb", &["claude-code", "codex", "cursor"]);
+    rig.write_manifest("schema = 1\n");
+    let expected = "Several agents are installed here: claude-code, codex, cursor.\n\
+                    Pick with: topos init -a claude-code [-a codex]\n";
+    let source = rig.root.join("a-skill");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("SKILL.md"), "# a\n").unwrap();
+    let source = source.display().to_string();
+    for args in [
+        vec!["init"],
+        vec!["install"],
+        vec!["update"],
+        vec!["add", source.as_str()],
+    ] {
+        let out = rig.run(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stderr), expected, "{args:?}");
+        assert!(rig.project_pick().is_none(), "{args:?}");
+        assert!(rig.machine_pick().is_none(), "{args:?}");
+        assert!(
+            PickRig::files_under(&rig.project, &[".git"]) == ["topos.toml"],
+            "{args:?}: nothing was placed"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+#[test]
+fn inside_claude_code_the_rule_picks_claude_code_silently() {
     let rig = pick_rig("ask-claudecode", &["claude-code", "cursor"]);
     let out = rig.run_at(&rig.project, &["init"], &[("CLAUDECODE", "1")]);
     assert!(
@@ -2632,7 +2695,7 @@ fn inside_claude_code_the_ask_picks_claude_code_silently() {
 }
 
 #[test]
-fn one_installed_agent_is_used_and_said() {
+fn one_installed_agent_is_still_used_and_said() {
     let rig = pick_rig("ask-one", &["cursor"]);
     let receipt = rig.stdout(&["init"]);
     assert!(
@@ -2658,34 +2721,89 @@ fn one_installed_agent_is_used_and_said() {
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
+/// **A teammate's fresh clone picks for itself.** A machine-wide pick is that person's answer for
+/// their machine, not for a checkout they have never picked agents for: `install` there refuses
+/// with the two lines and places nothing. `init -a` is what makes the clone a scope of its own,
+/// and then the same `install` lands everything.
 #[test]
-fn a_fresh_clone_uses_the_machine_pick() {
+fn a_fresh_clone_picks_for_itself() {
     let rig = pick_rig("fresh-clone", &["claude-code", "cursor"]);
     rig.write_machine_pick(&["claude-code"]);
     // A clone: the manifest names one machine-local MCP server (the one bundle a checkout
     // converges from its own bytes, no workspace needed); no project pick of its own.
     mcp_project(&rig);
     let out = rig.run(&["install"]);
-    assert!(
-        out.status.success(),
+    assert_eq!(
+        out.status.code(),
+        Some(2),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        !String::from_utf8_lossy(&out.stderr).contains("Using "),
-        "a standing pick is not re-announced"
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Several agents are installed here: claude-code, cursor.\n\
+         Pick with: topos init -a claude-code [-a cursor]\n"
     );
+    assert!(
+        !rig.project.join(".mcp.json").exists() && !rig.project.join(".cursor").exists(),
+        "nothing is placed in a checkout with no pick"
+    );
+    assert!(
+        rig.project_pick().is_none(),
+        "and no pick is invented for it"
+    );
+    assert_eq!(
+        agents_of(&rig.machine_pick().unwrap()),
+        ["claude-code"],
+        "the machine pick is untouched"
+    );
+    // The clone picks, and the same `install` lands the server entry.
+    rig.stdout(&["init", "-a", "claude-code"]);
+    rig.stdout(&["install"]);
     let mcp_json = std::fs::read_to_string(rig.project.join(".mcp.json"))
-        .expect("the machine pick's agent gets the project's server entry");
+        .expect("the project's own pick gets the project's server entry");
     assert!(mcp_json.contains("weather"), "{mcp_json}");
     assert!(
         !rig.project.join(".cursor").exists(),
         "the unpicked agent gets nothing"
     );
-    assert!(
-        rig.project_pick().is_none(),
-        "the clone inherits; no file of its own is born"
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// **A project never inherits the machine pick.** The machine names cursor; the checkout has no
+/// pick of its own. `init` there refuses, writes nothing, and leaves no cursor folder anywhere in
+/// the project.
+#[test]
+fn a_project_never_inherits_the_machine_pick() {
+    let rig = pick_rig("no-inherit", &["claude-code", "cursor"]);
+    rig.write_machine_pick(&["cursor"]);
+    let out = rig.run(&["init"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Several agents are installed here: claude-code, cursor.\n\
+         Pick with: topos init -a claude-code [-a cursor]\n"
+    );
+    assert!(
+        !rig.project.join("topos.toml").exists(),
+        "no manifest was born"
+    );
+    assert!(rig.project_pick().is_none());
+    assert!(
+        PickRig::files_under(&rig.project, &[".git"]).is_empty(),
+        "not a byte in the checkout: {:?}",
+        PickRig::files_under(&rig.project, &[".git"])
+    );
+    assert!(
+        !rig.project.join(".cursor").exists(),
+        "the machine's agent is not the project's"
+    );
+    assert_eq!(agents_of(&rig.machine_pick().unwrap()), ["cursor"]);
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
@@ -2909,12 +3027,11 @@ fn install_in_a_project_with_no_pick_exits_2_naming_init() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("Pick with: topos init -a <agent>"),
-        "{stderr}"
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Several agents are installed here: claude-code, cursor.\n\
+         Pick with: topos init -a claude-code [-a cursor]\n"
     );
-    assert!(stderr.contains("claude-code, cursor"), "{stderr}");
     let (status, v) = rig.json(&["--json", "update"]);
     assert_eq!(status.code(), Some(2));
     assert_eq!(v["error"]["code"], "PICK_REQUIRED", "{v}");
@@ -2925,7 +3042,7 @@ fn install_in_a_project_with_no_pick_exits_2_naming_init() {
 }
 
 #[test]
-fn the_quiet_hook_sweep_with_no_pick_stays_silent() {
+fn the_quiet_sweep_with_no_pick_stays_silent() {
     let rig = pick_rig("quiet-no-pick", &["claude-code", "cursor"]);
     rig.write_manifest("schema = 1\n");
     let out = rig.run(&["update", "--quiet", "--ttl", "0", "--hook", "claude-code"]);
@@ -2998,6 +3115,20 @@ fn status_lists_only_picked_agents() {
     let tty = bare.stdout(&["status", "-g"]);
     assert!(
         tty.contains("\nAgents (this machine): no agents picked yet: topos init -g -a <agent>\n"),
+        "{tty}"
+    );
+    // A MACHINE pick standing beside a checkout that has none: the panel says what governs HERE,
+    // never the machine's list under a project heading.
+    bare.write_machine_pick(&["cursor"]);
+    let tty = bare.stdout(&["status"]);
+    assert!(
+        tty.contains("\nAgents (this project): no agents picked yet: topos init -a <agent>\n"),
+        "{tty}"
+    );
+    assert!(!tty.contains("cursor"), "{tty}");
+    let tty = bare.stdout(&["status", "-g"]);
+    assert!(
+        tty.contains("\nAgents (this machine, ~/.topos/agents.json): cursor\n"),
         "{tty}"
     );
     let _ = std::fs::remove_dir_all(&rig.root);
@@ -3174,12 +3305,10 @@ fn add_runs_the_pick_rule_before_anything_lands() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
-        stderr,
-        "No agents picked yet in this project.\n\
-         Installed on this machine: claude-code, codex\n\
-         Pick with: topos init -a <agent>\n"
+        String::from_utf8_lossy(&out.stderr),
+        "Several agents are installed here: claude-code, codex.\n\
+         Pick with: topos init -a claude-code [-a codex]\n"
     );
     assert_eq!(
         std::fs::read_to_string(rig.project.join("topos.toml")).unwrap(),
@@ -3200,10 +3329,10 @@ fn add_runs_the_pick_rule_before_anything_lands() {
     // The machine scope, with `-g`: the same rule, spelled for the machine.
     let out = rig.run(&["add", "-g", hello.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("Pick with: topos init -g -a <agent>"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Several agents are installed here: claude-code, codex.\n\
+         Pick with: topos init -g -a claude-code [-a codex]\n"
     );
     assert!(
         !rig.topos_home().join("topos.toml").exists() || {
@@ -3391,13 +3520,13 @@ fn frozen_install_with_no_pick_fetches_and_places_nothing() {
     assert!(rig.project_pick().is_none() && rig.machine_pick().is_none());
     assert_no_agent_files(&rig);
 
-    // WITHOUT `--frozen` the ask stands: a person ran this, and the way out is theirs to take.
+    // WITHOUT `--frozen` the refusal stands: a person ran this, and the way out is theirs to take.
     let out = rig.run(&["install"]);
-    assert_eq!(out.status.code(), Some(2), "the ask is unchanged");
+    assert_eq!(out.status.code(), Some(2), "the refusal is unchanged");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("no agents picked yet in this project")
-            || String::from_utf8_lossy(&out.stderr)
-                .contains("No agents picked yet in this project")
+        String::from_utf8_lossy(&out.stderr).starts_with("Several agents are installed here: "),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
     // ZERO installed: the sentence is the agentless one, and the run still goes on.

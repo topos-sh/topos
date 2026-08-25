@@ -68,6 +68,12 @@ impl Machine {
         self.rig.root()
     }
 
+    /// The person's own pick FOR THAT CHECKOUT — personal and git-ignored, so a clone never
+    /// carries one and a checkout without one places nothing.
+    fn pick_in_project(&self, project_dir: &Path) {
+        self.rig.pick_in_project(project_dir);
+    }
+
     fn home(&self) -> PathBuf {
         self.rig.root().join("home")
     }
@@ -420,6 +426,10 @@ fn a_frozen_install_on_a_fresh_clone_places_the_locked_versions() {
         !clone.join(".topos").exists(),
         "a real clone carries no project store — that is the state under test"
     );
+    // The person picks the agents FOR THIS CHECKOUT — `topos init -a` in the real motion. The pick
+    // is personal and git-ignored, so it is never what the clone carried; it is the first thing
+    // its owner does with it, and nothing is placed here before they do.
+    machine.pick_in_project(&clone);
 
     let frozen = machine.run_in(&clone, &["install", "--frozen", "--json"]);
     assert_eq!(
@@ -472,6 +482,7 @@ fn a_frozen_install_on_a_fresh_clone_places_the_locked_versions() {
         .expect("canonical root")
         .join("clone-broken");
     std::fs::create_dir_all(broken.join(".git")).expect("a git-shaped checkout");
+    machine.pick_in_project(&broken);
     std::fs::write(broken.join("topos.toml"), &manifest).expect("the committed manifest");
     std::fs::write(broken.join("topos.lock"), lock.replace(&v1, &unserved))
         .expect("a lock naming a version nobody serves");
@@ -567,6 +578,7 @@ fn a_frozen_install_calls_an_unreachable_server_retryable() {
         .expect("canonical root")
         .join("clone-dark");
     std::fs::create_dir_all(clone.join(".git")).expect("a git-shaped checkout");
+    machine.pick_in_project(&clone);
     std::fs::write(clone.join("topos.toml"), &manifest).expect("the committed manifest");
     std::fs::write(clone.join("topos.lock"), &lock).expect("the committed lock");
     assert_eq!(locked_version(&clone).as_deref(), Some(v1.as_str()));

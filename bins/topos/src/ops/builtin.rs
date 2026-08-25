@@ -327,10 +327,8 @@ pub(crate) fn ensure_builtin_in_project(
 /// [`ensure_builtin`] whenever they drove a checkout: the built-in follows the pick AT ITS SCOPE,
 /// so a checkout holding a pick OF ITS OWN re-converges its copies through the project store
 /// ([`ensure_builtin_in_project`]), exactly as the bare sweep re-syncs the machine's. A checkout
-/// with no file of its own places nothing here: an inherited machine pick is served by the copy
-/// under the home, and with no pick at all nothing is placed and a copy the checkout already
-/// holds is left exactly as it is (the record keeps it; only `agents remove` and `uninstall`
-/// retire it).
+/// with no pick of its own places nothing here, and a copy it already holds is left exactly as it
+/// is (the record keeps it; only `agents remove` and `uninstall` retire it).
 ///
 /// # Errors
 /// As [`ensure_builtin_in_project`]; an unreadable pick file fails closed the same way.
@@ -338,9 +336,7 @@ pub(crate) fn ensure_builtin_for_project_pick(
     ctx: &Ctx<'_>,
     project_dir: &std::path::Path,
 ) -> Result<BuiltinSync, ClientError> {
-    let own_pick = crate::agents_pick::effective(ctx.fs, &ctx.layout, Some(project_dir))?
-        .is_some_and(|e| matches!(e.source, crate::agents_pick::PickSource::Project(_)));
-    if !own_pick {
+    if crate::agents_pick::effective(ctx.fs, &ctx.layout, Some(project_dir))?.is_none() {
         return Ok(BuiltinSync::default());
     }
     ensure_builtin_in_project(ctx, project_dir)
@@ -349,9 +345,9 @@ pub(crate) fn ensure_builtin_for_project_pick(
 /// The store `remove topos` / `add topos` act on where you stand: the checkout's own project
 /// store when the working directory's checkout holds a pick OF ITS OWN and `global` is not set
 /// (its copies, its record, its opt-out); `None` — the machine's — otherwise (`-g`, no checkout,
-/// or a checkout inheriting the machine pick, whose copies live under the home). A checkout with
-/// its own pick always has a store (the pick write mints it); one somehow without answers the
-/// machine's rather than minting one on a describe.
+/// or a checkout with no pick of its own). A checkout with its own pick always has a store (the
+/// pick write mints it); one somehow without answers the machine's rather than minting one on a
+/// describe.
 ///
 /// # Errors
 /// An unreadable pick file.
@@ -365,9 +361,7 @@ pub(crate) fn scope_layout(
     let Some(project) = super::agent_hooks::cwd_project(ctx) else {
         return Ok(None);
     };
-    let own_pick = crate::agents_pick::effective(ctx.fs, &ctx.layout, Some(&project))?
-        .is_some_and(|e| matches!(e.source, crate::agents_pick::PickSource::Project(_)));
-    if !own_pick {
+    if crate::agents_pick::effective(ctx.fs, &ctx.layout, Some(&project))?.is_none() {
         return Ok(None);
     }
     Ok(sidecar::existing_project_store(ctx.fs, &project))
