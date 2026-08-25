@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import type { MemberActor, ReadActor, SessionActor } from "@/lib/auth/guards.server";
 import { auditInTx, mintProposalId } from "@/lib/db/identity.server";
@@ -329,6 +329,62 @@ export async function versionCreatedAtMap(
       ),
     );
   return new Map(rows.map((r) => [r.versionId, r.createdAt]));
+}
+
+// ── Addressing a version by what a person can copy ───────────────────────────────────────────
+
+/** The shortest prefix a version id may be addressed by — git's own object-prefix floor. */
+export const VERSION_PREFIX_MIN = 8;
+
+const VERSION_REF = new RegExp(`^[0-9a-f]{${VERSION_PREFIX_MIN},64}$`);
+
+/** Is `typed` shaped like a version address at all — a full id or a long-enough prefix? The cheap
+ * gate a page runs before it asks the database anything. */
+export function isVersionRef(typed: string): boolean {
+  return VERSION_REF.test(typed);
+}
+
+/**
+ * Resolve a version id AS TYPED IN A URL against ONE bundle's versions, by git's object-prefix
+ * rule: a full 64-hex id addresses itself, and a prefix of at least eight hex characters
+ * addresses the one version that starts with it.
+ *
+ * Every id this product shows a person is the 12-hex SHORT form — the link text on a version, the
+ * History rows, `topos log`, and every CLI receipt — so a URL assembled from what the app itself
+ * printed has to open. Only the full 64-hex form did, which made a hand-built version URL a 404
+ * over an id the same page had just rendered.
+ *
+ * An ambiguous prefix, a prefix nothing matches, and a token of the wrong shape all answer `null`;
+ * the caller turns that into the uniform 404, so a probe learns nothing a member could not list
+ * anyway. A FULL id comes back WITHOUT asking the mirror: whether the vault still holds those
+ * bytes is the vault's answer to give (the page's own "no readable version" card), not this
+ * lookup's.
+ */
+export async function resolveVersionRef(
+  actor: PublishActor,
+  bundleId: string,
+  typed: string,
+): Promise<string | null> {
+  if (!isVersionRef(typed)) {
+    return null;
+  }
+  if (typed.length === 64) {
+    return typed;
+  }
+  // `typed` is hex-only by the gate above, so it carries no LIKE metacharacter. Two rows is all
+  // the question needs: one is the answer, two is an ambiguity, and neither reads further.
+  const rows = await getDb()
+    .select({ versionId: planeVersion.versionId })
+    .from(planeVersion)
+    .where(
+      and(
+        eq(planeVersion.workspaceId, actor.workspaceId),
+        eq(planeVersion.bundleId, bundleId),
+        like(planeVersion.versionId, `${typed}%`),
+      ),
+    )
+    .limit(2);
+  return rows.length === 1 ? (rows[0]?.versionId ?? null) : null;
 }
 
 // ── Who authored a version (the display-time key) ───────────────────────────────────────────

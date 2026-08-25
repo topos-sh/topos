@@ -8,11 +8,10 @@ import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
+import { isVersionRef, resolveVersionRef } from "@/lib/db/queries.custody.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { custodyCurrent } from "@/lib/plane/reads.server";
 import { useWsPath } from "@/lib/ws-path";
-
-const HEX64 = /^[0-9a-f]{64}$/;
 
 export function meta({
   params,
@@ -35,14 +34,19 @@ export function meta({
  * on the version id, then the DB catalog probe (an unknown NAME is the uniform 404). Every vault
  * read rides the internal custody lane and keys on the immutable `skillId` — authorization
  * already happened in the guard.
+ *
+ * The URL addresses a version the way git addresses an object: the full 64-hex id, or a unique
+ * prefix of at least eight hex characters (`resolveVersionRef`). The 12-hex SHORT form is the one
+ * every surface shows — this page's own header, History, `topos log`, every CLI receipt — so it
+ * is the form a person copies, and it opens. An ambiguous or unmatched prefix is the uniform 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
   const base = baseOf(params);
   const skill = bundleNameOf(params);
-  const versionId = params.versionId as string;
-  if (!HEX64.test(versionId)) {
+  const typed = params.versionId as string;
+  if (!isVersionRef(typed)) {
     notFound();
   }
   const row = await skillIndexRow(actor, skill);
@@ -54,8 +58,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     base,
     kind: row.kind,
     name: skill,
-    tail: `/versions/${versionId}`,
+    tail: `/versions/${typed}`,
   });
+  // From here the FULL id is the one truth: the vault reads, the current comparison, and every
+  // link this page renders are built from it, never from the prefix the URL happened to carry.
+  const versionId = await resolveVersionRef(actor, row.skillId, typed);
+  if (versionId === null) {
+    notFound();
+  }
 
   const [versionFiles, current] = await Promise.all([
     loadVersionFilesData(actor, row.skillId, versionId),

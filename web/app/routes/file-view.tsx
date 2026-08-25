@@ -8,6 +8,7 @@ import { Card, Chip } from "@/components/ui";
 import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
 import { baseOf, bundleNameOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
+import { isVersionRef, resolveVersionRef } from "@/lib/db/queries.custody.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
 import { MAX_BLOB_BYTES, MAX_HIGHLIGHT_BYTES } from "@/lib/diff/model";
@@ -16,8 +17,6 @@ import { renderCodeHTML } from "@/lib/view/highlight.server";
 import { languageForPath } from "@/lib/view/language";
 import { renderMarkdownHTML } from "@/lib/view/markdown.server";
 import { wsPathServer } from "@/lib/ws-url.server";
-
-const HEX64 = /^[0-9a-f]{64}$/;
 
 /**
  * The splat's segments percent-decoded, or undefined when they don't decode (a literal `%` outside
@@ -58,7 +57,9 @@ type FileContent =
  * One file of a version, rendered inline: markdown as sanitized HTML, code as sanitized highlighted
  * HTML (both under a Rendered | Raw toggle), everything else as an escaped <pre>. The async render
  * runs HERE in the loader (a route component fetches and renders nothing itself). Guard order
- * mirrors the review page (requireMember → id shape → catalog probe). The path is rebuilt from the
+ * mirrors the review page (requireMember → id shape → catalog probe), and the version id is
+ * addressed exactly as the listing above it is: the full 64-hex form or a unique prefix of at
+ * least eight hex characters. The path is rebuilt from the
  * splat and used ONLY as a manifest lookup key — never as a filesystem path — so there is no
  * traversal surface: a "../x" simply fails to match a manifest entry and 404s. The blob rides the
  * internal custody lane under the per-file byte cap, and each failure mode degrades to an honest
@@ -69,11 +70,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = workspace.id;
   const base = baseOf(params);
   const skill = bundleNameOf(params);
-  const versionId = params.versionId as string;
+  const typed = params.versionId as string;
   const splat = params["*"] ?? "";
   const raw = new URL(request.url).searchParams.get("view") === "raw";
 
-  if (!HEX64.test(versionId)) {
+  if (!isVersionRef(typed)) {
     notFound();
   }
   const row = await skillIndexRow(actor, skill);
@@ -85,9 +86,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     base,
     kind: row.kind,
     name: skill,
-    tail: `/versions/${versionId}/files/${splat}`,
+    tail: `/versions/${typed}/files/${splat}`,
     search: raw ? "?view=raw" : "",
   });
+  const versionId = await resolveVersionRef(actor, row.skillId, typed);
+  if (versionId === null) {
+    notFound();
+  }
 
   const meta = await custodyVersionMeta(ws, row.skillId, versionId);
   if (!meta.ok) {
