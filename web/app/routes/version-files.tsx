@@ -75,11 +75,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   ]);
   const isCurrent = current.ok && current.data.version_id === versionId;
 
-  return { skill, versionId, isCurrent, versionFiles };
+  // `versionId` is the truth every read used; `versionRef` is the spelling the visitor arrived
+  // with, and it is what every link on this page is built from. A page opened on the 12-hex short
+  // id that linked on with the full 64-hex one swapped the address under the reader: the id in
+  // their bar stopped matching the one they had copied, and a shared link changed shape on the
+  // first click.
+  return { skill, versionId, versionRef: typed, isCurrent, versionFiles };
 }
 
 export default function VersionFilesPage() {
-  const { skill, versionId, isCurrent, versionFiles } = useLoaderData<typeof loader>();
+  const { skill, versionId, versionRef, isCurrent, versionFiles } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   const base = useBundleBase();
   return (
@@ -96,7 +101,13 @@ export default function VersionFilesPage() {
         </header>
         <Breadcrumbs className="mt-1" />
       </div>
-      <VersionFiles skill={skill} versionId={versionId} currentChip={isCurrent} {...versionFiles} />
+      <VersionFiles
+        skill={skill}
+        versionId={versionId}
+        versionRef={versionRef}
+        currentChip={isCurrent}
+        {...versionFiles}
+      />
     </BrowseShell>
   );
 }

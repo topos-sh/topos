@@ -1,3 +1,11 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  createStaticHandler,
+  createStaticRouter,
+  type RouteObject,
+  StaticRouterProvider,
+} from "react-router";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   bootWorkspace,
@@ -168,5 +176,97 @@ describe("the version page addresses a version the way git addresses an object",
         `/skills/${NAME}/versions/da9fa16d/files/SKILL.md`,
       ),
     ).toEqual({ status: 404 });
+  });
+});
+
+/**
+ * THE SPELLING A VISITOR ARRIVED WITH IS THE SPELLING THEY KEEP.
+ *
+ * Resolving a short id is a READ concern: every byte on the page comes from the full 64-hex id
+ * the prefix named. Addressing is a different thing, and the page used to conflate them — opened
+ * on `…/versions/da9fa16db64b`, every file link on it pointed at `…/versions/<64 hex>/files/…`.
+ * One click and the reader was at an address they had never typed, of a shape they could not have
+ * copied from anything the product prints. The same jump waited on the way back up: the file
+ * view's breadcrumb re-addressed the listing with the long id.
+ *
+ * Links are now built from the ref in the URL. Short in, short links; full in, full links. The
+ * LABEL stays the canonical 12-hex short form either way — that is display, not address.
+ */
+describe("the id spelling a visitor arrived with rides every link", () => {
+  const SHORT = LONE.slice(0, 12);
+
+  /** Render a route's component over the data its real loader just returned. */
+  async function render(
+    path: string,
+    params: Record<string, string | undefined>,
+    Component: () => ReturnType<typeof createElement>,
+    loaderData: unknown,
+  ): Promise<string> {
+    const pattern =
+      params["*"] === undefined
+        ? "/skills/:skill/versions/:versionId"
+        : "/skills/:skill/versions/:versionId/files/*";
+    const routes: RouteObject[] = [{ path: pattern, loader: () => loaderData, Component }];
+    const handler = createStaticHandler(routes);
+    const context = await handler.query(new Request(`${ORIGIN}${path}`));
+    if (context instanceof Response) {
+      throw new Error("expected a rendered context, got a Response");
+    }
+    const router = createStaticRouter(handler.dataRoutes, context);
+    return renderToStaticMarkup(createElement(StaticRouterProvider, { router, context }));
+  }
+
+  it("keeps the short id in every file link on the version page", async () => {
+    const { data } = await versionPage(SHORT);
+    expect(data?.versionRef).toBe(SHORT);
+    expect(data?.versionId).toBe(LONE);
+
+    const { default: Component } = await import("@/routes/version-files");
+    const html = await render(
+      `/skills/${NAME}/versions/${SHORT}`,
+      { skill: NAME, versionId: SHORT },
+      Component,
+      data,
+    );
+    expect(html).toContain(`href="/skills/${NAME}/versions/${SHORT}/files/SKILL.md"`);
+    expect(html).not.toContain(`/versions/${LONE}/files/`);
+    // The label is unchanged — the short id is what a version has always been called on screen.
+    expect(html).toContain(SHORT);
+  });
+
+  it("keeps the FULL id in those links when that is the address that was opened", async () => {
+    const { data } = await versionPage(LONE);
+    expect(data?.versionRef).toBe(LONE);
+
+    const { default: Component } = await import("@/routes/version-files");
+    const html = await render(
+      `/skills/${NAME}/versions/${LONE}`,
+      { skill: NAME, versionId: LONE },
+      Component,
+      data,
+    );
+    expect(html).toContain(`href="/skills/${NAME}/versions/${LONE}/files/SKILL.md"`);
+  });
+
+  it("keeps it on the way back up, out of the file view's breadcrumb", async () => {
+    const { loader } = await import("@/routes/file-view");
+    const { data } = await load(
+      loader as unknown as Loader,
+      { skill: NAME, versionId: SHORT, "*": "SKILL.md" },
+      `/skills/${NAME}/versions/${SHORT}/files/SKILL.md`,
+    );
+    expect(data?.versionRef).toBe(SHORT);
+    // The toggle re-enters this page's own address, so it carries the same spelling.
+    expect(data?.fileBasePath).toBe(`/skills/${NAME}/versions/${SHORT}/files/SKILL.md`);
+
+    const { default: Component } = await import("@/routes/file-view");
+    const html = await render(
+      `/skills/${NAME}/versions/${SHORT}/files/SKILL.md`,
+      { skill: NAME, versionId: SHORT, "*": "SKILL.md" },
+      Component,
+      data,
+    );
+    expect(html).toContain(`href="/skills/${NAME}/versions/${SHORT}"`);
+    expect(html).not.toContain(`href="/skills/${NAME}/versions/${LONE}"`);
   });
 });
