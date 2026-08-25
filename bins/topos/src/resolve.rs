@@ -373,7 +373,10 @@ impl KindScope {
         channels: true,
         skills: true,
     };
-    /// Channels only (`--channel` selectors; channel curation).
+    /// Channels only (`--channel` selectors; channel curation) — a kind scope the shipped verbs
+    /// no longer narrow to (`log`'s channel probe reads both kinds in one pass, so a name that is
+    /// both is an ambiguity rather than a silent miss), kept for the resolver's own tests.
+    #[cfg(test)]
     pub(crate) const CHANNELS: KindScope = KindScope {
         workspaces: false,
         channels: true,

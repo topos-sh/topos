@@ -558,7 +558,12 @@ fn resolve_followed_skill_in_scope(
 /// `r2-smoke  (not applied here yet — \`topos update -g\` applies it)` was told `no tracked skill
 /// named 'r2-smoke'` — the same machine contradicting itself, with no next step even though ONE
 /// command turns the row into a copy. So the demand is asked about before a miss is claimed.
-pub(crate) fn unapplied_or_unknown(ctx: &Ctx<'_>, name: &str, scope: StoreScope) -> ClientError {
+pub(crate) fn unapplied_or_unknown(
+    ctx: &Ctx<'_>,
+    name: &str,
+    scope: StoreScope,
+    needs: &'static str,
+) -> ClientError {
     // A manifest this build REFUSES is not "nothing is tracked here": it is a file with one bad
     // line in it, and `list` names the line. Swallowing that read and answering the miss sent a
     // person hunting for a missing bundle when the fix was a row in a file the verb had already
@@ -572,6 +577,7 @@ pub(crate) fn unapplied_or_unknown(ctx: &Ctx<'_>, name: &str, scope: StoreScope)
         Some(global) => ClientError::NotAppliedHere {
             name: name.to_owned(),
             global,
+            needs,
         },
         None => ClientError::NoTrackedBundle {
             name: name.to_owned(),
@@ -588,7 +594,7 @@ pub(crate) fn unapplied_or_unknown(ctx: &Ctx<'_>, name: &str, scope: StoreScope)
 /// folder is GONE is excluded, because no `update` will ever apply that one either. Best-effort:
 /// an unreadable manifest or store answers `None` and the plain miss stands, rather than a
 /// half-fact promising a command that would not help.
-fn demanded_but_unapplied(ctx: &Ctx<'_>, name: &str, scope: StoreScope) -> Option<bool> {
+pub(crate) fn demanded_but_unapplied(ctx: &Ctx<'_>, name: &str, scope: StoreScope) -> Option<bool> {
     let (all, cache) = inventory::read_sources(ctx).ok()?;
     let resolved = inventory::resolve(ctx, &all, &cache).ok()?;
     let unapplied = |section: &inventory::ScopeResolution| {

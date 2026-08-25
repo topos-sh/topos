@@ -1817,6 +1817,25 @@ pub struct LogData {
     /// and for a copy no workspace delivers. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_fault: Option<SyncFault>,
+    /// Present when this history came from the WORKSPACE because no copy is applied in the scope
+    /// the command ran in: a recipe row here demands the bundle and no update has landed it yet.
+    /// A history is a LOOKUP — the versions live in the workspace — so the read still answers,
+    /// and this says which state it answered from. Absent for every applied copy. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_applied: Option<NotApplied>,
+}
+
+/// A bundle a recipe row in this scope DEMANDS with no applied copy behind it. **INFERRED**
+/// (additive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct NotApplied {
+    /// The bundle, as the workspace catalogs it.
+    pub bundle: String,
+    /// `true` when the row lives in the MACHINE recipe — the update that lands it is spelled
+    /// `-g`. The refusal-side twin of this fact carries the `NOT_APPLIED` code.
+    pub global: bool,
 }
 
 /// A workspace's last exchange with this machine, recorded because it did not land. **INFERRED**

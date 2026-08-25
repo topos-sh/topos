@@ -25,7 +25,7 @@ use crate::resolve::{self, Resolution, ResourceKind};
 use crate::{identity, logfile, sessions, sidecar::Layout, sync_status};
 use topos_core::digest::to_hex;
 use topos_types::requests::{WireLogProposal, WireLogVersion};
-use topos_types::results::{LogData, SyncFault};
+use topos_types::results::{LogData, NotApplied, SyncFault};
 
 /// The seam `log` needs — the per-session transports read the plane-side history.
 pub(crate) struct LogConnectors<'a> {
@@ -54,11 +54,12 @@ pub(crate) fn log(
     // came from), so this arm resolves nothing and reads no other login.
     let (layout, id, lock) = match super::resolve_skill_here(ctx, skill, None) {
         Ok(found) => found,
-        // Nothing here answers to that name. It may be a CHANNEL — whose curation history is a web
-        // surface — in the workspace this machine acts on: ONE workspace, never a scan of every
-        // login.
-        Err(absent @ ClientError::NoSuchSkill { .. }) => {
-            return Err(channel_refusal(ctx, connectors, skill, workspace)?.unwrap_or(absent));
+        // Nothing HERE answers to that name — which is not the end of the question. It may be a
+        // CHANNEL (whose curation history is a web surface), or a bundle a recipe row in this
+        // scope demands with no update behind it yet — whose history is the workspace's and needs
+        // no local copy at all.
+        Err(ClientError::NoSuchSkill { .. }) => {
+            return unresolved_history(ctx, connectors, skill, workspace, page);
         }
         Err(e) => return Err(e),
     };
@@ -157,13 +158,7 @@ pub(crate) fn log(
 
     // The row page, applied AFTER assembly (the assembled order is deterministic, so consecutive
     // pages tile the same list). An inactive page keeps the exact prior shape (no marker fields).
-    let (page_applied, truncated, total) = if page.is_active() {
-        let (_, total) = page.apply(&mut events);
-        let end = page.offset.saturating_add(events.len());
-        (true, end < total, total)
-    } else {
-        (false, false, events.len())
-    };
+    let (page_applied, truncated, total) = apply_page(&mut events, page);
 
     // Whether the workspace this copy is delivered from landed its LAST exchange with this machine.
     // The freshness cache is a MACHINE fact, like the device id above — one per install, whatever
@@ -178,51 +173,133 @@ pub(crate) fn log(
         truncated,
         total: page_applied.then_some(total as u64),
         sync_fault,
+        // An applied copy: this history is the copy's own.
+        not_applied: None,
     })
 }
 
-/// The refusal a name that is a CHANNEL earns: a channel's curation history lives on the web, not
-/// in `topos log`. Asked of ONE workspace — the one the machine acts on (`--workspace` →
-/// `TOPOS_WORKSPACE` → the starred default → the sole login) — because a lookup that scanned every
-/// login dialed workspaces that hold nothing by that name, and narrated each one.
+/// The row page over an assembled event list: `(a page was applied, more lies past it, the total
+/// before paging)`. An inactive page keeps the exact prior shape (no marker fields).
+fn apply_page(events: &mut Vec<Value>, page: super::RowPage) -> (bool, bool, usize) {
+    if !page.is_active() {
+        return (false, false, events.len());
+    }
+    let (_, total) = page.apply(events);
+    let end = page.offset.saturating_add(events.len());
+    (true, end < total, total)
+}
+
+/// A name NOTHING in this scope's stores answers to — resolved as far as this machine honestly
+/// can, and READ where there is something to read.
 ///
-/// `Ok(None)` = not a channel there (or this machine is signed into nothing), which leaves the
-/// caller's own "no such bundle" answer standing.
+/// Two things such a name can still be, asked of ONE workspace — the one the machine acts on
+/// (`--workspace` → `TOPOS_WORKSPACE` → the starred default → the sole login) — because a lookup
+/// that scanned every login dialed workspaces that hold nothing by that name and narrated each
+/// one:
+///
+/// - a CHANNEL, whose curation history is a web surface: the refusal says so;
+/// - a bundle a recipe row in THIS SCOPE demands with no update behind it yet. `list` prints that
+///   row, `revert` names the update that lands it, and `log` answered `no tracked skill named
+///   '<name>'` — the same machine contradicting its own listing, in a noun this CLI stopped using,
+///   with no next step. A history is a LOOKUP, not a local verb: the versions live in the
+///   workspace, so they are read and printed, and `not_applied` says which state answered.
+///
+/// A name nothing asks for earns no lookup at all: the classification refusal
+/// ([`super::unapplied_or_unknown`]) is the whole answer.
 ///
 /// # Errors
-/// The typed workspace-selection refusal when several logins are joined and none is the default.
-fn channel_refusal(
+/// The typed workspace-selection refusal when several logins are joined and none is the default;
+/// the channel refusal; the not-applied / plain-miss refusal; a transport fault on the read.
+fn unresolved_history(
     ctx: &Ctx<'_>,
     connectors: &LogConnectors<'_>,
     skill: &str,
     workspace: Option<&str>,
-) -> Result<Option<ClientError>, ClientError> {
+    page: super::RowPage,
+) -> Result<LogData, ClientError> {
     let su = match super::connect::acting_universe(ctx, connectors.session, workspace) {
-        Ok(Some(su)) => su,
-        Ok(None) => return Ok(None),
+        Ok(su) => su,
         // The PICK is the person's to make and has to be said out loud. A server that did not
         // answer is a different thing entirely: the probe is best-effort, so the local
         // "no bundle by that name" stands, exactly as it did before this probe existed.
         Err(e @ (ClientError::WorkspaceSelection(_) | ClientError::SessionRequired { .. })) => {
             return Err(e);
         }
-        Err(_) => return Ok(None),
+        Err(_) => None,
     };
-    let Ok(parsed) = resolve::parse_target(skill) else {
-        return Ok(None);
-    };
-    let Ok(Some(Resolution::Resource {
+    let found = su.as_ref().and_then(|su| {
+        let parsed = resolve::parse_target(skill).ok()?;
+        resolve::resolve_one(&su.universe, &parsed, resolve::KindScope::SUBSCRIBABLE)
+            .ok()
+            .flatten()
+    });
+    if let Some(Resolution::Resource {
         kind: ResourceKind::Channel,
         name,
         ..
-    })) = resolve::resolve_one(&su.universe, &parsed, resolve::KindScope::CHANNELS)
-    else {
-        return Ok(None);
+    }) = &found
+    {
+        return Err(ClientError::InvalidArgument(format!(
+            "'{name}' is a channel — a channel's curation history lives on the web, not in `topos \
+             log` (which shows a bundle's version history)"
+        )));
+    }
+    // Only a DEMANDED row earns the workspace read.
+    let Some(global) = super::demanded_but_unapplied(ctx, skill, super::StoreScope::Here) else {
+        return Err(super::unapplied_or_unknown(
+            ctx,
+            skill,
+            super::StoreScope::Here,
+            "",
+        ));
     };
-    Ok(Some(ClientError::InvalidArgument(format!(
-        "'{name}' is a channel — a channel's curation history lives on the web, not in `topos \
-         log` (which shows a skill's version history)"
-    ))))
+    // Demanded, but nothing here can read the workspace's copy of the answer: the shared clause
+    // alone — there is no second thing to say that a `log` reader would act on.
+    let unapplied = || ClientError::NotAppliedHere {
+        name: skill.to_owned(),
+        global,
+        needs: "",
+    };
+    let (
+        Some(su),
+        Some(Resolution::Resource {
+            kind: ResourceKind::Skill,
+            workspace_id,
+            name,
+            skill_id: Some(skill_id),
+            ..
+        }),
+    ) = (su.as_ref(), found)
+    else {
+        // Demanded, but this run cannot name it in the workspace (signed into nothing, offline,
+        // or the workspace shares nothing by that name): the refusal that names the update is
+        // the honest answer, and it is the same one `revert` gives about this very state.
+        return Err(unapplied());
+    };
+    let Some(directory) = su.directory_for(&workspace_id) else {
+        return Err(unapplied());
+    };
+    let plane = directory.skill_log(&workspace_id, &skill_id)?;
+    let archived_successor = plane
+        .base_name
+        .as_ref()
+        .map(|base| format!("{base} is archived as {}", plane.name));
+    let mut events: Vec<Value> = plane.versions.iter().map(plane_version_event).collect();
+    events.extend(plane.proposals.iter().map(plane_proposal_event));
+    let mut events = order_newest_first(events);
+    let (page_applied, truncated, total) = apply_page(&mut events, page);
+    Ok(LogData {
+        events,
+        team: None,
+        archived_successor,
+        truncated,
+        total: page_applied.then_some(total as u64),
+        sync_fault: recorded_fault(ctx, &workspace_id),
+        not_applied: Some(NotApplied {
+            bundle: name,
+            global,
+        }),
+    })
 }
 
 /// The fault recorded for `workspace_id`'s last exchange, named the way a person addresses the

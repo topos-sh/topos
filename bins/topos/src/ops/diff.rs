@@ -80,7 +80,23 @@ pub(crate) fn diff(
     // about THAT copy — not a same-named machine twin, and not a not-found. `-g` names the machine
     // copy instead, so a person standing in a project can read the twin the other scope holds
     // without leaving the folder (the same escape `list`/`status`/`update` offer).
-    let (layout, id, lock) = super::resolve_skill_in_scope(ctx, skill, None, store)?;
+    let (layout, id, lock) = match super::resolve_skill_in_scope(ctx, skill, None, store) {
+        Ok(found) => found,
+        // A name this scope has no copy of is TWO states, and `diff` wore one sentence for both.
+        // A row this scope DEMANDS with no update behind it is one command from being a copy —
+        // and `diff` reads a copy, so unlike `log` there is nothing to answer with but the
+        // refusal that names that command. The classification is the one `revert` uses, so a
+        // machine cannot say two things about one row.
+        Err(ClientError::NoSuchSkill { .. }) => {
+            return Err(super::unapplied_or_unknown(
+                ctx,
+                skill,
+                store,
+                "diff reads an applied copy",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     if !sel.is_empty() && r#ref.is_some() {
         return Err(ClientError::InvalidArgument(
             "`--dest`/`-a` names the copy of YOUR edits a diff reads, and a version-to-version \
