@@ -228,22 +228,67 @@ fn authority_usable(uri: &ureq::http::Uri) -> bool {
 /// label is the ONLY thing telling two sessions apart on the approval page, the bundle page's
 /// "On your machines", and Sessions: a hostname alone collapses a laptop and a build box a
 /// person is signed in from into one indistinguishable row.
+///
+/// One machine can also hold SEVERAL topos installs — a second `$TOPOS_HOME` is exactly what a
+/// sandbox, a CI checkout, or a second account on one laptop looks like — and every one of them
+/// composed the same user@host, so three logins from one machine read as three identical rows
+/// with nothing to pick between them. A non-default home therefore adds its own short name.
 pub(crate) fn machine_name() -> String {
     let uname = rustix::system::uname();
     let node = uname.nodename().to_string_lossy().into_owned();
-    compose_machine_name(std::env::var("USER").ok().as_deref(), &node)
+    compose_machine_name(
+        std::env::var("USER").ok().as_deref(),
+        &node,
+        home_discriminator(std::env::var_os("TOPOS_HOME"), std::env::var_os("HOME")).as_deref(),
+    )
 }
 
-/// The label's pure half — the OS user (`$USER`) and the hostname, each dropped when it is
-/// missing or blank, so an unnameable machine still gets a label rather than a dangling `@`.
-fn compose_machine_name(user: Option<&str>, node: &str) -> String {
+/// The short name a NON-DEFAULT topos home contributes to the label, and `None` for the ordinary
+/// `~/.topos` — where a discriminator would be noise on every label anyone ever sees.
+///
+/// Only an explicit `$TOPOS_HOME` can be non-default (an unset one IS `$HOME/.topos`), and it is
+/// compared against the default through the same root resolution the rest of the app uses, so
+/// spelling one of them through a symlink — or declaring `$TOPOS_HOME` as the default path — does
+/// not invent a discriminator.
+///
+/// The name is the PARENT's: a home is almost always called `.topos`, which tells nobody anything,
+/// while the folder holding it is the sandbox / checkout / account the person recognises. A home
+/// with no parent to name (`/.topos`) falls back to its own.
+fn home_discriminator(
+    declared: Option<std::ffi::OsString>,
+    user_home: Option<std::ffi::OsString>,
+) -> Option<String> {
+    let home = crate::ctx::resolved_root(std::path::PathBuf::from(declared?));
+    let default =
+        user_home.map(|h| crate::ctx::resolved_root(std::path::PathBuf::from(h).join(".topos")));
+    if default.as_deref() == Some(home.as_path()) {
+        return None;
+    }
+    let name = home
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .or_else(|| home.file_name())?
+        .to_string_lossy()
+        .trim()
+        .to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The label's pure half — the OS user (`$USER`), the hostname, and the non-default home's short
+/// name, each dropped when it is missing or blank, so an unnameable machine still gets a label
+/// rather than a dangling `@` or a trailing separator.
+fn compose_machine_name(user: Option<&str>, node: &str, home: Option<&str>) -> String {
     let node = node.trim();
     let user = user.map(str::trim).filter(|u| !u.is_empty());
-    match (user, node) {
+    let base = match (user, node) {
         (Some(user), "") => format!("topos CLI · {user}"),
         (Some(user), node) => format!("topos CLI · {user}@{node}"),
         (None, "") => "topos CLI".to_owned(),
         (None, node) => format!("topos CLI · {node}"),
+    };
+    match home.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(home) => format!("{base} · {home}"),
+        None => base,
     }
 }
 
@@ -297,14 +342,14 @@ pub(crate) fn device_challenge(device_code: &str) -> String {
 
 #[cfg(test)]
 mod machine_name_tests {
-    use super::compose_machine_name;
+    use super::{compose_machine_name, home_discriminator};
 
     /// Two machines one person is signed in from must be tellable apart on the approval page and
     /// in Sessions, so the label carries the OS user beside the hostname.
     #[test]
     fn label_carries_user_and_host() {
         assert_eq!(
-            compose_machine_name(Some("robert"), "MacBookPro"),
+            compose_machine_name(Some("robert"), "MacBookPro", None),
             "topos CLI · robert@MacBookPro"
         );
     }
@@ -314,31 +359,82 @@ mod machine_name_tests {
     #[test]
     fn no_user_falls_back_to_host_alone() {
         assert_eq!(
-            compose_machine_name(None, "build-box"),
+            compose_machine_name(None, "build-box", None),
             "topos CLI · build-box"
         );
         assert_eq!(
-            compose_machine_name(Some("   "), "build-box"),
+            compose_machine_name(Some("   "), "build-box", None),
             "topos CLI · build-box"
         );
     }
 
-    /// Surrounding whitespace on either half never reaches the label.
+    /// Surrounding whitespace on any half never reaches the label.
     #[test]
     fn halves_are_trimmed() {
         assert_eq!(
-            compose_machine_name(Some(" robert "), "  MacBookPro\n"),
-            "topos CLI · robert@MacBookPro"
+            compose_machine_name(Some(" robert "), "  MacBookPro\n", Some("  sandbox ")),
+            "topos CLI · robert@MacBookPro · sandbox"
         );
     }
 
     /// Neither half nameable — the bare product label, as before.
     #[test]
     fn nothing_nameable_keeps_the_bare_label() {
-        assert_eq!(compose_machine_name(None, "  "), "topos CLI");
+        assert_eq!(compose_machine_name(None, "  ", None), "topos CLI");
         assert_eq!(
-            compose_machine_name(Some("robert"), ""),
+            compose_machine_name(Some("robert"), "", None),
             "topos CLI · robert"
         );
+    }
+
+    /// SEVERAL INSTALLS ON ONE MACHINE. Three logins from three `$TOPOS_HOME`s under one laptop
+    /// read as three identical `topos CLI · user@host` rows — on the approval page, on a bundle's
+    /// "On your machines", and in Sessions — so there is nothing to revoke by. The home's own
+    /// short name is what tells them apart.
+    #[test]
+    fn a_non_default_home_rides_the_label_and_the_default_one_does_not() {
+        let scratch = std::env::temp_dir().join(format!(
+            "topos-label-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let user_home = scratch.join("A").join("home");
+        std::fs::create_dir_all(&user_home).expect("the scratch home");
+        let home = std::ffi::OsString::from(&user_home);
+
+        // The ordinary machine: `$TOPOS_HOME` unset — nothing to disambiguate, nothing added.
+        assert_eq!(home_discriminator(None, Some(home.clone())), None);
+        // The same path declared out loud is still the default home.
+        assert_eq!(
+            home_discriminator(Some(user_home.join(".topos").into()), Some(home.clone())),
+            None
+        );
+
+        // A second install beside it: the FOLDER HOLDING the home names it, because every home
+        // is called `.topos` and that tells nobody which one this is.
+        let second = scratch.join("A").join(".topos");
+        assert_eq!(
+            home_discriminator(Some(second.clone().into()), Some(home.clone())),
+            Some("A".to_owned())
+        );
+        assert_eq!(
+            compose_machine_name(Some("robert"), "MacBookPro", Some("A")),
+            "topos CLI · robert@MacBookPro · A"
+        );
+        // …and a third is a DIFFERENT row, which is the whole point.
+        assert_ne!(
+            home_discriminator(Some(scratch.join("B").join(".topos").into()), Some(home)),
+            home_discriminator(Some(second.into()), Some(user_home.into()))
+        );
+
+        // No `$HOME` at all: an explicit home cannot be proved default, so it names itself.
+        assert_eq!(
+            home_discriminator(Some(scratch.join("C").join(".topos").into()), None),
+            Some("C".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
