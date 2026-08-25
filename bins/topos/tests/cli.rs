@@ -2208,10 +2208,14 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
         !rig.project.join(".agents/skills/topos").exists(),
         "the copy is gone"
     );
-    // The hook ENTRY leaves; the shared hooks file it was merged into is kept, as every
-    // surgical scrub keeps it.
-    let hooks = std::fs::read_to_string(rig.project.join(".codex/hooks.json")).unwrap();
-    assert!(!hooks.contains("topos"), "the hook entry is gone: {hooks}");
+    // The hook entry leaves — and with it the file and the folder, because everything in them
+    // was topos's own.
+    assert!(!rig.project.join(".codex/hooks.json").exists());
+    assert!(!rig.project.join(".codex").exists(), "no empty folder left");
+    assert!(
+        !rig.project.join(".agents").exists(),
+        "no empty folder left"
+    );
     assert!(
         rig.project.join(".claude/skills/topos/SKILL.md").exists(),
         "claude-code keeps its copy"
@@ -2230,8 +2234,11 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
         "{receipt}"
     );
     assert!(!rig.project.join(".claude/skills/topos").exists());
-    let hooks = std::fs::read_to_string(rig.project.join(".claude/settings.local.json")).unwrap();
-    assert!(!hooks.contains("topos"), "{hooks}");
+    assert!(!rig.project.join(".claude/settings.local.json").exists());
+    assert!(
+        !rig.project.join(".claude").exists(),
+        "no empty folder left"
+    );
     assert!(
         !rig.project.join(".mcp.json").exists(),
         "a wholly-owned config file leaves with its last entry"
@@ -2241,6 +2248,77 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
     let (status, v) = rig.json(&["--json", "agents", "remove", "cursor"]);
     assert!(!status.success());
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{v}");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// Taking an agent out leaves no folder topos made standing empty — and never touches one
+/// holding anything of the person's. `git status` after a remove is as clean as before the add.
+#[test]
+fn agents_remove_leaves_no_trace_of_a_folder_topos_created() {
+    let rig = pick_rig("agents-remove-no-trace", &["cursor"]);
+    // The project: `.cursor` did not exist here at all before the add.
+    rig.stdout(&["init", "-a", "cursor"]);
+    assert!(rig.project.join(".cursor/skills/topos/SKILL.md").is_file());
+    assert!(rig.project.join(".cursor/hooks.json").is_file());
+    rig.stdout(&["agents", "remove", "cursor", "--yes"]);
+    assert!(
+        !rig.project.join(".cursor").exists(),
+        "the folder topos made is gone whole: {:?}",
+        PickRig::files_under(&rig.project, &[".git"])
+    );
+
+    // The machine, the same way.
+    let out = rig.run_at(&rig.home, &["init", "-g", "-a", "cursor"], &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(rig.home.join(".cursor/hooks.json").is_file());
+    let out = rig.run_at(
+        &rig.home,
+        &["agents", "remove", "-g", "cursor", "--yes"],
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.home.join(".cursor").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// The other half of the same rule: a file or folder holding anything that is not topos's is
+/// edited, never deleted.
+#[test]
+fn agents_remove_keeps_a_folder_holding_anything_of_yours() {
+    let rig = pick_rig("agents-remove-keeps-yours", &["cursor"]);
+    rig.stdout(&["init", "-a", "cursor"]);
+    // A hook of the person's own, beside topos's, in the file topos wrote.
+    let hooks = rig.project.join(".cursor/hooks.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    doc["hooks"]["sessionStart"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"command": "echo mine"}));
+    std::fs::write(&hooks, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    // And a file of theirs in the skills folder topos delivers into.
+    std::fs::write(rig.project.join(".cursor/skills/NOTES.md"), "mine\n").unwrap();
+
+    rig.stdout(&["agents", "remove", "cursor", "--yes"]);
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    let entries = doc["hooks"]["sessionStart"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "only topos's entry left: {doc}");
+    assert_eq!(entries[0]["command"], "echo mine");
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join(".cursor/skills/NOTES.md")).unwrap(),
+        "mine\n",
+        "their file, and the folder holding it, stay"
+    );
+    assert!(!rig.project.join(".cursor/skills/topos").exists());
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
@@ -2767,10 +2845,13 @@ fn the_quiet_sweep_mints_nothing_after_an_uninstall() {
     );
     assert!(!rig.topos_home().exists(), "the store is gone");
     assert!(
-        !std::fs::read_to_string(&repo_hook)
-            .unwrap()
-            .contains("topos"),
-        "the checkout the command ran in loses its hook entry"
+        !repo_hook.exists(),
+        "the checkout the command ran in loses its hook entry, and the file that held nothing \
+         else goes with it"
+    );
+    assert!(
+        rig.project.join(".claude/skills/topos/SKILL.md").is_file(),
+        "uninstall still deletes no skill byte, so the folder around them stays"
     );
     assert!(
         stdout.contains(&format!(

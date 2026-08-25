@@ -85,6 +85,9 @@ impl ConfigStore for crate::fs_seam::RealFs {
     fn replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         replace_config(self, path, bytes)
     }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        FsOps::remove_file(self, path)
+    }
 }
 
 /// The real [`CommandRunner`] — an adapter's window onto a harness's OWN management CLI (OpenClaw's
@@ -108,5 +111,8 @@ impl ConfigStore for crate::fs_seam::FaultFs {
     }
     fn replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         replace_config(self, path, bytes)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        FsOps::remove_file(self, path)
     }
 }

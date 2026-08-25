@@ -220,6 +220,11 @@ mod tests {
             *self.writes.borrow_mut() += 1;
             Ok(())
         }
+        fn remove_file(&self, _: &Path) -> std::io::Result<()> {
+            *self.content.borrow_mut() = None;
+            *self.writes.borrow_mut() += 1;
+            Ok(())
+        }
     }
 
     /// A self-cleaning temp dir for the `discover` tests (RAII).

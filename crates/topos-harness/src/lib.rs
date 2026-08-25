@@ -258,6 +258,16 @@ pub trait ConfigStore {
     /// # Errors
     /// An underlying I/O failure.
     fn replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    /// Delete `path`. An already-absent file is success, so a repeated scrub stays idempotent.
+    ///
+    /// The removal counterpart of [`ConfigStore::replace`], for the one case a scrub has to reach
+    /// for it: a config file whose whole content was topos's, whose last topos entry just left,
+    /// and which topos itself created. Leaving that behind is a folder topos made and never
+    /// cleaned up. A file holding anything of the person's is edited, never deleted.
+    ///
+    /// # Errors
+    /// An underlying I/O failure other than not-found.
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
 }
 
 /// One captured subprocess run for [`CommandRunner`]: whether the process exited successfully,

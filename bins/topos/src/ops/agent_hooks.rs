@@ -11,6 +11,10 @@
 //!
 //! Detection plays no part here: a picked agent is registered whether or not its detect dir
 //! exists, and an agent nobody picked is never touched (the whole point).
+//!
+//! One thing here is not about hooks: [`prune_emptied_dirs`], the last beat of taking an agent
+//! out. It lives beside them because it is the same question at the level of the FOLDER — what
+//! did topos make here, and is any of it still standing?
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +25,7 @@ use topos_types::results::StatusTrigger;
 
 use super::arm::EvidenceView;
 use crate::ctx::Ctx;
+use crate::fs_seam::{FsOps, PathKind};
 
 /// A picked agent that has no hook at the scope asked for — the receipt line's data.
 pub(crate) struct HookAbsence {
@@ -152,6 +157,59 @@ pub(crate) fn cwd_project(ctx: &Ctx<'_>) -> Option<PathBuf> {
     crate::manifest::scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home))
 }
 
+/// Delete the folders topos MADE for an agent and has just emptied — the last beat of taking one
+/// out.
+///
+/// `agents remove` and `uninstall --yes` delete what topos wrote one artifact at a time: the skill
+/// copies, the MCP entries, the hook. What that leaves is the shape AROUND them — a `.cursor/skills/`
+/// with nothing in it, and a `.cursor/` that did not exist before topos wrote the hook. A receipt
+/// saying the hook is gone while `git status` still shows a stray `.cursor/` is not the truth about
+/// what was removed.
+///
+/// So each named dir, then its parent, is deleted IF it is a real directory (never a symlink), holds
+/// nothing at all, and sits strictly inside `boundary` — the checkout for a project pick, the home
+/// for a machine one. Two levels is exactly an agent's own dir plus the skills dir inside it, which
+/// is why the walk stops there and can never reach a shared parent like `~/.config`. A dir holding
+/// anything — one foreign file is enough — is somebody else's and stays.
+///
+/// Best-effort: it runs after the removals it tidies up, so a dir that will not go is not a failed
+/// removal, and nothing here is reported.
+pub(crate) fn prune_emptied_dirs(fs: &dyn FsOps, boundary: &Path, dirs: &[PathBuf]) {
+    for dir in dirs {
+        let mut level = dir.as_path();
+        // The dir itself, then its parent. Nothing above that: two levels is the whole shape
+        // topos creates for one agent.
+        for _ in 0..2 {
+            if !gone_if_empty(fs, boundary, level) {
+                break;
+            }
+            match level.parent() {
+                Some(up) => level = up,
+                None => break,
+            }
+        }
+    }
+}
+
+/// Whether `dir` is now absent because it was already absent, or because it was an empty real
+/// directory strictly under `boundary` and this call removed it. `false` — stop walking up — for a
+/// dir holding anything, a symlink or a file at that name, the boundary itself, anything outside
+/// it, and a removal that failed.
+fn gone_if_empty(fs: &dyn FsOps, boundary: &Path, dir: &Path) -> bool {
+    if dir == boundary || !dir.starts_with(boundary) {
+        return false;
+    }
+    match fs.path_kind(dir) {
+        Ok(None) => true,
+        Ok(Some(PathKind::Dir)) => {
+            fs.read_dir(dir).is_ok_and(|entries| entries.is_empty())
+                && fs.remove_dir_all(dir).is_ok()
+        }
+        // A symlink or a plain file at that name was never a folder topos made.
+        _ => false,
+    }
+}
+
 /// A project pick names an agent whose harness reads no project hook: the line for it. Under
 /// `~` a trigger-less harness has nothing to register anywhere, and nothing to say.
 fn absence_at(slug: &str, scope: &TriggerScope) -> Option<HookAbsence> {
@@ -187,6 +245,10 @@ mod tests {
             self.files
                 .borrow_mut()
                 .insert(path.to_path_buf(), bytes.to_vec());
+            Ok(())
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.files.borrow_mut().remove(path);
             Ok(())
         }
     }
