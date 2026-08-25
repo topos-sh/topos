@@ -140,13 +140,31 @@ export async function loader({ request }: LoaderFunctionArgs) {
   };
 }
 
-/** The lookup belt's own in-page line. A refusal a PERSON meets has to be a sentence on the form
- * they are standing at, with the wait in it — the house fault screen says nothing they can act
- * on, and mistyping a code is the commonest way to arrive here. */
+/** The guessing belt's own in-page line, on whichever arm ran the person out of tokens. A refusal
+ * a PERSON meets has to be a sentence on the form they are standing at, with the wait in it — the
+ * house fault screen says nothing they can act on, and mistyping a code is the commonest way to
+ * arrive here. */
 const TOO_MANY_LOOKUPS = "Too many attempts — wait a few seconds and try again";
 
 const REQUEST_GONE =
   "That request expired or was already handled — nothing was approved. Ask the device to start again.";
+
+/**
+ * The answer a DECISION arm gives when the typed code resolved nothing — expired, already
+ * handled, or never a code at all. It is the only shape a guess can take on `approve` and
+ * `deny`, so it is where those two arms pay the belt.
+ *
+ * A decision on a code that RESOLVES costs nothing: the card was already in front of the person,
+ * and the act of deciding it is not a guess — which is why ten mistyped lookups must never lock
+ * out the approve of the request on screen. A loop of guesses pays for every miss instead, and
+ * meets the same wall the lookup does, in the same words: the two doors share one bucket, so
+ * spreading a scan across both buys nothing.
+ */
+function decisionMissed(actor: UserActor) {
+  return allowVerifyLookup(actor.userId)
+    ? data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 })
+    : data({ kind: "refused" as const, error: TOO_MANY_LOOKUPS }, { status: 429 });
+}
 
 /** Parse the chooser's posted pick into the ceremony's choice. Null = the invite-token
  * pre-bound arm (valid only while the flow's token binds — the fence decides). */
@@ -265,7 +283,7 @@ export async function action({ request }: ActionFunctionArgs) {
       choice,
     );
     if (approved === null) {
-      return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
+      return decisionMissed(actor);
     }
     if (approved.outcome === "taken") {
       // The whole transaction rolled back — the flow is still pending, so re-resolve the card
@@ -309,7 +327,7 @@ export async function action({ request }: ActionFunctionArgs) {
     display: actor.display,
   });
   if (denied === null) {
-    return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
+    return decisionMissed(actor);
   }
   if (loopback !== null && device !== null && denied.flowChallenge === device) {
     throw redirect(loopbackReturn(loopback, "denied"));
