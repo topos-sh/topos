@@ -1,6 +1,6 @@
 import type { McpGatewayView } from "@/components/skill/mcp-gateway";
 import type { MemberActor } from "@/lib/auth/guards.server";
-import { mcpSignInState, mcpToolsView, mcpUsageWindow } from "@/lib/db/queries.gateway.server";
+import { mcpSignInState, mcpToolsView, mcpUsageSessions } from "@/lib/db/queries.gateway.server";
 import { gatewayLane } from "@/lib/gateway/client.server";
 
 /**
@@ -19,6 +19,9 @@ export async function mcpGatewayView(
     displayName: string;
     authMode: string | null;
   },
+  /** Which page of the Usage table to read — the `?page=` the person is standing on. Out-of-range
+   *  numbers are clamped by the read, so a hand-typed one never renders an empty table. */
+  opts: { usagePage?: number } = {},
 ): Promise<McpGatewayView | null> {
   if (gatewayLane() === null) {
     return null;
@@ -26,7 +29,7 @@ export async function mcpGatewayView(
   const [signIn, tools, usage] = await Promise.all([
     mcpSignInState(actor, server.serverId),
     mcpToolsView(actor, server.serverId),
-    mcpUsageWindow(actor, server.serverId),
+    mcpUsageSessions(actor, server.serverId, { page: opts.usagePage }),
   ]);
   // Resolution mirrors the gateway's own: a person's own sign-in answers first, the workspace
   // service account second. The state line names the one a call would actually carry.
@@ -39,6 +42,6 @@ export async function mcpGatewayView(
     canConnectWorkspace: actor.role === "owner" && signIn.workspace === null,
     mode: tools.mode,
     tools: tools.tools,
-    usage: usage.events,
+    usage,
   };
 }

@@ -125,14 +125,22 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // THE GATEWAY'S HALF of a connected server's page — the sign-in, the tool policy and the call
   // ledger. `null` on a deployment that runs no gateway (and on every skill), and the page renders
   // nothing rather than a panel promising a capability this install does not have.
+  // `?page=` is the Usage table's page, and the only query this page reads. Out-of-range and
+  // unparseable numbers are the read's problem, not the route's — it clamps rather than 404s, so a
+  // hand-edited URL lands on a real page instead of an empty table that reads as "no calls".
+  const usagePage = Number.parseInt(new URL(request.url).searchParams.get("page") ?? "", 10);
   const gateway =
     server === null
       ? null
-      : await mcpGatewayView(memberActor, {
-          serverId: server.serverId,
-          displayName: server.displayName,
-          authMode: server.authMode,
-        });
+      : await mcpGatewayView(
+          memberActor,
+          {
+            serverId: server.serverId,
+            displayName: server.displayName,
+            authMode: server.authMode,
+          },
+          { usagePage: Number.isNaN(usagePage) ? 1 : usagePage },
+        );
 
   // THE VIEWER'S OWN ROUTE for this server — rendered only where the choice (or the mandate that
   // took it) can matter: an addressable server, a deployment whose delivery hands out gateway

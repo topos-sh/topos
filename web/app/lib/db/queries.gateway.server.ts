@@ -348,62 +348,117 @@ export async function setMcpGatewayRoute(
 
 // ── Usage ────────────────────────────────────────────────────────────────────────────────────
 
-/** One call through the gateway, as the Usage table renders it. */
-export interface McpUsageRow {
-  id: number;
+/**
+ * ONE MACHINE'S WHOLE HISTORY with one server, as the Usage table renders it.
+ *
+ * The ledger is per-CALL, and a working agent makes hundreds of them — the raw list rendered a
+ * hundred visually identical lines and told a reader nothing they could act on. A row here is one
+ * SESSION (a machine's login), which is the unit a person can actually do something about: they
+ * can find that machine, or end that session.
+ */
+export interface McpUsageSessionRow {
+  /** The session — the row's identity, and what the Sessions page calls the same machine. */
+  sessionId: string;
   /** Who called — the display of the person whose session it was, or a stand-in for a gone account. */
   person: string;
   /** Which machine — the session's own display label. */
   machine: string;
-  toolName: string | null;
-  method: string;
-  outcome: string;
-  createdAtMs: number;
+  /** Every call this session made through the gateway to this server. */
+  calls: number;
+  /** How many ended `ok`, and how many ended any other way. The two add up to `calls`. */
+  ok: number;
+  failed: number;
+  /** The distinct tools this session called, alphabetical. EMPTY where the ledger holds only
+   *  non-tool methods (initialize, a listing) — the table says so once per row rather than
+   *  carrying a column of dashes. */
+  tools: string[];
+  firstCallMs: number;
+  lastCallMs: number;
 }
 
-export interface McpUsageWindow {
-  events: McpUsageRow[];
-  /** True when older calls exist beyond the window — recorded, just not shown. */
-  hasMore: boolean;
+export interface McpUsagePage {
+  sessions: McpUsageSessionRow[];
+  /** 1-based, and already CLAMPED into range: a page number past the end reads the last page. */
+  page: number;
+  /** At least 1, even with nothing to show — a reader is never on "page 1 of 0". */
+  pageCount: number;
+  /** Every session that has ever called this server, not just the ones on this page. */
+  total: number;
 }
 
-/** The usage window's ceiling — the audit reader's number, for the same reason. */
-export const MCP_USAGE_MAX_LIMIT = 100;
+/** One page of the Usage table. A number, not a "recent window" — the ledger is reachable whole. */
+export const MCP_USAGE_PAGE_SIZE = 25;
 
 /**
- * THE LAST CALLS through the gateway for one server, newest first, bounded with the same +1 probe
- * the audit windows use so a full window can honestly say there are older ones. The person and the
- * machine are joined from THIS tier's rows — the gateway records ids, and displays are ours.
+ * THE USAGE TABLE'S ONE READ — every session that has called this server, one row each, newest
+ * activity first, a page at a time.
+ *
+ * Grouping is by (session, person) rather than session alone: a session is minted for exactly one
+ * person, so this is one row per session, and it can never blend two people's calls into a row
+ * that names one of them. The person and the machine are joined from THIS tier's rows — the
+ * gateway records ids, and displays are ours.
+ *
+ * The count is taken first so the page number can be clamped before the offset is spent: asking
+ * for page 9 of a 3-page ledger reads page 3, never an empty table that looks like "no calls".
  */
-export async function mcpUsageWindow(
+export async function mcpUsageSessions(
   actor: MemberActor,
   serverId: string,
-  opts: { limit?: number } = {},
-): Promise<McpUsageWindow> {
-  const limit = Math.min(Math.max(opts.limit ?? MCP_USAGE_MAX_LIMIT, 1), MCP_USAGE_MAX_LIMIT);
+  opts: { page?: number } = {},
+): Promise<McpUsagePage> {
+  const requested =
+    opts.page !== undefined && Number.isFinite(opts.page) ? Math.max(1, Math.floor(opts.page)) : 1;
+  const counted = await getDb().execute(sql`
+    SELECT count(*)::int AS total
+    FROM (
+      SELECT 1 FROM gateway.usage_event
+      WHERE workspace_id = ${actor.workspaceId} AND server_id = ${serverId}
+      GROUP BY session_id, user_id
+    ) grouped
+  `);
+  const total = Number((counted.rows[0] as { total: number } | undefined)?.total ?? 0);
+  const pageCount = Math.max(1, Math.ceil(total / MCP_USAGE_PAGE_SIZE));
+  const page = Math.min(requested, pageCount);
+  if (total === 0) {
+    return { sessions: [], page, pageCount, total };
+  }
   const rows = await getDb().execute(sql`
-    SELECT e.id, e.tool_name, e.method, e.outcome,
-           (extract(epoch from e.created_at) * 1000)::bigint AS created_at_ms,
+    WITH per_session AS (
+      SELECT e.session_id, e.user_id,
+             count(*)::int AS calls,
+             count(*) FILTER (WHERE e.outcome = 'ok')::int AS ok,
+             count(*) FILTER (WHERE e.outcome <> 'ok')::int AS failed,
+             array_agg(DISTINCT e.tool_name ORDER BY e.tool_name)
+               FILTER (WHERE e.tool_name IS NOT NULL) AS tools,
+             min(e.created_at) AS first_at,
+             max(e.created_at) AS last_at
+      FROM gateway.usage_event e
+      WHERE e.workspace_id = ${actor.workspaceId} AND e.server_id = ${serverId}
+      GROUP BY e.session_id, e.user_id
+    )
+    SELECT g.session_id, g.calls, g.ok, g.failed, g.tools,
+           (extract(epoch from g.first_at) * 1000)::bigint AS first_call_ms,
+           (extract(epoch from g.last_at) * 1000)::bigint AS last_call_ms,
            -- The display rule, spelled the way every other raw-SQL reader here spells it: the
            -- profile name, else the email, else a stand-in for an account that is gone.
            COALESCE(NULLIF(btrim(u.name), ''), u.email, 'former member') AS person,
            COALESCE(s.display_name, 'a removed machine') AS machine
-    FROM gateway.usage_event e
-    LEFT JOIN web."user" u ON u.id = e.user_id
-    LEFT JOIN web.cli_session s ON s.id = e.session_id
-    WHERE e.workspace_id = ${actor.workspaceId} AND e.server_id = ${serverId}
-    ORDER BY e.id DESC
-    LIMIT ${limit + 1}
+    FROM per_session g
+    LEFT JOIN web."user" u ON u.id = g.user_id
+    LEFT JOIN web.cli_session s ON s.id = g.session_id
+    ORDER BY g.last_at DESC, g.session_id DESC
+    LIMIT ${MCP_USAGE_PAGE_SIZE} OFFSET ${(page - 1) * MCP_USAGE_PAGE_SIZE}
   `);
-  const all = (rows.rows as Record<string, unknown>[]).map((row) => ({
-    id: Number(row.id),
+  const sessions = (rows.rows as Record<string, unknown>[]).map((row) => ({
+    sessionId: row.session_id as string,
     person: row.person as string,
     machine: row.machine as string,
-    toolName: (row.tool_name as string | null) ?? null,
-    method: row.method as string,
-    outcome: row.outcome as string,
-    createdAtMs: Number(row.created_at_ms),
+    calls: Number(row.calls),
+    ok: Number(row.ok),
+    failed: Number(row.failed),
+    tools: (row.tools as string[] | null) ?? [],
+    firstCallMs: Number(row.first_call_ms),
+    lastCallMs: Number(row.last_call_ms),
   }));
-  const hasMore = all.length > limit;
-  return { events: hasMore ? all.slice(0, limit) : all, hasMore };
+  return { sessions, page, pageCount, total };
 }

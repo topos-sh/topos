@@ -1,4 +1,4 @@
-import { Form, useActionData } from "react-router";
+import { Form, Link, useActionData } from "react-router";
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime } from "@/components/format";
 import { BusyFields, buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
@@ -26,14 +26,34 @@ export interface McpGatewayToolRow {
   selected: boolean;
 }
 
-export interface McpGatewayUsageRow {
-  id: number;
+/**
+ * ONE MACHINE'S WHOLE HISTORY with this server — one row per session, never one per call. A
+ * working agent makes hundreds of calls, and a hundred identical lines is not a record anybody can
+ * read; a session is the unit a person can act on (find that machine, end that session).
+ */
+export interface McpGatewayUsageSession {
+  sessionId: string;
   person: string;
   machine: string;
-  toolName: string | null;
-  method: string;
-  outcome: string;
-  createdAtMs: number;
+  calls: number;
+  /** How the calls ended. The two add up to `calls`. */
+  ok: number;
+  failed: number;
+  /** The distinct tools this session called, alphabetical — empty where the ledger holds only
+   *  non-tool methods (initialize, a listing), which the row says once instead of a dash column. */
+  tools: string[];
+  firstCallMs: number;
+  lastCallMs: number;
+}
+
+export interface McpGatewayUsage {
+  sessions: McpGatewayUsageSession[];
+  /** 1-based, already clamped into range by the read. */
+  page: number;
+  /** At least 1, so a reader is never on "page 1 of 0". */
+  pageCount: number;
+  /** Every session that has called this server, not just the ones on this page. */
+  total: number;
 }
 
 export interface McpGatewayView {
@@ -49,8 +69,8 @@ export interface McpGatewayView {
   canConnectWorkspace: boolean;
   mode: "all" | "selected";
   tools: McpGatewayToolRow[];
-  /** The most recent calls, newest first — a bounded window, not the whole ledger. */
-  usage: McpGatewayUsageRow[];
+  /** The whole ledger, aggregated per session and paged — newest activity first. */
+  usage: McpGatewayUsage;
 }
 
 /**
@@ -318,48 +338,115 @@ function ToolsSection({ view }: { view: McpGatewayView }) {
   );
 }
 
-/** USAGE. Who called, from which machine, which tool, how it ended, when. Never an argument and
- *  never a result — the ledger records that a call happened, not what was in it. */
+/**
+ * THE ONE LINE ABOVE THE TABLE — how much there is, and where in it you are standing. The count is
+ * the WHOLE ledger, not this page: a reader who sees five rows must not read that as five machines.
+ */
+function usageSummary(usage: McpGatewayUsage): string {
+  const sessions = usage.total === 1 ? "1 session" : `${usage.total} sessions`;
+  if (usage.pageCount > 1) {
+    return `${sessions}, newest activity first — page ${usage.page} of ${usage.pageCount}.`;
+  }
+  return `${sessions}, newest activity first.`;
+}
+
+/** Prev/next, and nothing else — the position is on the summary line, said once. Rendered only
+ *  where there is a second page to go to. */
+function UsagePager({ usage }: { usage: McpGatewayUsage }) {
+  if (usage.pageCount <= 1) {
+    return null;
+  }
+  return (
+    <nav
+      aria-label="Usage pages"
+      data-testid="mcp-usage-pager"
+      className="flex flex-wrap items-center gap-2 border-line-soft border-t pt-3"
+    >
+      {usage.page > 1 && (
+        <Link to={`?page=${usage.page - 1}`} className={buttonClasses("quiet")}>
+          Previous
+        </Link>
+      )}
+      {usage.page < usage.pageCount && (
+        <Link to={`?page=${usage.page + 1}`} className={buttonClasses("quiet")}>
+          Next
+        </Link>
+      )}
+    </nav>
+  );
+}
+
+/**
+ * USAGE. Who called, from which machine, how many times, how it ended, which tools, over what
+ * stretch. Never an argument and never a result — the ledger records that a call happened, not
+ * what was in it.
+ *
+ * ONE ROW PER SESSION. Per-call rows were the honest shape of the table and the wrong one to read:
+ * a single agent session filled the page with visually identical lines, all naming the same person
+ * and the same machine, and a `—` under Tool on every one of them because most calls are not tool
+ * calls. Aggregated, the row answers what a person came here to ask — which machines are using
+ * this, how hard, and is anything failing — and the page control makes the older ones reachable
+ * rather than silently dropped.
+ */
 function UsageSection({ view }: { view: McpGatewayView }) {
+  const usage = view.usage;
   return (
     <section aria-labelledby="mcp-usage-heading" className="space-y-3">
       <SectionHeading>
         <span id="mcp-usage-heading">Usage</span>
       </SectionHeading>
-      <Card className="px-4 py-3">
-        {view.usage.length === 0 ? (
+      <Card className="space-y-3 px-4 py-3">
+        {usage.sessions.length === 0 ? (
           <p className="text-faint text-sm" data-testid="mcp-usage-empty">
             No calls yet.
           </p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm" data-testid="mcp-usage-table">
-              <thead>
-                <tr className="text-dim text-xs">
-                  <th className="py-1 pr-3 text-left font-medium">Person</th>
-                  <th className="py-1 pr-3 text-left font-medium">Machine</th>
-                  <th className="py-1 pr-3 text-left font-medium">Tool</th>
-                  <th className="py-1 pr-3 text-left font-medium">Outcome</th>
-                  <th className="py-1 text-left font-medium">When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {view.usage.map((row) => (
-                  <tr key={row.id} className="border-line-soft border-t">
-                    <td className="py-1.5 pr-3 text-ink">{row.person}</td>
-                    <td className="py-1.5 pr-3 text-dim">{row.machine}</td>
-                    <td className="py-1.5 pr-3 font-mono text-[13px] text-dim">
-                      {row.toolName ?? "—"}
-                    </td>
-                    <td className="py-1.5 pr-3 font-mono text-[13px] text-dim">{row.outcome}</td>
-                    <td className="py-1.5 text-faint text-xs">
-                      {relativeTime(new Date(row.createdAtMs))}
-                    </td>
+          <>
+            <p className="text-faint text-xs" data-testid="mcp-usage-summary">
+              {usageSummary(usage)}
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm" data-testid="mcp-usage-table">
+                <thead>
+                  <tr className="text-dim text-xs">
+                    <th className="py-1 pr-3 text-left font-medium">Person</th>
+                    <th className="py-1 pr-3 text-left font-medium">Machine</th>
+                    <th className="py-1 pr-3 text-left font-medium">Calls</th>
+                    <th className="py-1 pr-3 text-left font-medium">Outcome</th>
+                    <th className="py-1 pr-3 text-left font-medium">Tools</th>
+                    <th className="py-1 pr-3 text-left font-medium">First call</th>
+                    <th className="py-1 text-left font-medium">Last call</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {usage.sessions.map((row) => (
+                    <tr
+                      key={row.sessionId}
+                      data-testid={`mcp-usage-${row.sessionId}`}
+                      className="border-line-soft border-t"
+                    >
+                      <td className="py-1.5 pr-3 text-ink">{row.person}</td>
+                      <td className="py-1.5 pr-3 text-dim">{row.machine}</td>
+                      <td className="py-1.5 pr-3 text-dim tabular-nums">{row.calls}</td>
+                      <td className="py-1.5 pr-3 text-dim">
+                        {row.ok} ok · {row.failed} failed
+                      </td>
+                      <td className="py-1.5 pr-3 font-mono text-[13px] text-dim">
+                        {row.tools.length === 0 ? "—" : row.tools.join(", ")}
+                      </td>
+                      <td className="py-1.5 pr-3 text-faint text-xs">
+                        {relativeTime(new Date(row.firstCallMs))}
+                      </td>
+                      <td className="py-1.5 text-faint text-xs">
+                        {relativeTime(new Date(row.lastCallMs))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <UsagePager usage={usage} />
+          </>
         )}
       </Card>
     </section>

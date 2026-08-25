@@ -8,7 +8,6 @@ import {
   type ScratchDb,
   seatUser,
   seedBundle,
-  seedSession,
   seedUser,
 } from "./helpers/scratch-db";
 
@@ -22,8 +21,9 @@ import {
  *  - the policy hangs off the CONNECTION: disconnecting takes it and its selections with it, which
  *    is a database cascade rather than cleanup code somebody has to remember to write;
  *  - sign-in resolution is the gateway's own — the person's credential first, the workspace
- *    service account second — and the page never sees more than metadata;
- *  - the usage window is newest-first and bounded with the +1 probe the audit windows use.
+ *    service account second — and the page never sees more than metadata.
+ *
+ * The Usage table has its own suite (gateway-usage.test.ts) — it is a read of its own shape.
  */
 
 let db: ScratchDb;
@@ -87,29 +87,6 @@ async function seedTool(serverId: string, name: string, offered = true) {
   );
 }
 
-async function seedUsage(
-  serverId: string,
-  userId: string,
-  sessionId: string,
-  toolName: string | null,
-  outcome: string,
-) {
-  await db.q(
-    `INSERT INTO gateway.usage_event
-       (workspace_id, server_id, session_id, user_id, tool_name, method, outcome, duration_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 12)`,
-    [
-      ws,
-      serverId,
-      sessionId,
-      userId,
-      toolName,
-      toolName === null ? "initialize" : "tools/call",
-      outcome,
-    ],
-  );
-}
-
 beforeAll(async () => {
   db = await createScratchDb("web_gateway_panel");
   await applyGatewayDdl(db.url);
@@ -118,7 +95,6 @@ beforeAll(async () => {
   await seatUser(db, ws, MEMBER, "member");
   await seedUser(db, OTHER, "Ola Other", "ola@example.com");
   await seatUser(db, ws, OTHER, "member");
-  await seedSession(db, "cs_laptop", ws, MEMBER, "active", "Mo's laptop");
 
   await seedServer(SERVER, "com.example/gated");
   await connect("b_gated", "gated-server", SERVER);
@@ -280,39 +256,5 @@ describe("the sign-in state", () => {
     );
     const state = await (await dal()).mcpSignInState(member(), SERVER);
     expect(state.mine?.credentialId).toBe(CRED_MINE);
-  });
-});
-
-describe("the usage window", () => {
-  it("is empty before anything has been called", async () => {
-    const window = await (await dal()).mcpUsageWindow(member(), OTHER_SERVER);
-    expect(window).toEqual({ events: [], hasMore: false });
-  });
-
-  it("names the person and the machine, newest first", async () => {
-    await seedUsage(SERVER, MEMBER, "cs_laptop", null, "ok");
-    await seedUsage(SERVER, MEMBER, "cs_laptop", "search", "ok");
-    await seedUsage(SERVER, MEMBER, "cs_laptop", "create_issue", "denied_tool");
-
-    const window = await (await dal()).mcpUsageWindow(member(), SERVER);
-    expect(window.hasMore).toBe(false);
-    expect(window.events.map((row) => row.toolName)).toEqual(["create_issue", "search", null]);
-    expect(window.events[0]?.person).toBe("Mo Member");
-    expect(window.events[0]?.machine).toBe("Mo's laptop");
-    expect(window.events[0]?.outcome).toBe("denied_tool");
-    expect(window.events[0]?.createdAtMs).toBeGreaterThan(0);
-  });
-
-  it("bounds the window and says so with the +1 probe", async () => {
-    const window = await (await dal()).mcpUsageWindow(member(), SERVER, { limit: 2 });
-    expect(window.events).toHaveLength(2);
-    expect(window.hasMore).toBe(true);
-  });
-
-  it("stands in for a gone account and a removed machine rather than dropping the row", async () => {
-    await seedUsage(SERVER, "u_ghost", "cs_ghost", "search", "upstream_error");
-    const window = await (await dal()).mcpUsageWindow(member(), SERVER, { limit: 1 });
-    expect(window.events[0]?.person).toBe("former member");
-    expect(window.events[0]?.machine).toBe("a removed machine");
   });
 });
