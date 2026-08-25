@@ -49,7 +49,19 @@ const HOOK_TIMEOUT_SECS: u64 = 60;
 /// a successful registration honestly reports `Active`. Ownership keys on the sentinel ALONE, so
 /// changing the command's spelling stays free: a re-arm migrates any earlier spelling in place.
 /// Marker schema 2 = the async, every-SessionStart-source entry.
-pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
+pub(crate) static SPEC: JsonHooksSpec = USER_SPEC;
+
+/// The same trigger in ONE PROJECT: `<project>/.claude/settings.local.json` — Claude Code's
+/// personal, uncommitted project settings file — under the same marker, the same command and the
+/// same machinery as [`SPEC`]. Only the file name differs, so a person's committed
+/// `.claude/settings.json` is never edited. Built by
+/// [`crate::triggers::adapter_for_slug_at`] for a project pick.
+pub(crate) static PROJECT_SPEC: JsonHooksSpec = JsonHooksSpec {
+    config_file: "settings.local.json",
+    ..USER_SPEC
+};
+
+const USER_SPEC: JsonHooksSpec = JsonHooksSpec {
     slug: "claude-code",
     marker_id: "topos:claude-code:currency:2",
     config_file: "settings.json",

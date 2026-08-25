@@ -349,23 +349,24 @@ fn run_command(
             // rather than a thing every code path must remember not to do.
             progress: crate::progress::silent(),
         };
-        // The snapshot from local state; the trigger rows from the read-only probe at this root
-        // (the one layer holding the real config port + $HOME) — the same layering the arming
-        // receipts use, minus every write.
+        // The snapshot from local state; the trigger rows from the read-only probe over the
+        // EFFECTIVE PICK at this root (the one layer holding the real config port + $HOME): the
+        // machine pick under `~` for `-g` and outside any project, a checkout's own pick at its
+        // own hook files inside one. Nothing probes detection — an agent nobody picked is not a
+        // row.
         let result = ops::status_snapshot(&ctx, view).map(|mut data| {
-            if let Some(r) = &ctx.roots {
-                data.triggers = ops::probe_detected(
-                    &r.home,
-                    r.cwd.as_deref(),
-                    ctx.triggers.active(),
-                    &fs,
-                    &fs,
-                    &ops::EvidenceView {
-                        agents: &crate::hook_evidence::read(&fs, &ctx.layout).agents,
-                        now_ms: i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX),
-                    },
-                );
-            }
+            let project = match view {
+                ops::ScopeView::Machine => None,
+                ops::ScopeView::Here | ops::ScopeView::All => ops::agent_hooks::cwd_project(&ctx),
+            };
+            data.triggers = ops::agent_hooks::probe_effective(
+                &ctx,
+                project.as_deref(),
+                &ops::EvidenceView {
+                    agents: &crate::hook_evidence::read(&fs, &ctx.layout).agents,
+                    now_ms: i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX),
+                },
+            );
             data
         });
         return finish_status(json, cmd_name, result, bare, argv);
@@ -454,6 +455,21 @@ fn run_command(
             .map(|h| crate::ctx::AgentRoots::new(PathBuf::from(h), std::env::current_dir().ok())),
         progress: &*progress,
     };
+
+    // The one-shot migration seed: a machine that predates the agents pick carries its answer in
+    // the hooks an earlier build registered and the MCP entries it placed. Folded into the machine
+    // pick here, on the first verb that composes the full context, so nothing standing changes
+    // silently on upgrade; said once on stderr, except under the quiet hook sweep (whose streams
+    // are the harness's — `topos agents` shows the pick either way).
+    if let Some(agents) = crate::agents_pick::seed_from_legacy(&fs, &ctx.layout)
+        && !quiet_sweep
+    {
+        errln!(
+            "Using {} on this machine (from the auto-update hooks already registered). Change: \
+             topos agents add|remove -g",
+            agents.join(", ")
+        );
+    }
 
     // The CONTRIBUTE connector — the one op (`revert`) that builds its write transport from a base
     // URL plus the credential its caller resolved, rather than from a session lane.
@@ -634,18 +650,6 @@ fn run_command(
                 loopback_plan,
                 || ops::session_login(&ctx, &connectors, address.as_deref(), holds_listener),
             );
-            // The breadth arming sweep + the built-in skill ride the completed login (the
-            // acceptance event is the trigger-arming moment), exactly as on `follow`'s receipt.
-            let result = result.map(|mut data| {
-                if data.currency.is_some() {
-                    let triggers = breadth_arm(&ctx, harness.as_ref(), &fs, data.currency.as_ref());
-                    data.triggers = triggers;
-                    if let Err(e) = ops::ensure_builtin(&ctx) {
-                        let _ = diag.note(cmd_name, &e);
-                    }
-                }
-                data
-            });
             finish_session_login(json, cmd_name, result, &diag)
         }
         // `logout [<workspace>|--all]` — end session(s); immediate (a fresh `login` is the way
@@ -727,19 +731,6 @@ fn run_command(
                     global,
                     &selection,
                 );
-                // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
-                // other adopt receipt (the same trigger-arming moment).
-                let result = result.map(|mut added| {
-                    if added.data.currency.is_some() {
-                        let triggers =
-                            breadth_arm(&ctx, harness.as_ref(), &fs, added.data.currency.as_ref());
-                        added.data.triggers = triggers;
-                        if let Err(e) = ops::ensure_builtin(&ctx) {
-                            let _ = diag.note(cmd_name, &e);
-                        }
-                    }
-                    added
-                });
                 return finish_add_mcp(json, cmd_name, result, &diag);
             }
             // The `-s`/`-a`/`--dest` SELECTORS (single, multiple, or the `*` fan-outs) narrow a
@@ -766,24 +757,6 @@ fn run_command(
                     global,
                     yes,
                 );
-                let result = result.map(|outcome| match outcome {
-                    // The breadth arming sweep + the built-in ride an APPLIED import exactly as
-                    // they ride any other adopt receipt (the same trigger-arming moment).
-                    ops::AddManyOutcome::Applied(mut items) => {
-                        if items.iter().any(|d| d.currency.is_some()) {
-                            let active = items.iter().find_map(|d| d.currency.as_ref());
-                            let triggers = breadth_arm(&ctx, harness.as_ref(), &fs, active);
-                            if let Err(e) = ops::ensure_builtin(&ctx) {
-                                let _ = diag.note(cmd_name, &e);
-                            }
-                            if let Some(first) = items.first_mut() {
-                                first.triggers = triggers;
-                            }
-                        }
-                        ops::AddManyOutcome::Applied(items)
-                    }
-                    described => described,
-                });
                 return finish_add_many(json, cmd_name, result, &diag);
             }
             // Whether the invocation SAID what kind it is adding — the one input the local-path
@@ -874,26 +847,6 @@ fn run_command(
                         &selection,
                         kind,
                     );
-                    let result = result.map(|outcome| match outcome {
-                        // The breadth arming sweep + the built-in ride an APPLIED add exactly as
-                        // they ride an adopt receipt (the same trigger-arming moment).
-                        ops::AddRefOutcome::Applied { mut data, messages } => {
-                            if data.currency.is_some() {
-                                let triggers = breadth_arm(
-                                    &ctx,
-                                    harness.as_ref(),
-                                    &fs,
-                                    data.currency.as_ref(),
-                                );
-                                data.triggers = triggers;
-                                if let Err(e) = ops::ensure_builtin(&ctx) {
-                                    let _ = diag.note(cmd_name, &e);
-                                }
-                            }
-                            ops::AddRefOutcome::Applied { data, messages }
-                        }
-                        described => described,
-                    });
                     return finish_add_reference(json, cmd_name, result, &diag);
                 }
                 // A REFERENCE-SHAPED token the grammar refused (`@x`, a malformed pin, a
@@ -1075,20 +1028,6 @@ fn run_command(
                                         if let Some(note) = note {
                                             ops::push_note(&mut data, note);
                                         }
-                                        // The arming sweep + the built-in ride an APPLIED add,
-                                        // exactly as on the spelled-out reference arm above.
-                                        if data.currency.is_some() {
-                                            let triggers = breadth_arm(
-                                                &ctx,
-                                                harness.as_ref(),
-                                                &fs,
-                                                data.currency.as_ref(),
-                                            );
-                                            data.triggers = triggers;
-                                            if let Err(e) = ops::ensure_builtin(&ctx) {
-                                                let _ = diag.note(cmd_name, &e);
-                                            }
-                                        }
                                         ops::AddRefOutcome::Applied { data, messages }
                                     }
                                     described => described,
@@ -1260,21 +1199,6 @@ fn run_command(
                     Err(ClientError::InvalidArgument(msg))
                 }
             };
-            // The breadth arming sweep rides the adopt receipt: when the active adapter armed its
-            // own trigger (`currency`), every OTHER detected agent's trigger is armed here at the
-            // composition root — the one layer holding the real ports + `$HOME`. The built-in
-            // `topos` skill lands at the same moment (best-effort — an install must not fail over
-            // it), so a freshly wired harness knows how to drive the tool.
-            let result = result.map(|mut data| {
-                if data.currency.is_some() {
-                    let triggers = breadth_arm(&ctx, harness.as_ref(), &fs, data.currency.as_ref());
-                    data.triggers = triggers;
-                    if let Err(e) = ops::ensure_builtin(&ctx) {
-                        let _ = diag.note(cmd_name, &e);
-                    }
-                }
-                data
-            });
             finish(json, cmd_name, result, render::add_tty, &diag)
         }
         Command::Invite {
@@ -3901,36 +3825,6 @@ fn claim_grammar(
         ));
     }
     Ok(path)
-}
-
-/// The breadth arming sweep, run at the composition root — the one layer holding the real ports
-/// (`RealFs` is both the `ConfigStore` and the `CommandRunner`) and the resolved machine roots.
-/// `None` roots (no `$HOME`) arms nothing: detection needs a home, and the active adapter's own
-/// trigger was already armed by the verb — `active_report` is that outcome, recorded here with the
-/// rest.
-///
-/// UNCONDITIONAL, and deliberately so: a person who ran a verb that wires topos into their machine
-/// asked for exactly this, so no registration record gates it. What the record gets is the
-/// REFRESH — the sweep offers a trigger once per agent ever, and a verb that just answered for
-/// these agents is what it must see (`crate::trigger_record`).
-fn breadth_arm(
-    ctx: &crate::ctx::Ctx<'_>,
-    active: &dyn HarnessAdapter,
-    fs: &RealFs,
-    active_report: Option<&topos_types::TriggerReport>,
-) -> Vec<topos_types::TriggerReport> {
-    let Some(roots) = &ctx.roots else {
-        return Vec::new();
-    };
-    let reports = ops::arm_detected(
-        &roots.home,
-        roots.cwd.as_deref(),
-        active.id().slug(),
-        fs,
-        fs,
-    );
-    crate::trigger_record::record_reports(ctx, active_report.into_iter().chain(&reports));
-    reports
 }
 
 /// Build the PLACEMENT adapter for `id`. Adding a harness is ONE new match arm — no caller change.

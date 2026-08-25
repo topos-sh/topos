@@ -10,7 +10,7 @@
 //! No consent gate (probed) — the file in place IS the live trigger, so a placement reports
 //! `Active` with no note owed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use topos_types::CurrencyKind;
 
@@ -59,6 +59,18 @@ pub(crate) fn in_config_home<'a>(config_home: &Path, cfg: &'a dyn ConfigStore) -
 
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> FileDrop<'a> {
     in_config_home(&registry::config_root(Root::Config, home), cfg)
+}
+
+/// The plugin's path in ONE PROJECT: `<project>/.opencode/plugin/topos.ts` — the singular
+/// `plugin/` dir, the same spelling the user-level adapter drops into (opencode loads it at both
+/// scopes, verified live).
+pub(crate) fn project_plugin_path(root: &Path) -> PathBuf {
+    root.join(".opencode").join("plugin").join("topos.ts")
+}
+
+/// The same plugin dropped into ONE PROJECT (see [`project_plugin_path`]).
+pub(crate) fn in_project<'a>(root: &Path, cfg: &'a dyn ConfigStore) -> FileDrop<'a> {
+    FileDrop::new(&SPEC, project_plugin_path(root), &plugin(), cfg)
 }
 
 #[cfg(test)]

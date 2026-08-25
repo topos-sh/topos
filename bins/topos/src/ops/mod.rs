@@ -23,6 +23,7 @@
 
 mod add;
 mod add_mcp;
+pub(crate) mod agent_hooks;
 mod arm;
 mod auth;
 mod builtin;
@@ -68,9 +69,7 @@ pub(crate) use add::{
 pub(crate) use add_mcp::{McpAdded, add_mcp};
 #[cfg(test)]
 pub(crate) use arm::INERT_TRIGGER;
-pub(crate) use arm::{
-    EvidenceView, Scrubbed, Triggers, arm_detected, probe_detected, register_new_detected,
-};
+pub(crate) use arm::{EvidenceView, Scrubbed, Triggers};
 pub(crate) use builtin::{
     ensure_builtin, is_builtin, placement_dirs as builtin_placement_dirs, restore_builtin,
     skill_md as builtin_skill_md,

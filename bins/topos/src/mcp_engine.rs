@@ -1221,6 +1221,11 @@ pub(crate) fn detach_bundle_rows(io: &ScopeIo<'_>, bundle_id: &str) -> Vec<Messa
     }
 }
 
+/// The MCP converge lock's file name under the scope's `locks/` — the one writer of every
+/// `entries.json` and of `state/config_custody.json`, so a reader that must see a settled
+/// custody picture (the agents-pick seed) takes the same lock.
+pub(crate) const MCP_LOCK_FILE: &str = "mcp.lock";
+
 /// The per-scope MCP converge lock (`locks/mcp.lock`, blocking): every entry point that runs the
 /// custody + config read-modify-write — the sweep's [`converge`] (which a targeted `update` and
 /// an `add` reach through the same narrowed reconcile) and [`remove_bundle`] — serializes on it,
@@ -1261,7 +1266,7 @@ fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, Message>
             ),
         ));
     }
-    io.fs.lock_exclusive(&locks.join("mcp.lock")).map_err(|e| {
+    io.fs.lock_exclusive(&locks.join(MCP_LOCK_FILE)).map_err(|e| {
         crate::message::failure(
             "MCP_LOCK_UNAVAILABLE",
             format!(

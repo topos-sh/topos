@@ -8,7 +8,6 @@ use serde_json::Value;
 use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{ClaudeCode, HarnessAdapter};
 use topos_types::persisted::Lock;
-use topos_types::{CurrencyKind, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::doc;
@@ -2332,7 +2331,7 @@ fn claude_skill(claude_home: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 #[test]
-fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothing() {
+fn add_recognizes_the_harness_and_installs_no_hook() {
     let h = Harness::new("cc-add");
     let user = Scratch::new("cc-home");
     let claude = claude_home(&user.0);
@@ -2355,9 +2354,11 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
         add.name, "pr-describe",
         "name is the directory basename, not frontmatter"
     );
-    let report = add.currency.expect("currency armed for a recognized skill");
-    assert_eq!(report.state, TriggerState::Active);
-    assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
+    assert!(
+        add.currency.is_none(),
+        "an add writes no hook — hooks follow the agents pick"
+    );
+    assert!(add.triggers.is_empty());
 
     // Adopt-in-place writes NOTHING into the skill dir — it is byte-identical.
     assert_eq!(
@@ -2366,14 +2367,16 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
         "the skill dir must stay byte-identical"
     );
 
-    // The hook landed in the harness settings.json (the only write outside ~/.topos/).
-    let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
+    // And nothing outside ~/.topos/: no settings.json, no built-in skill placed beside the
+    // adopted one.
     assert!(
-        settings.contains("topos install --quiet --hook claude-code"),
-        "hook command installed, carrying the dialect marker that opts Claude Code into the \
-         reload extension"
+        !claude.join("settings.json").exists(),
+        "the harness config is never opened by an add"
     );
-    assert!(settings.contains("# topos:currency"), "sentinel present");
+    assert!(
+        !claude.join("skills").join("topos").exists(),
+        "an add places no built-in skill"
+    );
 
     // The placement was recorded with the harness tag; the store carries the one record.
     let tracked = store_records(&ctx);

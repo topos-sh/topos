@@ -8,8 +8,11 @@
 //! byte).
 //!
 //! `--yes` deletes the built-in skill's copies, retires topos's own MCP config entries, deletes the
-//! `~/.topos/` tree via the fs seam, and LAST scrubs the auto-update triggers — the active
-//! harness's and then every other supported harness's (all reports surfaced honestly). The trigger
+//! `~/.topos/` tree via the fs seam, and LAST scrubs the user-level auto-update triggers — the
+//! active harness's and then every other supported harness's (all reports surfaced honestly). A
+//! PROJECT hook file (`.claude/settings.local.json`, `.cursor/hooks.json`, `.codex/hooks.json`,
+//! `.opencode/plugin/topos.ts` in the checkout the command ran in) is named by the describe and
+//! left in place: it is inert without the binary, and a teardown edits nothing in a checkout. The trigger
 //! scrubs go LAST because the deletions before them can fail, and **a teardown that dies halfway
 //! must not have disarmed a single agent on its way**: an agent left un-updated with nothing removed
 //! to show for it is the worst of both outcomes. The MCP scrub is the one destructive act that must
@@ -116,6 +119,15 @@ pub(crate) fn uninstall(
     // The MCP config files this machine's ownership ledger records entries in — read-only, and the
     // same split the apply acts on, so the preview promises exactly what the scrub does.
     let surfaces = mcp_surfaces(ctx);
+    // The hook files the checkout this command ran in holds, across the four project-capable
+    // harnesses and regardless of any pick — LISTED, never scrubbed: a project hook is inert
+    // without the binary, and a teardown edits nothing in a checkout.
+    let project_hook_files: Vec<String> = super::agent_hooks::cwd_project(ctx)
+        .map(|root| ctx.triggers.project_hook_files(&root))
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
 
     if !yes {
         return Ok(UninstallOutcome::Described {
@@ -127,6 +139,7 @@ pub(crate) fn uninstall(
                 builtin_dirs,
                 mcp_files: surfaces.owned,
                 mcp_drifted: surfaces.drifted,
+                project_hook_files,
             },
             yes_argv: vec![
                 "topos".to_owned(),
@@ -712,6 +725,109 @@ mod tests {
             harness.removed.get(),
             0,
             "the hook was never scrubbed either"
+        );
+    }
+
+    /// The describe names the checkout's PROJECT hook files — the four project-capable
+    /// harnesses', regardless of any pick — as left in place, and the apply never edits them: a
+    /// project hook is inert without the binary, and a teardown reaches nothing in a checkout.
+    #[test]
+    fn uninstall_describe_names_project_hook_files() {
+        let home = Scratch::new();
+        let user_home = Scratch::new();
+        let project = Scratch::new();
+        let root = project.0.canonicalize().unwrap();
+        std::fs::write(root.join("topos.toml"), b"").unwrap();
+        // Two project hooks, written exactly as a project pick writes them. No pick file exists
+        // anywhere: the listing is about what STANDS, never about what somebody wants.
+        let fs = RealFs;
+        let scope = topos_harness::triggers::TriggerScope::Project(root.clone());
+        for slug in ["claude-code", "codex"] {
+            topos_harness::triggers::adapter_for_slug_at(slug, &scope, &user_home.0, &fs, &fs)
+                .expect("a project trigger")
+                .install();
+        }
+        let claude_hook = root.join(".claude").join("settings.local.json");
+        let codex_hook = root.join(".codex").join("hooks.json");
+        let before = (
+            std::fs::read(&claude_hook).unwrap(),
+            std::fs::read(&codex_hook).unwrap(),
+        );
+
+        let ids = SeqIds::new("s");
+        let clock = FixedClock(1);
+        let harness = FakeHarness {
+            config: home.0.join("harness-settings.json"),
+            removed: Cell::new(0),
+        };
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let roots = || {
+            Some(crate::ctx::AgentRoots {
+                home: user_home.0.clone(),
+                cwd: Some(root.clone()),
+            })
+        };
+        // The describe: the machine's ports (the composition root's shape), read-only.
+        let ctx = Ctx {
+            roots: roots(),
+            ..ctx_with_triggers(
+                &fs,
+                &ids,
+                &clock,
+                &harness,
+                &plane,
+                &follow,
+                &home.0,
+                crate::ops::Triggers::machine(&harness, user_home.0.clone(), &fs, &fs),
+            )
+        };
+        let UninstallOutcome::Described { describe, .. } = uninstall(&ctx, None, false).unwrap()
+        else {
+            panic!("a bare uninstall describes")
+        };
+        assert_eq!(
+            describe.project_hook_files,
+            vec![
+                claude_hook.to_string_lossy().into_owned(),
+                codex_hook.to_string_lossy().into_owned(),
+            ]
+        );
+        assert!(
+            !describe
+                .trigger_artifacts
+                .iter()
+                .any(|row| row.starts_with(root.to_str().unwrap())),
+            "a project hook is never among the artifacts the scrub reaches: {:?}",
+            describe.trigger_artifacts
+        );
+
+        // The apply, over an explicit (empty) breadth so no ambient env can redirect a scrub:
+        // the sidecar goes, the project hooks stay byte-identical.
+        let none: Vec<Box<dyn TriggerAdapter>> = Vec::new();
+        let ctx = Ctx {
+            roots: roots(),
+            ..ctx_with_triggers(
+                &fs,
+                &ids,
+                &clock,
+                &harness,
+                &plane,
+                &follow,
+                &home.0,
+                crate::ops::Triggers::machine_of(&harness, &none),
+            )
+        };
+        let out = uninstall(&ctx, None, true).unwrap();
+        assert!(matches!(out, UninstallOutcome::Applied { .. }));
+        assert!(!home.0.exists(), "the sidecar tree is gone");
+        assert_eq!(
+            (
+                std::fs::read(&claude_hook).unwrap(),
+                std::fs::read(&codex_hook).unwrap()
+            ),
+            before,
+            "the project hooks are left in place, byte-identical"
         );
     }
 

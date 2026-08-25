@@ -23,14 +23,16 @@
 //! planners are infallible, so an unreadable pick file counts as no pick there (nothing placed,
 //! fail closed); [`effective`] hands the error to the verbs that show the pick.
 //!
-//! ## The migration seed (the seam)
+//! ## The migration seed
 //!
-//! An older machine holds no pick file; its registered auto-update hooks say which agents it
-//! used. The one-shot seed that writes the machine pick from that record lands in this module as
-//! `seed_from_trigger_record`, writing through [`write`] at [`PickScope::Machine`]; nothing here
-//! reads the record yet.
+//! An older machine holds no pick file; the auto-update hooks an earlier build registered
+//! (`state/trigger_registration.json`) and the MCP entries it placed (the machine store's
+//! config custody) say which agents it used. [`seed_from_legacy`] folds both into the machine
+//! pick ONCE — on the first verb of this build that composes the full context — so nothing
+//! standing changes silently on upgrade, then deletes the legacy record. It never overwrites a
+//! pick that exists.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -83,12 +85,12 @@ impl AgentsPick {
 
 /// Where a pick is written: the machine store, or one project checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "named by init -a and the agents verbs")
-)]
 pub(crate) enum PickScope {
     Machine,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "named by init -a and the agents verbs")
+    )]
     Project(PathBuf),
 }
 
@@ -142,10 +144,6 @@ pub(crate) fn read(fs: &dyn FsOps, path: &Path) -> Result<Option<AgentsPick>, Cl
 /// # Errors
 /// The [`validate`] refusals; [`sidecar::ensure_project_store`]'s containment refusal; the
 /// filesystem failure.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "written by init -a and the agents verbs")
-)]
 pub(crate) fn write(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -258,6 +256,103 @@ pub(crate) fn picked_slugs(ctx: &Ctx<'_>, project_dir: Option<&Path>) -> BTreeSe
     picked_harnesses(ctx, project_dir)
         .iter()
         .map(|h| h.slug.to_owned())
+        .collect()
+}
+
+/// The legacy trigger record's lock file name under `locks/` — an earlier build's one writer of
+/// the record. The seed holds it while it reads and deletes the record; the lock FILE stays (a
+/// stale lock file is inert).
+const LEGACY_LOCK: &str = "trigger_registration.lock";
+
+/// The legacy record, read for the one fact the seed needs: which agents had a hook registered.
+/// Every other field is ignored, and a document this build cannot parse reads as no rows.
+#[derive(Default, Deserialize)]
+struct LegacyRegistrations {
+    #[serde(default)]
+    agents: BTreeMap<String, LegacyRegistration>,
+}
+
+#[derive(Default, Deserialize)]
+struct LegacyRegistration {
+    #[serde(default)]
+    registered: bool,
+}
+
+/// **The one-shot migration seed.** With NO machine pick, the agents an earlier build wired in —
+/// every slug the legacy trigger record marks `registered`, plus every agent holding an MCP entry
+/// in the machine store's custody (each live bundle's `entries.json`, and the unrecorded rows) —
+/// become the machine pick: validated (an unknown slug is dropped), written FIRST, then the
+/// legacy record is deleted. Returns the seeded slugs, in table-independent sorted order, for the
+/// one receipt line; `None` when nothing was seeded — a pick already stands, or there is nothing
+/// to carry (a legacy record with nothing to carry is deleted all the same: its question is
+/// closed).
+///
+/// Read under both legacy writers' locks (the record's own, and the MCP converge lock that owns
+/// the custody documents), so a converge racing this seed cannot hand it a torn picture. A lock
+/// that cannot be taken seeds nothing this run; the next run asks again. A standing pick is never
+/// overwritten.
+pub(crate) fn seed_from_legacy(fs: &dyn FsOps, layout: &Layout) -> Option<Vec<String>> {
+    if fs.exists(&machine_path(layout)) {
+        return None;
+    }
+    let record = layout.trigger_registration_path();
+    let locks = layout.locks_dir();
+    fs.create_dir_all(&locks).ok()?;
+    let _legacy = fs.lock_exclusive(&locks.join(LEGACY_LOCK)).ok()?;
+    let _mcp = fs
+        .lock_exclusive(&locks.join(crate::mcp_engine::MCP_LOCK_FILE))
+        .ok()?;
+
+    let record_present = fs.exists(&record);
+    let mut agents: BTreeSet<String> = fs
+        .read_opt(&record)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<LegacyRegistrations>(&bytes).ok())
+        .map(|doc| {
+            doc.agents
+                .into_iter()
+                .filter(|(_, row)| row.registered)
+                .map(|(slug, _)| slug)
+                .collect()
+        })
+        .unwrap_or_default();
+    agents.extend(custody_agents(fs, layout));
+    let agents: Vec<String> = agents
+        .into_iter()
+        .filter(|slug| slug != WILDCARD && validate(std::slice::from_ref(slug)).is_ok())
+        .collect();
+    if agents.is_empty() {
+        if record_present {
+            let _ = fs.remove_file(&record);
+        }
+        return None;
+    }
+    write(
+        fs,
+        layout,
+        &PickScope::Machine,
+        &AgentsPick::new(agents.clone()),
+    )
+    .ok()?;
+    if record_present {
+        let _ = fs.remove_file(&record);
+    }
+    Some(agents)
+}
+
+/// Every agent holding an MCP entry in this store's custody: each keyed bundle's rows read where
+/// they live (a live record's `entries.json`, else the scope document), plus every unrecorded
+/// row. Best-effort — an unreadable custody answers no agents.
+fn custody_agents(fs: &dyn FsOps, layout: &Layout) -> BTreeSet<String> {
+    let Ok(doc) = crate::config_custody::read(fs, layout) else {
+        return BTreeSet::new();
+    };
+    doc.keys
+        .keys()
+        .flat_map(|bundle_id| crate::config_custody::entries_of(fs, layout, bundle_id))
+        .chain(doc.unrecorded.values().flatten().cloned())
+        .map(|row| row.agent)
         .collect()
 }
 
@@ -535,6 +630,139 @@ mod tests {
         let raw = sidecar::project_store_layout(&rig.project.0);
         assert_eq!(raw.machine_home(), raw.home());
         assert!(effective(&rig.fs, &raw, None).unwrap().is_none());
+    }
+
+    /// A legacy record on disk, as the last build wrote it: two registered rows, one that failed
+    /// (and was awaiting its retry), one slug the table no longer knows.
+    fn legacy_record(layout: &Layout, rows: &[(&str, bool)]) -> PathBuf {
+        let path = layout.trigger_registration_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let agents: serde_json::Map<String, serde_json::Value> = rows
+            .iter()
+            .map(|(slug, registered)| {
+                (
+                    (*slug).to_owned(),
+                    serde_json::json!({"at_ms": 1, "registered": registered, "retry_at_ms": 0}),
+                )
+            })
+            .collect();
+        let doc = serde_json::json!({"schema_version": 1, "agents": agents});
+        std::fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        path
+    }
+
+    /// MCP custody in the machine store: one live bundle record owning an entry in `codex`'s
+    /// config, one unrecorded row in `zed`'s.
+    fn custody_with_entries(fs: &RealFs, layout: &Layout) {
+        use crate::config_custody::{ConfigCustody, EntryCustody, EntryPlacement};
+        let sid = crate::id::SkillId::parse("topos_a9b7ee2b").unwrap();
+        std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+        let row = |agent: &str| EntryPlacement {
+            agent: agent.to_owned(),
+            file: format!("/cfg/{agent}"),
+            key: "topos-linear".to_owned(),
+            fingerprint: "f".to_owned(),
+            owns_file: false,
+            version_id: String::new(),
+        };
+        crate::doc::write_doc(
+            fs,
+            &layout.published(&sid).entries,
+            &EntryCustody {
+                schema_version: 1,
+                entries: vec![row("codex")],
+            },
+        )
+        .unwrap();
+        let mut doc = ConfigCustody::default();
+        doc.keys
+            .insert(sid.as_str().to_owned(), "topos-linear".to_owned());
+        doc.keys
+            .insert("local:weather".to_owned(), "topos-weather".to_owned());
+        doc.unrecorded
+            .insert("local:weather".to_owned(), vec![row("zed")]);
+        crate::config_custody::write(fs, layout, &doc).unwrap();
+    }
+
+    #[test]
+    fn the_seed_reads_registered_rows_and_custody_entries_writes_the_pick_and_deletes_the_record() {
+        let rig = Rig::new("seed");
+        let layout = rig.layout();
+        let record = legacy_record(
+            &layout,
+            &[
+                ("cursor", true),
+                ("claude-code", true),
+                ("openclaw", false),
+                ("not-a-harness", true),
+            ],
+        );
+        custody_with_entries(&rig.fs, &layout);
+
+        let seeded = seed_from_legacy(&rig.fs, &layout).expect("something to carry");
+        assert_eq!(seeded, ["claude-code", "codex", "cursor", "zed"]);
+        let pick = read(&rig.fs, &machine_path(&layout)).unwrap().unwrap();
+        assert_eq!(pick.agents, ["claude-code", "codex", "cursor", "zed"]);
+        assert!(!record.exists(), "the legacy record is gone");
+        assert!(
+            layout.locks_dir().join(LEGACY_LOCK).exists(),
+            "the lock file is left in place"
+        );
+        // The seed is one-shot: with the pick standing there is nothing to do, whatever the
+        // record says.
+        legacy_record(&layout, &[("gemini-cli", true)]);
+        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert_eq!(
+            read(&rig.fs, &machine_path(&layout))
+                .unwrap()
+                .unwrap()
+                .agents,
+            ["claude-code", "codex", "cursor", "zed"]
+        );
+    }
+
+    #[test]
+    fn the_seed_never_overwrites_a_standing_pick() {
+        let rig = Rig::new("seed-standing");
+        let layout = rig.layout();
+        write(
+            &rig.fs,
+            &layout,
+            &PickScope::Machine,
+            &AgentsPick::new(vec!["claude-code".to_owned()]),
+        )
+        .unwrap();
+        let record = legacy_record(&layout, &[("cursor", true)]);
+        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert_eq!(
+            read(&rig.fs, &machine_path(&layout))
+                .unwrap()
+                .unwrap()
+                .agents,
+            ["claude-code"]
+        );
+        assert!(record.exists(), "a standing pick leaves the record alone");
+    }
+
+    /// Nothing to carry — no record, or a record with only failed rows and no MCP custody — seeds
+    /// nothing and writes no pick (an empty pick would silence the ask). The record's question is
+    /// closed either way.
+    #[test]
+    fn the_seed_writes_nothing_when_there_is_nothing_to_carry() {
+        let rig = Rig::new("seed-empty");
+        let layout = rig.layout();
+        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert!(!machine_path(&layout).exists());
+        let record = legacy_record(&layout, &[("openclaw", false)]);
+        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert!(!machine_path(&layout).exists(), "no pick of nothing");
+        assert!(!record.exists(), "the record is retired all the same");
+        // Custody alone seeds.
+        custody_with_entries(&rig.fs, &layout);
+        assert_eq!(
+            seed_from_legacy(&rig.fs, &layout).unwrap(),
+            ["codex", "zed"]
+        );
     }
 
     #[test]

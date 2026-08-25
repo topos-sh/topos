@@ -57,14 +57,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   bundle `narrowed`, never `removed`, so the arithmetic and the loss block agree. Forge rows ride their OWN hardcoded
   clock (`forge_check`, machine-scoped, no config surface): a floating row is PROBED (the git ref
   advertisement — outside the REST allowance) and downloaded only on a real change, with a
-  per-round circuit breaker and a clock that advances on failure too. Every reconcile CLOSES by
-  REGISTERING a newly detected agent's auto-update trigger (`ops::register_new_detected` over
-  `ctx.triggers`, the ACTIVE harness a candidate like any other): detected + trigger-capable + no
-  record → install and record; a trigger already standing is recorded without an attempt; a harness
-  WITH a record is never touched, which is what makes a hand-removal permanent. The non-quiet
-  receipt lists what it registered. `update --quiet` is the
-  harness-hook sweep: self-throttled, schema-conservative stdout (`--hook claude-code` opts that
-  harness into `reloadSkills`) — a registration moves no bundle bytes, so it adds nothing there.
+  per-round circuit breaker and a clock that advances on failure too. A reconcile registers NO
+  agent's auto-update trigger: hooks follow the agents pick (`ops::agent_hooks`), and nothing
+  else writes one. `update --quiet` is the harness-hook sweep: self-throttled,
+  schema-conservative stdout (`--hook claude-code` opts that harness into `reloadSkills`).
 - **`add`/`remove` are exact file inverses** (property-tested). `add` is source-polymorphic
   (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE
   NAME resolves STANDING first — a name the invoked scope's FILE already records answers
@@ -141,16 +137,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   dir-handle-anchored writes, private-file primitives) + crash-safe JSON docs with fail-closed
   schema migration. Every durable mutation goes through here; crash-safety contracts live in the
   module docs.
-- `sidecar`, `forge_check`, `harness_registry`, `visited_stores`, `sync_status`, `trigger_record`
-  — the per-scope
+- `sidecar`, `forge_check`, `harness_registry`, `visited_stores`, `sync_status` — the per-scope
   store layout + recovery sweep, and the machine-local state documents (the forge auto-update
   clock + per-source check log, visited project stores, the offline delivery cache that keeps
-  `status`/`list` honest, and which agents this machine has been OFFERED a trigger).
-  `trigger_record` is the sweep's one-time-offer gate: a row per harness slug, written by every
-  trigger installation there is (`login`/`add`'s unconditional breadth arming and the sweep's own),
-  so a hook the person deleted stays deleted — a FAILED attempt is recorded too and retried on the
-  forge clock's rhythm, never per sweep; a newer build's document is neither read nor written, and
-  an unparseable one reads as absent (garbage is not evidence that anybody removed anything).
+  `status`/`list` honest). The legacy `state/trigger_registration.json` (an earlier build's
+  record of which agents it registered a trigger in) has ONE reader left, the agents-pick seed,
+  which folds it into the machine pick on this build's first full-context run and deletes it.
   `harness_registry` is the HARNESS TABLE's own lane, on the forge
   clock's rhythm and its fail-open discipline: the bare sweep downloads
   `TOPOS_HARNESS_REGISTRY_URL` (default `https://topos.sh/harness-registry.toml`), runs
@@ -195,14 +187,19 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `init`, `fmt`, `uninstall`, `builtin` (the embedded meta-skill from `skills/topos/`),
   `self_update` (minisign-gated via `release`), `version_check`, `arm` (the TRIGGER half of the
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
-  machine root the whole-machine set resolves under, so `artifacts` (the uninstall describe, and its
-  path rows `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE SAME set — plus the
-  detection-scoped `arm_detected`/`probe_detected`/`register_new_detected` sweeps. All of it iterates harness-table rows
-  and asks `topos-harness::triggers` for each row's adapter, so no caller knows which machinery
-  serves which agent — ARMING over the table this machine resolved, TEARDOWN over
-  `registry::teardown_harnesses()` (that table plus the bundled floor), because a row a newer
-  downloaded table dropped is one topos stops arming and never one it stops scrubbing),
-  `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the `DivergedWitness` token).
+  machine root + ports the whole-machine set resolves under, so `artifacts` (the uninstall
+  describe, and its path rows `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE
+  SAME set, `project_hook_files` names the checkout's hook files a teardown lists and leaves, and
+  `machine_ports` hands the pick-scoped sweeps the same roots. TEARDOWN iterates
+  `registry::teardown_harnesses()` (the table this machine resolved plus the bundled floor) and
+  asks `topos-harness::triggers` for each row's adapter, so no caller knows which machinery
+  serves which agent, and a row a newer downloaded table dropped is never one topos stops
+  scrubbing), `agent_hooks` (the hooks that FOLLOW THE PICK: `install_for`/`remove_for`/`probe`
+  walk the picked slugs through the scoped trigger factory — `TriggerScope::User` under `~`, or
+  `Project(root)` for the four project hook files — and a picked agent with no hook at that scope
+  is a `HookAbsence` line, never a silent skip; `probe_effective` is what `status` and `auth
+  status` read, over the effective pick and never detection), `quiet_gate`, `merge_resolve`
+  (diverged-draft diff3 behind the `DivergedWitness` token).
 - `materialize` — crash-safe dir-swap placement writes. The destructive-path rail is
   PARK-THEN-VERIFY (park aside, re-read, drop only what is accounted for; unaccounted bytes are
   preserved as `.topos-kept-*` siblings) plus the park journal + recovery; the contracts live in

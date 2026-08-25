@@ -384,17 +384,10 @@ impl Layout {
         self.state_dir().join("forge_check.json")
     }
 
-    /// `locks/trigger_registration.lock` — the one writer at a time for
-    /// `state/trigger_registration.json`. Every write of that document merges over the last, so
-    /// two rounds (a sweep beside a login) must not interleave.
-    pub(crate) fn trigger_registration_lock_file(&self) -> PathBuf {
-        self.locks_dir().join("trigger_registration.lock")
-    }
-
-    /// `state/trigger_registration.json` — which agents this machine has already been offered an
-    /// auto-update trigger, and how the offer went (see `crate::trigger_record`). Home store only:
-    /// a trigger lives in an agent's own machine-wide config, so the offer is a machine fact
-    /// whatever checkout the sweep ran from. A plain doc — slugs and timestamps, never a secret.
+    /// `state/trigger_registration.json` — the LEGACY record of which agents an earlier build
+    /// registered an auto-update trigger in. Nothing writes it any more; its ONE reader is the
+    /// agents-pick seed (`crate::agents_pick::seed_from_legacy`), which folds its registered rows
+    /// into the machine pick on the first run of this build and deletes it. Home store only.
     pub(crate) fn trigger_registration_path(&self) -> PathBuf {
         self.state_dir().join("trigger_registration.json")
     }

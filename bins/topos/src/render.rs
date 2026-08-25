@@ -721,10 +721,6 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
     if let Some(note) = &data.manifest_note {
         s.push_str(&format!("\nmanifest: {note}"));
     }
-    // A LOGIN REGISTERS TRIGGERS, and every other receipt that does says so. These are the same
-    // rows in the same block the `add` receipt prints — a login that put a hook in five agents'
-    // config files and said nothing about it left the person to find them.
-    s.push_str(&breadth_trigger_lines(&data.triggers));
     s
 }
 
@@ -939,9 +935,7 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             None => String::new(),
         };
         out.push_str(&source_line(data));
-        // A run that recorded nothing can still have REGISTERED an agent's trigger (its converge
-        // closes the way every sweep does), and a config file topos edited is never left unsaid.
-        return out.trim_end().to_owned() + &breadth_trigger_lines(&data.triggers);
+        return out.trim_end().to_owned();
     }
     // The identity claim has its own two lines: no row was written for it, so the file-naming
     // lead every other add prints would name a file this act never touched.
@@ -1048,7 +1042,6 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             (TriggerState::Inactive, _) => "",
         });
     }
-    out.push_str(&breadth_trigger_lines(&data.triggers));
     // The same courtesy for a NAME: the local dir was adopted as asked, and a connected workspace
     // publishes that name too — so the team-managed spelling is named beside it. Proven-identical
     // bytes say so, because then the local copy has nothing the team's copy lacks.
@@ -1148,10 +1141,10 @@ fn add_set_delivered_tty(data: &AddData, delivery: &topos_types::results::SetDel
         };
         if delivery.failure.is_some() {
             out.push_str(&source_line(data));
-            return out.trim_end().to_owned() + &breadth_trigger_lines(&data.triggers);
+            return out.trim_end().to_owned();
         }
         out.push_str("nothing changed");
-        return out + &breadth_trigger_lines(&data.triggers);
+        return out;
     }
     let mut out = format!("{lead}\n");
     out.push_str(if placed.len() == 1 {
@@ -1163,7 +1156,7 @@ fn add_set_delivered_tty(data: &AddData, delivery: &topos_types::results::SetDel
         out.push_str(&format!("  {}\n", surface_line(s)));
     }
     out.push_str(&source_line(data));
-    out.trim_end().to_owned() + &breadth_trigger_lines(&data.triggers)
+    out.trim_end().to_owned()
 }
 
 /// One converged surface as a receipt line — the AGENT first (the person named an agent, not a
@@ -1248,9 +1241,6 @@ fn add_dest_receipt(data: &AddData) -> String {
     if let Some(note) = &data.note {
         s.push_str(&format!("\nnote: {note}"));
     }
-    // The trigger rows this add's own converge earned — the same block the plain add receipt
-    // closes with (see [`add_tty`]).
-    s.push_str(&breadth_trigger_lines(&data.triggers));
     s
 }
 
@@ -1318,44 +1308,6 @@ pub(crate) fn fmt_tty(data: &topos_types::results::FmtData) -> String {
     } else {
         format!("{} already formatted", data.manifest)
     }
-}
-
-/// The breadth arming sweep's receipt lines — one per OTHER detected agent. See
-/// [`trigger_lines`] for the per-row wording. Empty input renders nothing.
-pub(crate) fn breadth_trigger_lines(triggers: &[topos_types::TriggerReport]) -> String {
-    trigger_lines("Other detected agents:", triggers)
-}
-
-/// The `update` sweep's registration lines — one per agent this run found newly detected and
-/// offered its trigger to. The rows are the ones every install receipt prints; only the lead says
-/// which question they answer.
-pub(crate) fn registered_trigger_lines(triggers: &[topos_types::TriggerReport]) -> String {
-    trigger_lines("Newly detected agents:", triggers)
-}
-
-/// One trigger-report block: the lead, then a row per agent, honest per row (an `Active` row names
-/// its live moment; a registered-but-ungated row names the consent still owed; a degraded row
-/// names the explicit-pull floor). Empty input renders nothing.
-fn trigger_lines(lead: &str, triggers: &[topos_types::TriggerReport]) -> String {
-    if triggers.is_empty() {
-        return String::new();
-    }
-    let mut out = format!("\n{lead}");
-    for t in triggers {
-        let phrase = match (t.state, t.currency_kind) {
-            (TriggerState::Active, CurrencyKind::SessionStart) => "active (session start)",
-            (TriggerState::Active, CurrencyKind::Scheduled) => "active (scheduled)",
-            (TriggerState::Active, _) => "active",
-            (TriggerState::Inactive, _) => "registered",
-            (TriggerState::Degraded, _) => "couldn't register — `topos update` still works",
-            (TriggerState::AlreadyPresentUnmanaged, _) => "left your existing trigger untouched",
-        };
-        out.push_str(&format!("\n  {}: {}", t.agent, phrase));
-        if let Some(note) = &t.note {
-            out.push_str(&format!(" — {note}"));
-        }
-    }
-    out
 }
 
 /// The `keep-as-yours` DESCRIBE's TTY: what the retained copy is, why the team copy is gone, and that
@@ -2433,6 +2385,12 @@ pub(crate) fn uninstall_describe_tty(
             "\n  · leave the hand-edited entries in {path} in place"
         ));
     }
+    if !d.project_hook_files.is_empty() {
+        s.push_str(&format!(
+            "\n  · leave this project's auto-update hooks in place (inert without topos): {}",
+            d.project_hook_files.join(", ")
+        ));
+    }
     s.push_str("\n  · leave every SKILL FILE in your agent dirs untouched — uninstall deletes no skill bytes");
     if let Some(bin) = &d.binary_path {
         s.push_str(&format!(
@@ -2618,9 +2576,8 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
         for t in &d.triggers {
             // The word the EVIDENCE supports. `status` never installs anything, so it holds no
             // `Active` report to call a trigger live: all it has is the artifact's footprint,
-            // which proves the trigger is REGISTERED — the same word the install receipt uses for
-            // exactly that evidence level (see [`trigger_lines`]). `active` is reserved there, for
-            // a report that stated a live update moment.
+            // which proves the trigger is REGISTERED. `active` is reserved for a report that
+            // stated a live update moment.
             // Observed evidence beats the footprint word: a hook seen RUNNING is the answer
             // "is this even working?" wants, and a registered-but-never-seen row says exactly
             // that, with the one-time step the harness still owes when there is one.
@@ -4326,8 +4283,7 @@ pub(crate) fn pull_tty(
         for behind in behind_trailer(&data.behind_elsewhere) {
             line.push_str(&format!("\n{behind}"));
         }
-        let line = append_proposals_trailer(line, data.proposals_awaiting);
-        return line + &registered_trigger_lines(&data.triggers);
+        return append_proposals_trailer(line, data.proposals_awaiting);
     }
     use topos_types::results::PullAction;
     let mut kept_lines: Vec<String> = Vec::new();
@@ -4524,11 +4480,7 @@ pub(crate) fn pull_tty(
     for line in behind_trailer(&data.behind_elsewhere) {
         out.push_str(&format!("\n{line}"));
     }
-    // The registrations LAST, where every other receipt prints them: they are a fact about this
-    // machine's agents, not about a bundle, and a person reading the sweep's arithmetic should
-    // reach the end of it before the subject changes.
-    let out = append_proposals_trailer(out, data.proposals_awaiting);
-    out + &registered_trigger_lines(&data.triggers)
+    append_proposals_trailer(out, data.proposals_awaiting)
 }
 
 /// What an `update` receipt's summary counts, by name. The clause exists so the reader never has
@@ -5742,121 +5694,6 @@ mod tests {
         assert!(
             describe.contains("the copies it placed leave this machine now"),
             "{describe}"
-        );
-    }
-
-    /// AN ADD THAT REGISTERED A TRIGGER SAYS SO, whichever of its answers printed. The rows are
-    /// the ones every install receipt carries; the arms that skipped them (the destination
-    /// receipt, the redundancy answer, and the set-delivered arm — whose converge closes like any
-    /// other sweep) edited an agent's config file and said nothing about it.
-    #[test]
-    fn every_add_answer_prints_the_triggers_its_run_registered() {
-        let rows = vec![
-            topos_types::TriggerReport {
-                agent: "cline".to_owned(),
-                currency_kind: topos_types::CurrencyKind::SessionStart,
-                touched_path: None,
-                marker_id: "topos".to_owned(),
-                state: topos_types::TriggerState::Active,
-                note: None,
-            },
-            topos_types::TriggerReport {
-                agent: "hermes-agent".to_owned(),
-                currency_kind: topos_types::CurrencyKind::ExplicitPullOnly,
-                touched_path: None,
-                marker_id: "topos".to_owned(),
-                state: topos_types::TriggerState::Inactive,
-                note: None,
-            },
-        ];
-        let block = "\nOther detected agents:\n  cline: active (session start)\n  \
-                     hermes-agent: registered";
-        let base = topos_types::results::AddData {
-            skill_id: Some("topos_a9b7ee2b".to_owned()),
-            name: "sentry".to_owned(),
-            version_id: None,
-            bundle_digest: None,
-            tracked: true,
-            currency: None,
-            triggers: rows,
-            origin: None,
-            source: Some("topos.sh/acme/sentry".to_owned()),
-            manifest: None,
-            scope: Some(ReceiptScope::Machine),
-            reference: Some("topos.sh/acme/sentry".to_owned()),
-            undo: Vec::new(),
-            governed_copy: None,
-            published_match: None,
-            note: None,
-            mcp: None,
-            dest: Vec::new(),
-            dest_resolved: Vec::new(),
-            dest_change: None,
-            claim: None,
-            unchanged: false,
-            machine_copy: None,
-            set_delivery: None,
-            display: None,
-            workspace: Some(WorkspaceRef {
-                host: "topos.sh".to_owned(),
-                name: "acme".to_owned(),
-            }),
-        };
-        // The SET-DELIVERED arm, on each of its three answers.
-        let delivered = |surfaces: Vec<topos_types::results::Surface>, asked: Vec<String>| {
-            topos_types::results::AddData {
-                set_delivery: Some(topos_types::results::SetDelivery {
-                    set: "channels/everyone".to_owned(),
-                    scope: ReceiptScope::Machine,
-                    surfaces,
-                    asked,
-                    failure: None,
-                }),
-                ..base.clone()
-            }
-        };
-        let surface = |state| topos_types::results::Surface {
-            agent: "codex".to_owned(),
-            target: Some("~/.codex/config.toml".to_owned()),
-            state,
-            note: None,
-        };
-        use topos_types::results::TargetOutcome;
-        for data in [
-            delivered(vec![surface(TargetOutcome::Created)], Vec::new()),
-            delivered(
-                vec![surface(TargetOutcome::Current)],
-                vec!["codex".to_owned()],
-            ),
-            delivered(Vec::new(), Vec::new()),
-        ] {
-            let text = add_tty(&data);
-            assert!(text.ends_with(block), "{text}");
-        }
-        // The DESTINATION receipt, and the redundancy answer.
-        let dest_add = topos_types::results::AddData {
-            dest: vec!["~/.codex/skills".to_owned()],
-            ..base.clone()
-        };
-        assert!(add_tty(&dest_add).ends_with(block), "{:?}", dest_add.dest);
-        let unchanged = topos_types::results::AddData {
-            unchanged: true,
-            note: Some(
-                "`topos.sh/acme/sentry` is already recorded in this file — nothing changed"
-                    .to_owned(),
-            ),
-            ..base.clone()
-        };
-        let text = add_tty(&unchanged);
-        assert!(text.ends_with(block), "{text}");
-        // And a run that registered nothing says nothing about triggers.
-        let quiet = topos_types::results::AddData {
-            triggers: Vec::new(),
-            ..base
-        };
-        assert_eq!(
-            add_tty(&quiet),
-            "added sentry machine-wide (~/.topos/topos.toml)\nsource: topos.sh/acme/sentry"
         );
     }
 
@@ -7826,74 +7663,6 @@ mod tests {
         assert!(!out.contains("MCP_DEST_UNKNOWN"), "{out}");
         assert!(out.contains("Checked 2 bundles: all up to date."), "{out}");
         assert!(!out.contains("failed"), "{out}");
-    }
-
-    /// The registrations this run performed close the receipt — the rows every install receipt
-    /// prints, under a lead that says which question they answer. They ride the run that had
-    /// nothing else to do as well: an agent installed today is exactly the machine whose bundles
-    /// are all current.
-    #[test]
-    fn the_update_receipt_names_the_agents_this_run_registered() {
-        use topos_types::{CurrencyKind, TriggerState};
-        let trigger = |agent: &str, state, kind| topos_types::TriggerReport {
-            agent: agent.to_owned(),
-            currency_kind: kind,
-            touched_path: None,
-            marker_id: "topos".to_owned(),
-            state,
-            note: None,
-        };
-        let data = PullData {
-            skills: Vec::new(),
-            proposals_awaiting: 0,
-            notices: Vec::new(),
-            sync: Vec::new(),
-            behind_elsewhere: Vec::new(),
-            triggers: vec![
-                trigger("cursor", TriggerState::Active, CurrencyKind::SessionStart),
-                trigger(
-                    "openclaw",
-                    TriggerState::Degraded,
-                    CurrencyKind::ExplicitPullOnly,
-                ),
-            ],
-            scope: None,
-        };
-        assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[], 0, 0),
-            "Nothing to update here — no manifest or profile demands anything in this directory.\n\
-             Newly detected agents:\n\
-             \x20 cursor: active (session start)\n\
-             \x20 openclaw: couldn't register — `topos update` still works"
-        );
-        // The word for a trigger nobody has to touch again is REGISTERED — `armed` is not this
-        // CLI's vocabulary anywhere a person reads.
-        let out = pull_tty(&data, &[], &[], &[], &[], 0, 0);
-        assert!(!out.contains("armed"), "{out}");
-        // A run with rows to show carries the block too, after the summary.
-        let with_rows = PullData {
-            skills: vec![row("a", PullAction::UpToDate)],
-            ..data
-        };
-        let out = pull_tty(&with_rows, &[], &[], &[], &[], 0, 0);
-        assert!(
-            out.ends_with(
-                "Checked 1 bundle: all up to date.\n\
-                 Newly detected agents:\n\
-                 \x20 cursor: active (session start)\n\
-                 \x20 openclaw: couldn't register — `topos update` still works"
-            ),
-            "{out}"
-        );
-        // And a run that registered nothing says nothing about triggers.
-        let none = PullData {
-            triggers: Vec::new(),
-            ..with_rows
-        };
-        assert_eq!(
-            pull_tty(&none, &[], &[], &[], &[], 0, 0),
-            "Checked 1 bundle: all up to date."
-        );
     }
 
     /// THE update receipt, byte for byte — the final copy. The lead line names the project folder
@@ -11667,33 +11436,21 @@ mod tests {
             "{named}"
         );
 
-        // A LOGIN REGISTERS TRIGGERS, and a login that edited five agents' config files may not
-        // say nothing about it: the rows are the ones every other install receipt prints.
-        let mut registered = connected(false);
-        registered.triggers = vec![
-            topos_types::TriggerReport {
-                agent: "cline".to_owned(),
-                currency_kind: topos_types::CurrencyKind::SessionStart,
-                touched_path: None,
-                marker_id: "topos".to_owned(),
-                state: topos_types::TriggerState::Active,
-                note: None,
-            },
-            topos_types::TriggerReport {
-                agent: "hermes-agent".to_owned(),
-                currency_kind: topos_types::CurrencyKind::ExplicitPullOnly,
-                touched_path: None,
-                marker_id: "topos".to_owned(),
-                state: topos_types::TriggerState::Inactive,
-                note: None,
-            },
-        ];
+        // A LOGIN WRITES NO HOOK. The `currency`/`triggers` fields stay on the wire for schema
+        // stability and are always empty; a document carrying rows anyway (nothing produces one)
+        // renders nothing about them — there is no trigger block on a login receipt.
+        let mut carried = connected(false);
+        carried.triggers = vec![topos_types::TriggerReport {
+            agent: "cline".to_owned(),
+            currency_kind: topos_types::CurrencyKind::SessionStart,
+            touched_path: None,
+            marker_id: "topos".to_owned(),
+            state: topos_types::TriggerState::Active,
+            note: None,
+        }];
         assert_eq!(
-            session_login_tty(&registered),
-            "signed in to topos.sh/acme as robert\n\
-             Other detected agents:\n\
-             \x20 cline: active (session start)\n\
-             \x20 hermes-agent: registered"
+            session_login_tty(&carried),
+            "signed in to topos.sh/acme as robert"
         );
     }
 

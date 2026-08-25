@@ -45,7 +45,7 @@
       }
     },
     "triggers": {
-      "description": "The auto-update triggers this run REGISTERED — one row per newly detected agent whose\ntrigger the sweep installed, in the same shape `login`/`add` report their own arming. Asked\nonce per agent ever, so a trigger somebody removed by hand never reappears here. Empty (and\nomitted) on every run that found nothing new. **INFERRED** (additive).",
+      "description": "The auto-update triggers this run registered. Always empty since 0.1.52; kept for schema\nstability (the sweep registers no agent — hooks follow the agents pick). **INFERRED**\n(additive).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/TriggerReport"
