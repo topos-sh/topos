@@ -116,9 +116,10 @@ topos uninstall --yes
 ```
 
 The bare run previews. Applying removes the machine-wide auto-update hooks and `~/.topos/`; it
-**never deletes a skill file** — everything in your agent directories stays. A project's own hook
-files stay too, inert without the binary, and the preview names them. The binary's own path is
-printed so you can remove it with whatever installed it.
+**never deletes a skill file** — everything in your agent directories stays. Run it inside a
+checkout and that checkout's own auto-update hook entries go too; the preview names the files.
+Other checkouts you set up keep their hook until you run `topos agents remove` there. The
+binary's own path is printed so you can remove it with whatever installed it.
 
 ## Next
 

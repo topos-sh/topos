@@ -101,8 +101,9 @@ error.
 
 An ownership marker written alongside each trigger is how Topos recognizes its own and never
 touches yours. A trigger is written when you pick that agent, by `topos init -a <agent>` or
-`topos agents add <agent>`, and taken away by `topos agents remove <agent>` or
-`topos uninstall --yes`. Nothing else writes one: signing in does not, and neither does adding a
+`topos agents add <agent>`, and taken away by `topos agents remove <agent>`, or by
+`topos uninstall --yes` for the machine and for the checkout you run it in (other checkouts keep
+theirs until you run `topos agents remove` there). Nothing else writes one: signing in does not, and neither does adding a
 skill. Install a new agent today and Topos leaves it alone until you pick it.
 
 Removal is confirmed for triggers living in a config file
