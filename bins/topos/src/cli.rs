@@ -45,7 +45,11 @@ pub(crate) struct Cli {
     pub(crate) json: bool,
 
     /// Pick which workspace to act in when this machine is logged into more than one. Takes the
-    /// workspace's name or id. With a single login it is inferred.
+    /// workspace's name or id, and beats the machine default (`topos workspace use <name>`) for
+    /// this one command. A command always acts on ONE workspace, never all of them: a bundle this
+    /// machine already tracks acts on the workspace it came from, and anything else acts on the
+    /// one this flag, `TOPOS_WORKSPACE`, or the default names. With a single login it is
+    /// inferred.
     #[arg(long, global = true, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
@@ -198,6 +202,9 @@ pub(crate) enum Command {
     /// into, with a `*` on the default; `use <name>` moves the default. A command's
     /// `--workspace` flag and the `TOPOS_WORKSPACE` environment variable both beat the default
     /// for one invocation; inside a project, the project file's `workspace = ` line does too.
+    /// With several logins and no default, a command that needs one refuses and names them
+    /// rather than reading every workspace. `topos update` is the exception by nature: delivery
+    /// is per login, so it converges every one of them.
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,

@@ -203,13 +203,15 @@ pub(crate) fn list_with(
     // The live per-workspace catalog view — the one networked arm.
     if req.remote {
         let connect = remote.expect("the composition root passes the --remote connector");
-        data.remote = remote_view(
+        let (remote_rows, others) = remote_view(
             &resolved,
             &all,
             req.workspace.as_deref(),
             connect,
             &mut warnings,
         )?;
+        data.remote = remote_rows;
+        data.also_signed_in = others;
         // The page applies to each workspace's SKILLS — the unbounded axis. Paging the workspace
         // WRAPPERS instead left every nested catalog whole, so a `--limit 5` over one workspace
         // holding 400 skills emitted all 400. The channels ride whole: a workspace has a handful,
@@ -983,17 +985,22 @@ fn unmanaged_detail(ctx: &Ctx<'_>, token: &str, roots: Option<&DiscoveryRoots>) 
     }
 }
 
-/// The `--remote` view: one channel-index + catalog read per live session (narrowed by the
-/// `--workspace` filter), each skill annotated with this machine's adoption state from the SAME
-/// resolution the local sections print. A per-workspace transport fault DEGRADES to a warning —
-/// the successfully-read workspaces still land.
+/// The `--remote` view: ONE workspace's channel-index + catalog read — the one this machine acts
+/// on (`--workspace` → `TOPOS_WORKSPACE` → the starred default → the sole login), each skill
+/// annotated with this machine's adoption state from the SAME resolution the local sections
+/// print. A transport fault DEGRADES to a warning rather than failing the whole `list`.
+///
+/// The catalog view is a LOOKUP, so it acts on one workspace like every other lookup does:
+/// reading every login made a two-workspace machine dial both servers to answer a question about
+/// one, and printed two catalogs where a person asked for theirs. The other logins ride back as
+/// [`WorkspaceRef`]s for the closing line that names them.
 fn remote_view(
     resolved: &Resolved,
     all: &crate::sessions::Sessions,
     only: Option<&str>,
     connect: SessionDirectory<'_>,
     warnings: &mut Vec<topos_types::Message>,
-) -> Result<Vec<RemoteWorkspace>, ClientError> {
+) -> Result<(Vec<RemoteWorkspace>, Vec<topos_types::results::WorkspaceRef>), ClientError> {
     let live: Vec<&Session> = all.live().collect();
     if live.is_empty() {
         return Err(ClientError::SessionRequired {
@@ -1002,11 +1009,14 @@ fn remote_view(
                 .into(),
         });
     }
+    let acting = all.resolve_target(only)?.clone();
+    let others: Vec<topos_types::results::WorkspaceRef> = live
+        .iter()
+        .filter(|s| s.workspace_id != acting.workspace_id)
+        .map(|s| crate::ops::session_workspace_ref(s))
+        .collect();
     let mut out = Vec::new();
-    for s in live {
-        if only.is_some_and(|w| w != s.workspace_id) {
-            continue;
-        }
+    for s in [&acting] {
         let dir = connect(s);
         let channels = match dir.channels_index(&s.workspace_id) {
             Ok(c) => c,
@@ -1065,14 +1075,7 @@ fn remote_view(
                 .collect(),
         });
     }
-    // Deterministic order however the sessions file lists them.
-    out.sort_by(|a, b| {
-        a.workspace
-            .host
-            .cmp(&b.workspace.host)
-            .then_with(|| a.workspace.name.cmp(&b.workspace.name))
-    });
-    Ok(out)
+    Ok((out, others))
 }
 
 /// A short, leak-free line for one skipped `--remote` workspace.

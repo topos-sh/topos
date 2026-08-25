@@ -44,28 +44,24 @@ pub(crate) fn log(
     ctx: &Ctx<'_>,
     connectors: &LogConnectors<'_>,
     skill: &str,
+    workspace: Option<&str>,
     page: super::RowPage,
 ) -> Result<LogData, ClientError> {
-    // A CHANNEL target (resolved through the grammar) is a web surface — refuse it toward the web before
-    // the local skill resolution swallows it as a not-found.
-    if let Ok(su) = super::connect::session_universe(ctx, connectors.session)
-        && let Ok(parsed) = resolve::parse_target(skill)
-        && let Ok(Some(Resolution::Resource {
-            kind: ResourceKind::Channel,
-            name,
-            ..
-        })) = resolve::resolve_one(&su.universe, &parsed, resolve::KindScope::CHANNELS)
-    {
-        return Err(ClientError::InvalidArgument(format!(
-            "'{name}' is a channel — a channel's curation history lives on the web, not in `topos \
-             log` (which shows a skill's version history)"
-        )));
-    }
-
-    // Resolve WHERE YOU STAND: a bundle a project `topos.toml` delivers keeps its custody (and its
-    // action log) in the checkout's own store, so a `log` run from inside that checkout reads THAT
-    // store — not a same-named machine twin, and not a not-found.
-    let (layout, id, lock) = super::resolve_skill_here(ctx, skill, None)?;
+    // Resolve WHERE YOU STAND, FIRST: a bundle a project `topos.toml` delivers keeps its custody
+    // (and its action log) in the checkout's own store, so a `log` run from inside that checkout
+    // reads THAT store — not a same-named machine twin, and not a not-found. A bundle this
+    // machine already tracks is also UNAMBIGUOUS about its workspace (its own row names the one it
+    // came from), so this arm resolves nothing and reads no other login.
+    let (layout, id, lock) = match super::resolve_skill_here(ctx, skill, None) {
+        Ok(found) => found,
+        // Nothing here answers to that name. It may be a CHANNEL — whose curation history is a web
+        // surface — in the workspace this machine acts on: ONE workspace, never a scan of every
+        // login.
+        Err(absent @ ClientError::NoSuchSkill { .. }) => {
+            return Err(channel_refusal(ctx, connectors, skill, workspace)?.unwrap_or(absent));
+        }
+        Err(e) => return Err(e),
+    };
     let sctx = super::pull::ctx_with_layout(ctx, &layout);
     // The KIND decides whether this verb applies at all, asked before a single event is read.
     let placements: Vec<String> = crate::doc::read_map(sctx.fs, &layout.published(&id).map)
@@ -123,11 +119,18 @@ pub(crate) fn log(
     let mut plane_proposals: Vec<Value> = Vec::new();
     let mut plane_version_ids: HashSet<String> = HashSet::new();
     if let Some(workspace_id) = super::followed_workspace(ctx, id.as_str())
-        && let Ok(su) = super::connect::session_universe(ctx, connectors.session)
-        && let Some(directory) = su.directory_for(&workspace_id)
+        && let Ok(Some((session, transports))) =
+            super::connect::workspace_transports(ctx, connectors.session, &workspace_id)
     {
+        // The ONE workspace this bundle came from, named once. Reading every login to find a lane
+        // for a workspace already known announced `reading <host>/<ws>` for workspaces that hold
+        // no copy of this bundle at all.
+        let _phase = crate::progress::phase(
+            ctx.progress,
+            &format!("reading {}/{}", session.host, session.workspace_name),
+        );
         // Best-effort: a transport fault or a not-found leaves the local log intact.
-        if let Ok(plane) = directory.skill_log(&workspace_id, id.as_str()) {
+        if let Ok(plane) = transports.directory.skill_log(&workspace_id, id.as_str()) {
             // The archived-successor hint when the skill was resolved by its FREED base name.
             if let Some(base) = &plane.base_name {
                 archived_successor = Some(format!("{base} is archived as {}", plane.name));
@@ -176,6 +179,50 @@ pub(crate) fn log(
         total: page_applied.then_some(total as u64),
         sync_fault,
     })
+}
+
+/// The refusal a name that is a CHANNEL earns: a channel's curation history lives on the web, not
+/// in `topos log`. Asked of ONE workspace — the one the machine acts on (`--workspace` →
+/// `TOPOS_WORKSPACE` → the starred default → the sole login) — because a lookup that scanned every
+/// login dialed workspaces that hold nothing by that name, and narrated each one.
+///
+/// `Ok(None)` = not a channel there (or this machine is signed into nothing), which leaves the
+/// caller's own "no such bundle" answer standing.
+///
+/// # Errors
+/// The typed workspace-selection refusal when several logins are joined and none is the default.
+fn channel_refusal(
+    ctx: &Ctx<'_>,
+    connectors: &LogConnectors<'_>,
+    skill: &str,
+    workspace: Option<&str>,
+) -> Result<Option<ClientError>, ClientError> {
+    let su = match super::connect::acting_universe(ctx, connectors.session, workspace) {
+        Ok(Some(su)) => su,
+        Ok(None) => return Ok(None),
+        // The PICK is the person's to make and has to be said out loud. A server that did not
+        // answer is a different thing entirely: the probe is best-effort, so the local
+        // "no bundle by that name" stands, exactly as it did before this probe existed.
+        Err(
+            e @ (ClientError::WorkspaceSelection(_) | ClientError::SessionRequired { .. }),
+        ) => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    let Ok(parsed) = resolve::parse_target(skill) else {
+        return Ok(None);
+    };
+    let Ok(Some(Resolution::Resource {
+        kind: ResourceKind::Channel,
+        name,
+        ..
+    })) = resolve::resolve_one(&su.universe, &parsed, resolve::KindScope::CHANNELS)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ClientError::InvalidArgument(format!(
+        "'{name}' is a channel — a channel's curation history lives on the web, not in `topos \
+         log` (which shows a skill's version history)"
+    ))))
 }
 
 /// The fault recorded for `workspace_id`'s last exchange, named the way a person addresses the

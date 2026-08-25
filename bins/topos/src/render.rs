@@ -1690,6 +1690,27 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         }
     }
 
+    // The catalog view acts on ONE workspace; the other logins get ONE closing line each run, so
+    // a person reading their default workspace's catalog still sees that another exists — and the
+    // line they read is the command that shows it.
+    if !data.also_signed_in.is_empty() {
+        let names: Vec<&str> = data
+            .also_signed_in
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect();
+        // ONE other workspace: name it in the command, so the line is paste-ready. SEVERAL: the
+        // placeholder, because a command naming one of three would be a guess.
+        let spelling = match names.as_slice() {
+            [one] => (*one).to_owned(),
+            _ => "<name>".to_owned(),
+        };
+        s.push_str(&format!(
+            "also logged into: {} — `topos list --remote --workspace {spelling}`\n",
+            names.join(", ")
+        ));
+    }
+
     // The quiet-rule summaries: what this view did not show, ONE line each.
     if let Some(m) = &data.machine_summary {
         let updates = if m.updates_pending > 0 {

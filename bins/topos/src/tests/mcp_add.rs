@@ -1136,6 +1136,7 @@ fn the_version_verbs_refuse_over_a_connected_server() {
             session: &no_session,
         },
         "weather",
+        None,
         ops::RowPage::unlimited(),
     )
     .expect_err("log refuses");
@@ -1234,6 +1235,7 @@ fn the_same_verbs_still_serve_a_skill() {
             session: &no_session,
         },
         "notes",
+        None,
         ops::RowPage::unlimited(),
     )
     .expect("a skill still logs");

@@ -1099,6 +1099,7 @@ fn a_wedged_skills_sweep_failure_surfaces_in_its_topos_log() {
         &rig.ctx(&plane, &foll),
         &connectors,
         &name,
+        None,
         ops::RowPage::unlimited(),
     )
     .unwrap();

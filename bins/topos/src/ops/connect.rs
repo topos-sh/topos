@@ -61,18 +61,72 @@ impl SessionUniverse {
     }
 }
 
-/// Build the [`SessionUniverse`] (see [`build_universe_sessions`] for the read semantics).
+/// Build the [`SessionUniverse`] over EVERY live session (see [`build_universe_sessions`] for the
+/// read semantics) — for the verbs that are cross-workspace BY NATURE (the review inbox).
 pub(crate) fn session_universe(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
 ) -> Result<SessionUniverse, ClientError> {
     let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let live: Vec<sessions::Session> = all.live().cloned().collect();
+    universe_over(ctx, connect, &live)
+}
+
+/// The ONE workspace an ambient LOOKUP acts on, as a resolver universe: `--workspace` →
+/// `TOPOS_WORKSPACE` → the starred machine default → the only live session, and a typed refusal
+/// naming the choices when several are joined and none is default (see
+/// [`sessions::Sessions::resolve_target`]).
+///
+/// `Ok(None)` when this machine is signed into nothing at all — a lookup then has nowhere to ask,
+/// and the caller keeps whatever local answer it already has rather than refusing toward `login`.
+///
+/// # Errors
+/// [`ClientError::WorkspaceSelection`] / [`ClientError::SessionRequired`] from the resolution; a
+/// transport fault from the reads.
+pub(crate) fn acting_universe(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    explicit: Option<&str>,
+) -> Result<Option<SessionUniverse>, ClientError> {
+    let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    if all.live().next().is_none() {
+        return Ok(None);
+    }
+    let session = all.resolve_target(explicit)?.clone();
+    Ok(Some(universe_over(ctx, connect, std::slice::from_ref(
+        &session,
+    ))?))
+}
+
+/// The transports for ONE workspace this machine holds a live session for, under that session's
+/// own credential — what a verb takes when its TARGET already names the workspace (a tracked
+/// bundle's own origin), so nothing else is dialed and no name has to be resolved.
+///
+/// # Errors
+/// An unreadable sessions file.
+pub(crate) fn workspace_transports(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    workspace_id: &str,
+) -> Result<Option<(sessions::Session, super::reconcile::SessionTransports)>, ClientError> {
+    let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let Some(session) = all.live().find(|s| s.workspace_id == workspace_id).cloned() else {
+        return Ok(None);
+    };
+    let transports = connect(&session);
+    Ok(Some((session, transports)))
+}
+
+/// Build the [`SessionUniverse`] over EXACTLY the sessions given (see [`build_universe_sessions`]
+/// for the read semantics).
+fn universe_over(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    sessions: &[sessions::Session],
+) -> Result<SessionUniverse, ClientError> {
     let mut universe = Vec::new();
     let mut lanes = std::collections::HashMap::new();
-    for s in &all.sessions {
-        if s.status == SESSION_ENDED {
-            continue;
-        }
+    for s in sessions {
         let transports = connect(s);
         // ONE activity line per workspace — the three member reads underneath would otherwise
         // each announce their own "contacting <host>", seven lines for one governance op.
