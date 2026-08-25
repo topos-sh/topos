@@ -2253,13 +2253,15 @@ fn log_line(e: &serde_json::Value) -> String {
         return s;
     }
     let mut parts = vec![when, action.to_owned()];
-    // Who/what: the human name where recorded, else the skill id; git version events carry the author.
-    if let Some(name) = get("name")
-        .or_else(|| get("skill_id"))
-        .or_else(|| get("author"))
-    {
-        parts.push(name.to_owned());
-    }
+    // WHO acted. A version event carries its author (a person, or `you` for this install's own
+    // git versions); a local action row carries the name it was recorded under. Anything else was
+    // this installation's own doing and says so — the fallback used to be the bundle's `skill_id`,
+    // which printed `topos_04e736b27f…` in the actor column of a view already about that one
+    // bundle, beside version rows naming a person.
+    let who = get("author")
+        .or_else(|| get("name"))
+        .unwrap_or("this machine");
+    parts.push(who.to_owned());
     if let Some(v) = get("version_id") {
         parts.push(format!("@{}", short(v)));
     }
@@ -9947,6 +9949,48 @@ mod tests {
             text.contains("/home/x/.topos/skills/topos_s00"),
             "each path is listed: {text}"
         );
+    }
+
+    /// A LOCAL action row — `pull`, `pull-goback` — records no author, and the actor column fell
+    /// back to the bundle's own `skill_id`: `pull  topos_04e736b27f…  @cf1de528aca4`, an opaque
+    /// id in the WHO column of a view that is already about that one bundle, sitting beside
+    /// version rows naming a person. The act was this installation's, and says so.
+    #[test]
+    fn a_local_action_row_names_this_machine_never_the_bundle_id() {
+        let data = LogData {
+            events: vec![
+                serde_json::json!({
+                    "action": "pull",
+                    "skill_id": "topos_04e736b27f3340d0b33bfb6be8965df7",
+                    "version_id": "cf".repeat(32),
+                    "at": 1_700_000_000_000u64,
+                }),
+                serde_json::json!({
+                    "action": "version",
+                    "source": "plane",
+                    "version_id": "cf".repeat(32),
+                    "at": 1_700_000_000_000u64,
+                    "author": "Robert <robert@topos.sh>",
+                    "message": "topos: revert",
+                }),
+            ],
+            team: None,
+            archived_successor: None,
+            truncated: false,
+            total: None,
+            sync_fault: None,
+        };
+        let out = log_tty(&data);
+        assert!(
+            out.contains("pull  this machine  @cfcfcfcfcfcf"),
+            "the local act is this machine's: {out}"
+        );
+        assert!(
+            !out.contains("topos_04e736b27f"),
+            "the bundle id is never the actor: {out}"
+        );
+        // The version row beside it still names the person who published it.
+        assert!(out.contains("version  Robert <robert@topos.sh>"), "{out}");
     }
 
     #[test]
