@@ -85,6 +85,18 @@ test.describe("signed out", () => {
   });
 });
 
+test("ENTER in the code field looks the request up — exactly as the button does", async ({
+  page,
+}) => {
+  // The keyboard is how a code gets typed: hands are already on it. Enter must be the Look up
+  // click, not a second, emptier page.
+  const flow = await startLoginFlow(page, "e2e-keyboard");
+  await page.goto("/verify");
+  await page.getByLabel("Code").fill(flow.user_code);
+  await page.getByLabel("Code").press("Enter");
+  await expect(page.getByText("\u201ce2e-keyboard\u201d", { exact: true })).toBeVisible();
+});
+
 test("an unknown code is an honest in-page state, never a 404", async ({ page }) => {
   await lookUp(page, "ZZZZ-9999");
   await expect(page.getByRole("heading", { name: "Approve a login" })).toBeVisible();
