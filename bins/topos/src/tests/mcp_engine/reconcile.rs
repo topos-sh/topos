@@ -508,17 +508,13 @@ fn a_served_document_that_cannot_be_read_fails_the_bundle() {
 fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
     // PROJECT scope, so the breadth is hermetic without narrowing (a fresh subscribe row spells
     // no `dest`, and project surfaces are checkout-relative whatever the dev env sets): the four
-    // project-capable agents engage deterministically — claude-code + cursor via detection under
-    // the fake home, codex + opencode via their seeded project files.
+    // project-capable agents are PICKED for the checkout, and a picked agent engages whether or
+    // not it is installed.
     let rig = Rig::new("sub-receipt");
     rig.seed_session();
-    seed_harness_dirs(&rig.home.0);
-    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
     let proj = Scratch::new("sub-receipt-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
-    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
-    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    rig.project_pick(&proj.0, &["claude-code", "cursor", "codex", "opencode"]);
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
     let s = served_at("https://mcp.example/linear");
     let plane = FakePlane::new();
@@ -834,16 +830,22 @@ fn a_channel_drop_removes_the_entries_everywhere() {
 fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_supported() {
     let rig = Rig::new("project");
     rig.seed_session();
-    seed_harness_dirs(&rig.home.0);
-    // claude-code + codex + opencode engage hermetically at PROJECT scope: their project surfaces
-    // are checkout-relative. Seed codex's and opencode's project files so they engage without a
-    // detect dir (opencode's sits at the checkout ROOT).
-    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    // The PROJECT pick names the four project-capable agents plus two with no project surface:
+    // every picked agent's project surface is checkout-relative, so nothing here depends on what
+    // the dev machine has installed.
     let proj = Scratch::new("project-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
-    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
-    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    rig.project_pick(
+        &proj.0,
+        &[
+            "claude-code",
+            "cursor",
+            "codex",
+            "opencode",
+            "openclaw",
+            "hermes-agent",
+        ],
+    );
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
         format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = \"latest\"\n"),
@@ -901,6 +903,7 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
 fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
     let rig = Rig::new("escape");
     rig.seed_session();
+    rig.pick(&["cursor"]);
     let outside = Scratch::new("escape-outside");
     let proj = Scratch::new("escape-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
@@ -1293,13 +1296,14 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
     let channel_row =
         format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\neveryone = \"latest\"\n");
     std::fs::write(&manifest, &channel_row).unwrap();
+    rig.project_pick(&proj.0, &["claude-code", "codex"]);
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep(&ctx, &plane, &dir);
     assert!(proj.0.join(".mcp.json").exists());
     assert!(proj.0.join(".codex/config.toml").exists());
 
-    // A NEW agent is installed after the channel row was written.
-    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    // A NEW agent is picked after the channel row was written.
+    rig.project_pick(&proj.0, &["claude-code", "codex", "opencode"]);
     let add = |agent: &str| {
         let outcome = ops::add_reference(
             &ctx,
@@ -1396,14 +1400,11 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
 fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     let rig = Rig::new("narrow-lead");
     rig.seed_session();
-    // PROJECT scope, where every surface is checkout-relative and hermetic: claude-code detects
-    // under the fake home, codex + opencode through their seeded project files.
-    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    // PROJECT scope, where every surface is checkout-relative and hermetic: the checkout picks
+    // claude-code, codex and opencode.
     let proj = Scratch::new("narrow-lead-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
-    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
-    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    rig.project_pick(&proj.0, &["claude-code", "codex", "opencode"]);
     let s = served_at("https://mcp.example/sentry");
     let plane = FakePlane::new();
     plane.serves_servers(vec![delivered_mcp("s_sentry", "sentry", &s)]);
@@ -1650,4 +1651,44 @@ fn an_address_add_of_a_feed_delivered_server_writes_nothing_and_leads_with_that(
              nothing, so nothing was written\nsource: {HOST}/{WS_NAME}/deepwiki"
         )
     );
+}
+
+/// ENTRIES FOLLOW THE PICK. An MCP row lands in the picked agents' configs and in no other,
+/// whatever is installed; an entry placed while an agent was picked is CUSTODY once the agent
+/// leaves the pick, so the next converge still reaches it — through the config-exists arm — and
+/// removes it.
+#[test]
+fn mcp_entries_land_only_in_picked_agents_configs_and_standing_custody_is_still_removable() {
+    let rig = Rig::new("pick-entries");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0); // cursor AND openclaw installed
+    rig.pick(&["cursor"]);
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
+    rig.write_global(&format!(
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = \"latest\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let openclaw = rig.home.0.join(".openclaw/openclaw.json");
+    let holds = |p: &std::path::Path| {
+        std::fs::read_to_string(p).is_ok_and(|t| t.contains("mcp.example/linear"))
+    };
+
+    sweep(&ctx, &plane, &dir);
+    assert!(holds(&cursor), "the picked agent got its entry");
+    assert!(!openclaw.exists(), "installed but unpicked: not a byte");
+
+    // Picked later: reached, the row untouched.
+    rig.pick(&["cursor", "openclaw"]);
+    sweep(&ctx, &plane, &dir);
+    assert!(holds(&openclaw), "the newly picked agent got its entry");
+
+    // Dropped from the pick: its standing entry is custody, and the converge takes it out.
+    rig.pick(&["cursor"]);
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(!holds(&openclaw), "the entry left: {:?}", out.data.skills);
+    assert!(holds(&cursor), "the picked agent's entry stands");
 }

@@ -29,7 +29,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use topos_harness::coverage;
 use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{ConflictReason, Lock, PlacementMap};
 use topos_types::results::{
@@ -1148,10 +1147,9 @@ fn adoption(
     }
 }
 
-/// The agent-eye view for one harness: each skills dir it reads from this folder — its canonical
-/// home dir, the shared `.agents/skills` dirs when the harness is covered by them, and its
-/// project dir — with every entry marked managed (by which manifest row or feed, or `built-in`
-/// for the CLI's own placed meta-skill) or untracked.
+/// The agent-eye view for one harness: each skills dir its registry row names from this folder —
+/// its canonical home dir and its project dir — with every entry marked managed (by which manifest
+/// row or feed, or `built-in` for the CLI's own placed meta-skill) or untracked.
 fn agent_view(
     ctx: &Ctx<'_>,
     resolved: &Resolved,
@@ -1167,22 +1165,15 @@ fn agent_view(
         )));
     };
 
-    // The dirs, home scope first, deduped (a harness whose native dir IS the shared dir).
+    // The dirs, home scope first, deduped (a row whose two dirs resolve to one folder).
     let mut dirs: Vec<(PathBuf, &'static str)> = Vec::new();
     if let Some(r) = roots {
         let cwd = r.cwd.as_deref();
         if let Some(d) = registry::skills_root(slug, SkillScope::User, &r.home, cwd) {
             dirs.push((d, "user"));
         }
-        let covered = coverage::shared_dir_support(slug).covered();
-        if covered {
-            dirs.push((coverage::shared_skills_dir(&r.home), "user"));
-        }
         if let Some(d) = registry::skills_root(slug, SkillScope::Project, &r.home, cwd) {
             dirs.push((d, "project"));
-        }
-        if covered && let Some(c) = cwd {
-            dirs.push((c.join(".agents/skills"), "project"));
         }
     }
     let mut seen: HashSet<PathBuf> = HashSet::new();

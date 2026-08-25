@@ -1208,20 +1208,6 @@ pub(crate) enum ClientError {
     /// closes with `nothing changed`, because nothing was read past the argv.
     #[error("{0}")]
     SelectionRefused(String),
-    /// A per-agent removal whose only copy is a SHARED folder several agents read — subtracting
-    /// one agent cannot narrow one copy. The two ways out ride as structured `next_actions`
-    /// (and the TTY renders them as aligned command lines): remove the copy for every agent, or
-    /// re-add per-agent for the others and re-run.
-    #[error("{name} has no {agent}-only copy — its one copy is {copy}, which several agents read")]
-    SharedCopyOnly {
-        name: String,
-        agent: String,
-        copy: String,
-        /// `topos remove [-g] <name>` — remove it for every agent.
-        remove_argv: Vec<String>,
-        /// `topos add [-g] <ref> -a <slug>…` — keep it per-agent instead, then re-run.
-        readd_argv: Vec<String>,
-    },
 }
 
 impl ClientError {
@@ -1396,8 +1382,6 @@ impl ClientError {
             ClientError::UnknownAgent { .. } => "UNKNOWN_AGENT",
             // A selection the arm refuses whole shares the argument-shaped code.
             ClientError::SelectionRefused(_) => "INVALID_ARGUMENT",
-            // The shared-copy narrowing refusal: the ways out ride as next_actions.
-            ClientError::SharedCopyOnly { .. } => "SHARED_COPY_ONLY",
         }
     }
 

@@ -26,7 +26,7 @@ Some folders are cross-agent conventions that several agents read, so each is na
 
 - `~/.agents/skills` — the machine folder read by cline, dexto, kimi-code-cli, loaf, warp, zed.
 - `~/.config/agents/skills` — the machine folder read by amp, replit, universal.
-- `.agents/skills` — the project folder read by amp, antigravity, antigravity-cli, cline, codex, cursor, deepagents, dexto, firebender, gemini-cli, github-copilot, kimi-code-cli, loaf, opencode, promptscript, replit, universal, warp, zed. A `shared` cell below means this folder.
+- `.agents/skills` — the project folder read by amp, antigravity, antigravity-cli, cline, codex, deepagents, dexto, firebender, gemini-cli, github-copilot, kimi-code-cli, loaf, promptscript, replit, universal, warp, zed. A `shared` cell below means this folder.
 
 | Agent | Machine folder | Project folder |
 |---|---|---|
@@ -48,7 +48,7 @@ Some folders are cross-agent conventions that several agents read, so each is na
 | `continue` | `~/.continue/skills` | `.continue/skills` |
 | `cortex` | `~/.snowflake/cortex/skills` | `.cortex/skills` |
 | `crush` | `~/.config/crush/skills` | `.crush/skills` |
-| `cursor` | `~/.cursor/skills` | shared |
+| `cursor` | `~/.cursor/skills` | `.cursor/skills` |
 | `deepagents` | `~/.deepagents/agent/skills` | shared |
 | `devin` | `~/.config/devin/skills` | `.devin/skills` |
 | `droid` | `~/.factory/skills` | `.factory/skills` |
@@ -77,7 +77,7 @@ Some folders are cross-agent conventions that several agents read, so each is na
 | `neovate` | `~/.neovate/skills` | `.neovate/skills` |
 | `ona` | `~/.ona/skills` | `.ona/skills` |
 | `openclaw` | `~/.openclaw/skills` | `skills` |
-| `opencode` | `~/.config/opencode/skills` | shared |
+| `opencode` | `~/.config/opencode/skills` | `.opencode/skills` |
 | `openhands` | `~/.openhands/skills` | `.openhands/skills` |
 | `pi` | `~/.pi/agent/skills` | `.pi/skills` |
 | `pochi` | `~/.pochi/skills` | `.pochi/skills` |

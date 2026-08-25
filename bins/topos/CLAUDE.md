@@ -104,10 +104,8 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   converge's outcome IS the answer: an error is the add's own, a bundle it failed says so on the
   asked agent's line (never `not placed — it is not set up here`, which is the DETECTION answer)
   and never closes on `nothing changed`, and its warnings ride the add's envelope. Asked agents
-  match the converge's surfaces by FOLDER — its own root, then the shared one where
-  `topos_harness::coverage` says it reads there, which is the order placement itself answers in
-  (shared-dir-first: a covered agent's copy is in that folder and its own root holds nothing) — so
-  an agent reading a shared skills root is reported against that root instead of missing.
+  match the converge's surfaces by FOLDER — the agent's own root from its registry row — so a
+  folder several picked agents read answers for each of them instead of reading as missing.
   Every registration the inline converge made rides the add's own receipt, on all of its answers.
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members — a row edit
   uninstalls its copies EAGERLY (one scope reconcile in the same invocation; edited copies kept
@@ -210,17 +208,25 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   preserved as `.topos-kept-*` siblings) plus the park journal + recovery; the contracts live in
   the module docs. The rule everywhere: **no byte differing from its recorded baseline is
   destroyed unless a snapshot taken after the last revalidation holds it.**
-- `placement` — where a bundle's bytes land per scope. **Every target dir comes from the harness's
-  registry ROW through the one resolver — the ACTIVE harness's exactly like every other detected
-  one**, so a machine-local table that moved an agent's skills dir moves the bytes with it; the
-  `HarnessAdapter` answers for the dir only where no row can (no machine roots at all). Two target
-  shapes ride one plan:
-  a DIRECTORY the bundle owns (shared-dir-first over the home; project-rooted with containment
+- `agents_pick` — WHICH agents topos touches: `<project>/.topos/agents.json` (per clone, never
+  committed) and `<machine store>/agents.json`, `{"schema_version": 1, "agents": [...]}` with a
+  lone `"*"` for every agent installed here, resolved when read. The effective pick in a project is
+  its own file, else the machine's, else NONE — and no pick places nothing. Every writer asks one
+  of two shapes (`picked_harnesses` for the dir planners, `picked_slugs` for the entries planner),
+  both read from the ctx's MACHINE store (`Layout::machine_home`, stamped when a ctx is re-rooted
+  at a project store). Detection feeds only the wildcard and the questions that name what is
+  installed; teardown never reads the pick.
+- `placement` — where a bundle's bytes land per scope. **One native copy per PICKED agent, in the
+  folder its registry ROW names at that scope, through the one resolver**, so a machine-local
+  table that moved an agent's skills dir moves the bytes with it; two picked agents whose rows
+  name one folder share one copy; the `HarnessAdapter` answers for the dir only where no row can
+  (no machine roots at all). Two target shapes ride one plan:
+  a DIRECTORY the bundle owns (the picked agents' folders; project-rooted with containment
   proven at the write boundary), or ENTRIES it owns inside a config file shared with the whole
-  machine (`entries_plan` — the harness table's MCP surfaces joined onto detection, narrowed by
+  machine (`entries_plan` — the harness table's MCP surfaces joined onto the pick, narrowed by
   the reach the caller resolved, with the surfaces it withheld and their reasons). A kind picks
   which arm plans and which mechanic applies; a plan says what SHOULD stand and never what does
-  (that is the bundle record's custody). Composes `topos-harness::{coverage,registry,mcp}`. `Drift`
+  (that is the bundle record's custody). Composes `topos-harness::{registry,mcp}`. `Drift`
   is the ONE payload-free vocabulary both shapes project onto (Absent/Clean/Modified/Foreign/
   Unscannable) for the words receipts and the wire choose; `ScanStatus` keeps its scanned bytes.
 - `ops/add_mcp` — `add --kind mcp`'s ONE door, and a THIN one: a registry name or an https link to

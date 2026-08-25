@@ -1,5 +1,5 @@
 //! The per-scope MCP CONVERGENCE engine — how a `kind = "mcp"` bundle's `server.json` becomes (and
-//! stops being) an entry in each detected agent's own MCP config.
+//! stops being) an entry in each picked agent's own MCP config.
 //!
 //! The pure placement math lives in `topos_harness::mcp` (bytes in → an [`EditPlan`] out, one
 //! driver per dialect); THIS module owns everything stateful around it, per scope:
@@ -21,8 +21,10 @@
 //! - the [`crate::config_custody`] discipline: key minting, the `key → fingerprint` prior map
 //!   (read off each bundle's OWN record — the same `map.json` that records a skill bundle's dirs),
 //!   the intent journal around EVERY config write, and crash recovery at converge start,
-//! - the per-harness surface: the descriptor table joined onto detection (a harness engages only
-//!   when its slug is detected OR its config file already exists), the person/project surface
+//! - the per-harness surface: the descriptor table joined onto the agents pick (a harness engages
+//!   only when its slug is picked OR its config file already exists — the second arm is custody:
+//!   an entry placed while the agent was picked must still be reachable for removal), the
+//!   person/project surface
 //!   split (a project scope NEVER falls back to a user surface), and the project containment
 //!   proof (the [`crate::placement::within_project`] rail — refused + disclosed, never
 //!   redirected),
@@ -121,19 +123,18 @@ pub(crate) struct DemandedBundle {
 
 impl DemandedBundle {
     /// Plan this row onto ONE scope's config surfaces — the ONE construction of an [`McpDemand`].
-    /// The scope (its fs, home and project root) comes from `io`, and `detected` is the SAME set
+    /// The scope (its fs, home and project root) comes from `io`, and `picked` is the SAME set
     /// the converge this feeds engages against.
     pub(crate) fn planned(
         self,
         io: &ScopeIo<'_>,
         descriptors: &[&'static KnownHarness],
-        detected: &BTreeSet<String>,
+        picked: &BTreeSet<String>,
     ) -> McpDemand {
         let plan = crate::placement::entries_plan_at(
-            io.fs,
             descriptors,
             &io.home,
-            detected,
+            picked,
             io.project_root.as_deref(),
             self.reach.as_deref(),
         );
@@ -323,7 +324,7 @@ pub(crate) fn converge(
     io: &ScopeIo<'_>,
     demands: &[McpDemand],
     descriptors: &[&'static KnownHarness],
-    detected: &BTreeSet<String>,
+    picked: &BTreeSet<String>,
     hold: &HashSet<String>,
     allow_removals: bool,
 ) -> ConvergeOutcome {
@@ -523,10 +524,10 @@ pub(crate) fn converge(
                     }
                     continue;
                 };
-                // Engagement: the harness is detected on this machine, OR its config surface
-                // already exists (entries were placed while it was detected — removal must still
-                // reach them).
-                if !(detected.contains(h.slug) || io.fs.exists(&root)) {
+                // Engagement: the harness is picked on this machine, OR its config surface
+                // already exists (entries were placed while it was picked — removal must still
+                // reach them; the plan admits no new entry for an unpicked agent).
+                if !(picked.contains(h.slug) || io.fs.exists(&root)) {
                     continue;
                 }
                 (file, dialect)
@@ -791,7 +792,7 @@ pub(crate) fn converge(
 pub(crate) fn remove_bundle(
     io: &ScopeIo<'_>,
     descriptors: &[&'static KnownHarness],
-    detected: &BTreeSet<String>,
+    picked: &BTreeSet<String>,
     bundle_id: &str,
     /* the name a person calls it — see `converge`'s `names` */ name: &str,
 ) -> ConvergeOutcome {
@@ -855,7 +856,7 @@ pub(crate) fn remove_bundle(
         else {
             continue;
         };
-        if !(detected.contains(h.slug) || io.fs.exists(&root)) {
+        if !(picked.contains(h.slug) || io.fs.exists(&root)) {
             continue;
         }
         if !custody.holds(&placement_key(h.slug, &key)) {

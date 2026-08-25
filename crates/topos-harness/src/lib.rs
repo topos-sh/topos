@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 mod claude_code;
-pub mod coverage;
 mod hermes;
 pub mod mcp;
 mod openclaw;

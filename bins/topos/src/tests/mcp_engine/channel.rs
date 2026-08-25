@@ -39,16 +39,14 @@ fn channel_of(skills: Vec<WireSkillIndexEntry>, servers: Vec<WireMcpIndexEntry>)
     }
 }
 
-/// A checkout whose committed manifest holds `body`, with the project MCP surfaces of claude-code,
-/// codex and opencode seeded so they engage hermetically (their project files are
-/// checkout-relative; the home-rooted ones are `seed_harness_dirs`'s).
-fn project_with(tag: &str, body: &str) -> Scratch {
+/// A checkout whose committed manifest holds `body`, PICKING the four project-capable agents so
+/// every project MCP surface engages hermetically (they are checkout-relative; a picked agent
+/// needs no detect dir).
+fn project_with(rig: &Rig, tag: &str, body: &str) -> Scratch {
     let proj = Scratch::new(tag);
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
-    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
-    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), body).unwrap();
+    rig.project_pick(&proj.0, &["claude-code", "cursor", "codex", "opencode"]);
     proj
 }
 
@@ -73,6 +71,7 @@ fn a_channel_dest_places_its_skills_while_its_servers_reach_every_agent() {
     std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
     // PROJECT scope: every MCP surface is checkout-relative there, so "every agent" is hermetic.
     let proj = project_with(
+        &rig,
         "ch-dest-co",
         &format!(
             "workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\ntools = {{ dest = [\"prompts/skills\"] }}\n"
@@ -304,6 +303,7 @@ fn a_config_file_path_in_a_channels_dest_is_a_folder_to_skills_and_nothing_to_se
     // `.openclaw/openclaw.json` is a real MCP config spelling — and openclaw has no PROJECT
     // surface, so nothing in this checkout could ever read it as one.
     let proj = project_with(
+        &rig,
         "ch-crossed-co",
         &format!(
             "workspace = \"{HOST}/{WS_NAME}\"\n\n[channels]\ntools = \

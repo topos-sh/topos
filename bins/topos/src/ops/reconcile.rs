@@ -6475,12 +6475,7 @@ fn run_mcp_converge(
             }
         }
         let allow_removals = opts.targets.is_empty() && !sweep.mcp_blind;
-        let cwd = project_root.clone().or_else(|| roots.cwd.clone());
-        let detected: std::collections::BTreeSet<String> =
-            topos_harness::registry::detected_harnesses(&roots.home, cwd.as_deref())
-                .iter()
-                .map(|h| h.slug.to_owned())
-                .collect();
+        let picked = crate::agents_pick::picked_slugs(env.ctx, project_root.as_deref());
         let io = crate::mcp_engine::ScopeIo {
             fs: env.ctx.fs,
             runtimes: &crate::mcp_render::PathRuntimes,
@@ -6495,13 +6490,13 @@ fn run_mcp_converge(
         // plans and custody from each bundle's own record — it decides no reach of its own.
         let demands: Vec<crate::mcp_engine::McpDemand> = rows
             .into_iter()
-            .map(|row| row.planned(&io, &descriptors, &detected))
+            .map(|row| row.planned(&io, &descriptors, &picked))
             .collect();
         let outcome = crate::mcp_engine::converge(
             &io,
             &demands,
             &descriptors,
-            &detected,
+            &picked,
             &hold,
             allow_removals,
         );

@@ -290,13 +290,7 @@ fn retire_mcp_entries(
         return;
     }
     let project_root = layout.project_root().map(std::path::Path::to_path_buf);
-    let detected: std::collections::BTreeSet<String> = topos_harness::registry::detected_harnesses(
-        &roots.home,
-        project_root.as_deref().or(roots.cwd.as_deref()),
-    )
-    .iter()
-    .map(|h| h.slug.to_owned())
-    .collect();
+    let picked = crate::agents_pick::picked_slugs(ctx, project_root.as_deref());
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
         runtimes: &crate::mcp_render::PathRuntimes,
@@ -308,7 +302,7 @@ fn retire_mcp_entries(
     let outcome = crate::mcp_engine::remove_bundle(
         &io,
         &topos_harness::mcp::descriptor::mcp_harnesses_for_teardown(),
-        &detected,
+        &picked,
         skill_id,
         &item.name,
     );

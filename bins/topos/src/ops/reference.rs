@@ -585,12 +585,7 @@ fn set_delivered_add(
         },
     )?;
     let failure = converge_failure(&outcome, sid.as_deref(), &resolved.name);
-    let asked = asked_surfaces(
-        selection,
-        target.scope,
-        kind,
-        shared_root(ctx, target, kind),
-    );
+    let asked = asked_surfaces(selection, target.scope, kind);
     let mut surfaces = if mcp {
         converged_entries(ctx, target, Some(&outcome), resolved)
     } else {
@@ -600,16 +595,11 @@ fn set_delivered_add(
         if surfaces.iter().any(|s| s.agent == a.key) {
             continue;
         }
-        // A SHARED skills folder names no single agent, so a slug-keyed match found nothing for an
-        // agent whose copy was sitting right there and reported it `not placed`. The asked agent's
-        // own folder is what the converge answered about: a surface inside it IS that agent's copy,
-        // and the line names the agent and the folder it reads.
-        //
-        // Placement is shared-dir-FIRST, so for an agent the shared folder COVERS that folder is
-        // where its copy is and its own root holds nothing — the agent's own dest can only be
-        // asked first and missed. Both folders are the same question, asked in the order placement
-        // answers it.
-        if let Some((folder, state)) = a.dest.iter().chain(a.shared.iter()).find_map(|dest| {
+        // A folder several picked agents read names no single agent, so a slug-keyed match found
+        // nothing for an agent whose copy was sitting right there and reported it `not placed`.
+        // The asked agent's own folder is what the converge answered about: a surface inside it
+        // IS that agent's copy, and the line names the agent and the folder it reads.
+        if let Some((folder, state)) = a.dest.iter().find_map(|dest| {
             surfaces
                 .iter()
                 .find(|s| reads_folder(s.target.as_deref(), dest))
@@ -689,26 +679,6 @@ fn converge_failure(outcome: &super::PullOutcome, sid: Option<&str>, name: &str)
     Some(text.strip_prefix(&lead).unwrap_or(&text).to_owned())
 }
 
-/// The CROSS-AGENT skills folder at this scope, in the spelling this receipt gives its folders —
-/// the one copy every covered harness reads (`placement`'s shared-dir-first policy). `None` for a
-/// config-placed bundle, which owns entries in files and has no shared folder at all, and for a
-/// machine whose home is unknown.
-fn shared_root(ctx: &Ctx<'_>, target: &EditTarget, kind: BundleKind) -> Option<String> {
-    if kind.is_mcp() {
-        return None;
-    }
-    let dir = match target.scope {
-        ManifestScope::Global => {
-            topos_harness::coverage::shared_skills_dir(&ctx.roots.as_ref()?.home)
-        }
-        ManifestScope::Project => target.dir.join(".agents/skills"),
-    };
-    Some(spell_in(
-        spelled_dir(ctx, target).as_deref(),
-        &super::inventory::pretty(ctx, &dir),
-    ))
-}
-
 /// Whether a converged surface's target is the folder `dest` names, or a copy sitting inside it.
 fn reads_folder(target: Option<&str>, dest: &str) -> bool {
     target.is_some_and(|t| {
@@ -727,33 +697,18 @@ struct AskedSurface {
     /// `None` for a slug with no destination at this scope (the selection would have refused it
     /// already) — such an ask can only be matched by key.
     dest: Option<String>,
-    /// The SHARED skills folder, for an asked agent that folder covers — where placement puts its
-    /// one copy instead of the agent's own root. `None` for every uncovered agent and for every
-    /// config-placed bundle.
-    shared: Option<String>,
 }
 
 /// The surfaces the invocation ASKED for, keyed the way [`converged_entries`] /
-/// [`converged_dirs`] key theirs, each carrying the destination it resolves to — and, for an
-/// agent the cross-agent folder covers, that folder too (`shared`).
+/// [`converged_dirs`] key theirs, each carrying the destination it resolves to.
 fn asked_surfaces(
     selection: &super::dest_select::Selection,
     scope: ManifestScope,
     kind: BundleKind,
-    shared: Option<String>,
 ) -> Vec<AskedSurface> {
     let slug_of = |entry: &str| match kind {
         BundleKind::Mcp => super::dest_select::slug_for_mcp_entry(entry, scope),
         BundleKind::Skill => super::dest_select::slug_for_skill_entry(entry, scope),
-    };
-    // The coverage question is the PLACEMENT engine's own (`topos_harness::coverage`), asked of
-    // the slug the ask resolves to, so an asked agent and the folder its copy really landed in
-    // cannot disagree.
-    let shared_of = |slug: &str| {
-        topos_harness::coverage::shared_dir_support(slug)
-            .covered()
-            .then(|| shared.clone())
-            .flatten()
     };
     let asked = selection
         .agents
@@ -764,12 +719,10 @@ fn asked_surfaces(
                 BundleKind::Mcp => crate::manifest::dest::mcp_dest_spelling_here(slug, scope),
                 BundleKind::Skill => crate::manifest::dest::skills_dest_spelling(slug, scope),
             },
-            shared: shared_of(slug),
         })
         .chain(selection.dests.iter().map(|dest| {
             let slug = slug_of(dest);
             AskedSurface {
-                shared: slug.as_deref().and_then(shared_of),
                 key: slug.unwrap_or_else(|| dest.clone()),
                 dest: Some(dest.clone()),
             }

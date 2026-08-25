@@ -90,8 +90,8 @@ pub(crate) use connect::parse_rfc3339_utc_millis;
 pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 #[cfg(test)]
 pub(crate) use builtin::{
-    ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
-    remove_builtin as builtin_remove,
+    ensure_builtin_in_project, ensure_with as builtin_ensure_with,
+    marker_in_frontmatter as builtin_marker_in_frontmatter, remove_builtin as builtin_remove,
 };
 pub(crate) use diff::{DiffBudget, diff, reset_preview_diff};
 pub(crate) use fmt::fmt_manifest;

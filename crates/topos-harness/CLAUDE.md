@@ -81,9 +81,6 @@ never learns which machinery served which harness.
   AND the only place machinery is named, so the trigger-capable set is a view over the registry, not
   a second list; the one sweep spelling is composed from shared consts (`GUARDED_SWEEP` +
   `SENTINEL` = `SHELL_SWEEP_LINE`).
-- **`coverage`** — whether a harness reads the shared `~/.agents/skills` dir, with PROVENANCE
-  (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed): the claim is a registry-row
-  column, over an automatic derivation for a row carrying none.
 - **`mcp`** — pure MCP-server config placement for sixteen harnesses; bytes in → an `EditPlan` out,
   the CLI owns ALL file I/O. An entry names one of TWO targets (`McpTarget`): an ADDRESS the
   harness dials, or a PROGRAM it runs on this machine (command + argv + env). Both are ordinary
@@ -129,7 +126,9 @@ never learns which machinery served which harness.
   keeps its name and claims no address; an unreadable surface answers `None`, which is never an
   empty answer.
 - **`registry`** — the ONE ~76-harness table: every row carries its skills dirs, detection
-  probes, MCP surfaces, and shared-dir claim, so a capability is a column rather than a table.
+  probes, and MCP surfaces, so a capability is a column rather than a table. Every row names ONE
+  skills folder per scope (`user_dirs` first entry, `project_dir`), and the CLI places a picked
+  agent's copy there; where two rows name one folder they share one copy.
   **The rows are DATA** — `registry.toml` at the crate root, `include_str!`d in, parsed by
   `registry::format`, and served byte-identically by the web app (`cargo xtask gen-registry`
   vendors it into `web/public/`, and `--check` gates the copy). `known_harnesses()` resolves

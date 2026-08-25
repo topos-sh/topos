@@ -234,7 +234,22 @@ impl SessionInstall {
         let root = Scratch::new(tag);
         std::fs::create_dir_all(root.0.join("home")).unwrap();
         std::fs::create_dir_all(root.0.join("work")).unwrap();
-        Self { root }
+        let install = Self { root };
+        // The machine's agents pick: every agent installed under the fake home — so the suites'
+        // detect-dir seeds decide which agents are reached, exactly as `["*"]` does for a person
+        // who picked everything. Claude Code is always installed here: the fixture's own
+        // `skills_dir` answers with its row, so the fixture must reach it whatever a suite seeds.
+        // A suite about the pick itself overwrites the file.
+        std::fs::create_dir_all(install.root.0.join("home").join(".claude")).unwrap();
+        let layout = install.layout();
+        std::fs::create_dir_all(layout.home()).unwrap();
+        crate::doc::write_doc(
+            &RealFs,
+            &crate::agents_pick::machine_path(&layout),
+            &crate::agents_pick::AgentsPick::new(vec![crate::agents_pick::WILDCARD.to_owned()]),
+        )
+        .unwrap();
+        install
     }
 
     /// The install's root dir (suites build project checkouts under it).

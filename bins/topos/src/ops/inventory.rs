@@ -373,7 +373,7 @@ pub(crate) fn resolve(
     }
     // The same bundle at BOTH scopes on different versions — nothing blends, so both copies land.
     // Disclosed on the PROJECT side: it is the project copy that is projected in-repo.
-    let claude = claude_code_detected(ctx);
+    let claude = claude_code_picked(ctx, project.as_ref().map(|(dir, _)| dir.as_path()));
     for prow in project_out.rows.iter().filter(|r| r.bundle) {
         let Some(person) = person_out
             .rows
@@ -1660,14 +1660,11 @@ pub(crate) fn pretty(ctx: &Ctx<'_>, path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Whether Claude Code is detected on this machine — its own precedence resolves personal skills
-/// over project ones, which a cross-scope version split must disclose. A read-only probe.
-fn claude_code_detected(ctx: &Ctx<'_>) -> bool {
-    ctx.roots.as_ref().is_some_and(|r| {
-        topos_harness::registry::detected_harnesses(&r.home, r.cwd.as_deref())
-            .iter()
-            .any(|h| h.slug == "claude-code")
-    })
+/// Whether Claude Code is one of the agents picked where this inventory stands (the project's
+/// effective pick, else the machine's) — its own precedence resolves personal skills over project
+/// ones, which a cross-scope version split must disclose. A read-only probe.
+fn claude_code_picked(ctx: &Ctx<'_>, project_dir: Option<&Path>) -> bool {
+    crate::agents_pick::picked_slugs(ctx, project_dir).contains("claude-code")
 }
 
 /// The reader both verbs open with: the sessions file and the offline delivery cache.

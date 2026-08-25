@@ -1488,7 +1488,7 @@ fn coalesce_set_splits(arms: Vec<Arm>) -> Vec<Arm> {
 /// # Errors
 /// [`ClientError::InvalidArgument`] for a token the file (and the feed) do not carry — with the
 /// cross-scope hint when the project manifest does; the narrowing refusals
-/// ([`ClientError::SharedCopyOnly`] / [`ClientError::SelectionRefused`]); a filesystem failure.
+/// ([`ClientError::SelectionRefused`]); a filesystem failure.
 pub(crate) fn remove_global(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -1964,7 +1964,6 @@ fn resolve_via(
 /// resurrect copies).
 ///
 /// # Errors
-/// [`ClientError::SharedCopyOnly`] when the only copy is a shared folder several agents read;
 /// [`ClientError::SelectionRefused`] for an arm subtraction cannot narrow (a feed line, a
 /// channel/repo member) or a destination the bundle has no copy at; the selection's own
 /// resolution errors.
@@ -2047,11 +2046,9 @@ fn narrow_one(
                 row_fields.dest.clone().unwrap_or_default()
             };
             let (subtract, remaining) = split_dest(
-                ctx,
                 target,
                 selection,
                 &name,
-                ws.as_ref(),
                 &row_dest,
                 &entries,
                 &record_copies(ctx, target, Some(&row), &name),
@@ -2170,11 +2167,9 @@ fn narrow_one(
                 )));
             }
             let (subtract, remaining) = split_dest(
-                ctx,
                 target,
                 selection,
                 &name,
-                ws.as_ref(),
                 &current,
                 &entries,
                 &record_copies(ctx, target, None, &name),
@@ -2422,20 +2417,16 @@ fn claim_origin(ctx: &Ctx<'_>, sctx: &Ctx<'_>, sid: &SkillId) -> Option<String> 
 }
 
 /// Split a destination set into `(subtract, remaining)` against the selection's entries — every
-/// selected entry must name a destination the set holds, or the refusal says why (the
-/// shared-copy answer when the coverage table explains the miss).
+/// selected entry must name a destination the set holds, or the refusal says which it holds.
 ///
 /// `copies` are the bundle's recorded copies as a receipt spells them — what the zero-state
 /// refusal names when the resolved destination set is empty but copies DO stand (every one of
 /// them a folder the person adopted or claimed, which no destination set speaks for). Saying
 /// "nothing has synced" there is a plain falsehood, and `list` one line up says otherwise.
-#[allow(clippy::too_many_arguments)]
 fn split_dest(
-    ctx: &Ctx<'_>,
     target: &EditTarget,
     selection: &super::dest_select::Selection,
     name: &str,
-    ws: Option<&(String, String)>,
     dest: &[String],
     entries: &[String],
     copies: &[String],
@@ -2464,26 +2455,6 @@ fn split_dest(
         if dest.contains(entry) {
             continue;
         }
-        // The miss: a shared folder several agents read may be the reason — the honest refusal
-        // names it and the two ways out.
-        let shared_root = match target.scope {
-            ManifestScope::Global => "~/.agents/skills".to_owned(),
-            ManifestScope::Project => ".agents/skills".to_owned(),
-        };
-        let removed_slug = selection
-            .agents
-            .iter()
-            .find(|slug| {
-                crate::manifest::dest::skills_dest_spelling(slug, target.scope).as_deref()
-                    == Some(entry.as_str())
-            })
-            .cloned();
-        if dest.contains(&shared_root)
-            && let Some(slug) = &removed_slug
-            && topos_harness::coverage::shared_dir_support(slug).covered()
-        {
-            return Err(shared_copy_refusal(ctx, target, name, slug, ws, global));
-        }
         return Err(ClientError::SelectionRefused(format!(
             "'{name}' has no copy at {entry} — its destinations here are {}",
             crate::manifest::dest::quoted_list(dest)
@@ -2500,79 +2471,6 @@ fn split_dest(
         .cloned()
         .collect();
     Ok((subtract, remaining))
-}
-
-/// The [`ClientError::SharedCopyOnly`] refusal, fully spelled: the one shared copy, the
-/// whole-removal command, and the per-agent re-add for the OTHER covered agents.
-fn shared_copy_refusal(
-    ctx: &Ctx<'_>,
-    target: &EditTarget,
-    name: &str,
-    removed_slug: &str,
-    ws: Option<&(String, String)>,
-    global: bool,
-) -> ClientError {
-    // The shared COPY dir (the placement itself, not its root), best-effort from the record.
-    let copy = shared_copy_dir(ctx, target, name).unwrap_or_else(|| match target.scope {
-        ManifestScope::Global => format!("~/.agents/skills/{name}"),
-        ManifestScope::Project => format!(".agents/skills/{name}"),
-    });
-    let mut remove_argv = vec!["topos".to_owned(), "remove".to_owned()];
-    if global {
-        remove_argv.push("-g".to_owned());
-    }
-    remove_argv.push(name.to_owned());
-    let mut readd_argv = vec!["topos".to_owned(), "add".to_owned()];
-    if global {
-        readd_argv.push("-g".to_owned());
-    }
-    readd_argv.push(sugar_reference(ctx, ws, name));
-    // The agents that read the shared copy per the coverage table, minus the one being removed —
-    // detected here, alphabetical.
-    let mut others: Vec<String> = ctx
-        .roots
-        .as_ref()
-        .map(|roots| {
-            topos_harness::registry::detected_harnesses(&roots.home, roots.cwd.as_deref())
-                .iter()
-                .map(|h| h.slug.to_owned())
-                .filter(|slug| slug != removed_slug)
-                .filter(|slug| topos_harness::coverage::shared_dir_support(slug).covered())
-                .collect()
-        })
-        .unwrap_or_default();
-    others.sort();
-    others.dedup();
-    for slug in &others {
-        readd_argv.push("-a".to_owned());
-        readd_argv.push(slug.clone());
-    }
-    ClientError::SharedCopyOnly {
-        name: name.to_owned(),
-        agent: removed_slug.to_owned(),
-        copy,
-        remove_argv,
-        readd_argv,
-    }
-}
-
-/// The recorded SHARED placement dir for `name` in this scope's store (pretty-spelled), when one
-/// stands.
-fn shared_copy_dir(ctx: &Ctx<'_>, target: &EditTarget, name: &str) -> Option<String> {
-    let sctx = scope_store_ctx(ctx, target)?;
-    let (sid, _lock) = super::resolve_skill(&sctx, name).ok()?;
-    let map = crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map).ok()??;
-    map.placements
-        .iter()
-        .zip(&map.placement_state)
-        .find(|(_, st)| st.kind == topos_types::persisted::PlacementKind::Shared)
-        .map(|(p, _)| dest_display(ctx, target, Path::new(p)))
-}
-
-/// The `@ws/<name>` sugar at the machine's one connected host, else the canonical spelling, else
-/// the bare name (a non-workspace bundle).
-fn sugar_reference(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> String {
-    qualified_name(ctx, ws, name)
 }
 
 /// The workspace-QUALIFIED display a destination receipt leads with — [`qualify_display`], with
@@ -4467,13 +4365,7 @@ fn converge_removed_mcp(
         return; // nothing was ever config-placed in this scope
     }
     let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
-    let detected: std::collections::BTreeSet<String> = topos_harness::registry::detected_harnesses(
-        &roots.home,
-        project_root.as_deref().or(roots.cwd.as_deref()),
-    )
-    .iter()
-    .map(|h| h.slug.to_owned())
-    .collect();
+    let picked = crate::agents_pick::picked_slugs(ctx, project_root.as_deref());
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
         runtimes: &crate::mcp_render::PathRuntimes,
@@ -4489,7 +4381,7 @@ fn converge_removed_mcp(
         let outcome = crate::mcp_engine::remove_bundle(
             &io,
             &topos_harness::mcp::descriptor::mcp_harnesses_for_teardown(),
-            &detected,
+            &picked,
             &bundle_id,
             &item.name,
         );

@@ -16,7 +16,6 @@
 //! root holds `server.json`. It stays a hand-written line: nothing is shared, so there is nobody to
 //! ask and no ruling to make, and the converge reads the file every run.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use topos_types::requests::McpAddRequest;
@@ -359,9 +358,10 @@ fn row_narrowing(
     (narrowing.filter, warnings)
 }
 
-/// The MCP-capable agents this scope's converge would engage — the same predicate the engine uses
-/// (the harness is detected here, OR its config file already exists), narrowed by the same
-/// `filter` the demand carries — so the receipt's breadth line is the one the converge delivers.
+/// The MCP-capable agents this scope's converge places into — the PICKED agents with a surface at
+/// this scope, narrowed by the same `filter` the demand carries — so the receipt's breadth line is
+/// the one the converge delivers (an unpicked agent whose config file exists is reached for
+/// removal only, and is no agent this add gave anything to).
 fn engaged_agents(
     ctx: &Ctx<'_>,
     target: &EditTarget,
@@ -372,13 +372,7 @@ fn engaged_agents(
         return Vec::new();
     };
     let project_root = (!global).then(|| target.dir.clone());
-    let detected: BTreeSet<String> = topos_harness::registry::detected_harnesses(
-        &roots.home,
-        project_root.as_deref().or(roots.cwd.as_deref()),
-    )
-    .iter()
-    .map(|h| h.slug.to_owned())
-    .collect();
+    let picked = crate::agents_pick::picked_slugs(ctx, project_root.as_deref());
     let mut out = Vec::new();
     for h in topos_harness::mcp::descriptor::mcp_harnesses() {
         if filter.is_some_and(|f| !f.iter().any(|s| s == h.slug)) {
@@ -391,8 +385,7 @@ fn engaged_agents(
             }),
             None => h.mcp_user_path(&roots.home),
         };
-        let Some(path) = surface else { continue };
-        if detected.contains(h.slug) || ctx.fs.exists(&path) {
+        if surface.is_some() && picked.contains(h.slug) {
             out.push(h.display_name.to_owned());
         }
     }

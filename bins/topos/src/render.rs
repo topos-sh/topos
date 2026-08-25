@@ -296,23 +296,6 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 "--json".into(),
             ],
         )],
-        // The shared-copy narrowing refusal: BOTH ways out, structurally — the whole-row remove
-        // and the per-agent re-add — each argv straight from the error's own fields (the TTY
-        // prints the same two lines, annotated).
-        ClientError::SharedCopyOnly {
-            remove_argv,
-            readd_argv,
-            ..
-        } => vec![
-            crate::actions::next_action(
-                ActionCode::from("RUN_COMMAND".to_owned()),
-                remove_argv.clone(),
-            ),
-            crate::actions::next_action(
-                ActionCode::from("RUN_COMMAND".to_owned()),
-                readd_argv.clone(),
-            ),
-        ],
         // A folder whose kind the door could not read. ONE runnable answer rides here — adopting
         // the folder as a skill — because it is the only one that IS a command: a server this
         // machine keeps to itself is a line in a file, and a server shared with a workspace names
@@ -5232,24 +5215,6 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
             crate::error::scope_flag(*global)
         );
     }
-    // The shared-copy narrowing refusal renders its ways out as ALIGNED command lines under the
-    // statement — the copy is the answer, so it carries no `error:` prefix (the `--json`
-    // envelope keeps the single-sentence message; the same two commands ride `next_actions`).
-    if let ClientError::SharedCopyOnly {
-        remove_argv,
-        readd_argv,
-        ..
-    } = err
-    {
-        let remove_line = argv_line(remove_argv);
-        let readd_line = argv_line(readd_argv);
-        let pad = remove_line.len().max(readd_line.len());
-        return format!(
-            "{}\n  {remove_line:<pad$}   remove it for every agent\n  {readd_line:<pad$}   keep \
-             it per-agent instead, then re-run",
-            safe_message(err)
-        );
-    }
     format!("error: {}", safe_message(err))
 }
 
@@ -5311,9 +5276,7 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
     }
     if matches!(
         err,
-        ClientError::SharedCopyOnly { .. }
-            | ClientError::PlacementsDiverged { .. }
-            | ClientError::PublishBehind { .. }
+        ClientError::PlacementsDiverged { .. } | ClientError::PublishBehind { .. }
     ) {
         return None;
     }
