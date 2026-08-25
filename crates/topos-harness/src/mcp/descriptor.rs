@@ -277,9 +277,18 @@ mod tests {
             (Root::Config, "opencode/opencode.json")
         );
         assert_eq!(s.dialect, McpDialect::OpencodeJson);
+        // A project's servers sit under the agent's own folder, beside its trigger file. The root
+        // file the agent also reads is the second project surface, reached only by a row's `dest`.
         assert_eq!(
             oc.project,
-            Some(in_checkout("opencode.json", McpDialect::OpencodeJson))
+            Some(in_checkout(
+                ".opencode/opencode.json",
+                McpDialect::OpencodeJson
+            ))
+        );
+        assert_eq!(
+            oc.project_dest,
+            Some(("opencode.json", McpDialect::OpencodeJson))
         );
 
         let claw = get("openclaw");

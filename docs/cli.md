@@ -114,7 +114,7 @@ An MCP-server bundle arrives as an entry in the agent's own MCP config rather th
 | `github-copilot` | `~/.copilot/mcp-config.json` | — |
 | `goose` | `~/.config/goose/config.yaml` | — |
 | `hermes-agent` | `~/.hermes/config.yaml` | — |
-| `opencode` | `~/.config/opencode/opencode.json` | `opencode.json` |
+| `opencode` | `~/.config/opencode/opencode.json` | `.opencode/opencode.json` |
 | `roo` | `<application support>/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` | `.roo/mcp.json` |
 | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | — |
 | `zed` | `~/.config/zed/settings.json` | — |

@@ -270,9 +270,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   PROJECT surface is usually a file in the checkout, proven inside it at every write; Claude Code's
   is its own MACHINE file, whose entries for a checkout sit in a slot keyed by that checkout's
   absolute path, so nothing is written in the repository and the rail has nothing to prove. One
-  agent can therefore have TWO project files — the default one, and a second (`.mcp.json`) reached
-  only when a row's `dest` names it — which is what `Reach` carries beside each slug. A kind picks
-  which arm plans and which mechanic applies; a plan says what SHOULD stand and never what does
+  agent can therefore have TWO project files — the default one, and a second at the checkout root
+  (`.mcp.json` for Claude Code, `opencode.json` for OpenCode) reached only when a row's `dest`
+  names it — which is what `Reach` carries beside each slug. A kind picks which arm plans and
+  which mechanic applies; a plan says what SHOULD stand and never what does
   (that is the bundle record's custody). Composes `topos-harness::{registry,mcp}`. `Drift`
   is the ONE payload-free vocabulary both shapes project onto (Absent/Clean/Modified/Foreign/
   Unscannable) for the words receipts and the wire choose; `ScanStatus` keeps its scanned bytes.
@@ -350,8 +351,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   recorded rows — prior-matched keys, with drift left in place. ONE converge path serves every
   surface, and it runs first over the RETIRED ones (`retired_surfaces`): the surfaces an older
   topos wrote this harness's entries into and this one does not — Claude Code's wholly-owned
-  plugin folder, and the `.mcp.json` a project used to get — converged with an empty desired set,
-  so their rows leave through the ordinary prior-matched removal and the file (or folder) goes
+  plugin folder, and the checkout-root files two rows used to write (`.mcp.json` for Claude Code,
+  `opencode.json` for OpenCode) — converged with an empty desired set, so their rows leave
+  through the ordinary prior-matched removal and the file (or folder) goes
   with the last of them, and no server is registered twice under two names. They are code and not
   a table column: which files a PAST topos wrote is this binary's own history, and a downloaded
   table must never aim a cleanup. Every entry

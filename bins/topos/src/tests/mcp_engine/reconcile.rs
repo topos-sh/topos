@@ -852,7 +852,11 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
 
     // The FOUR project surfaces — three in the checkout, and Claude Code's own slot for THIS
     // checkout inside its machine file. Nothing else under the home moved.
-    for rel in [".codex/config.toml", ".cursor/mcp.json", "opencode.json"] {
+    for rel in [
+        ".codex/config.toml",
+        ".cursor/mcp.json",
+        ".opencode/opencode.json",
+    ] {
         let text =
             std::fs::read_to_string(proj.0.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(text.contains("topos-eng-linear"), "{rel}: {text}");
@@ -1344,12 +1348,12 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
         crate::render::add_tty(&data),
         format!(
             "sentry already reaches every agent here through channels/everyone — no row to \
-             record.\nPlaced the copy that was missing:\n  opencode: opencode.json — \
+             record.\nPlaced the copy that was missing:\n  opencode: .opencode/opencode.json — \
              created\nsource: {HOST}/{WS_NAME}/sentry"
         ),
         "{data:?}"
     );
-    let placed = std::fs::read_to_string(proj.0.join("opencode.json")).unwrap();
+    let placed = std::fs::read_to_string(proj.0.join(".opencode/opencode.json")).unwrap();
     assert!(placed.contains("https://mcp.example/sentry"), "{placed}");
 
     // The destination that already had it: the answer is about THAT agent, and it closes on the
@@ -1430,9 +1434,9 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep(&ctx, &plane, &dir);
     assert!(!claude_project_servers(&rig.home.0, &proj.0).is_empty());
-    assert!(proj.0.join("opencode.json").exists());
+    assert!(proj.0.join(".opencode/opencode.json").exists());
 
-    row("{ dest = [\"opencode.json\"] }");
+    row("{ dest = [\".opencode/opencode.json\"] }");
     let out = sweep(&ctx, &plane, &dir);
     let receipt = crate::render::pull_tty(
         &out.data,
@@ -1445,8 +1449,9 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     );
     assert!(
         receipt.contains(
-            "sentry now delivers only to project/opencode.json — removed its entries from:\n  \
-             claude-code: ~/.claude.json\n  codex: project/.codex/config.toml\n"
+            "sentry now delivers only to project/.opencode/opencode.json — removed its \
+             entries from:\n  claude-code: ~/.claude.json\n  codex: \
+             project/.codex/config.toml\n"
         ),
         "{receipt}"
     );

@@ -31,7 +31,7 @@
 # `brace-env` = `{env:VAR}`, `dollar-brace-env` = `${env:VAR}`; `dollar-brace` unless stated).
 
 schema_version = 1
-version = "2026.8.25.2"
+version = "2026.8.25.3"
 min_engine_version = 4
 
 # The remote-to-stdio BRIDGE: the program topos runs so an agent that cannot dial an MCP address
@@ -484,8 +484,7 @@ detect_dirs = ["home/.mux"]
 [[harness]]
 # Verified against a live containerized opencode-ai 1.18.3 on 2026-07-16: the binary's own
 # help text names `~/.agents/skills/<name>/SKILL.md` as an auto-loaded external skills dir.
-# The project config sits at the checkout root, not under a dot-dir; the reload is automatic
-# on 401 + dynamic client registration.
+# The reload is automatic on 401 + dynamic client registration.
 slug = "opencode"
 display_name = "OpenCode"
 user_dirs = ["configHome/opencode/skills"]
@@ -497,7 +496,15 @@ reload_note = "restart opencode"
 # OpenCode spells an environment-variable reference its own way.
 env_ref = "brace-env"
 user = { dir = "configHome/opencode/opencode.json", dialect = "opencode-json" }
-project = { path = "opencode.json", dialect = "opencode-json" }
+# Verified against a live opencode 1.18.18 with `opencode debug config`: a project config at
+# `<checkout>/.opencode/opencode.json` IS read, and it is merged AFTER a root `opencode.json`, so
+# it wins where the two disagree. The agent's own `opencode mcp add` prefers this path when the
+# folder is there. topos writes nothing loose in the checkout root, and the folder is already
+# topos's to create (the trigger file sits at `.opencode/plugin/topos.ts`).
+project = { path = ".opencode/opencode.json", dialect = "opencode-json" }
+# The ESCAPE HATCH, written only when a row's own `dest` names it: the root file the agent still
+# reads and an older topos wrote. Entries an older topos left there are retired when the row moves.
+project_dest = { path = "opencode.json", dialect = "opencode-json" }
 
 [[harness]]
 slug = "openhands"

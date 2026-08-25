@@ -1022,7 +1022,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 surfaces: vec![
                     Surface {
                         agent: "opencode".to_owned(),
-                        target: Some("opencode.json".to_owned()),
+                        target: Some(".opencode/opencode.json".to_owned()),
                         state: TargetOutcome::Created,
                         note: None,
                     },
