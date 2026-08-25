@@ -1874,3 +1874,56 @@ fn the_activity_counter_runs_once_across_every_workspace() {
         "one counter, one total, across both workspaces: {counted:?}"
     );
 }
+
+/// A machine whose recipe is a FEED row — "adopt everything northwind assigns me" — and which has
+/// never swept. `topos add r2-smoke -g` answers "northwind's feed already delivers 'r2-smoke'
+/// here", and `revert -g r2-smoke` answered `no tracked bundle named 'r2-smoke' here`: the machine
+/// asserting a miss it has no way to know, with nothing to run. A feed row names no bundle, so
+/// under one the honest answer is the command that settles it.
+#[test]
+fn revert_under_a_feed_row_names_the_update_instead_of_claiming_a_miss() {
+    let rig = Rig::new("zq-revert-feed-unapplied");
+    rig.seed_session();
+    // The ordinary machine recipe after a login: the feed row, and no line naming any bundle.
+    rig.seed_feed();
+    let ctx = rig.ctx_at(None);
+    let no_contribute = |_: &str, _: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        unreachable!("the copy is resolved before any write lane is built")
+    };
+    let no_session = |_: &Session| -> ops::SessionTransports {
+        unreachable!("the copy is resolved before any workspace read")
+    };
+    let good = "a".repeat(64);
+    let err = ops::revert(
+        &ctx,
+        &ops::RevertConnectors {
+            contribute: &no_contribute,
+            session: &no_session,
+        },
+        "deploy",
+        &good,
+        false,
+        None,
+        ops::StoreScope::Machine,
+    )
+    .expect_err("no applied copy to revert");
+    assert_eq!(
+        err.to_string(),
+        "deploy is not applied on this machine yet — `topos update -g` applies it; revert acts on \
+         an applied copy",
+        "{err:?}"
+    );
+    assert_eq!(
+        scope_ways_out("revert", &["revert", "deploy", "--to", &good, "-g"], &err),
+        vec![(
+            "UPDATE_SKILLS".to_owned(),
+            vec![
+                "topos".to_owned(),
+                "update".to_owned(),
+                "-g".to_owned(),
+                "--json".to_owned(),
+            ],
+        )],
+        "the fix rides as a runnable argv",
+    );
+}

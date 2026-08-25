@@ -587,15 +587,30 @@ fn demanded_but_unapplied(ctx: &Ctx<'_>, name: &str, scope: StoreScope) -> Optio
             row.bundle && row.name == name && row.version.is_none() && !row.source_missing
         })
     };
+    // A FEED row adopts EVERYTHING its workspace assigns, and names no bundle — so under one, a
+    // name this machine holds no copy of is either an assignment no sweep has landed yet or a
+    // name nobody has, and nothing local tells them apart. (A journey hit exactly this: `topos
+    // add r2-smoke -g` answered "northwind's feed already delivers 'r2-smoke' here", and `revert
+    // -g r2-smoke` then said the machine tracked nothing by that name.) The refusal answers with
+    // the one command that settles it rather than asserting a miss it cannot know. An `"off"` row
+    // is the exception: `update` deliberately will not land that one, so it stays a plain miss.
+    // Feeds are person-scope by nature, so this is the machine's question either way.
+    let feed_may_assign = all.live().any(|s| {
+        resolved.person_plan.has_feed(&s.host, &s.workspace_name)
+            && resolved
+                .person_plan
+                .off_for(&s.host, &s.workspace_name, name)
+                .is_none()
+    });
     if scope == StoreScope::Machine {
-        return unapplied(resolved.machine()).then_some(true);
+        return (feed_may_assign || unapplied(resolved.machine())).then_some(true);
     }
     // Bare: the order the resolution itself walks — the checkout you stand in first, the machine
     // behind it — so the update the refusal names is the one that owns the row it found.
     if resolved.project().is_some_and(unapplied) {
         return Some(false);
     }
-    unapplied(resolved.machine()).then_some(true)
+    (feed_may_assign || unapplied(resolved.machine())).then_some(true)
 }
 
 /// A store's DRAFT of one bundle: the folder holding the unshipped bytes, and the digest those
