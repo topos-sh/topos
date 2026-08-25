@@ -424,6 +424,10 @@ mod tests {
                 .insert(path.to_path_buf(), bytes.to_vec());
             Ok(())
         }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.files.borrow_mut().remove(path);
+            Ok(())
+        }
     }
 
     /// A `CommandRunner` whose binary is absent — the honest OpenClaw degrade path (no suite ever

@@ -4,9 +4,11 @@
 //! instances): parse-or-fail-closed; navigate-or-create the events map; Managed / Unmanaged /
 //! Absent classification keyed on the sentinel ALONE; canonical-entry migration in place (so a
 //! fix to the managed entry reaches installs that predate it); a surgical remove that prunes
-//! only what our removal emptied; a byte-preserving no-op on rerun; and a malformed or
-//! wrong-typed file degrading with ZERO writes — a user's differently-shaped config is never
-//! coerced or clobbered.
+//! only what our removal emptied, and DELETES the file outright when the prune left nothing in
+//! it but the root key topos seeded there itself (removing an agent leaves no folder topos made
+//! standing empty); a byte-preserving no-op on rerun; and a malformed or wrong-typed file
+//! degrading with ZERO writes — a user's differently-shaped config is never coerced or
+//! clobbered.
 //!
 //! Parameterized by [`JsonHooksSpec`]: the config file under the harness root, the JSON path to
 //! the events map, the event key spelling, the entry SHAPE (Claude-Code-style matcher groups
@@ -129,6 +131,16 @@ impl<'a> JsonHooks<'a> {
         )
     }
 
+    /// Delete the config file itself — the removal the scrub earns when nothing but topos's own
+    /// seed would be left in it (see [`only_our_seed_left`]). An already-absent file is a clean
+    /// removal; any other failure degrades honestly, naming the file and the reason.
+    fn unlink(&self) -> TriggerReport {
+        match self.cfg.remove_file(&self.config_path()) {
+            Ok(()) => self.out(TriggerState::Inactive, true, None),
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
+        }
+    }
+
     /// Apply a planned edit: write through the port (degrading honestly if the write fails) or
     /// leave the file untouched, reporting the planned state.
     fn apply(&self, plan: EditPlan) -> TriggerReport {
@@ -167,7 +179,10 @@ impl TriggerAdapter for JsonHooks<'_> {
 
     fn remove(&self) -> TriggerReport {
         match self.read() {
-            Ok(current) => self.apply(plan_remove(self.spec, current.as_deref())),
+            Ok(current) => match plan_remove(self.spec, current.as_deref()) {
+                RemovePlan::Edit(plan) => self.apply(plan),
+                RemovePlan::Unlink => self.unlink(),
+            },
             Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
         }
     }
@@ -306,20 +321,36 @@ fn plan_install(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPla
     }
 }
 
-fn plan_remove(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPlan {
+/// What a removal does to the file: the ordinary edit, or UNLINK it — the scrub emptied it and
+/// what remains is nothing but the root key topos seeded there itself, which is a file topos
+/// created and would otherwise leave behind (a stray `.cursor/hooks.json` holding `{"version": 1}`
+/// and a `.cursor/` beside it that was not there before topos wrote the hook).
+enum RemovePlan {
+    Edit(EditPlan),
+    Unlink,
+}
+
+fn plan_remove(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> RemovePlan {
     let mut root = match parse(current) {
-        Parsed::Fresh => return EditPlan::Leave(TriggerState::Inactive, None), // nothing to remove
+        // Nothing to remove.
+        Parsed::Fresh => return RemovePlan::Edit(EditPlan::Leave(TriggerState::Inactive, None)),
         Parsed::Value(v) => v,
         Parsed::Malformed => {
-            return EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON));
+            return RemovePlan::Edit(EditPlan::Leave(
+                TriggerState::Degraded,
+                Some(crate::UNPROVABLE_REASON),
+            ));
         }
     };
     let Some(entries) = entries_existing_mut(&mut root, spec) else {
-        return EditPlan::Leave(TriggerState::Inactive, None); // no well-typed event key → nothing ours
+        // No well-typed event key → nothing ours.
+        return RemovePlan::Edit(EditPlan::Leave(TriggerState::Inactive, None));
     };
     match classify(spec, entries) {
-        Classification::Absent => EditPlan::Leave(TriggerState::Inactive, None),
-        Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None),
+        Classification::Absent => RemovePlan::Edit(EditPlan::Leave(TriggerState::Inactive, None)),
+        Classification::Unmanaged => {
+            RemovePlan::Edit(EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None))
+        }
         Classification::Managed => {
             if spec.grouped {
                 scrub_grouped(spec, entries);
@@ -327,11 +358,33 @@ fn plan_remove(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPlan
                 entries.retain(|e| !command_of(spec, e).is_some_and(|c| managed(spec, c)));
             }
             prune_empty(&mut root, spec);
-            match serialize(&root) {
+            if only_our_seed_left(spec, &root) {
+                return RemovePlan::Unlink;
+            }
+            RemovePlan::Edit(match serialize(&root) {
                 Some(bytes) => EditPlan::Write(bytes, TriggerState::Inactive, None),
                 None => EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON)),
-            }
+            })
         }
+    }
+}
+
+/// Whether the post-scrub file would hold NOTHING of the person's: an empty root object, or the
+/// single root key this spec seeds holding exactly the value it seeds (Cursor's `version: 1`,
+/// which topos writes itself because Cursor's validator refuses a file without it). Anything
+/// else — a sibling key, another value, a non-object root — is the person's file, edited and
+/// kept. This runs only after our own scrub and [`prune_empty`], so an emptiness it finds is
+/// always emptiness WE made.
+fn only_our_seed_left(spec: &JsonHooksSpec, root: &Value) -> bool {
+    let Some(obj) = root.as_object() else {
+        return false;
+    };
+    match obj.len() {
+        0 => true,
+        1 => spec
+            .root_seed
+            .is_some_and(|(key, seed)| obj.get(key).and_then(Value::as_u64) == Some(seed)),
+        _ => false,
     }
 }
 

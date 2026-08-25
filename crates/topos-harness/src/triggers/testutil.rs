@@ -56,6 +56,11 @@ impl ConfigStore for MemConfig {
         *self.writes.borrow_mut() += 1;
         Ok(())
     }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.files.borrow_mut().remove(path);
+        *self.writes.borrow_mut() += 1;
+        Ok(())
+    }
 }
 
 /// A store whose every access FAILS (a permission error, say) — the genuine-I/O-failure degrade
@@ -68,6 +73,9 @@ impl ConfigStore for ErrConfig {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
     }
     fn replace(&self, _: &Path, _: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+    }
+    fn remove_file(&self, _: &Path) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
     }
 }
@@ -90,6 +98,12 @@ impl ConfigStore for DiskConfig {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, bytes)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
     }
 }
 

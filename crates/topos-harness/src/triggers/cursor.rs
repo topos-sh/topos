@@ -232,6 +232,54 @@ mod tests {
         assert_eq!(cfg.writes(), writes, "second remove writes nothing");
     }
 
+    /// The whole file was topos's — the flat entry plus the schema `version` topos seeded itself
+    /// so Cursor would accept the file at all. Scrubbing the entry would leave a 19-byte stub and
+    /// a `.cursor/` that was not there before, so the removal takes the file with the entry.
+    #[test]
+    fn a_file_that_holds_nothing_but_our_entry_and_our_seed_is_deleted() {
+        let cfg = MemConfig::default();
+        a(&cfg).install();
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
+
+        let report = a(&cfg).remove();
+        assert_eq!(report.state, TriggerState::Inactive);
+        assert_eq!(
+            report.touched_path.as_deref(),
+            Some(CONFIG),
+            "the receipt names the file the removal reached"
+        );
+        assert!(cfg.text(CONFIG).is_none(), "no stub left behind");
+
+        // Idempotent: a second removal finds nothing and writes nothing.
+        let writes = cfg.writes();
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
+        assert_eq!(cfg.writes(), writes);
+    }
+
+    /// Anything of the person's in the file keeps the file: their own root key survives the
+    /// removal, and only topos's entry leaves.
+    #[test]
+    fn a_root_key_that_is_not_ours_keeps_the_file() {
+        let cfg = MemConfig::with_file(CONFIG, "{\"theirs\": {\"keep\": true}}\n");
+        a(&cfg).install();
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
+        let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        assert_eq!(root["theirs"]["keep"], true, "their key is untouched");
+        assert!(root.get("hooks").is_none(), "the map we created is pruned");
+        assert_eq!(root["version"], 1, "the seed we wrote stays beside theirs");
+    }
+
+    /// A schema `version` the person set to their own value is not the seed topos writes, so the
+    /// file is edited, never deleted.
+    #[test]
+    fn a_seed_key_holding_the_persons_own_value_keeps_the_file() {
+        let cfg = MemConfig::with_file(CONFIG, "{\"version\": 7}\n");
+        a(&cfg).install();
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
+        let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        assert_eq!(root["version"], 7);
+    }
+
     #[test]
     fn present_is_honest() {
         let cfg = MemConfig::default();

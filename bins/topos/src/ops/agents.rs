@@ -625,6 +625,10 @@ struct Loss {
     hooks: Vec<String>,
     /// The roots whose placements retire (absolute).
     retire_roots: Vec<PathBuf>,
+    /// Every dir the leaving agents' artifacts sit in (absolute): the skills roots that retire,
+    /// the MCP config files' dirs, the hook files' dirs. What
+    /// [`agent_hooks::prune_emptied_dirs`] deletes afterwards IF this removal is what emptied it.
+    prune_dirs: Vec<PathBuf>,
 }
 
 fn plan_loss(
@@ -664,7 +668,11 @@ fn plan_loss(
             let mut files: BTreeSet<String> = BTreeSet::new();
             for (_, _, row) in custody.iter() {
                 if leaving.iter().any(|h| h.slug == row.agent) {
-                    files.insert(pretty_at(ctx, scope, Path::new(&row.file)));
+                    let file = Path::new(&row.file);
+                    files.insert(pretty_at(ctx, scope, file));
+                    if let Some(dir) = file.parent() {
+                        loss.prune_dirs.push(dir.to_path_buf());
+                    }
                 }
             }
             loss.files = files.into_iter().collect();
@@ -683,14 +691,30 @@ fn plan_loss(
             ) else {
                 continue;
             };
-            if adapter.present()
-                && let Some(file) = hook_file_of(scope, h.slug, adapter.as_ref())
-            {
+            let Some(file) = hook_file_of(scope, h.slug, adapter.as_ref()) else {
+                continue;
+            };
+            if let Some(dir) = file.parent() {
+                loss.prune_dirs.push(dir.to_path_buf());
+            }
+            if adapter.present() {
                 loss.hooks.push(pretty_at(ctx, scope, &file));
             }
         }
     }
+    loss.prune_dirs.extend(loss.retire_roots.iter().cloned());
+    loss.prune_dirs.sort();
+    loss.prune_dirs.dedup();
     Ok(loss)
+}
+
+/// How far up a folder cleanup may walk: the checkout for a project pick, the home for a machine
+/// one. Nothing at or above it is ever removed. `None` (no home known) prunes nothing at all.
+fn prune_boundary(ctx: &Ctx<'_>, scope: &PickScope) -> Option<PathBuf> {
+    match scope {
+        PickScope::Project(dir) => Some(dir.clone()),
+        PickScope::Machine => ctx.roots.as_ref().map(|r| r.home.clone()),
+    }
 }
 
 /// The file a registered hook lives in: the project hook file for a project pick, the adapter's
@@ -976,6 +1000,12 @@ pub(crate) fn remove(
             agent: agents.join(", "),
             left,
         });
+    }
+    // Everything topos wrote for those agents is gone. What can still be standing is the shape it
+    // wrote them INTO — a `.cursor/skills/` with nothing left in it, and a `.cursor/` that did not
+    // exist before topos put a hook there. Removing an agent leaves no folder topos made.
+    if let Some(boundary) = prune_boundary(ctx, &scope) {
+        agent_hooks::prune_emptied_dirs(ctx.fs, &boundary, &loss.prune_dirs);
     }
     // LAST: the reduced pick, atomically.
     agents_pick::write(ctx.fs, &ctx.layout, &scope, &AgentsPick::new(remaining))?;

@@ -26,7 +26,7 @@
 //! with a "remove it with your installer (or `rm <path>`)" note. A maintenance command: it needs no
 //! sign-in, mints no identity, and touches no plane.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use topos_types::{Message, TriggerState};
 
@@ -213,11 +213,41 @@ pub(crate) fn uninstall(
         .filter_map(trigger_failure)
         .collect();
     messages.extend(mcp_messages);
+    // Everything topos wrote is gone; what can still be standing is the shape it wrote into. A
+    // teardown that leaves a `~/.cursor/` (or a `.cursor/` in this checkout) holding nothing but
+    // the folders topos itself made has not finished. Only an EMPTY dir goes, so an agent's own
+    // files always keep theirs.
+    let machine_dirs = artifact_dirs(
+        std::iter::once(&active)
+            .chain(breadth.iter())
+            .filter_map(|s| s.config_file.as_deref())
+            .chain(applied.builtin_dirs.iter().map(String::as_str))
+            .chain(applied.mcp_files.iter().map(String::as_str)),
+    );
+    if let Some(roots) = &ctx.roots {
+        super::agent_hooks::prune_emptied_dirs(ctx.fs, &roots.home, &machine_dirs);
+    }
+    if let Some(root) = project_root.as_deref() {
+        let dirs = artifact_dirs(project.iter().filter_map(|s| s.config_file.as_deref()));
+        super::agent_hooks::prune_emptied_dirs(ctx.fs, root, &dirs);
+    }
     applied.hook = Some(active.report);
     applied.triggers = breadth.into_iter().map(|s| s.report).collect();
     applied.project_hooks = project.into_iter().map(|s| s.report).collect();
 
     Ok(UninstallOutcome::Applied { applied, messages })
+}
+
+/// The dirs a set of teardown artifacts sat in — a config file's own dir, a placed skill dir's
+/// parent (its skills root). What the folder cleanup is offered; it removes only the ones this
+/// teardown emptied.
+fn artifact_dirs<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = paths
+        .filter_map(|p| std::path::Path::new(p).parent().map(Path::to_path_buf))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// A filesystem failure with the PATH folded into the diagnostic detail. `safe_message` still
@@ -883,18 +913,24 @@ mod tests {
                 ),
             ]
         );
+        // Both files held NOTHING but topos's entry, so the scrub takes the file — and the
+        // folder topos made to hold it — rather than leaving an empty stub in the checkout.
         for hook in [&claude_hook, &codex_hook] {
-            let text = std::fs::read_to_string(hook).unwrap();
+            assert!(!hook.exists(), "the stub left {}", hook.display());
             assert!(
-                !text.contains("topos"),
-                "the entry left {}: {text}",
-                hook.display()
+                !hook.parent().unwrap().exists(),
+                "the folder topos made left {}",
+                hook.parent().unwrap().display()
             );
         }
         assert_eq!(
             std::fs::read(&cursor_hook).unwrap(),
             cursor_bytes,
             "a file with nothing of topos's in it is byte-identical"
+        );
+        assert!(
+            cursor_hook.parent().unwrap().is_dir(),
+            "the folder holding it stays too"
         );
         let tty = crate::render::uninstall_applied_tty(&applied, &messages, true);
         assert!(

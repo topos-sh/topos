@@ -218,10 +218,9 @@ mod tests {
         let report = a(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
-        let root: serde_json::Value = serde_json::from_str(&cfg.text(HOOKS).unwrap()).unwrap();
         assert!(
-            root.get("hooks").is_none(),
-            "the map we created is pruned back"
+            cfg.text(HOOKS).is_none(),
+            "the whole file was topos's, so the scrub takes it with the entry"
         );
 
         let writes = cfg.writes();
