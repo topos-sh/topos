@@ -8,16 +8,19 @@
 //! byte).
 //!
 //! `--yes` deletes the built-in skill's copies, retires topos's own MCP config entries, deletes the
-//! `~/.topos/` tree via the fs seam, and LAST scrubs the user-level auto-update triggers — the
-//! active harness's and then every other supported harness's (all reports surfaced honestly). A
-//! PROJECT hook file (`.claude/settings.local.json`, `.cursor/hooks.json`, `.codex/hooks.json`,
-//! `.opencode/plugin/topos.ts` in the checkout the command ran in) is named by the describe and
-//! left in place: it is inert without the binary, and a teardown edits nothing in a checkout. The trigger
-//! scrubs go LAST because the deletions before them can fail, and **a teardown that dies halfway
-//! must not have disarmed a single agent on its way**: an agent left un-updated with nothing removed
-//! to show for it is the worst of both outcomes. The MCP scrub is the one destructive act that must
-//! precede the sidecar delete, because the ownership ledger that proves which entries are topos's
-//! lives inside the tree being deleted — after it, nothing could ever tell them from a hand edit.
+//! `~/.topos/` tree via the fs seam, and LAST scrubs the auto-update triggers — the active
+//! harness's, then every other supported harness's under `~`, then the PROJECT hooks of the
+//! checkout the command ran in (`.claude/settings.local.json`, `.cursor/hooks.json`,
+//! `.codex/hooks.json`, `.opencode/plugin/topos.ts`; every project-capable harness, regardless
+//! of the pick), all reports surfaced honestly. Other checkouts keep their hook until
+//! `topos agents remove` runs there; the binary stays installed, so that still works, and the
+//! quiet sweep those hooks fire is inert once `~/.topos/` is gone (it mints nothing and exits 0).
+//! The trigger scrubs go LAST because the deletions before them can fail, and **a teardown that
+//! dies halfway must not have disarmed a single agent on its way**: an agent left un-updated with
+//! nothing removed to show for it is the worst of both outcomes. The MCP scrub is the one
+//! destructive act that must precede the sidecar delete, because the ownership ledger that proves
+//! which entries are topos's lives inside the tree being deleted — after it, nothing could ever
+//! tell them from a hand edit.
 //!
 //! The `topos` binary is NOT self-deleted (a package manager may own it) — its path is disclosed
 //! with a "remove it with your installer (or `rm <path>`)" note. A maintenance command: it needs no
@@ -120,10 +123,13 @@ pub(crate) fn uninstall(
     // same split the apply acts on, so the preview promises exactly what the scrub does.
     let surfaces = mcp_surfaces(ctx);
     // The hook files the checkout this command ran in holds, across the four project-capable
-    // harnesses and regardless of any pick — LISTED, never scrubbed: a project hook is inert
-    // without the binary, and a teardown edits nothing in a checkout.
-    let project_hook_files: Vec<String> = super::agent_hooks::cwd_project(ctx)
-        .map(|root| ctx.triggers.project_hook_files(&root))
+    // harnesses and regardless of any pick — what the apply scrubs LAST, beside the machine's:
+    // left there, `command -v topos && topos install --quiet` would keep firing from this
+    // checkout with the binary still installed.
+    let project_root = super::agent_hooks::cwd_project(ctx);
+    let project_hook_files: Vec<String> = project_root
+        .as_deref()
+        .map(|root| ctx.triggers.project_hook_files(root))
         .unwrap_or_default()
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
@@ -193,15 +199,23 @@ pub(crate) fn uninstall(
     // one the describe disclosed.
     let active = ctx.triggers.scrub_active();
     let breadth = ctx.triggers.scrub_others();
+    // The checkout this command ran in: its project hooks go the same way, surgically (the entry
+    // leaves, the person's file stays). Exactly the files the describe named.
+    let project = project_root
+        .as_deref()
+        .map(|root| ctx.triggers.scrub_project(root))
+        .unwrap_or_default();
     // Any trigger still armed means the teardown did not finish, whatever else it managed. The
     // messages are the ONE value the finisher reads for `ok`, the exit status and the headline.
     let mut messages: Vec<Message> = std::iter::once(&active)
         .chain(breadth.iter())
+        .chain(project.iter())
         .filter_map(trigger_failure)
         .collect();
     messages.extend(mcp_messages);
     applied.hook = Some(active.report);
     applied.triggers = breadth.into_iter().map(|s| s.report).collect();
+    applied.project_hooks = project.into_iter().map(|s| s.report).collect();
 
     Ok(UninstallOutcome::Applied { applied, messages })
 }
@@ -728,18 +742,22 @@ mod tests {
         );
     }
 
-    /// The describe names the checkout's PROJECT hook files — the four project-capable
-    /// harnesses', regardless of any pick — as left in place, and the apply never edits them: a
-    /// project hook is inert without the binary, and a teardown reaches nothing in a checkout.
+    /// `uninstall` names the checkout's PROJECT hook files — the four project-capable harnesses',
+    /// regardless of any pick — and `--yes` scrubs the topos entry out of each, the way it scrubs
+    /// the machine's: left there, the hook would keep firing `topos install --quiet` from this
+    /// checkout with the binary still installed. The scrub is surgical (the person's file stays,
+    /// minus the entry), and the receipt carries one row per file.
     #[test]
-    fn uninstall_describe_names_project_hook_files() {
+    fn uninstall_scrubs_the_current_checkouts_project_hooks() {
         let home = Scratch::new();
+        std::fs::create_dir_all(home.0.join("identity")).unwrap();
         let user_home = Scratch::new();
         let project = Scratch::new();
         let root = project.0.canonicalize().unwrap();
         std::fs::write(root.join("topos.toml"), b"").unwrap();
         // Two project hooks, written exactly as a project pick writes them. No pick file exists
-        // anywhere: the listing is about what STANDS, never about what somebody wants.
+        // anywhere: the listing is about what STANDS, never about what somebody wants. A third
+        // hook file with nothing of topos's in it (a hand-written cursor hook) is never opened.
         let fs = RealFs;
         let scope = topos_harness::triggers::TriggerScope::Project(root.clone());
         for slug in ["claude-code", "codex"] {
@@ -749,9 +767,20 @@ mod tests {
         }
         let claude_hook = root.join(".claude").join("settings.local.json");
         let codex_hook = root.join(".codex").join("hooks.json");
-        let before = (
-            std::fs::read(&claude_hook).unwrap(),
-            std::fs::read(&codex_hook).unwrap(),
+        let cursor_hook = root.join(".cursor").join("hooks.json");
+        std::fs::create_dir_all(cursor_hook.parent().unwrap()).unwrap();
+        let cursor_bytes =
+            b"{\"version\": 1, \"hooks\": {\"sessionStart\": [{\"command\": \"mine\"}]}}\n";
+        std::fs::write(&cursor_hook, cursor_bytes).unwrap();
+        assert!(
+            std::fs::read_to_string(&claude_hook)
+                .unwrap()
+                .contains("topos")
+        );
+        assert!(
+            std::fs::read_to_string(&codex_hook)
+                .unwrap()
+                .contains("topos")
         );
 
         let ids = SeqIds::new("s");
@@ -768,42 +797,8 @@ mod tests {
                 cwd: Some(root.clone()),
             })
         };
-        // The describe: the machine's ports (the composition root's shape), read-only.
-        let ctx = Ctx {
-            roots: roots(),
-            ..ctx_with_triggers(
-                &fs,
-                &ids,
-                &clock,
-                &harness,
-                &plane,
-                &follow,
-                &home.0,
-                crate::ops::Triggers::machine(&harness, user_home.0.clone(), &fs, &fs),
-            )
-        };
-        let UninstallOutcome::Described { describe, .. } = uninstall(&ctx, None, false).unwrap()
-        else {
-            panic!("a bare uninstall describes")
-        };
-        assert_eq!(
-            describe.project_hook_files,
-            vec![
-                claude_hook.to_string_lossy().into_owned(),
-                codex_hook.to_string_lossy().into_owned(),
-            ]
-        );
-        assert!(
-            !describe
-                .trigger_artifacts
-                .iter()
-                .any(|row| row.starts_with(root.to_str().unwrap())),
-            "a project hook is never among the artifacts the scrub reaches: {:?}",
-            describe.trigger_artifacts
-        );
-
-        // The apply, over an explicit (empty) breadth so no ambient env can redirect a scrub:
-        // the sidecar goes, the project hooks stay byte-identical.
+        // Both phases over an explicit (empty) user-level breadth, so no ambient env can
+        // redirect a scrub, plus the project ports the checkout walks resolve through.
         let none: Vec<Box<dyn TriggerAdapter>> = Vec::new();
         let ctx = Ctx {
             roots: roots(),
@@ -815,20 +810,133 @@ mod tests {
                 &plane,
                 &follow,
                 &home.0,
-                crate::ops::Triggers::machine_of(&harness, &none),
+                crate::ops::Triggers::machine_of_with_project_ports(
+                    &harness,
+                    &none,
+                    &user_home.0,
+                    &fs,
+                    &fs,
+                ),
             )
         };
-        let out = uninstall(&ctx, None, true).unwrap();
-        assert!(matches!(out, UninstallOutcome::Applied { .. }));
-        assert!(!home.0.exists(), "the sidecar tree is gone");
+        let UninstallOutcome::Described { describe, .. } = uninstall(&ctx, None, false).unwrap()
+        else {
+            panic!("a bare uninstall describes")
+        };
         assert_eq!(
-            (
-                std::fs::read(&claude_hook).unwrap(),
-                std::fs::read(&codex_hook).unwrap()
-            ),
-            before,
-            "the project hooks are left in place, byte-identical"
+            describe.project_hook_files,
+            vec![
+                claude_hook.to_string_lossy().into_owned(),
+                codex_hook.to_string_lossy().into_owned(),
+            ],
+            "the two topos hooks, never the hand-written one"
         );
+        assert!(
+            !describe
+                .trigger_artifacts
+                .iter()
+                .any(|row| row.starts_with(root.to_str().unwrap())),
+            "a project hook is not among the machine artifacts: {:?}",
+            describe.trigger_artifacts
+        );
+        let tty = crate::render::uninstall_describe_tty(&describe, &["topos".into()]);
+        assert!(
+            tty.contains(&format!(
+                "scrub this checkout's auto-update hooks from: {}, {}",
+                claude_hook.display(),
+                codex_hook.display()
+            )),
+            "{tty}"
+        );
+        assert!(
+            tty.contains("Other checkouts you set up keep their auto-update hook until you run `topos agents remove` there."),
+            "{tty}"
+        );
+        assert!(
+            std::fs::read_to_string(&claude_hook)
+                .unwrap()
+                .contains("topos"),
+            "a describe scrubs nothing"
+        );
+
+        let out = uninstall(&ctx, None, true).unwrap();
+        let UninstallOutcome::Applied { applied, messages } = out else {
+            panic!("--yes applies")
+        };
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(!home.0.exists(), "the sidecar tree is gone");
+        let scrubbed: Vec<(String, Option<String>)> = applied
+            .project_hooks
+            .iter()
+            .map(|r| (r.agent.clone(), r.touched_path.clone()))
+            .collect();
+        assert_eq!(
+            scrubbed,
+            vec![
+                (
+                    "claude-code".to_owned(),
+                    Some(claude_hook.to_string_lossy().into_owned())
+                ),
+                (
+                    "codex".to_owned(),
+                    Some(codex_hook.to_string_lossy().into_owned())
+                ),
+            ]
+        );
+        for hook in [&claude_hook, &codex_hook] {
+            let text = std::fs::read_to_string(hook).unwrap();
+            assert!(
+                !text.contains("topos"),
+                "the entry left {}: {text}",
+                hook.display()
+            );
+        }
+        assert_eq!(
+            std::fs::read(&cursor_hook).unwrap(),
+            cursor_bytes,
+            "a file with nothing of topos's in it is byte-identical"
+        );
+        let tty = crate::render::uninstall_applied_tty(&applied, &messages, true);
+        assert!(
+            tty.contains(&format!(
+                "claude-code: scrubbed this checkout's auto-update hook from {}",
+                claude_hook.display()
+            )),
+            "{tty}"
+        );
+        assert!(
+            tty.contains("Other checkouts you set up keep their auto-update hook until you run `topos agents remove` there."),
+            "{tty}"
+        );
+        // Outside any checkout there is no project row, and the same describe promises none.
+        let outside = Scratch::new();
+        let ctx = Ctx {
+            roots: Some(crate::ctx::AgentRoots {
+                home: user_home.0.clone(),
+                cwd: Some(outside.0.canonicalize().unwrap()),
+            }),
+            ..ctx_with_triggers(
+                &fs,
+                &ids,
+                &clock,
+                &harness,
+                &plane,
+                &follow,
+                &home.0,
+                crate::ops::Triggers::machine_of_with_project_ports(
+                    &harness,
+                    &none,
+                    &user_home.0,
+                    &fs,
+                    &fs,
+                ),
+            )
+        };
+        let UninstallOutcome::Described { describe, .. } = uninstall(&ctx, None, false).unwrap()
+        else {
+            panic!("a bare uninstall describes")
+        };
+        assert!(describe.project_hook_files.is_empty());
     }
 
     /// The describe names an OUT-OF-PROCESS trigger in words. A harness whose trigger lives in its

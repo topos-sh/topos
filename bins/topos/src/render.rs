@@ -905,7 +905,20 @@ pub(crate) fn agents_tty(d: &topos_types::results::AgentsData) -> String {
             } else {
                 path.clone()
             };
-            format!("{this} ({from}): {}", d.agents.join(", "))
+            // A slug this binary's table does not know is shown as written, marked: it picks
+            // nothing until a table knows it again, and `agents remove` takes it out.
+            let agents: Vec<String> = d
+                .agents
+                .iter()
+                .map(|a| {
+                    if d.not_in_table.contains(a) {
+                        format!("{a} (not in this table)")
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            format!("{this} ({from}): {}", agents.join(", "))
         }
         _ => format!("{this}: no agents picked yet: topos init{flag} -a <agent>"),
     };
@@ -2638,11 +2651,12 @@ pub(crate) fn uninstall_describe_tty(
     }
     if !d.project_hook_files.is_empty() {
         s.push_str(&format!(
-            "\n  · leave this project's auto-update hooks in place (inert without topos): {}",
+            "\n  · scrub this checkout's auto-update hooks from: {}",
             d.project_hook_files.join(", ")
         ));
     }
     s.push_str("\n  · leave every SKILL FILE in your agent dirs untouched — uninstall deletes no skill bytes");
+    s.push_str(OTHER_CHECKOUTS_KEEP_THEIR_HOOK);
     if let Some(bin) = &d.binary_path {
         s.push_str(&format!(
             "\nThe `topos` binary at {bin} is NOT removed — delete it with the installer you used (or `rm {bin}`)."
@@ -2654,6 +2668,12 @@ pub(crate) fn uninstall_describe_tty(
     ));
     s
 }
+
+/// The one line both `uninstall` faces carry about the checkouts the command did not stand in:
+/// a teardown scrubs the hooks of the one it ran in and reaches no other.
+const OTHER_CHECKOUTS_KEEP_THEIR_HOOK: &str = "\nOther checkouts you set up keep their \
+                                              auto-update hook until you run `topos agents \
+                                              remove` there.";
 
 /// The applied `uninstall`'s TTY — what was removed, the hook scrub surfaced honestly.
 ///
@@ -2723,6 +2743,18 @@ pub(crate) fn uninstall_applied_tty(
         };
         s.push_str(&format!("\n  · {}: {}", t.agent, phrase));
     }
+    // The checkout's own rows — the hooks the command stood beside, scrubbed like the machine's.
+    for t in &d.project_hooks {
+        let phrase = match (t.state, t.touched_path.as_deref()) {
+            (TriggerState::Degraded, _) => {
+                "couldn't remove this checkout's auto-update hook; it may still be registered there"
+                    .to_owned()
+            }
+            (_, Some(path)) => format!("scrubbed this checkout's auto-update hook from {path}"),
+            (_, None) => "this checkout's auto-update hook removed".to_owned(),
+        };
+        s.push_str(&format!("\n  · {}: {}", t.agent, phrase));
+    }
     if d.sidecar_removed {
         s.push_str("\n  · deleted topos's own files at ~/.topos (credential included)");
     } else {
@@ -2733,6 +2765,7 @@ pub(crate) fn uninstall_applied_tty(
     for f in failures {
         s.push_str(&format!("\n{}", f.text));
     }
+    s.push_str(OTHER_CHECKOUTS_KEEP_THEIR_HOOK);
     if let Some(bin) = &d.binary_path {
         s.push_str(&format!(
             "\nThe `topos` binary at {bin} was left in place — remove it with your installer (or `rm {bin}`)."
@@ -10238,6 +10271,7 @@ mod tests {
             pick_path: Some(".topos/agents.json".to_owned()),
             source: Some("project".to_owned()),
             agents: vec!["claude-code".to_owned(), "codex".to_owned()],
+            not_in_table: Vec::new(),
             installed: vec![
                 "claude-code".to_owned(),
                 "codex".to_owned(),
@@ -10253,6 +10287,18 @@ mod tests {
              Installed on this machine: claude-code, codex, cursor, gemini-cli\n\
              Change: topos agents add <agent> · topos agents remove <agent>"
         );
+        // A slug this binary's table does not know is shown as written, marked.
+        agents.agents.push("old-agent".to_owned());
+        agents.not_in_table = vec!["old-agent".to_owned()];
+        assert!(
+            agents_tty(&agents).starts_with(
+                "This project (.topos/agents.json): claude-code, codex, old-agent (not in this table)\n"
+            ),
+            "{}",
+            agents_tty(&agents)
+        );
+        agents.agents.pop();
+        agents.not_in_table = Vec::new();
         // A hook that is not registered earns its line; an inherited pick names its file.
         agents.hooks[1].armed = Some(false);
         agents.source = Some("machine".to_owned());
@@ -10270,6 +10316,7 @@ mod tests {
             pick_path: None,
             source: None,
             agents: Vec::new(),
+            not_in_table: Vec::new(),
             installed: vec!["cursor".to_owned()],
             hooks: Vec::new(),
             gitignored: Vec::new(),

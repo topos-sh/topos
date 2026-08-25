@@ -270,6 +270,13 @@ fn run_command(
     // because the transports built below are boxed `'static` trait objects: they cannot borrow the
     // binding, so each one clones a handle to the same sink.
     let quiet_sweep = matches!(&command, Command::Update { quiet: true, .. });
+    // A quiet sweep on a machine with no store is INERT: after `uninstall`, a checkout this
+    // machine never ran `topos agents remove` in still fires `topos install --quiet` on every
+    // session start (the binary stays installed), and that run must mint nothing — no dirs, no
+    // lock, no log, no identity — and exit 0. There is nothing to sweep without a store.
+    if quiet_sweep && !fs.exists(layout.home()) {
+        return ExitCode::SUCCESS;
+    }
     let progress = crate::progress::select(quiet_sweep);
     // The MACHINE-WIDE fetched-object cache every byte transport built below shares: blob bytes
     // under `<machine home>/cache/objects`, keyed by the object id the plane names. Resolved from
@@ -470,8 +477,11 @@ fn run_command(
     // pick here, on the first verb that composes the full context, so nothing standing changes
     // silently on upgrade; said once on stderr, except under the quiet hook sweep (whose streams
     // are the harness's — `topos agents` shows the pick either way).
-    if let Some(agents) = crate::agents_pick::seed_from_legacy(&fs, &ctx.layout)
-        && !quiet_sweep
+    if let Some(agents) = crate::agents_pick::seed_from_legacy(
+        &fs,
+        &ctx.layout,
+        ctx.triggers.machine_ports().as_ref(),
+    ) && !quiet_sweep
     {
         errln!(
             "Using {} on this machine (from the auto-update hooks already registered). Change: \
@@ -844,14 +854,21 @@ fn run_command(
                 );
             }
             if ops::is_builtin(&source) {
-                // The FOLDERS the restore actually wrote — read back after it ran, because they
-                // are what this receipt has to name in place of the manifest file every other
-                // `add` answer names (the built-in has none: it ships with the binary).
-                let result = ops::restore_builtin(&ctx).map(|sync| {
-                    serde_json::json!({
-                        "restored": true,
-                        "changed": sync.changed,
-                        "folders": ops::builtin_placement_dirs(&ctx).unwrap_or_default(),
+                // At the store the pick stands in where you are (a checkout with a pick of its
+                // own; `-g` or no such checkout → the machine's), the inverse of `remove topos`
+                // at the same scope. The FOLDERS the restore actually wrote are read back after
+                // it ran, because they are what this receipt has to name in place of the
+                // manifest file every other `add` answer names (the built-in has none: it ships
+                // with the binary).
+                let result = ops::builtin_scope_layout(&ctx, global).and_then(|layout| {
+                    let scoped = layout.as_ref().map(|l| ops::ctx_with_layout(&ctx, l));
+                    let bctx = scoped.as_ref().unwrap_or(&ctx);
+                    ops::restore_builtin(bctx).map(|sync| {
+                        serde_json::json!({
+                            "restored": true,
+                            "changed": sync.changed,
+                            "folders": ops::builtin_placement_dirs(bctx).unwrap_or_default(),
+                        })
                     })
                 });
                 return finish(json, cmd_name, result, render::builtin_add_tty, &diag);
@@ -1919,11 +1936,15 @@ fn run_command(
                     );
                 }
             }
+            // The built-in `topos` skill is no manifest row anywhere: its opt-out is the classic
+            // removal's own arm, at the store the pick stands in where you are (`-g` → the
+            // machine's), so `remove -g topos` skips the machine-file edit below.
+            let builtin_only = skill.len() == 1 && ops::is_builtin(&skill[0]);
             // `remove -g` edits THIS MACHINE's own file: drop a row, stop adopting a workspace's
             // feed, or switch one feed-delivered bundle off here — or, with `-a`/`--dest`,
             // subtract just those destinations from a row. It never touches the server — what a
             // workspace assigns you is managed on the web.
-            if global {
+            if global && !builtin_only {
                 let result = ops::remove_global(
                     &ctx,
                     &connect_session_transports,
@@ -1937,19 +1958,21 @@ fn run_command(
             // The PROJECT manifest arm first: a target naming a row in this folder's file (or a
             // member a channel/repo line brings) edits that file. The classic tracked/untracked
             // removal owns everything no manifest mentions.
-            match ops::remove_project(
-                &ctx,
-                &connect_session_transports,
-                &skill,
-                via.as_deref(),
-                yes,
-                &selection,
-            ) {
-                Ok(Some(outcome)) => {
-                    return finish_remove(json, cmd_name, Ok(outcome), &diag);
+            if !global {
+                match ops::remove_project(
+                    &ctx,
+                    &connect_session_transports,
+                    &skill,
+                    via.as_deref(),
+                    yes,
+                    &selection,
+                ) {
+                    Ok(Some(outcome)) => {
+                        return finish_remove(json, cmd_name, Ok(outcome), &diag);
+                    }
+                    Ok(None) => {}
+                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
                 }
-                Ok(None) => {}
-                Err(e) => return emit_err(json, cmd_name, &e, &diag),
             }
             // `--via` selects a manifest set line; a token no manifest arm claimed has no line
             // for it to select — refuse rather than routing the flag into the classic removal,
@@ -1984,7 +2007,15 @@ fn run_command(
                 session: &connect_session_transports,
             };
             let roots = list_discovery();
-            let result = ops::remove(&ctx, &connectors, &skill, &agent, roots.as_ref(), yes);
+            let result = ops::remove(
+                &ctx,
+                &connectors,
+                &skill,
+                &agent,
+                roots.as_ref(),
+                yes,
+                global,
+            );
             finish_remove(json, cmd_name, result, &diag)
         }
         // `protect <target> [<level>]` — the two-phase protection change for a skill or a channel

@@ -16,15 +16,16 @@
 //! adopts — snapshot-first, then force-synced and managed; without the marker the dir is
 //! someone else's and stays a frozen Foreign reservation.
 //!
-//! Machine-local surface: `topos remove topos` opts this machine out durably
-//! (`state/builtin.json`), `topos add topos` re-places it. The built-in has no `follows.json`
-//! row: it is not a subscription, and the plane never hears of it. It lands for the PICKED agents
-//! like any bundle (`crate::agents_pick`), at the pick's own scope: the machine pick places it
-//! under the home through the machine store ([`ensure_builtin`]); a project pick places it in the
-//! picked agents' project skills dirs through the project's own store
-//! ([`ensure_builtin_in_project`]), each store carrying its own record and opt-out. The name
-//! `topos` is reserved end-to-end (the placement naming discipline client-side, the catalog name
-//! mint plane-side), so a workspace skill can never shadow it.
+//! Local surface: `topos remove topos` opts out durably (`state/builtin.json`), `topos add topos`
+//! re-places it — both at the store the pick stands in where you are ([`scope_layout`]): a
+//! checkout holding a pick of its own acts on its project store, `-g` or any other place on the
+//! machine's. The built-in has no `follows.json` row: it is not a subscription, and the plane
+//! never hears of it. It lands for the PICKED agents like any bundle (`crate::agents_pick`), at
+//! the pick's own scope: the machine pick places it under the home through the machine store
+//! ([`ensure_builtin`]); a project pick places it in the picked agents' project skills dirs
+//! through the project's own store ([`ensure_builtin_in_project`]), each store carrying its own
+//! record and opt-out. The name `topos` is reserved end-to-end (the placement naming discipline
+//! client-side, the catalog name mint plane-side), so a workspace skill can never shadow it.
 
 use serde::{Deserialize, Serialize};
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
@@ -340,6 +341,33 @@ pub(crate) fn ensure_builtin_for_project_pick(
         return Ok(BuiltinSync::default());
     }
     ensure_builtin_in_project(ctx, project_dir)
+}
+
+/// The store `remove topos` / `add topos` act on where you stand: the checkout's own project
+/// store when the working directory's checkout holds a pick OF ITS OWN and `global` is not set
+/// (its copies, its record, its opt-out); `None` — the machine's — otherwise (`-g`, no checkout,
+/// or a checkout inheriting the machine pick, whose copies live under the home). A checkout with
+/// its own pick always has a store (the pick write mints it); one somehow without answers the
+/// machine's rather than minting one on a describe.
+///
+/// # Errors
+/// An unreadable pick file.
+pub(crate) fn scope_layout(
+    ctx: &Ctx<'_>,
+    global: bool,
+) -> Result<Option<sidecar::Layout>, ClientError> {
+    if global {
+        return Ok(None);
+    }
+    let Some(project) = super::agent_hooks::cwd_project(ctx) else {
+        return Ok(None);
+    };
+    let own_pick = crate::agents_pick::effective(ctx.fs, &ctx.layout, Some(&project))?
+        .is_some_and(|e| matches!(e.source, crate::agents_pick::PickSource::Project(_)));
+    if !own_pick {
+        return Ok(None);
+    }
+    Ok(sidecar::existing_project_store(ctx.fs, &project))
 }
 
 /// [`ensure_builtin`] over an explicit bundle — the seam the tests drive a "binary changed" refresh

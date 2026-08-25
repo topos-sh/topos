@@ -208,6 +208,13 @@ pub(crate) fn list(
         }
         None => (None, None, Vec::new()),
     };
+    // A slug this binary's table does not know (a row a newer table dropped, a hand edit) is
+    // shown as written and marked: it picks nothing until a table knows it again.
+    let not_in_table: Vec<String> = agents
+        .iter()
+        .filter(|slug| !agents_pick::is_known(slug))
+        .cloned()
+        .collect();
     let gitignored = if gitignore {
         let PickScope::Project(dir) = &scope else {
             return Err(ClientError::GitignoreNeedsProject);
@@ -230,6 +237,7 @@ pub(crate) fn list(
         pick_path,
         source,
         agents,
+        not_in_table,
         installed: installed_slugs(ctx, &scope),
         hooks: agent_hooks::probe_effective(ctx, project_dir(&scope), &evidence),
         gitignored,
@@ -470,7 +478,7 @@ fn skills_roots(ctx: &Ctx<'_>, scope: &PickScope, rows: &[&'static KnownHarness]
 }
 
 /// Every record in a store: the id and its placement map (records without a map are skipped).
-fn records(
+pub(crate) fn records(
     fs: &dyn FsOps,
     layout: &crate::sidecar::Layout,
 ) -> Vec<(SkillId, topos_types::persisted::PlacementMap)> {
@@ -648,7 +656,9 @@ fn hook_file_of(
 
 /// Remove agents from the pick where you stand: describe the loss, or (`--yes`) clean what
 /// topos wrote for them, verify, and write the reduced pick last. A removal with nothing to
-/// delete applies at once (no loss, no gate).
+/// delete applies at once (no loss, no gate). A slug is checked against the PICK, never the
+/// harness table: a row a newer table dropped can always be taken out (it has nothing to lose
+/// here, so it applies at once).
 ///
 /// # Errors
 /// [`ClientError::NoManifest`] outside a project without `-g`; a slug not in the pick
@@ -666,7 +676,6 @@ pub(crate) fn remove(
             "name the agents to remove; `topos agents` lists the pick".into(),
         ));
     }
-    agents_pick::validate(agents)?;
     let (current, had_own) = current_pick(ctx, &scope)?;
     let standing = expand(ctx, &scope, &current);
     let where_ = match scope {
@@ -691,7 +700,12 @@ pub(crate) fn remove(
     let pick_path = pretty_at(ctx, &scope, &agents_pick::path_for(&ctx.layout, &scope));
     let mut data = AgentsChanged {
         scope: scope_word(&scope).to_owned(),
-        removed: leaving_rows.iter().map(|h| h.slug.to_owned()).collect(),
+        // As the pick spells them (a slug the table dropped resolves to no row, and still leaves).
+        removed: standing
+            .iter()
+            .filter(|s| agents.contains(s))
+            .cloned()
+            .collect(),
         agents: remaining.clone(),
         pick_path,
         applied: false,
@@ -860,6 +874,31 @@ pub(crate) fn remove(
             ports.run,
         );
         for r in reports {
+            // A degraded scrub is an INCOMPLETE cleanup: the entry may still be live in a file
+            // topos could not read, parse, or reach through the rail (`present()` fails closed
+            // there, so the check below would say nothing). The receipt names the file and the
+            // reason, and the pick stays.
+            if r.state == TriggerState::Degraded {
+                let file = triggers::adapter_for_slug_at(
+                    &r.agent,
+                    &trigger_scope(&scope),
+                    ports.home,
+                    ports.cfg,
+                    ports.run,
+                )
+                .and_then(|adapter| hook_file_of(&scope, &r.agent, adapter.as_ref()))
+                .map_or_else(
+                    || format!("{}'s auto-update hook", r.agent),
+                    |file| pretty_at(ctx, &scope, &file),
+                );
+                left.push(format!(
+                    "{file} ({})",
+                    r.note
+                        .as_deref()
+                        .unwrap_or("topos could not edit that file")
+                ));
+                continue;
+            }
             if let Some(path) = r.touched_path {
                 removed_hooks.push(pretty_at(ctx, &scope, Path::new(&path)));
             }

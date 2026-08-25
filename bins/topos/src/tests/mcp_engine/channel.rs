@@ -757,6 +757,7 @@ fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
         &[],
         None,
         true,
+        false,
     )
     .expect("the offered command is runnable");
     assert!(
@@ -1013,6 +1014,7 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
         &[],
         None,
         true,
+        false,
     )
     .expect("the offered command is runnable from inside the checkout");
 

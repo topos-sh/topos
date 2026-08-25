@@ -71,10 +71,11 @@ pub(crate) use add::{
 pub(crate) use add_mcp::{McpAdded, add_mcp};
 #[cfg(test)]
 pub(crate) use arm::INERT_TRIGGER;
-pub(crate) use arm::{EvidenceView, Scrubbed, Triggers};
+pub(crate) use arm::{EvidenceView, MachinePorts, Scrubbed, Triggers};
 pub(crate) use builtin::{
     ensure_builtin, ensure_builtin_for_project_pick, is_builtin,
-    placement_dirs as builtin_placement_dirs, restore_builtin, skill_md as builtin_skill_md,
+    placement_dirs as builtin_placement_dirs, restore_builtin,
+    scope_layout as builtin_scope_layout, skill_md as builtin_skill_md,
 };
 pub(crate) use claim::claim;
 #[cfg(test)]

@@ -26,11 +26,12 @@
 //! ## The migration seed
 //!
 //! An older machine holds no pick file; the auto-update hooks an earlier build registered
-//! (`state/trigger_registration.json`) and the MCP entries it placed (the machine store's
-//! config custody) say which agents it used. [`seed_from_legacy`] folds both into the machine
-//! pick ONCE — on the first verb of this build that composes the full context — so nothing
-//! standing changes silently on upgrade, then deletes the legacy record. It never overwrites a
-//! pick that exists.
+//! (`state/trigger_registration.json`), the MCP entries it placed (the machine store's config
+//! custody) and the skill copies it placed (each record's `placement_state[].agent`, the
+//! built-in's included) say which agents it used. [`seed_from_legacy`] folds all three into the
+//! machine pick ONCE — on the first verb of this build that composes the full context — so
+//! nothing standing changes silently on upgrade, then deletes the legacy record. It never
+//! overwrites a pick that exists.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -132,20 +133,23 @@ pub(crate) fn read(fs: &dyn FsOps, path: &Path) -> Result<Option<AgentsPick>, Cl
     crate::doc::read_doc(fs, path)
 }
 
-/// Write a pick at `scope`, atomically, after [`validate`]. The machine store's root is created
-/// when absent; a project's `.topos/` store is minted through [`sidecar::ensure_project_store`],
-/// so the pick always sits beside the store's self-ignore file. Returns the path written.
+/// Write a pick at `scope`, atomically. Only the document's SHAPE is checked here (the wildcard
+/// stands alone); the slugs are opaque, because a pick may carry a slug this binary's table no
+/// longer knows and it must stay writable around it (an `add` beside it, a `remove` of it). The
+/// slugs a verb ADDS pass [`validate`] at the verb. The machine store's root is created when
+/// absent; a project's `.topos/` store is minted through [`sidecar::ensure_project_store`], so
+/// the pick always sits beside the store's self-ignore file. Returns the path written.
 ///
 /// # Errors
-/// The [`validate`] refusals; [`sidecar::ensure_project_store`]'s containment refusal; the
-/// filesystem failure.
+/// [`ClientError::InvalidArgument`] for a wildcard beside a named agent;
+/// [`sidecar::ensure_project_store`]'s containment refusal; the filesystem failure.
 pub(crate) fn write(
     fs: &dyn FsOps,
     layout: &Layout,
     scope: &PickScope,
     pick: &AgentsPick,
 ) -> Result<PathBuf, ClientError> {
-    validate(&pick.agents)?;
+    wildcard_alone(&pick.agents)?;
     match scope {
         PickScope::Machine => fs.create_dir_all(layout.machine_home())?,
         PickScope::Project(dir) => {
@@ -157,26 +161,35 @@ pub(crate) fn write(
     Ok(path)
 }
 
-/// Validate a pick's entries: every slug is a known harness other than the sentinel row, and the
-/// wildcard, when present, is the only entry.
+/// Validate the slugs a verb ADDS to a pick: every one is a known harness other than the
+/// sentinel row, and the wildcard, when present, is the only entry. Slugs already in a file are
+/// never re-validated (see [`write`]).
 ///
 /// # Errors
 /// [`ClientError::UnknownAgent`] for a slug the registry does not know (or the sentinel row),
 /// naming the known slugs in the `-a` refusal's own words; [`ClientError::InvalidArgument`] for
 /// a wildcard beside a named agent.
 pub(crate) fn validate(agents: &[String]) -> Result<(), ClientError> {
+    wildcard_alone(agents)?;
+    for slug in agents {
+        if slug != WILDCARD && !is_known(slug) {
+            return Err(crate::ops::dest_select::unknown_agent(slug, false));
+        }
+    }
+    Ok(())
+}
+
+/// Whether this binary's harness table knows `slug` as an agent (the sentinel row is no agent).
+pub(crate) fn is_known(slug: &str) -> bool {
+    slug != UNIVERSAL && registry::known_harness(slug).is_some()
+}
+
+/// The one shape rule every pick document obeys: the wildcard stands alone.
+fn wildcard_alone(agents: &[String]) -> Result<(), ClientError> {
     if agents.iter().any(|a| a == WILDCARD) && agents.len() > 1 {
         return Err(ClientError::InvalidArgument(format!(
             "\"{WILDCARD}\" already means every agent installed on this machine; name it alone"
         )));
-    }
-    for slug in agents {
-        if slug == WILDCARD {
-            continue;
-        }
-        if slug == UNIVERSAL || registry::known_harness(slug).is_none() {
-            return Err(crate::ops::dest_select::unknown_agent(slug, false));
-        }
     }
     Ok(())
 }
@@ -274,19 +287,27 @@ struct LegacyRegistration {
 }
 
 /// **The one-shot migration seed.** With NO machine pick, the agents an earlier build wired in —
-/// every slug the legacy trigger record marks `registered`, plus every agent holding an MCP entry
-/// in the machine store's custody (each live bundle's `entries.json`, and the unrecorded rows) —
-/// become the machine pick: validated (an unknown slug is dropped), written FIRST, then the
-/// legacy record is deleted. Returns the seeded slugs, in table-independent sorted order, for the
-/// one receipt line; `None` when nothing was seeded — a pick already stands, or there is nothing
-/// to carry (a legacy record with nothing to carry is deleted all the same: its question is
-/// closed).
+/// every slug the legacy trigger record marks `registered` (and a row it marked failed whose
+/// hook nonetheless stands in that agent's config now, when `ports` are there to prove it), plus
+/// every agent holding an MCP entry in the machine store's custody (each live bundle's
+/// `entries.json`, and the unrecorded rows), plus every agent a skill record in the machine
+/// store placed a copy for (`placement_state[].agent`, the built-in's record included: a
+/// placement-only agent has no trigger row and no config entry, and only its record says it was
+/// used) — become the machine pick: validated (an unknown slug is dropped), written FIRST, then
+/// the legacy record is deleted. Returns the seeded slugs, in table-independent sorted order, for
+/// the one receipt line; `None` when nothing was seeded — a pick already stands, or there is
+/// nothing to carry (a legacy record with nothing to carry is deleted all the same: its question
+/// is closed).
 ///
 /// Read under both legacy writers' locks (the record's own, and the MCP converge lock that owns
 /// the custody documents), so a converge racing this seed cannot hand it a torn picture. A lock
 /// that cannot be taken seeds nothing this run; the next run asks again. A standing pick is never
 /// overwritten.
-pub(crate) fn seed_from_legacy(fs: &dyn FsOps, layout: &Layout) -> Option<Vec<String>> {
+pub(crate) fn seed_from_legacy(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    ports: Option<&crate::ops::MachinePorts<'_>>,
+) -> Option<Vec<String>> {
     if fs.exists(&machine_path(layout)) {
         return None;
     }
@@ -299,20 +320,20 @@ pub(crate) fn seed_from_legacy(fs: &dyn FsOps, layout: &Layout) -> Option<Vec<St
         .ok()?;
 
     let record_present = fs.exists(&record);
-    let mut agents: BTreeSet<String> = fs
+    let rows: BTreeMap<String, LegacyRegistration> = fs
         .read_opt(&record)
         .ok()
         .flatten()
         .and_then(|bytes| serde_json::from_slice::<LegacyRegistrations>(&bytes).ok())
-        .map(|doc| {
-            doc.agents
-                .into_iter()
-                .filter(|(_, row)| row.registered)
-                .map(|(slug, _)| slug)
-                .collect()
-        })
+        .map(|doc| doc.agents)
         .unwrap_or_default();
+    let mut agents: BTreeSet<String> = rows
+        .iter()
+        .filter(|(slug, row)| row.registered || hook_stands(slug, ports))
+        .map(|(slug, _)| slug.clone())
+        .collect();
     agents.extend(custody_agents(fs, layout));
+    agents.extend(placement_agents(fs, layout));
     let agents: Vec<String> = agents
         .into_iter()
         .filter(|slug| slug != WILDCARD && validate(std::slice::from_ref(slug)).is_ok())
@@ -353,6 +374,29 @@ pub(crate) fn legacy_registered(fs: &dyn FsOps, layout: &Layout) -> Vec<String> 
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether a hook the legacy record marked FAILED nonetheless stands in `slug`'s config now (a
+/// later run registered it, or a person did): the user-level adapter's read-only presence probe,
+/// cheap for every harness whose hook lives in a file. A harness whose probe would have to run
+/// its own program is not asked (no proof, no seed), and with no ports nothing is.
+fn hook_stands(slug: &str, ports: Option<&crate::ops::MachinePorts<'_>>) -> bool {
+    let Some(ports) = ports else {
+        return false;
+    };
+    topos_harness::triggers::adapter_for_slug(slug, ports.home, ports.cfg, ports.run)
+        .is_some_and(|adapter| adapter.offline_probe_refusal().is_none() && adapter.present())
+}
+
+/// Every agent a skill record in this store placed a copy for: each record's
+/// `placement_state[].agent` (a native placement names the agent whose folder it sits in). The
+/// built-in's record counts like any other. Best-effort — an unreadable record answers nothing.
+fn placement_agents(fs: &dyn FsOps, layout: &Layout) -> BTreeSet<String> {
+    crate::ops::agents::records(fs, layout)
+        .into_iter()
+        .flat_map(|(_, map)| map.placement_state)
+        .filter_map(|state| state.agent)
+        .collect()
 }
 
 /// Every agent holding an MCP entry in this store's custody: each keyed bundle's rows read where
@@ -562,11 +606,24 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("aider-desk"), "{text}");
-        // Nothing is written on a refusal.
+        // The refusal is the verb's, on the slugs it ADDS. A document already carrying a slug
+        // this table does not know (a row a newer table dropped) is written and read as is; the
+        // slug picks nothing, and the known one beside it still resolves.
         let rig = Rig::new("unknown");
-        let bad = AgentsPick::new(vec!["claude".to_owned()]);
-        assert!(write(&rig.fs, &rig.layout(), &PickScope::Machine, &bad).is_err());
-        assert!(!machine_path(&rig.layout()).exists());
+        let carried = AgentsPick::new(vec!["claude-code".to_owned(), "old-agent".to_owned()]);
+        write(&rig.fs, &rig.layout(), &PickScope::Machine, &carried).unwrap();
+        assert_eq!(
+            read(&rig.fs, &machine_path(&rig.layout()))
+                .unwrap()
+                .unwrap()
+                .agents,
+            ["claude-code", "old-agent"]
+        );
+        assert_eq!(
+            slugs(&resolve(&carried, &rig.home.0, None)),
+            ["claude-code"]
+        );
+        assert!(!is_known("old-agent") && is_known("claude-code"));
     }
 
     #[test]
@@ -713,7 +770,7 @@ mod tests {
         );
         custody_with_entries(&rig.fs, &layout);
 
-        let seeded = seed_from_legacy(&rig.fs, &layout).expect("something to carry");
+        let seeded = seed_from_legacy(&rig.fs, &layout, None).expect("something to carry");
         assert_eq!(seeded, ["claude-code", "codex", "cursor", "zed"]);
         let pick = read(&rig.fs, &machine_path(&layout)).unwrap().unwrap();
         assert_eq!(pick.agents, ["claude-code", "codex", "cursor", "zed"]);
@@ -725,7 +782,7 @@ mod tests {
         // The seed is one-shot: with the pick standing there is nothing to do, whatever the
         // record says.
         legacy_record(&layout, &[("gemini-cli", true)]);
-        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert!(seed_from_legacy(&rig.fs, &layout, None).is_none());
         assert_eq!(
             read(&rig.fs, &machine_path(&layout))
                 .unwrap()
@@ -747,7 +804,7 @@ mod tests {
         )
         .unwrap();
         let record = legacy_record(&layout, &[("cursor", true)]);
-        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert!(seed_from_legacy(&rig.fs, &layout, None).is_none());
         assert_eq!(
             read(&rig.fs, &machine_path(&layout))
                 .unwrap()
@@ -765,18 +822,109 @@ mod tests {
     fn the_seed_writes_nothing_when_there_is_nothing_to_carry() {
         let rig = Rig::new("seed-empty");
         let layout = rig.layout();
-        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert!(seed_from_legacy(&rig.fs, &layout, None).is_none());
         assert!(!machine_path(&layout).exists());
         let record = legacy_record(&layout, &[("openclaw", false)]);
-        assert!(seed_from_legacy(&rig.fs, &layout).is_none());
+        assert!(seed_from_legacy(&rig.fs, &layout, None).is_none());
         assert!(!machine_path(&layout).exists(), "no pick of nothing");
         assert!(!record.exists(), "the record is retired all the same");
         // Custody alone seeds.
         custody_with_entries(&rig.fs, &layout);
         assert_eq!(
-            seed_from_legacy(&rig.fs, &layout).unwrap(),
+            seed_from_legacy(&rig.fs, &layout, None).unwrap(),
             ["codex", "zed"]
         );
+    }
+
+    /// A v0.1.49 machine that placed native copies into a PLACEMENT-ONLY agent (no trigger
+    /// surface, no MCP surface) has only its records to say so: each carries
+    /// `placement_state[].agent`. Without this the agent vanished from the seeded pick and its
+    /// copies were retired on the next sweep.
+    #[test]
+    fn the_seed_carries_placement_only_agents() {
+        use topos_types::persisted::{PlacementKind, PlacementMap, PlacementState, SwapCapability};
+        let rig = Rig::new("seed-placement");
+        let layout = rig.layout();
+        let state = |agent: Option<&str>| PlacementState {
+            kind: PlacementKind::Native,
+            agent: agent.map(str::to_owned),
+            materialized_sha: Some("e".repeat(64)),
+            pre_existing_sha: None,
+            swap_capability: SwapCapability::Unsupported,
+            adopted_source: false,
+            claim: None,
+        };
+        // The built-in's record and a workspace bundle's: one copy for aider-desk each, and one
+        // placement with no agent recorded (an old adopted dir) that names nobody.
+        for (id, agents) in [
+            ("topos", vec![Some("aider-desk"), None]),
+            (
+                "topos_a9b7ee2b",
+                vec![Some("aider-desk"), Some("gemini-cli")],
+            ),
+        ] {
+            let sid = crate::id::SkillId::parse(id).unwrap();
+            std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+            crate::doc::write_map(
+                &rig.fs,
+                &layout.published(&sid).map,
+                &PlacementMap {
+                    schema_version: 2,
+                    placements: agents
+                        .iter()
+                        .map(|a| format!("/copies/{}/{id}", a.unwrap_or("nobody")))
+                        .collect(),
+                    applied_commit: "b".repeat(64),
+                    materialized_sha: "e".repeat(64),
+                    harness: None,
+                    harness_slug: None,
+                    placement_state: agents.into_iter().map(state).collect(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            seed_from_legacy(&rig.fs, &layout, None).expect("the records carry agents"),
+            ["aider-desk", "gemini-cli"]
+        );
+        assert_eq!(
+            read(&rig.fs, &machine_path(&layout))
+                .unwrap()
+                .unwrap()
+                .agents,
+            ["aider-desk", "gemini-cli"]
+        );
+    }
+
+    /// A row the legacy record marked FAILED whose hook nonetheless stands now (a later run or a
+    /// person registered it) is carried when the ports are there to prove it, and not otherwise.
+    #[test]
+    fn the_seed_carries_a_failed_row_whose_hook_stands() {
+        let rig = Rig::new("seed-failed-row");
+        let layout = rig.layout();
+        rig.install(".cursor");
+        legacy_record(&layout, &[("cursor", false), ("cline", false)]);
+        // Cursor's user-level hook, written by the real adapter over the rig's home.
+        let report =
+            topos_harness::triggers::adapter_for_slug("cursor", &rig.home.0, &rig.fs, &rig.fs)
+                .expect("cursor's trigger")
+                .install();
+        assert_eq!(report.state, topos_types::TriggerState::Active);
+        // Without ports nothing is proven, and a record of failed rows only is retired unseeded.
+        assert!(seed_from_legacy(&rig.fs, &layout, None).is_none());
+        assert!(!machine_path(&layout).exists());
+        let record = legacy_record(&layout, &[("cursor", false), ("cline", false)]);
+        let ports = crate::ops::MachinePorts {
+            home: &rig.home.0,
+            cfg: &rig.fs,
+            run: &rig.fs,
+        };
+        assert_eq!(
+            seed_from_legacy(&rig.fs, &layout, Some(&ports)).expect("the standing hook seeds"),
+            ["cursor"],
+            "cline's hook never landed, so it is not carried"
+        );
+        assert!(!record.exists());
     }
 
     #[test]

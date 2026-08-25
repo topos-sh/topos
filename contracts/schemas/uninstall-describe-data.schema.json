@@ -33,7 +33,7 @@
       }
     },
     "project_hook_files": {
-      "description": "The auto-update hook files the checkout the command ran in holds (the four project-capable\nharnesses', each named only while it is provably topos's). LEFT IN PLACE: a project hook is\ninert without the binary, and a teardown never edits a checkout. Empty outside a project.\n**Additive.**",
+      "description": "The auto-update hook files the checkout the command ran in holds (the four project-capable\nharnesses', each named only while it is provably topos's). The apply scrubs the topos entry\nout of each, the way it scrubs the machine's; other checkouts keep theirs. Empty outside a\nproject. **Additive.**",
       "type": "array",
       "items": {
         "type": "string"

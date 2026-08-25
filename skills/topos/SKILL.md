@@ -276,5 +276,6 @@ its three steps — the only browser moments are theirs.
 This bundle rides the binary: re-placed for each agent as it is picked, re-synced every sweep — hand
 edits here are overwritten. A downloaded copy is adopted only by an explicit `topos add topos` (a
 `topos` dir that is not a downloaded copy of this skill stays untouched).
-`topos remove topos --yes` opts this machine out durably; `topos add topos` brings it back.
+`topos remove topos --yes` opts out durably where you stand (a checkout with a pick of its own,
+else this machine; `-g` is always the machine); `topos add topos` brings it back at the same scope.
 The name `topos` is reserved.

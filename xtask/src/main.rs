@@ -2196,6 +2196,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             pick_path: Some(".topos/agents.json".to_owned()),
             source: Some("project".to_owned()),
             agents: vec!["claude-code".to_owned(), "codex".to_owned()],
+            not_in_table: Vec::new(),
             installed: vec![
                 "claude-code".to_owned(),
                 "codex".to_owned(),
