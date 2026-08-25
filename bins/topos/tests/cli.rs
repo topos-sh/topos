@@ -389,6 +389,61 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// The health panel on a fresh machine — no global manifest, not connected, the built-in placed
+/// by the first sweep. `status -g --json` says `builtin_in_place: true`; the terminal face must
+/// say the same thing in words, or the panel reads as if the machine held nothing one command
+/// away from a `list -g` that shows the bundle.
+#[test]
+fn status_names_the_built_in_on_the_terminal_where_no_manifest_governs_the_machine() {
+    let root = scratch("status-builtin");
+    let topos_home = root.join("topos");
+    let disc_home = root.join("home");
+    let claude = disc_home.join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(bin())
+            .env("TOPOS_HOME", &topos_home)
+            .env("HOME", &disc_home)
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .env("TOPOS_NO_UPDATE_CHECK", "1")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("CODEX_HOME")
+            .env_remove("HERMES_HOME")
+            .env_remove("VIBE_HOME")
+            .env_remove("AUTOHAND_HOME")
+            .env_remove("APPDATA")
+            .env_remove("FLATPAK_XDG_CONFIG_HOME")
+            .current_dir(&disc_home)
+            .args(args)
+            .output()
+            .expect("spawn topos")
+    };
+    // The bare sweep places the built-in; nothing else is demanded (no manifest, no session).
+    let swept = run(&["update"]);
+    assert!(
+        swept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&run(&["status", "-g", "--json"]).stdout).unwrap();
+    let machine = &json["data"]["scopes"][0];
+    assert_eq!(machine["scope"], "machine", "{json}");
+    assert_eq!(machine["builtin_in_place"], true, "{json}");
+    assert!(machine.get("manifest").is_none(), "{json}");
+    // The same fact, in words, on the terminal face — under the no-manifest header, said once.
+    let tty = String::from_utf8_lossy(&run(&["status", "-g"]).stdout).into_owned();
+    assert!(tty.contains("not connected"), "{tty}");
+    assert!(
+        tty.contains(
+            "Machine-wide — no global manifest\n  the built-in topos bundle is in place; no \
+             workspace demands anything machine-wide\n  nothing pending"
+        ),
+        "{tty}"
+    );
+    assert_eq!(tty.matches("machine-wide").count(), 1, "{tty}");
+}
+
 /// Run `topos` with discovery pinned to a hermetic, EMPTY `$HOME` (so no real harness on the dev's machine
 /// is "present") and a Claude config home holding the laid skills. The other per-harness home overrides are
 /// scrubbed so discovery resolves ONLY the injected Claude Code dir — a name never resolves to a stray real
