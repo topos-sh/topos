@@ -185,6 +185,33 @@ topos logout [OPTIONS]
 | `--all` | Log out of every workspace on this machine |
 
 
+### `topos workspace`
+
+Which workspace commands act on. `list` shows every workspace this machine is signed into, with a `*` on the default; `use <name>` moves the default. Every command resolves its workspace in one fixed order: the `--workspace` flag, then the `TOPOS_WORKSPACE` environment variable, then — inside a project — that project file's `workspace = ` line, then this machine's default, then the only login when there is just one. With several logins and no default, a command that needs one refuses and names them rather than reading every workspace. `topos update` is the exception by nature: delivery is per login, so it converges every one of them.
+
+```
+topos workspace <COMMAND>
+```
+
+
+#### `topos workspace list`
+
+The signed-in workspaces, `*` on the machine default.
+
+
+#### `topos workspace use`
+
+Set the machine default workspace.
+
+```
+topos workspace use <NAME>
+```
+
+| Argument / flag | What it does |
+|---|---|
+| `<NAME>` | The workspace: its name, or `<host>/<name>` when one name is signed in on two servers |
+
+
 ### `topos init`
 
 Create a `topos.toml` in this folder. The file lists the skills everyone working in this project should have — commit it, and teammates' agents pick up the same set by themselves. With `-g`, creates your machine's own `~/.topos/topos.toml` instead, header only — `topos login` writes a workspace's feed line on this machine's first connection to it, and `topos add -g` records the rest. If the file already exists, nothing changes.
@@ -247,6 +274,22 @@ topos remove [OPTIONS] [SKILL]...
 | `-g, --global` | Edit your machine-wide file (`~/.topos/topos.toml`) instead of this folder's |
 | `--via <REF>` | When more than one channel/repo line carries the skill, name WHICH line's rewrite you mean (its reference, e.g. `@acme/channels/backend`) — the ambiguity refusal lists the exact `--via` invocations |
 | `--yes` | Confirm a removal that loses local work (unshared edits, or a local-only skill whose delete is permanent) |
+
+
+### `topos install`
+
+Get what's declared, changing no decisions. In a project: place exactly what topos.lock records (verified against its checksums); a topos.toml line the lock does not know yet is resolved once and its lock entry written — an existing entry never moves. On your machine-wide set: the newest of what follows you. `topos update` is the verb that moves versions.
+
+```
+topos install [OPTIONS]
+```
+
+| Argument / flag | What it does |
+|---|---|
+| `-g, --global` | Install only your machine-wide skills, even when run inside a project |
+| `--frozen` | Fail instead of writing anything when topos.lock and topos.toml disagree, anything cannot be fetched, or a checksum does not match — the CI mode (like `npm ci`) |
+| `--quiet` | Print nothing on stdout — the mode the session-start hook uses |
+| `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes it |
 
 
 ### `topos update`
@@ -339,6 +382,19 @@ topos log [OPTIONS] <SKILL>
 | `<SKILL>` | The skill name |
 | `--limit <N>` | Print at most this many entries (`0` = all). Default: unlimited on a terminal, 20 under `--json` |
 | `--offset <N>` | Skip this many entries first — the next page's cursor |
+
+
+### `topos relay`
+
+Serve one gateway-routed MCP server over stdio. This is the command a delivered MCP entry runs — an agent starts it, and it forwards the conversation to the workspace's gateway at the given address, signed in as this machine's session. The credential stays in topos's own session store; the config entry carries only this command line. Not a command a person needs to run by hand.
+
+```
+topos relay <URL>
+```
+
+| Argument / flag | What it does |
+|---|---|
+| `<URL>` | The gateway address the entry names (`https://<gateway>/<session>/<server>`) |
 
 ## Team commands
 

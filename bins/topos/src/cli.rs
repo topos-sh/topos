@@ -199,12 +199,13 @@ pub(crate) enum Command {
         from: Option<String>,
     },
     /// Which workspace commands act on. `list` shows every workspace this machine is signed
-    /// into, with a `*` on the default; `use <name>` moves the default. A command's
-    /// `--workspace` flag and the `TOPOS_WORKSPACE` environment variable both beat the default
-    /// for one invocation; inside a project, the project file's `workspace = ` line does too.
-    /// With several logins and no default, a command that needs one refuses and names them
-    /// rather than reading every workspace. `topos update` is the exception by nature: delivery
-    /// is per login, so it converges every one of them.
+    /// into, with a `*` on the default; `use <name>` moves the default. Every command resolves
+    /// its workspace in one fixed order: the `--workspace` flag, then the `TOPOS_WORKSPACE`
+    /// environment variable, then — inside a project — that project file's `workspace = ` line,
+    /// then this machine's default, then the only login when there is just one. With several
+    /// logins and no default, a command that needs one refuses and names them rather than
+    /// reading every workspace. `topos update` is the exception by nature: delivery is per
+    /// login, so it converges every one of them.
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
