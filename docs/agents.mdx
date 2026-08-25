@@ -4,8 +4,12 @@ description: The machine surface — entry points, the JSON envelope, exit codes
 sidebar_label: For agents
 ---
 
-Every command is non-interactive, `--json` prints exactly one machine-readable object and never
-prompts, and every refusal names its own fix. Five rules cover almost everything:
+`--json` prints exactly one machine-readable object and never prompts, and every refusal names its
+own fix. Exactly one question exists, and it only ever reaches a terminal: which agents Topos may
+touch here. On a terminal, a run that needs a pick and finds several agents installed offers a
+numbered list. Piped or under `--json` the same run prints the installed agents in `data` and exits
+`2` instead, carrying `topos init -a <agent>` as the way through; inside Claude Code it picks
+Claude Code and says nothing. Five rules cover almost everything:
 
 1. **Use `--json` on every command** and read the envelope rather than parsing prose.
 2. **Follow `next_actions`** — each carries a complete `argv`.
@@ -25,7 +29,7 @@ prompts, and every refusal names its own fix. Five rules cover almost everything
 |---|---|
 | `<origin>/agent` | A plain-text setup walkthrough for agents — install, login, first commands. Humans bootstrap you with: `Set up Topos for us: fetch https://topos.sh/agent and follow it.` |
 | The protocol card | Fetch **any** path on a Topos server with `Accept: application/json` and you get `{"schema_version":2,"card":"topos-protocol-card","api_base_url":"…","server_version":"0.1.x","min_cli_version":"0.1.x"}` — byte-identical on every path. This is API-base discovery, and how you confirm an address is a Topos server at all |
-| The built-in `topos` skill | Lands in your skills directories when Topos wires into an agent: a `SKILL.md`, an `INSTALL.md`, and the command reference — so a fresh agent learns Topos from inside its own context |
+| The built-in `topos` skill | Lands in the skills directory of every agent you pick: a `SKILL.md`, an `INSTALL.md`, and the command reference — so a fresh agent learns Topos from inside its own context |
 | These docs | Append `.md` to any page URL for plain markdown; `/docs/llms.txt` is the index |
 | `npx skills add topos-sh/topos` | The same skill with no binary — its `INSTALL.md` walks you through the real install |
 
@@ -159,7 +163,8 @@ receipt; read the undo, and tell the person what changed.
 | `add` | Immediate — **except** a git source, which lists what it found and waits for `--yes`. Every time, including a repo already in a local `topos.toml` |
 | `add --kind mcp` | Immediate — the receipt leads with the undo (`topos remove <name>` drops the row and the config entries) ([MCP servers](/docs/mcp)) |
 | `remove` | Two-phase when local work would be lost (a draft ahead, a permanent local delete) **or** when the row is a channel/repo line that would be rewritten to its members; immediate otherwise |
-| `init`, `fmt`, `login`, `logout`, `update`, `list`, `diff`, `log`, `status`, `self-update` | Immediate, with receipt (`--yes` is an accepted no-op) |
+| `agents remove` | Two-phase when something Topos wrote for that agent would be deleted; immediate when there is nothing to lose |
+| `init`, `agents`, `agents add`, `fmt`, `login`, `logout`, `update`, `list`, `diff`, `log`, `status`, `self-update` | Immediate, with receipt (`--yes` is an accepted no-op) |
 
 The CLI's gate is the floor, not the ceiling. Two rules sit above it for you:
 
@@ -196,10 +201,10 @@ topos add code-review --dest ./.agents/skills --json
 topos remove code-review -a codex --json   # subtract that one destination; the row keeps the rest
 ```
 
-On `add` they are recorded on the manifest line, so every later `update` keeps the copy exactly
-there whether or not that agent is detected — and a line that named nothing keeps everything it
-already reached, through the `"*"` entry the add writes beside them (an add never costs a line an
-agent). The receipt's `dest` echoes the line as the file now spells it. On `remove` they
+`-a` names an agent from the pick where you stand: an agent outside it refuses, naming
+`topos agents add <agent>`. On `add` the destinations are recorded on the manifest line, so every
+later `update` keeps the copy exactly there, and the line ends up with exactly what that run
+named. The receipt's `dest` echoes the line as the file now spells it. On `remove` they
 **subtract**: only the named destinations are uninstalled,
 the row survives with the others (`kind: "manifest-narrowed"`, and `uninstalled[].remaining` counts
 what the row still names), and subtracting the last one removes the row.

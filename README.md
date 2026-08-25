@@ -26,6 +26,7 @@ Or by hand (macOS and Linux, WSL2 on Windows; no sudo):
 ```sh
 curl -fsSL https://topos.sh/install | sh
 topos login
+topos init -g -a claude-code
 ```
 
 Your browser opens: sign in, pick your workspace - or create it right there - and one click
@@ -33,8 +34,10 @@ connects. A workspace is your team's shared home for skills; its address is
 `https://topos.sh/<name>`. Already invited? The invitation link works as the address:
 `topos login <invite-url>`.
 
-That is the whole setup: this machine receives everything the workspace has for you, and
-updates apply silently at the start of each agent session.
+That is the whole setup. The last line names the agents topos may use - it never touches one you
+did not name, and `topos agents` shows or changes the choice - and from then on this machine
+receives everything the workspace has for you, with updates applying silently at the start of each
+agent session.
 
 **2. Share a skill.** Point `publish` at any skill folder you already have - here, a Claude
 Code one. A bare run is a preview - it prints what would happen and changes nothing; `--yes`

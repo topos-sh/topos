@@ -29,20 +29,21 @@ A project also commits the generated `topos.lock` — exactly which version each
 An unknown section warns and is skipped (a newer topos wrote it), never a refusal.
 
 Placement is ONE field: `dest`, an array of destinations. A row without it reaches every agent
-this machine has, now and later; a row with it lands at exactly what it names, detected or not
-(skill rows: folders; MCP rows: the agents' config files). One entry is not a destination:
+PICKED at that scope, now and later (`<project>/.topos/agents.json`, else `~/.topos/agents.json`;
+`topos agents` prints it); a row with it lands at exactly what it names, picked or not (skill rows:
+folders; MCP rows: the agents' config files). One entry is not a destination:
 **`"*"`** stands for the reach the row would have with no `dest` at all, recomputed on every run —
-so `dest = ["*", "~/.codex/skills"]` reads "every agent this machine has, plus that folder
-always". It is what `topos add … -a <agent>` joins onto a row that named no destinations:
-destinations EXTEND, and narrowing is `topos remove … -a <agent>`. The machine file spells
+so `dest = ["*", "~/.codex/skills"]` reads "every agent picked here, plus that folder always".
+`topos add … -a <agent>` SETS the row to exactly the folders that run names, and every agent it
+names must be in the pick; `topos remove … -a <agent>` subtracts one. The machine file spells
 machine paths (`~/…` or absolute), a project file spells relative paths inside the checkout.
 Hand-edit the array and the next `topos install` converges it — a new entry installs, a dropped
 entry uninstalls (edited copies kept, disclosed).
 
 A CHANNEL row carries members of both kinds, so it takes two arrays: `dest` freezes its skill
 members' folders and `mcp_dest` freezes its MCP members' config files. Each narrows only its own
-kind; with no `mcp_dest` the channel's MCP members reach every MCP-capable agent. In a project,
-the lock freezes a channel to its resolved member list — a member the server adds arrives as a
+kind; with no `mcp_dest` the channel's MCP members reach every MCP-capable agent PICKED here. In a
+project, the lock freezes a channel to its resolved member list — a member the server adds arrives as a
 `topos update` diff, never silently.
 
 Two spellings are the MACHINE file's alone (a project file is a repo fact): the `[workspaces]`

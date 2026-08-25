@@ -111,8 +111,10 @@ H1 and provenance quote — the page provides both). After changing the CLI, run
 - **Written for people AND agents.** Commands copy-pasteable and complete, tables parseable,
   explicit over clever.
 - **Vocabulary**: workspace · seat · session · manifest · channel · skill · version · `current` ·
-  draft · proposal · auto-update. For the delivery model: a workspace **gives** a person skills
-  (the `everyone` baseline, a channel, an assignment, their own pick) and they can turn one **off**.
+  draft · proposal · auto-update · **pick** (the agents topos may touch where you stand, named
+  with `topos init -a` and managed with `topos agents`). For the delivery model: a workspace
+  **gives** a person skills (the `everyone` baseline, a channel, an assignment, one they added
+  themselves) and they can turn one **off**.
   Not: device, profile, include/exclude, follow/unfollow, or "currency" (internal code spellings,
   never product words).
 - **Compression is a feature.** This is deliberately a small set of pages (~12). Deepen an

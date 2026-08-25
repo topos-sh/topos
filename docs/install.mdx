@@ -115,15 +115,20 @@ topos uninstall
 topos uninstall --yes
 ```
 
-The bare run previews. Applying removes the auto-update hooks and `~/.topos/`; it **never
-deletes a skill file** — everything in your agent directories stays. The binary's own path is
+The bare run previews. Applying removes the machine-wide auto-update hooks and `~/.topos/`; it
+**never deletes a skill file** — everything in your agent directories stays. A project's own hook
+files stay too, inert without the binary, and the preview names them. The binary's own path is
 printed so you can remove it with whatever installed it.
 
 ## Next
 
 ```bash
 topos login
+topos init -a claude-code
 ```
 
-Pick your workspace in the browser — or create it right there — and one click connects the
-machine and turns on automatic updates. Full walkthrough: [Quickstart](/docs/quickstart).
+Pick your workspace in the browser, or create it right there, and one click connects the machine.
+The second line names an agent Topos may use here, which is what turns auto-updates on for it;
+Topos never touches an agent you did not name. Repeat `-a` for more, add `-g` for your
+machine-wide skills, and `topos agents` shows the choice any time. Full walkthrough:
+[Quickstart](/docs/quickstart).

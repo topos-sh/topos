@@ -55,6 +55,34 @@ contract for every `--json` envelope.
   with `--yes` once. Never route around a refusal by hand-editing files or sidecar internals.
 - Exit codes: `0` success, `1` domain refusal or failure, `2` usage error.
 
+## Which agents topos touches (settle this first)
+
+topos writes ONLY into agents the person picked: an unpicked agent gets no skills folder, no MCP
+entry and no auto-update hook, ever. Nothing lands anywhere until a pick exists.
+
+```
+topos init -a <agent>             # pick, in THIS project, and install for it now
+topos init -g -a <agent>          # the same for the machine-wide set
+topos agents                      # the pick where you stand + what is installed on this machine
+topos agents add <agent>          # add one and install for it
+topos agents remove <agent>       # drop one AND delete what topos wrote for it (--yes applies)
+```
+
+Name YOURSELF: run `topos init -a claude-code` when you are Claude Code, `-a codex` for Codex,
+`-a cursor` for Cursor, `-a opencode` for OpenCode. Repeat `-a` for more; `-a '*'` is every agent
+installed on this machine; `topos agents --json` names the ones that are. The pick is PERSONAL and
+per project (`<project>/.topos/agents.json`, never committed), and a project with no pick of its
+own falls back to the machine's. `init` on a folder no `topos.toml` covers CREATES that file, which the
+repo commits, so ask the human first; on an existing one it only records the pick and installs.
+
+Each picked agent gets its own folder, its own MCP config file and its own session-start hook:
+inside the project for claude-code, cursor, codex and opencode, machine-wide (`-g`) for every
+other agent, whose receipt says so and names `topos update` as the other way to stay fresh.
+
+A verb that needs a pick and cannot ask exits `2` with error code `PICK_REQUIRED`,
+`data.installed` naming the agents installed here and `next_actions` carrying
+`topos init -a <agent>`. Answer it by picking, never by writing `agents.json` yourself.
+
 ## What the CLI does NOT write
 
 topos edits files on this machine. It never writes workspace-side state, so what the WORKSPACE
@@ -93,8 +121,8 @@ skills dirs as that agent reads them.
 the machine-wide set otherwise; `-g` converges the machine from anywhere, `topos update <name>`
 narrows within that scope, `topos update --force` re-creates a managed folder that exists but is
 damaged (edits saved first; a deleted folder comes back on an ordinary update). Every receipt names
-the scope it acted on. The session-start trigger runs
-`topos update --quiet`, which always covers BOTH scopes, so nothing goes stale while the session
+the scope it acted on. The session-start hook runs
+`topos install --quiet`, which always covers BOTH scopes, so nothing goes stale while the session
 works in one folder. Updates never destroy drafts — they merge around them. Where you and the team
 changed the same lines the update stops: every agent folder keeps your version untouched (never
 markers), and a marked-up copy of both sides goes to a folder of Topos's own, named on the receipt.
@@ -108,15 +136,14 @@ downloads only on a real change, receipted with the commit it moved to. `topos u
 checks every source immediately; `topos status` shows when each was last checked, and `topos list`
 marks the rows a stopped source froze — `[not responding]`, with the last time it answered.
 
-A newly installed agent needs no flags: run `topos update` and every delivered bundle reaches
-it — its update trigger is registered too. Destinations extend; narrowing is `remove -a`.
-That registration is offered once per agent ever, so a trigger the person deleted stays deleted;
-a `login` or an `add` is the deliberate way to put one back.
+An agent installed today stays untouched until it is PICKED: `topos agents add <agent>` (or
+`topos init -a <agent>` in a project that has no pick yet) installs this scope's bundles for it and
+registers its hook in the same command. Nothing else writes a hook: not `login`, not `add`.
 
 ## Adding skills (a manifest row is the demand)
 
 ```
-topos init                        # create THIS folder's topos.toml (the one way one is born)
+topos init -a <agent>             # create THIS folder's topos.toml AND pick an agent (see above)
 topos add <name>                  # a connected catalog's skill, by bare name when unique
 topos add @<workspace>/<name>     # the same, workspace-qualified; pins with @<64-hex digest>
 topos add @<workspace>/channels/<name>   # a whole channel
@@ -137,12 +164,12 @@ this folder") and hands back both ways out as next actions — `topos init` here
 invocation with `-g`. It never crosses that line by itself either: removing a machine-delivered
 skill from a project refuses toward `-g`. `-g` edits `~/.topos/topos.toml` instead:
 `add -g @<workspace>` adopts that whole feed, `remove -g <name>` writes the machine-local `off`
-row (and `add -g <name>` deletes it again). By default a skill reaches every agent on the
-machine; `-a <agent>` / `--dest <folder>` record the row's destinations as exactly those (written
-as `dest = [...]`, so updates keep landing there). The same flags on a later `add` EXTEND that set
-— what is recorded stays and the new ones join it, and on a row that named none they join the
-reserved `"*"` entry, which IS that row's default reach — and on `remove` they SUBTRACT a
-destination: the row keeps the rest, and removing the last one removes the row. Removing a row
+row (and `add -g <name>` deletes it again). By default a skill reaches every agent PICKED at that
+scope; `-a <agent>` / `--dest <folder>` record the row's destinations as exactly those (written as
+`dest = [...]`, so updates keep landing there). `-a` stays INSIDE the pick: an agent outside it
+refuses toward `topos agents add <agent>`. The same flags on a later `add` SET the row again: it
+ends up with exactly what that run named. On `remove` they SUBTRACT a destination: the row keeps
+the rest, and removing the last one removes the row. Removing a row
 also uninstalls the copies it placed, in the same command (an edited copy stays in place,
 disclosed). `~/.topos/topos.toml` is always the machine's whole
 truth: a workspace's feed flows only while its `[workspaces] "<host>/<workspace>" = "latest"` line is in the file.
@@ -246,8 +273,8 @@ its three steps — the only browser moments are theirs.
 
 ## This skill itself
 
-This bundle rides the binary: re-placed when triggers are registered, re-synced every sweep — hand edits
-here are overwritten. A downloaded copy is adopted only by an explicit `topos add topos` (a
+This bundle rides the binary: re-placed for each agent as it is picked, re-synced every sweep — hand
+edits here are overwritten. A downloaded copy is adopted only by an explicit `topos add topos` (a
 `topos` dir that is not a downloaded copy of this skill stays untouched).
 `topos remove topos --yes` opts this machine out durably; `topos add topos` brings it back.
 The name `topos` is reserved.

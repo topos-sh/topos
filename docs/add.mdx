@@ -146,8 +146,9 @@ ending in the exact command that expands it.
 
 ## Where the files land
 
-Skills go into the folders your agents actually read — `~/.claude/skills/<name>`, the shared
-`~/.agents/skills/<name>`, or a project's own agent directories. The full table:
+Skills go into the folders the agents you picked actually read: `~/.claude/skills/<name>` for
+your machine-wide set, `.claude/skills/<name>` and its siblings inside a checkout. One folder per
+agent, and nothing for an agent you did not pick. The full table:
 [Supported agents](/docs/harnesses).
 
 Some of those folders are links rather than files — one bundle installs itself once and links each
@@ -199,18 +200,17 @@ topos add @acme/deploy-checklist --dest ~/team-skills -g
 topos remove deploy-checklist -a codex -g
 ```
 
-By default a skill reaches every agent on the machine. `-a <agent>` (repeatable) installs it for
-just those agents — the flag is sugar for that agent's own skills folder — and `--dest <folder>`
-names an exact folder; together the union is the destination set. The choice is recorded on the
-line itself (`dest = ["~/.codex/skills"]`), so every later update keeps the copy where you asked.
-For an MCP server, `-a` picks whose config file gets the entry.
+By default a skill reaches every agent you picked here. `-a <agent>` (repeatable) narrows it to
+exactly those agents, and each one has to be in your pick already: name an agent outside it and the
+add refuses, pointing at `topos agents add <agent>`. The flag is sugar for that agent's own skills
+folder. `--dest <folder>` names an exact folder, which the pick does not govern; together the union
+is the destination set. The choice is recorded on the line itself (`dest = ["~/.codex/skills"]`), so
+every later update keeps the copy where you asked. For an MCP server, `-a` picks whose config file
+gets the entry.
 
-The same flags on `add` again **extend**: the destinations already recorded stay, and the new ones
-join them (`added ~/.cursor/skills to deploy-checklist's destinations`). Naming a destination the
-line already has changes nothing, and says so. The first `-a` on a line that reached every agent
-keeps that reach — the line becomes `dest = ["*", "~/.cursor/skills"]`, where `"*"` is everything
-the line reached before, answered afresh on every run, so the agent you install next month is
-reached too. The undo takes back only what that add put there.
+The same flags on a later `add` **set** the destinations again: the line ends up with exactly what
+that run named, which is how you re-aim a line as well as how you first aim it. Naming what the
+line already has changes nothing, and says so.
 
 When a channel or workspace line already delivers the bundle and it has no line of its own, there
 is nothing to record: a line written here could only narrow what that channel reaches. The add
@@ -230,9 +230,6 @@ The same flags on `remove` **subtract**: only that agent's copy leaves, the line
 and the receipt says what remains (`removed (~/.codex/skills) — 2 folders remain`). Removing the
 last destination removes the line. On a line that named no destinations, a subtraction first
 writes out the line's current set minus the removed one — the receipt disclosing exactly that.
-When several agents share one copy (the shared `~/.agents/skills` folder), a per-agent removal
-refuses and offers both ways out: remove it for every agent, or re-add per-agent and re-run.
-
 Inside a repo, delivered folders keep **themselves** out of commits: each carries a one-line
 `.gitignore`, the way `node_modules` does. Topos writes nothing under `.git/` and never touches an
 ignore file you wrote. Its bookkeeping for that checkout lives in `<project>/.topos/`, which also
