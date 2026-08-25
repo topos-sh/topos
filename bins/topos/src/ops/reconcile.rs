@@ -252,19 +252,29 @@ fn frozen_refusal(gaps: &[FrozenGap], lock_path: &std::path::Path) -> ClientErro
         match &gap.kind {
             FrozenGapKind::NotServed { address, version } => {
                 code = Some("NOT_FOUND");
-                let address = address.as_deref().unwrap_or(ANY_WORKSPACE);
-                sentences.push(format!(
-                    "the lock names {name}@{} but {address} does not serve that version to this \
-                     login — log in to the workspace that carries it (`topos login {address}`) or \
-                     update the lock (`topos update {name}`)",
-                    crate::render::short(version)
-                ));
+                let short = crate::render::short(version);
+                // The workspace that answered is named where the run knows it. Where it does not
+                // — a lock with entries under a `topos.toml` that declares no workspace — the
+                // sentence says so rather than putting a blank where a name belongs; the login
+                // it offers is then a template, and `needs` says which holes to fill.
+                sentences.push(match address {
+                    Some(address) => format!(
+                        "the lock names {name}@{short} but {address} does not serve that version \
+                         to this login — log in to the workspace that carries it (`topos login \
+                         {address}`) or update the lock (`topos update {name}`)"
+                    ),
+                    None => format!(
+                        "the lock names {name}@{short} but no workspace this machine is logged in \
+                         to serves that version — log in to the workspace that carries it (`topos \
+                         login {ANY_WORKSPACE}`) or update the lock (`topos update {name}`)"
+                    ),
+                });
                 push(
                     &mut actions,
                     vec![
                         "topos".to_owned(),
                         "login".to_owned(),
-                        address.to_owned(),
+                        address.as_deref().unwrap_or(ANY_WORKSPACE).to_owned(),
                         "--json".to_owned(),
                     ],
                 );
