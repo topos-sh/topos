@@ -1,17 +1,38 @@
 ---
 title: Supported agents
-description: Topos places the same files into each agent's skills directories and arranges for updates to fire — 70+ agents known.
+description: Topos writes into the agents you pick, one folder per agent, and keeps them current. 70+ agents known.
 sidebar_label: Supported agents
 ---
 
-Topos puts the same files wherever each agent on your machine looks for skills, and refreshes
-them at the right moment — so Claude Code, Cursor, and everything else you run work from the
-same shared set, with no per-agent setup. Nothing is translated between agent formats: a skill
-is a plain directory, and supporting an agent means knowing **which directories it reads and
-when to refresh them**. There is no second permission system either — how much a human sits in
-the loop belongs to your agent, not to Topos.
+Topos never touches an agent you did not pick. You name the agents you use, and from then on
+Topos puts the same files wherever each of them looks for skills and refreshes them at the right
+moment. Nothing is translated between agent formats: a skill is a plain directory, and supporting
+an agent means knowing **which directories it reads and when to refresh them**. There is no second
+permission system either: how much a human sits in the loop belongs to your agent, not to Topos.
+
+## Pick your agents
+
+```bash
+topos init -a claude-code -a codex     # use these two in this project
+topos agents                           # the pick here, and what is installed on this machine
+topos agents add cursor                # add one, and install for it now
+topos agents remove cursor --yes       # drop one, and delete what Topos put there
+```
+
+The pick is per project and personal. It lives in `<project>/.topos/agents.json`, which keeps
+itself out of git, so a teammate who clones the same repo picks their own agents. Repeat `-a` for
+several, or write `-a '*'` for every agent installed on this machine. Add `-g` to any of these
+commands and the choice is your machine's instead, recorded in `~/.topos/agents.json`.
+
+With no `-a`, the one agent installed here is used and Topos says which. With several you are
+asked, and inside an agent that announces itself, such as Claude Code, that agent is picked
+silently. A run that cannot ask, because it is piped or uses `--json`, prints the list of
+installed agents and stops with exit `2`, naming `topos init -a <agent>`. In a fresh clone with no
+pick of its own, your machine pick applies.
 
 ## Three tiers of support
+
+What Topos can do for an agent, once you have picked it:
 
 - **auto-update** — Topos installs an update trigger inside the agent (a session-start hook,
   or a scheduled job where that's what the agent offers), so managed skills refresh without
@@ -39,7 +60,7 @@ the loop belongs to your agent, not to Topos.
 Every trigger runs the same base sweep, registered in whatever form the agent accepts:
 
 ```bash
-topos update --quiet
+topos install --quiet
 ```
 
 Claude Code's line adds a short flag naming itself, which is how that agent opts into the extra
@@ -75,15 +96,10 @@ exit through. The deliberate result: a best-effort update almost never surfaces 
 error.
 
 An ownership marker written alongside each trigger is how Topos recognizes its own and never
-touches yours. Triggers are installed when Topos wires into an agent (a completed login, an adopt)
-and removed by `topos uninstall --yes`. Every `topos update` also registers the trigger of an agent
-it has found for the first time — install an agent today and its next sweep wires it in, with no
-flags and no re-login. That question is asked **once per agent, ever**: delete the hook and it stays
-deleted, because the sweep never offers twice. A login or an `add` is the deliberate way back — both
-register every detected agent unconditionally.
-
-A newly installed agent needs no flags: run `topos update` and every delivered bundle reaches
-it — its update trigger is registered too. Destinations extend; narrowing is `remove -a`.
+touches yours. A trigger is written when you pick that agent, by `topos init -a <agent>` or
+`topos agents add <agent>`, and taken away by `topos agents remove <agent>` or
+`topos uninstall --yes`. Nothing else writes one: signing in does not, and neither does adding a
+skill. Install a new agent today and Topos leaves it alone until you pick it.
 
 Removal is confirmed for triggers living in a config file
 Topos can read; where one lives behind an agent's own service and that service isn't reachable at
@@ -91,19 +107,69 @@ the time, Topos reports the removal as unconfirmed — a scheduled job may survi
 rather than claiming it is gone. Every adapter is idempotent and fails closed: if a config file's
 shape can't be proven, Topos reports it honestly and writes nothing.
 
-## Where the files land
+## One folder per agent
 
-**For you** (the skills that follow you from machine to machine), under `$HOME`: one copy in
-`~/.agents/skills/<name>` where a detected agent reads that shared convention, plus one native
-copy per detected agent that doesn't.
+Each agent you pick gets its own folder: its skills sit next to its MCP config and its
+auto-update hook. Codex is the one documented exception, because it reads no project skills
+folder of its own.
 
-**Per project** (skills from a repo's [`topos.toml`](/docs/topos-toml)), rooted at the checkout:
-`<project>/.agents/skills/<name>` for agents covered by the shared convention, the agent's own
-project directory otherwise (`.claude/skills`, `.factory/skills`, …), and
-`<project>/.claude/skills` as the default when nothing is detected.
+Per project, rooted at the checkout:
 
-A committed `topos.toml` can freeze that per entry instead — `dest` names the exact
-project-relative folders a line delivers into, and detection stops mattering for it:
+| Agent | Skills | MCP servers | Auto-update hook | `--gitignore` adds |
+|---|---|---|---|---|
+| Claude Code | `.claude/skills/` | `.mcp.json` | `.claude/settings.local.json` | `.claude/`, `.mcp.json` |
+| Cursor | `.cursor/skills/` | `.cursor/mcp.json` | `.cursor/hooks.json` | `.cursor/` |
+| Codex | `.agents/skills/` | `.codex/config.toml` | `.codex/hooks.json` | `.codex/`, `.agents/` |
+| OpenCode | `.opencode/skills/` | `opencode.json` | `.opencode/plugin/topos.ts` | `.opencode/`, `opencode.json` |
+
+Machine-wide (`-g`) is the same shape per agent under `$HOME`: `~/.claude/skills` with
+`~/.claude/settings.json`; `~/.cursor/skills` with `~/.cursor/hooks.json` and `~/.cursor/mcp.json`;
+`~/.codex/skills` with `~/.codex/hooks.json` and `~/.codex/config.toml`;
+`~/.config/opencode/skills` with `~/.config/opencode/plugin/topos.ts` and
+`~/.config/opencode/opencode.json`.
+
+A project pick writes inside that checkout and nowhere else: no skills folder, no MCP entry and no
+hook under your home directory. `-g` is the mirror image, writing under `$HOME` and never into a
+checkout. In both scopes an agent you did not pick gets nothing at all, whether or not it is
+installed here. A directory is only chosen when it is free or already Topos-managed: a
+byte-identical occupant is adopted in place, never duplicated.
+
+Any other agent from the [table below](#the-agent-table) can be picked too. It gets its skills
+folder, and its MCP entry where it has a project config. No project hook exists for it, so the
+receipt says so and names the two ways to keep it fresh: run `topos update`, or pick that agent
+with `-g` and let its machine-wide hook do it.
+
+Codex runs a project hook only once you have trusted that repository inside Codex, and the receipt
+says so when it writes one.
+
+## Keeping the files out of git
+
+Two things need no thought. `<project>/.topos/`, where Topos keeps its bookkeeping and your pick,
+ignores itself whole. Every delivered skill folder carries a one-line `.gitignore` of its own, the
+way `node_modules` does. Topos writes nothing under `.git/`, and never touches an ignore file you
+wrote.
+
+Committing those folders instead is a fine choice. The hook line is the same on every agent and is
+safe in a repo other people clone: without the `topos` binary on `PATH` it does nothing, and it
+exits `0` either way.
+
+```bash
+command -v topos >/dev/null 2>&1 && topos install --quiet || true
+```
+
+To ignore the agents' folders whole, ask for it once. It is off by default, and it is the only
+time Topos edits a `.gitignore`:
+
+```bash
+topos init --gitignore
+topos agents --gitignore
+```
+
+That appends the last column of the table above, for the agents you picked, one line each. Run it
+again and nothing is written twice.
+
+A committed `topos.toml` can freeze placement per entry instead. `dest` names the exact
+project-relative folders a line delivers into, and the pick stops deciding for it:
 
 ```toml title="topos.toml"
 workspace = "topos.sh/acme"
@@ -116,19 +182,13 @@ Each entry must stay inside the checkout — relative, no `..`, not absolute —
 everyone commits can never aim managed bytes somewhere else on a contributor's disk; one that
 tries refuses at load, naming the entry and the rule.
 
-Delivered project folders keep **themselves** out of commits — each carries a one-line
-`.gitignore`, the way `node_modules` does — and Topos's bookkeeping in `<project>/.topos/` ignores
-itself whole. Nothing under `.git/` is written, and an ignore file you committed is never touched.
-A directory is only chosen when it's free or already Topos-managed: a byte-identical occupant is
-adopted in place, never duplicated.
-
 ## MCP servers
 
 A skill is files; an [MCP server](/docs/mcp) is an address. Sixteen agents have an MCP config
 surface, and for those Topos writes **one entry per agent** — under a stable `topos-`-prefixed key
 — instead of placing a directory. Everything else here still applies: Topos writes only its own
-entries, an agent it can't detect gets nothing, and a file whose shape can't be proven safe is left
-alone.
+entries, an agent you did not pick gets nothing, and a file whose shape can't be proven safe is
+left alone.
 
 | Agent | User-scope config | Project-scope config | Picked up | Sign-in |
 |---|---|---|---|---|
@@ -191,14 +251,15 @@ the shape stays unwritten until a real build confirms it.
 
 ## The current state, honestly
 
-- **Placement** reaches every detected agent in the table below — that tier is broad.
-- **Full adapters** (placement + trigger management + discovery) exist for Claude Code,
-  OpenClaw, and Hermes Agent; the active adapter constructed today is **Claude Code**.
-- **Triggers** are additionally installed for Amp, Antigravity CLI, Cline, Codex, Cursor,
-  Devin for Terminal, Droid, Gemini CLI, GitHub Copilot, Goose, Grok Build, Kilo Code,
-  Kimi Code CLI, OpenCode, Pi, and Qoder.
+- **Placement** works for every agent in the table below. Pick one and its skills folder is
+  filled; leave it out and Topos never writes there.
+- **A project auto-update hook** exists for Claude Code, Cursor, Codex, and OpenCode. Any other
+  agent you pick in a project still gets its skills; its hook can only be machine-wide (`-g`).
+- **Machine-wide triggers** also cover Amp, Antigravity CLI, Cline, Devin for Terminal, Droid,
+  Gemini CLI, GitHub Copilot, Goose, Grok Build, Hermes Agent, Kilo Code, Kimi Code CLI,
+  OpenClaw, Pi, and Qoder.
 - Some trigger shapes are confirmed against a live build; others follow vendor documentation.
-  `topos status` tells you the truth for your machine — per agent: `registered`,
+  `topos status` tells you the truth for your machine, per picked agent: `registered`,
   `not registered`, or `not checked`.
 
 ## The agent table
@@ -216,7 +277,7 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | auto-update |
 | Cline | `cline` | `~/.agents/skills` | `.agents/skills` | auto-update |
 | Codex | `codex` | `~/.codex/skills` † | `.agents/skills` | auto-update * |
-| Cursor | `cursor` | `~/.cursor/skills` | `.agents/skills` | auto-update |
+| Cursor | `cursor` | `~/.cursor/skills` | `.cursor/skills` | auto-update |
 | Devin for Terminal | `devin` | `~/.config/devin/skills` † | `.devin/skills` | auto-update |
 | Droid | `droid` | `~/.factory/skills` | `.factory/skills` | auto-update |
 | Gemini CLI | `gemini-cli` | `~/.gemini/skills` | `.agents/skills` | auto-update * |
@@ -225,7 +286,7 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Grok Build | `grok` | `~/.grok/skills` † | `.grok/skills` | auto-update |
 | Kilo Code | `kilo` | `~/.kilocode/skills` | `.kilocode/skills` | auto-update |
 | Kimi Code CLI | `kimi-code-cli` | `~/.agents/skills` | `.agents/skills` | auto-update |
-| OpenCode | `opencode` | `~/.config/opencode/skills` † | `.agents/skills` | auto-update |
+| OpenCode | `opencode` | `~/.config/opencode/skills` † | `.opencode/skills` | auto-update |
 | Pi | `pi` | `~/.pi/agent/skills` | `.pi/skills` | auto-update |
 | Qoder | `qoder` | `~/.qoder/skills` | `.qoder/skills` | auto-update |
 | AdaL | `adal` | `~/.adal/skills` | `.adal/skills` | delivery |
@@ -306,12 +367,17 @@ servers — and their config files are in [MCP servers](#mcp-servers) above.
   line, `topos list --untracked` names them, and `topos add <name>` takes one over.
 </Note>
 
-## The shared directory
+## Folders more than one agent reads
 
-`~/.agents/skills` is a cross-agent convention. Where a detected agent is known to read it, Topos
-places **one** copy there instead of a native copy per agent, so several agents on one machine
-share the same files. Coverage fails closed: an agent whose support is unknown gets its own native
-copy.
+`.agents/skills` and `~/.agents/skills` are cross-agent conventions, and several rows above name
+them. Two picked agents whose folders are the same get one copy, not two.
+
+Agents also overlap in what they read beyond their own folder: Cursor reads `.claude/skills` and
+`.codex/skills` as well as its own, and OpenCode reads `.claude/skills` and `.agents/skills`. So
+with several agents picked, one of them may list the same skill twice. That is their behaviour,
+not a conflict: the bytes are identical everywhere, and frontmatter fields an agent does not know
+are ignored, never run. The layout in the table above is the one that keeps each agent's own
+folder to itself.
 
 ## Adding your harness
 
@@ -320,7 +386,7 @@ Topos needs exactly two facts to deliver to a harness:
 1. **Which directories it reads** — the user-scope and project-scope folders it loads skills
    from, and the directory whose existence marks it installed.
 2. **What fires its refresh** — a session-start hook, a plugin, or a scheduler that can run
-   `topos update --quiet`. The sweep self-throttles, so firing often is free.
+   `topos install --quiet`. The sweep self-throttles, so firing often is free.
 
 If you build or maintain an agent, you can make it topos-deliverable with a pull request to
 [`topos-sh/topos`](https://github.com/topos-sh/topos) naming those two facts — the registry is

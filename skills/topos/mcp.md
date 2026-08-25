@@ -33,7 +33,7 @@ given. All of those refuse by name. A connection follows the workspace's latest 
 a pinned one is delivered exactly, and a pinned version withdrawn from the catalog is still placed
 and DISCLOSED on the receipt (`a pin is a promise`) — relay that line, do not act on it.
 
-Placement is SILENT and per-agent: no skill folder is written — each detected agent gets ONE entry
+Placement is SILENT and per-agent: no skill folder is written — each PICKED agent gets ONE entry
 in its own MCP config under an immutable `topos-…` key, so never hand-edit those entries or rename
 them (a rename strands the agent's OAuth sign-in). An entry a human edited reads `drifted` and is
 left byte-identical forever.

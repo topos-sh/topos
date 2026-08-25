@@ -4,7 +4,7 @@ description: Create your workspace right inside the first login, share a skill, 
 sidebar_label: Quickstart
 ---
 
-Four steps. At the end your team has a shared workspace, one skill in it, and machines that keep
+Five steps. At the end your team has a shared workspace, one skill in it, and machines that keep
 themselves current — no one runs anything to receive updates.
 
 <Steps>
@@ -40,10 +40,21 @@ themselves current — no one runs anything to receive updates.
 
     Already have a workspace, or invited by a teammate? The same command shows yours to pick
     from — one click connects — and the invitation mail's link works as the address:
-    `topos login <invite-url>`. Connecting adopts everything the workspace has given you, and
-    updates apply silently at the start of each agent session. There is no per-skill step to
-    accept — your workspace's **Your skills** page always shows what you have and why, with an
-    off switch on every row.
+    `topos login <invite-url>`. Connecting adopts everything the workspace has given you. There is
+    no per-skill step to accept — your workspace's **Your skills** page always shows what you have
+    and why, with an off switch on every row.
+  </Step>
+  <Step title="Name the agents Topos may use">
+    ```bash
+    topos init -g -a claude-code    # your machine-wide skills
+    topos init -a claude-code       # or, inside a project, only there
+    ```
+
+    Topos never touches an agent you did not name. This line records the choice, installs what
+    you have for that agent, and registers its auto-update hook, so from here on updates apply
+    silently at the start of each agent session. Repeat `-a` for more agents (`-a '*'` takes every
+    agent installed on this machine), and `topos agents` shows or changes the choice later. In a
+    project the choice is yours alone: it lives in `.topos/`, which stays out of git.
   </Step>
   <Step title="Share a skill">
     Adopt any skill folder you already have — here, one in your agent's skills directory —
