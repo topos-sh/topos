@@ -552,6 +552,52 @@ fn resolve_followed_skill_in_scope(
     Ok((ctx.layout.clone(), id, lock))
 }
 
+/// The refusal a FOLLOWED-bundle verb (`revert`) answers when a name resolved to no copy in the
+/// scope it acts in. Two very different states wore one sentence otherwise, and the sentence was
+/// wrong for the commoner of them: a machine whose `list` prints
+/// `r2-smoke  (not applied here yet — \`topos update -g\` applies it)` was told `no tracked skill
+/// named 'r2-smoke'` — the same machine contradicting itself, with no next step even though ONE
+/// command turns the row into a copy. So the demand is asked about before a miss is claimed.
+pub(crate) fn unapplied_or_unknown(ctx: &Ctx<'_>, name: &str, scope: StoreScope) -> ClientError {
+    match demanded_but_unapplied(ctx, name, scope) {
+        Some(global) => ClientError::NotAppliedHere {
+            name: name.to_owned(),
+            global,
+        },
+        None => ClientError::NoTrackedBundle {
+            name: name.to_owned(),
+            global: scope == StoreScope::Machine,
+        },
+    }
+}
+
+/// Does a manifest row in the scope this invocation acts in DEMAND `name` with no applied version
+/// behind it? Answers WHICH scope's `update` would apply it (`true` = the machine's, the `-g`
+/// spelling), so the refusal spells the command that actually changes something.
+///
+/// The same rows [`list`](super::list) prints, read through the same resolution — a row whose
+/// folder is GONE is excluded, because no `update` will ever apply that one either. Best-effort:
+/// an unreadable manifest or store answers `None` and the plain miss stands, rather than a
+/// half-fact promising a command that would not help.
+fn demanded_but_unapplied(ctx: &Ctx<'_>, name: &str, scope: StoreScope) -> Option<bool> {
+    let (all, cache) = inventory::read_sources(ctx).ok()?;
+    let resolved = inventory::resolve(ctx, &all, &cache).ok()?;
+    let unapplied = |section: &inventory::ScopeResolution| {
+        section.inventory_rows().any(|row| {
+            row.bundle && row.name == name && row.version.is_none() && !row.source_missing
+        })
+    };
+    if scope == StoreScope::Machine {
+        return unapplied(resolved.machine()).then_some(true);
+    }
+    // Bare: the order the resolution itself walks — the checkout you stand in first, the machine
+    // behind it — so the update the refusal names is the one that owns the row it found.
+    if resolved.project().is_some_and(unapplied) {
+        return Some(false);
+    }
+    unapplied(resolved.machine()).then_some(true)
+}
+
 /// A store's DRAFT of one bundle: the folder holding the unshipped bytes, and the digest those
 /// bytes carry — the pair a cross-scope disclosure needs, because naming a second copy is only
 /// honest while its bytes differ from the ones being shipped.
