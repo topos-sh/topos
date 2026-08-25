@@ -97,7 +97,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
   const meta = await custodyVersionMeta(ws, row.skillId, versionId);
   if (!meta.ok) {
-    return { kind: "meta_missing" as const, skill, versionId };
+    return { kind: "meta_missing" as const, skill, versionId, versionRef: typed };
   }
 
   // The path is a pure lookup key into the version manifest (never a filesystem path). Both delivery
@@ -118,9 +118,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const filePath = file.path;
   const displaySegments = filePath.split("/");
   const encodedPath = displaySegments.map(encodeURIComponent).join("/");
+  // Built from the TYPED spelling, not the resolved id: this path is the page's own address (the
+  // Rendered|Raw toggle re-enters it), and a toggle must not re-address the page a reader is on.
   const fileBasePath = wsPathServer(
     workspace.name,
-    bundlePath(base, skill, `/versions/${versionId}/files/${encodedPath}`),
+    bundlePath(base, skill, `/versions/${typed}/files/${encodedPath}`),
   );
   const executable = file.mode === "100755";
 
@@ -167,6 +169,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     kind: "file" as const,
     skill,
     versionId,
+    /** The version as the URL spells it — what the breadcrumb links back with. */
+    versionRef: typed,
     displaySegments,
     fileBasePath,
     executable,
@@ -193,6 +197,7 @@ export default function FileViewPage() {
   const {
     skill,
     versionId,
+    versionRef,
     displaySegments,
     fileBasePath,
     executable,
@@ -208,7 +213,12 @@ export default function FileViewPage() {
           spot), a page section apart from PathBreadcrumb, which stays the in-version file locator. */}
       <Breadcrumbs />
       <header className="space-y-2">
-        <PathBreadcrumb skill={skill} versionId={versionId} segments={displaySegments} />
+        <PathBreadcrumb
+          skill={skill}
+          versionId={versionId}
+          versionRef={versionRef}
+          segments={displaySegments}
+        />
         {(sizeBytes !== undefined || executable) && (
           <p className="flex items-center gap-2 text-faint text-xs">
             {sizeBytes !== undefined && <span>{sizeBytes} bytes</span>}

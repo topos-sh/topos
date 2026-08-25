@@ -20,10 +20,15 @@ import type { ListingEntry } from "@/lib/view/tree";
  * its own live current comparison. Placing the chip HERE (beside the device line) keeps the body a
  * single shape — both callers frame the content identically and only the boolean differs. `skill`
  * is the catalog NAME (the URL key; the workspace prefix comes from `useWsPath` in FileListing).
+ *
+ * `versionRef` is what the file links are built from — the id AS THE URL SPELLS IT. The Current
+ * tab has no version in its address and passes none, so its links carry the full id; the versions
+ * page passes the ref its visitor arrived with, and the address keeps the shape they copied.
  */
 export function VersionFiles({
   skill,
   versionId,
+  versionRef,
   version,
   authorDisplay,
   entries,
@@ -34,6 +39,8 @@ export function VersionFiles({
 }: {
   skill: string;
   versionId: string;
+  /** The version as the URL spells it. Absent (the Current tab) = link with the full id. */
+  versionRef?: string;
   /** The version's immutable metadata; null when the server had no readable version for this id. */
   version: CustodyVersionMeta | null;
   /** Who to show as the author — the person behind the signing machine, else its id verbatim. */
@@ -86,7 +93,7 @@ export function VersionFiles({
         </div>
       </div>
 
-      <FileListing skill={skill} versionId={versionId} entries={entries} />
+      <FileListing skill={skill} versionRef={versionRef ?? versionId} entries={entries} />
 
       {docHtml !== undefined && docName !== undefined && (
         <section className="space-y-2">

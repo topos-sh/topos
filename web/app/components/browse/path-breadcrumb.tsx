@@ -12,20 +12,27 @@ const CRUMB_LINK =
  * list) → the path, its parent segments faint and the file name in ink. Segments are display
  * text nodes only — the path itself is never a link target here, only a label. `skill` is the
  * catalog NAME (the URL key; the workspace prefix comes from `useWsPath`).
+ *
+ * The version LINK is built from `versionRef` — the id as the visitor's own URL spells it — while
+ * the label stays the canonical 12-hex short form. Going back up must not silently re-address the
+ * page a reader arrived at.
  */
 export function PathBreadcrumb({
   skill,
   versionId,
+  versionRef,
   segments,
 }: {
   skill: string;
   versionId: string;
+  /** The version as the URL spells it — what the back-link carries. */
+  versionRef: string;
   segments: readonly string[];
 }) {
   const wsPath = useWsPath();
   const base = useBundleBase();
   const skillHref = wsPath(bundlePath(base, skill));
-  const listingHref = wsPath(bundlePath(base, skill, `/versions/${versionId}`));
+  const listingHref = wsPath(bundlePath(base, skill, `/versions/${versionRef}`));
   return (
     <nav
       aria-label="Breadcrumb"

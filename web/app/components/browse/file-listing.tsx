@@ -11,14 +11,20 @@ import { useWsPath } from "@/lib/ws-path";
  * Tailwind can't express a per-row dynamic step, and the value is a trusted small integer off
  * the manifest, never user bytes. `skill` is the catalog NAME (the URL key; the workspace prefix
  * comes from `useWsPath`).
+ *
+ * `versionRef` is the id AS THE VISITOR SPELLED IT — the 12-hex short form when that is the URL
+ * they opened, the full 64-hex when it is not. A page reached by the short id that linked on with
+ * the long one swapped the address under the reader mid-visit: the id in the bar stopped matching
+ * the id they had copied, and a shared link changed shape on the first click.
  */
 export function FileListing({
   skill,
-  versionId,
+  versionRef,
   entries,
 }: {
   skill: string;
-  versionId: string;
+  /** The version as the URL spells it — never re-spelled on the way into a link. */
+  versionRef: string;
   entries: readonly ListingEntry[];
 }) {
   if (entries.length === 0) {
@@ -32,7 +38,7 @@ export function FileListing({
     <Card>
       <ul>
         {entries.map((entry) => (
-          <ListingRow key={entry.path} skill={skill} versionId={versionId} entry={entry} />
+          <ListingRow key={entry.path} skill={skill} versionRef={versionRef} entry={entry} />
         ))}
       </ul>
     </Card>
@@ -41,11 +47,11 @@ export function FileListing({
 
 function ListingRow({
   skill,
-  versionId,
+  versionRef,
   entry,
 }: {
   skill: string;
-  versionId: string;
+  versionRef: string;
   entry: ListingEntry;
 }) {
   const wsPath = useWsPath();
@@ -67,7 +73,7 @@ function ListingRow({
   // Re-encode each segment so a name with a URL-unsafe character round-trips through the
   // catch-all route unharmed.
   const encoded = entry.path.split("/").map(encodeURIComponent).join("/");
-  const href = wsPath(bundlePath(base, skill, `/versions/${versionId}/files/${encoded}`));
+  const href = wsPath(bundlePath(base, skill, `/versions/${versionRef}/files/${encoded}`));
   return (
     <li className="border-line-soft border-b last:border-b-0">
       <Link
