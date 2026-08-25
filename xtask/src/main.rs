@@ -2314,6 +2314,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             user: None,
             feed_row_added: false,
             undo: Vec::new(),
+            machine_pick: false,
             pending: Some(EnrollmentPending {
                 verification_uri: "https://topos.sh/verify".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
@@ -2361,6 +2362,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             user: Some("robert".to_owned()),
             feed_row_added: true,
             undo: vec!["remove".to_owned(), "-g".to_owned(), "@acme".to_owned()],
+            machine_pick: true,
             pending: None,
             currency: None,
             triggers: Vec::new(),
