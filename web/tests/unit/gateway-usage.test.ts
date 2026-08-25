@@ -307,8 +307,9 @@ describe("the server page's Usage pages", () => {
   });
 });
 
-/** Render the panel the way the server face does, inside a router so its links resolve. */
-async function renderPanel(usage: unknown): Promise<string> {
+/** Render the panel the way the server face does, inside a router so its links resolve. The
+ *  search string is the page's real address — a pager link is built against it. */
+async function renderPanel(usage: unknown, search = ""): Promise<string> {
   const { McpGatewayPanel } = await import("@/components/skill/mcp-gateway");
   const view = {
     displayName: "Linear",
@@ -331,7 +332,7 @@ async function renderPanel(usage: unknown): Promise<string> {
     },
   ];
   const handler = createStaticHandler(routes);
-  const context = await handler.query(new Request(`${ORIGIN}/mcp/${BUNDLE_NAME}`));
+  const context = await handler.query(new Request(`${ORIGIN}/mcp/${BUNDLE_NAME}${search}`));
   if (context instanceof Response) {
     throw new Error("expected a rendered context, got a Response");
   }
@@ -375,9 +376,37 @@ describe("what the Usage table renders", () => {
   });
 
   it("offers both directions in the middle of the ledger", async () => {
-    const html = await renderPanel({ sessions: [usageRow({})], page: 2, pageCount: 4, total: 84 });
+    const html = await renderPanel(
+      { sessions: [usageRow({})], page: 2, pageCount: 4, total: 84 },
+      "?page=2",
+    );
     expect(html).toContain('href="/mcp/deepwiki?page=1"');
     expect(html).toContain('href="/mcp/deepwiki?page=3"');
+  });
+
+  it("carries the rest of the address through a page turn", async () => {
+    // The post-publish placement note lives in the query. Turning a page is a move WITHIN this
+    // page, not a fresh arrival at it, so a page link rewrites `page` and nothing else.
+    const html = await renderPanel(
+      { sessions: [usageRow({})], page: 2, pageCount: 4, total: 84 },
+      "?placement=curated_role_required&channel=eng&page=2",
+    );
+    expect(html).toContain(
+      'href="/mcp/deepwiki?placement=curated_role_required&amp;channel=eng&amp;page=1"',
+    );
+    expect(html).toContain(
+      'href="/mcp/deepwiki?placement=curated_role_required&amp;channel=eng&amp;page=3"',
+    );
+  });
+
+  it("adds `page` to an address that never carried one", async () => {
+    const html = await renderPanel(
+      { sessions: [usageRow({})], page: 1, pageCount: 3, total: 60 },
+      "?placement=channel_not_found&channel=eng",
+    );
+    expect(html).toContain(
+      'href="/mcp/deepwiki?placement=channel_not_found&amp;channel=eng&amp;page=2"',
+    );
   });
 
   it("offers no page control at all when the whole ledger fits on one page", async () => {
