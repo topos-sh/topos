@@ -310,6 +310,7 @@ mod tests {
                     in_claude_code: false,
                     json: false,
                     global,
+                    frozen: false,
                 },
             },
         )

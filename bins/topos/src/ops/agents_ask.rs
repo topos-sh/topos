@@ -8,6 +8,11 @@
 //! the caller picks by name. A terminal gets one numbered prompt, read from stdin, no new
 //! dependency.
 //!
+//! `--frozen` NEVER asks, and never derives one from the environment either: a CI posture that
+//! stopped to ask a question no runner can answer is a pipeline that hangs or exits 2 over a file
+//! no clone can carry (the pick is personal and git-ignored). With several agents installed and
+//! no pick, a frozen run picks nobody, places nothing, and says so.
+//!
 //! NO agent installed is NOT an ask. There is nothing to choose from, so nothing is chosen and
 //! nothing is recorded: the verb proceeds, places nothing, and says so. Only a machine that holds
 //! several agents can leave the question open. A build box with no agent at all still has to run
@@ -32,6 +37,9 @@ pub(crate) struct AskInputs {
     pub json: bool,
     /// Whether the way out is spelled for the machine scope (`-g`).
     pub global: bool,
+    /// Whether this run is `--frozen`. A frozen run never asks and never derives a pick from an
+    /// ambiguous machine: the same invocation must answer the same way on every runner.
+    pub frozen: bool,
 }
 
 /// Choose the pick for a scope with none, from the agents installed on this machine. An empty
@@ -124,6 +132,7 @@ mod tests {
         in_claude_code: false,
         json: false,
         global: false,
+        frozen: false,
     };
 
     #[test]
