@@ -539,12 +539,26 @@ function CodeLookup() {
               submit has one answer — the action's line, in the app's words, in the same place
               every other refusal on this page appears. The maxlength is the FULL spelling, so
               typing the code without its hyphen (or with a space) still fits; the action puts the
-              hyphen back. */}
+              hyphen back.
+
+              AND THE FIELD SAYS WHAT IT IS. A login-approval code is read off another screen
+              seconds after it appeared; nothing has it saved, so no password manager has
+              anything to offer here. `autocomplete="off"` does not say that — every password
+              manager ignores that hint by design, reads a lone text field in a form as a sign-in
+              field, and mounts its own menu over it. The menu then takes the first keypress, so
+              the first Enter after a page load goes to the menu instead of the form: nothing
+              leaves the browser, nothing appears in the page, and only a second attempt gets
+              through — which reads as "the code was refused". `one-time-code` is what this field
+              actually is (and is what the platform's own code autofill listens for); the three
+              `data-*` attributes are the opt-out each common manager documents. */}
           <input
             type="text"
             name="code"
             maxLength={USER_CODE_LENGTH}
-            autoComplete="off"
+            autoComplete="one-time-code"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-bwignore="true"
             spellCheck={false}
             className={`${INPUT} font-mono uppercase`}
             placeholder="AB29-CD34"
