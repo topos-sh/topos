@@ -1879,6 +1879,113 @@ fn the_activity_counter_runs_once_across_every_workspace() {
     );
 }
 
+/// An EXPLICITLY-ADDED row takes a number too. `update -g` over a machine recipe holding one
+/// `[skills]` row and two feeds printed `topos: updating github` — no position, ahead of the
+/// counter — then `(1 of 7)…(7 of 7)`, and summed `Checked 8 bundles`: the counting pass walked
+/// the feed and channel arms and skipped the standalone-row arm, so the run's denominator was
+/// one short of what it checked and the first item read as something outside the run.
+#[test]
+fn the_activity_counter_numbers_an_explicitly_added_row_too() {
+    let rig = Rig::new("ws-counter-explicit-row");
+    rig.seed_session();
+    rig.seed_other_session("w_ops", "ops");
+    // The MCP row needs somewhere to land — a detected config file — or it reaches nobody and
+    // there is nothing to count.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    // Two EXPLICIT rows, one of each kind (the arm that skipped the counter is the standalone-row
+    // arm, and there is one per kind), beside the two feeds.
+    let feeds =
+        format!("[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\"{HOST}/ops\" = \"latest\"\n");
+    let rows = format!("\n[skills]\n\"{HOST}/{WS_NAME}/zeta\" = \"latest\"\n");
+    let servers =
+        format!("\n[mcp]\n\"{HOST}/{WS_NAME}/eta\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n");
+    rig.write_global(&(feeds + &rows + &servers));
+
+    let v = one_file(b"# body\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let first = ["alpha", "beta"];
+    let second = ["gamma", "delta", "epsilon"];
+    let mut plane_a = FakePlane::new(Arc::clone(&log)).with_version("s_zeta", &v);
+    let mut plane_b = FakePlane::new(log);
+    for name in first {
+        plane_a = plane_a.with_version(&format!("s_{name}"), &v);
+    }
+    for name in second {
+        plane_b = plane_b.with_version(&format!("s_{name}"), &v);
+    }
+    plane_a.serves(
+        first
+            .iter()
+            .map(|n| delivered(&format!("s_{n}"), n, &v))
+            .collect(),
+    );
+    plane_b.serves(
+        second
+            .iter()
+            .map(|n| delivered(&format!("s_{n}"), n, &v))
+            .collect(),
+    );
+    // The explicit rows resolve through the CATALOG, not the feed.
+    let dir = FakeDirectory::new(vec![catalog_entry("s_zeta", "zeta", &v)], Vec::new())
+        .with_server(catalog_server("s_eta", "eta", "https://mcp.example/eta"));
+    let lanes = |s: &Session| ops::SessionTransports {
+        plane: if s.workspace_id == WS {
+            Box::new(plane_a.clone())
+        } else {
+            Box::new(plane_b.clone())
+        },
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+
+    let progress = crate::progress::captured();
+    let ctx = rig.ctx_with_progress(Some(&rig.work.0), &progress);
+    let out = ops::manifest_update(
+        &ctx,
+        &lanes,
+        None,
+        &ops::ManifestUpdateOpts {
+            lock: ops::LockMode::Update,
+            scope: ops::UpdateScope::Machine,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(
+        out.data.skills.len(),
+        7,
+        "the run converged all seven: {out:?}"
+    );
+
+    let lines = crate::progress::captured_lines(&progress);
+    let updating: Vec<&String> = lines.iter().filter(|l| l.contains("updating ")).collect();
+    // EVERY item the run checks carries a position, in ONE numbering — the explicit rows included,
+    // and its total equals the number of bundles the summary reports.
+    let positions: Vec<String> = updating
+        .iter()
+        .map(|l| {
+            l[l.rfind('(')
+                .unwrap_or_else(|| panic!("a counter: {updating:?}"))..]
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        positions,
+        [
+            "(1 of 7)", "(2 of 7)", "(3 of 7)", "(4 of 7)", "(5 of 7)", "(6 of 7)", "(7 of 7)"
+        ],
+        "one counter over both explicit rows and both feeds: {updating:?}"
+    );
+    for named in ["updating zeta (", "updating eta ("] {
+        assert!(
+            updating.iter().any(|l| l.contains(named)),
+            "the explicitly-added rows are numbered like every other item: {updating:?}"
+        );
+    }
+}
+
 /// A machine whose recipe is a FEED row — "adopt everything northwind assigns me" — and which has
 /// never swept. `topos add r2-smoke -g` answers "northwind's feed already delivers 'r2-smoke'
 /// here", and `revert -g r2-smoke` answered `no tracked bundle named 'r2-smoke' here`: the machine
