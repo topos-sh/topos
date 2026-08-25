@@ -66,21 +66,25 @@ never learns which machinery served which harness.
   session-start merge — claude-code, gemini-cli, cursor, devin, droid, qoder, github-copilot —
   parameterized by a `JsonHooksSpec` whose per-harness deviations are knobs, never forks: the entry
   shape (grouped/flat + the group `matcher`), the handler key spellings (`command`/`timeout`, or
-  Copilot's `bash`/`timeoutSec`), `handler_async`, `hook_dialect`; plus codex, the one instance
-  needing a SECOND surface — its `hooks.json` entry through the same engine, and `[features] hooks
-  = true` line-anchored into `config.toml`, the switch without which codex reads no hooks at all —
-  and never Active) and `file_drop` (one topos-owned marker-led file: opencode, goose, amp, cline,
+  Copilot's `bash`/`timeoutSec`), `handler_async`, `hook_dialect`; plus codex — its `hooks.json`
+  entry through the same engine, never Active, and nothing else: its `config.toml` is never
+  opened) and `file_drop` (one topos-owned marker-led file: opencode, goose, amp, cline,
   grok's merged `hooks/*.json` dir, pi's auto-loaded extension, kilo's auto-loaded plugin), plus the
   two shared configs neither base fits — antigravity-cli (a hooks file keyed by NAME: topos owns the
   key `topos` wholesale, writes its handler list FLAT because a matcher group would invalidate the
   whole file, and byte-preserves every other key) and kimi-code-cli (a sentinel-led `[[hooks]]`
   block appended to its own `config.toml`) — and openclaw + hermes-agent implementing the port
-  themselves. The line-anchored TOML reading codex and kimi share lives in `toml_lines`; every
-  engine plans a pure `EditPlan` (bytes in, write-or-leave out), which is what makes fail-closed
-  zero-writes a property of the type. `adapter_for_slug` is the seam the CLI's arming sweep consumes
-  AND the only place machinery is named, so the trigger-capable set is a view over the registry, not
-  a second list; the one sweep spelling is composed from shared consts (`GUARDED_SWEEP` +
-  `SENTINEL` = `SHELL_SWEEP_LINE`).
+  themselves. The line-anchored TOML reading behind kimi lives in `toml_lines`; every engine
+  plans a pure `EditPlan` (bytes in, write-or-leave out), which is what makes fail-closed
+  zero-writes a property of the type. `adapter_for_slug` is the seam the CLI's hook sweeps
+  consume AND the only place machinery is named, so the trigger-capable set is a view over the
+  registry, not a second list; `adapter_for_slug_at` is the same factory with a `TriggerScope` —
+  `User` (the harness root under the home) or `Project(root)`, which answers the four harnesses
+  that read a hook from inside ONE checkout (claude-code `.claude/settings.local.json`, cursor
+  `.cursor/hooks.json`, codex `.codex/hooks.json`, opencode `.opencode/plugin/topos.ts`), each the
+  user-level spec re-rooted at the checkout behind the `project` containment rail (a symlinked
+  parent or leaf refuses with zero writes; `project_hook_file` names the file). The one sweep
+  spelling is composed from shared consts (`GUARDED_SWEEP` + `SENTINEL` = `SHELL_SWEEP_LINE`).
 - **`mcp`** — pure MCP-server config placement for sixteen harnesses; bytes in → an `EditPlan` out,
   the CLI owns ALL file I/O. An entry names one of TWO targets (`McpTarget`): an ADDRESS the
   harness dials, or a PROGRAM it runs on this machine (command + argv + env). Both are ordinary

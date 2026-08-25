@@ -32,6 +32,13 @@
         "type": "string"
       }
     },
+    "project_hook_files": {
+      "description": "The auto-update hook files the checkout the command ran in holds (the four project-capable\nharnesses', each named only while it is provably topos's). LEFT IN PLACE: a project hook is\ninert without the binary, and a teardown never edits a checkout. Empty outside a project.\n**Additive.**",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "sidecar_path": {
       "description": "The `~/.topos/` sidecar tree that would be deleted (the signed-in credential lives inside it).",
       "type": "string"

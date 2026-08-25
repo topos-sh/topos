@@ -7,9 +7,11 @@
 //!
 //! [`adapter_for_slug`] is the ONE place a harness's trigger machinery is named, so the set of
 //! trigger-capable harnesses is a VIEW over the [`registry`](crate::registry) table — a caller arms
-//! or scrubs by iterating rows, never by carrying its own list. Two shared bases carry most of the
-//! machinery, plus three harnesses whose config surface is theirs alone and two whose trigger lives
-//! in a program of their own:
+//! or scrubs by iterating rows, never by carrying its own list. [`adapter_for_slug_at`] is the
+//! same factory with a [`TriggerScope`]: the user-level set under a home, or the four harnesses
+//! that read a hook from inside ONE project checkout (the `project` module), each behind the containment
+//! rail. Two shared bases carry most of the machinery, plus two harnesses whose config surface is
+//! theirs alone and two whose trigger lives in a program of their own:
 //!
 //! - `cc_hooks` — the JSON-config-merge family (hooks registered in a shared strict-JSON config
 //!   file): `claude-code` (whose spec lives with its placement adapter, and is the only one
@@ -19,14 +21,12 @@
 //! - `file_drop` — one topos-owned file at a harness-defined path: `opencode`, `goose`, `amp`,
 //!   `cline`, `grok` (a merged hooks dir), `pi` (an auto-loaded extension), `kilo` (an auto-loaded
 //!   plugin).
-//! - `codex` is special: it is a `cc_hooks` instance over its `hooks.json` PLUS a line-anchored
-//!   TOML edit setting `[features] hooks = true` in `config.toml` — codex's own switch for the
-//!   mechanism, without which the entry is never read. That edit mirrors the Hermes YAML
-//!   discipline: provable shapes only, fail-closed on everything else.
+//! - `codex` is a `cc_hooks` instance over its `hooks.json` that never claims `Active`: codex
+//!   gates every hook behind trust granted in its own UI, which topos never writes.
 //! - `antigravity_cli` and `kimi_code_cli` each edit a SHARED config nobody else's shape fits:
 //!   Antigravity's hooks file keys blocks by NAME (topos owns the key `topos` wholesale, every
 //!   other key byte-preserved), and Kimi keeps its hooks in its own `config.toml` (a sentinel-led
-//!   `[[hooks]]` block appended line-surgically, over the shared `toml_lines` anchors codex uses).
+//!   `[[hooks]]` block appended line-surgically, over the `toml_lines` anchors).
 //! - `openclaw` (its own scheduler) and `hermes-agent` (its own config edit) implement this port
 //!   DIRECTLY on the same types that carry their placement half, so a caller never sees the
 //!   difference.
@@ -64,6 +64,7 @@ mod kilo;
 mod kimi_code_cli;
 mod opencode;
 mod pi;
+mod project;
 mod qoder;
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -351,6 +352,90 @@ pub fn adapter_for_slug<'a>(
     })
 }
 
+/// Where a trigger lives: the person's own config under their home (the `-g` pick), or ONE
+/// project checkout — `<root>/.claude`, `<root>/.cursor`, `<root>/.codex`, `<root>/.opencode`.
+/// A factory input, not a trait knob: an adapter carries its resolved root and never asks again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerScope {
+    User,
+    Project(PathBuf),
+}
+
+/// [`adapter_for_slug`] at a [`TriggerScope`]. `User` is exactly that factory (the harness root
+/// resolved under `home`, env overrides honored); `Project(root)` answers the four harnesses that
+/// read a hook from inside a checkout — claude-code, cursor, codex, opencode — each re-rooted at
+/// the checkout and behind the containment rail (the `project` module), and `None` for every other slug:
+/// no project hook exists for it, whatever its user-level trigger. The project set is a view over
+/// the registry too — the rows this answers `Some` for.
+#[must_use]
+pub fn adapter_for_slug_at<'a>(
+    slug: &str,
+    scope: &TriggerScope,
+    home: &Path,
+    cfg: &'a dyn ConfigStore,
+    run: &'a dyn CommandRunner,
+) -> Option<Box<dyn TriggerAdapter + 'a>> {
+    match scope {
+        TriggerScope::User => adapter_for_slug(slug, home, cfg, run),
+        TriggerScope::Project(root) => project_adapter(slug, root, cfg),
+    }
+}
+
+/// The four project-capable harnesses' triggers, each behind the rail. A slug is named here and
+/// in [`project_hook_file`] and nowhere else, so the two can never disagree about a file.
+fn project_adapter<'a>(
+    slug: &str,
+    root: &Path,
+    cfg: &'a dyn ConfigStore,
+) -> Option<Box<dyn TriggerAdapter + 'a>> {
+    let leaf = project_hook_file(slug, root)?;
+    let (inner, marker_id): (Box<dyn TriggerAdapter + 'a>, &'static str) = match slug {
+        "claude-code" => (
+            Box::new(cc_hooks::JsonHooks::new(
+                &crate::claude_code::PROJECT_SPEC,
+                root.join(".claude"),
+                cfg,
+            )),
+            crate::claude_code::PROJECT_SPEC.marker_id,
+        ),
+        "cursor" => (
+            Box::new(cursor::in_project(root, cfg)),
+            cursor::SPEC.marker_id,
+        ),
+        "codex" => (
+            Box::new(codex::in_project(root, cfg)),
+            codex::PROJECT_SPEC.marker_id,
+        ),
+        "opencode" => (
+            Box::new(opencode::in_project(root, cfg)),
+            opencode::SPEC.marker_id,
+        ),
+        _ => return None,
+    };
+    Some(Box::new(project::Contained::new(
+        inner,
+        root.to_path_buf(),
+        leaf,
+        marker_id,
+    )))
+}
+
+/// The hook file a project trigger lives in, for the four project-capable harnesses — what a
+/// receipt names and what `uninstall`'s describe lists as left in place. `None` for every other
+/// slug (and an unknown one).
+#[must_use]
+pub fn project_hook_file(slug: &str, root: &Path) -> Option<PathBuf> {
+    Some(match slug {
+        "claude-code" => root
+            .join(".claude")
+            .join(crate::claude_code::PROJECT_SPEC.config_file),
+        "cursor" => root.join(".cursor").join(cursor::SPEC.config_file),
+        "codex" => root.join(".codex").join(codex::PROJECT_SPEC.config_file),
+        "opencode" => opencode::project_plugin_path(root),
+        _ => return None,
+    })
+}
+
 /// The Claude Code trigger over an EXPLICIT config root — the injection-explicit constructor for a
 /// caller that already knows the root, and the ONE way a suite builds this harness's trigger.
 ///
@@ -507,6 +592,68 @@ mod tests {
                 adapter_for_slug(slug, &home, &cfg, &NoCli).is_none(),
                 "{slug}"
             );
+        }
+    }
+
+    /// The project-capable set is a view over the registry the same way: iterate rows, ask the
+    /// scoped factory. Exactly the four harnesses that read a hook from inside a checkout answer,
+    /// in table order, and each names the file it would write.
+    #[test]
+    fn the_project_trigger_capable_harnesses_are_a_view_over_the_registry() {
+        let cfg = MemConfig::default();
+        let home = std::path::PathBuf::from("/no-such-home");
+        let root = std::path::PathBuf::from("/no-such-checkout");
+        let scope = TriggerScope::Project(root.clone());
+        let capable: Vec<&str> = crate::registry::bundled_harnesses()
+            .iter()
+            .filter(|h| adapter_for_slug_at(h.slug, &scope, &home, &cfg, &NoCli).is_some())
+            .map(|h| h.slug)
+            .collect();
+        assert_eq!(
+            capable,
+            ["claude-code", "codex", "cursor", "opencode"],
+            "registry-table order"
+        );
+        for slug in &capable {
+            let adapter = adapter_for_slug_at(slug, &scope, &home, &cfg, &NoCli)
+                .unwrap_or_else(|| panic!("{slug} has a project trigger"));
+            assert_eq!(adapter.slug(), *slug);
+            let file = project_hook_file(slug, &root).expect("the file it would write");
+            assert!(file.starts_with(&root), "{slug}: {file:?}");
+            assert_eq!(adapter.config_file(), Some(file));
+            assert!(
+                !adapter.present(),
+                "{slug}: nothing under a checkout that does not exist is ever claimed present"
+            );
+        }
+        // The user scope through the same door is the plain factory.
+        assert!(adapter_for_slug_at("cursor", &TriggerScope::User, &home, &cfg, &NoCli).is_some());
+    }
+
+    /// A harness with a USER-level trigger but no project hook (gemini-cli, cline, openclaw…), a
+    /// placement-only one, and an unknown slug all answer `None` at a project root — a caller
+    /// then says so instead of writing anything.
+    #[test]
+    fn no_project_adapter_for_other_slugs() {
+        let cfg = MemConfig::default();
+        let home = std::path::PathBuf::from("/no-such-home");
+        let scope = TriggerScope::Project(std::path::PathBuf::from("/no-such-checkout"));
+        for slug in [
+            "gemini-cli",
+            "cline",
+            "openclaw",
+            "hermes-agent",
+            "kimi-code-cli",
+            "zed",
+            "universal",
+            "not-a-harness",
+            "",
+        ] {
+            assert!(
+                adapter_for_slug_at(slug, &scope, &home, &cfg, &NoCli).is_none(),
+                "{slug}"
+            );
+            assert!(project_hook_file(slug, Path::new("/p")).is_none(), "{slug}");
         }
     }
 

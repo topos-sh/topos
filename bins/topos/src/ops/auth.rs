@@ -105,8 +105,19 @@ pub(crate) fn status(
         principal: probed_principal,
         signed_in,
         workspaces,
-        // The same probe `list`'s header uses: the active harness's own trigger-health answer.
-        hook_armed: ctx.triggers.active().present(),
+        // Whether an auto-update hook stands for the effective pick where this command ran (a
+        // checkout's own hook files inside one, the machine's under `~` outside): one registered
+        // hook is enough, since every hook runs the one sweep. Nothing probes detection.
+        hook_armed: crate::ops::agent_hooks::probe_effective(
+            ctx,
+            crate::ops::agent_hooks::cwd_project(ctx).as_deref(),
+            &crate::ops::EvidenceView {
+                agents: &Default::default(),
+                now_ms: 0,
+            },
+        )
+        .iter()
+        .any(|t| t.armed == Some(true)),
         reporting,
     })
 }

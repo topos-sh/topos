@@ -50,6 +50,13 @@ pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a
     JsonHooks::new(&SPEC, resolve_root(home), cfg)
 }
 
+/// The same trigger in ONE PROJECT: `<project>/.cursor/hooks.json`, the same spec — Cursor reads
+/// the project file beside the user one and runs both, so the entry, the seeded `version`, and
+/// the sentinel-less command are exactly the user-level bytes.
+pub(crate) fn in_project<'a>(root: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a> {
+    JsonHooks::new(&SPEC, root.join(".cursor"), cfg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::testutil::MemConfig;

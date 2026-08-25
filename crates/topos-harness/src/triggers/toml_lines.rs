@@ -1,5 +1,5 @@
-//! The line-anchored TOML reading shared by the two instances that edit a TOML config surgically
-//! (`codex`'s `[features]` switch, `kimi-code-cli`'s sentinel-led `[[hooks]]` block).
+//! The line-anchored TOML reading behind an instance that edits a TOML config surgically
+//! (`kimi-code-cli`'s sentinel-led `[[hooks]]` block).
 //!
 //! There is deliberately NO TOML dependency behind these: they answer only what a line ANCHOR can
 //! prove — the table a header line opens, the key an assignment line states (in every spelling
@@ -294,68 +294,6 @@ pub(super) fn basic_string_value(line: &str) -> Option<&str> {
     None // an unterminated string is not a value these anchors can prove
 }
 
-/// An assignment line's tail, split where an in-place edit has to split it: the VALUE as written,
-/// and everything from the whitespace before its trailing comment to the end of the line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ValueTail<'a> {
-    /// The value between the `=` and any trailing comment, trimmed.
-    pub(super) value: &'a str,
-    /// The raw bytes after it — the spacing, a `# …` comment, and the line's own terminator —
-    /// re-emitted verbatim, so a person's note beside the setting (and a CRLF file's line
-    /// endings) survive an edit that replaces the value.
-    pub(super) trailing: &'a str,
-}
-
-/// What an assignment line states after its `=`, WHEN a line anchor can prove where the value
-/// ends. `None` for a value that runs past this line — an array or inline table left open
-/// (`hooks = [`, whose elements and `]` live on the lines below) or a string that never closes —
-/// because a value this cannot delimit is one it must never rewrite: replacing the line would
-/// strand the lines that finish the value and cost the harness its whole config.
-///
-/// The walk is the same discipline as everything else here: quotes are tracked (a `#` inside one
-/// is not a comment, a `]` inside one closes nothing), escapes are honored only inside a basic
-/// string, and a bracket or brace still open at the line's end is the refusal.
-pub(super) fn value_tail(line: &str) -> Option<ValueTail<'_>> {
-    let trimmed = line.trim_start();
-    let (_, rest) = key_segment(trimmed)?;
-    let after = rest.trim_start().strip_prefix('=')?;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth: usize = 0;
-    let mut comment_at = None;
-    for (i, c) in after.char_indices() {
-        match quote {
-            Some(open) => {
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' && open == '"' {
-                    escaped = true;
-                } else if c == open {
-                    quote = None;
-                }
-            }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '[' | '{' => depth += 1,
-                ']' | '}' => depth = depth.checked_sub(1)?,
-                '#' => {
-                    comment_at = Some(i);
-                    break;
-                }
-                _ => {}
-            },
-        }
-    }
-    if quote.is_some() || depth != 0 {
-        return None; // the value continues on the lines below
-    }
-    let raw = &after[..comment_at.unwrap_or(after.len())];
-    Some(ValueTail {
-        value: raw.trim(),
-        trailing: &after[raw.trim_end().len()..],
-    })
-}
-
 /// Append a block as a new top-level table at EOF, one blank line after whatever was there.
 ///
 /// A top-level header is absolute, so an EOF append can never land inside somebody else's table —
@@ -574,46 +512,6 @@ mod tests {
                 None,
                 "{not_a_basic_string:?}"
             );
-        }
-    }
-
-    /// The two halves an in-place value edit needs: the value as written, and the trailing bytes
-    /// (the spacing, a person's comment, the line's own terminator) re-emitted verbatim.
-    #[test]
-    fn a_value_tail_keeps_the_comment_and_the_terminator_it_found() {
-        let tail = value_tail("hooks = false  # off on purpose\n").expect("a scalar");
-        assert_eq!(tail.value, "false");
-        assert_eq!(tail.trailing, "  # off on purpose\n");
-
-        let tail = value_tail("  \"hooks\"   =   false\r\n").expect("a scalar");
-        assert_eq!(tail.value, "false");
-        assert_eq!(tail.trailing, "\r\n", "CRLF rides the trailing half");
-
-        let tail = value_tail("hooks = \"a # b\"").expect("a scalar");
-        assert_eq!(
-            tail.value, "\"a # b\"",
-            "a `#` inside a string is not a comment"
-        );
-        assert_eq!(
-            tail.trailing, "",
-            "an unterminated last line stays unterminated"
-        );
-
-        let tail = value_tail("hooks = [1, 2]\n").expect("closed on this line");
-        assert_eq!(tail.value, "[1, 2]");
-    }
-
-    /// A value that RUNS ON is one no anchor may rewrite: replacing the line would strand the
-    /// lines that finish it and leave the file unparsable.
-    #[test]
-    fn a_value_that_runs_past_its_line_is_not_a_value_these_anchors_prove() {
-        for runs_on in [
-            "hooks = [\n",
-            "hooks = { a = 1,\n",
-            "hooks = \"unterminated\n",
-            "hooks\n", // no assignment at all
-        ] {
-            assert_eq!(value_tail(runs_on), None, "{runs_on:?}");
         }
     }
 

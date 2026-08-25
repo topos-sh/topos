@@ -21,7 +21,7 @@
       }
     },
     "currency": {
-      "description": "The active adapter's auto-update-trigger outcome, when the login armed it.",
+      "description": "The auto-update-trigger outcome of the login. Always empty since 0.1.52; kept for schema\nstability (a login writes no hook — hooks follow the agents pick).",
       "anyOf": [
         {
           "$ref": "#/$defs/TriggerReport"
@@ -78,7 +78,7 @@
       "type": "string"
     },
     "triggers": {
-      "description": "The breadth arming sweep's outcomes (one row per other detected agent).",
+      "description": "The other agents' trigger outcomes of the same login. Always empty since 0.1.52; kept for\nschema stability.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/TriggerReport"

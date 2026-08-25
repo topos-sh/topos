@@ -1,44 +1,39 @@
-//! The TRIGGER half of the harness ports — the active agent's auto-update trigger, and the breadth
-//! sweep over every OTHER agent's.
+//! The TRIGGER ports a verb holds — the active harness's auto-update trigger plus, in production,
+//! the machine roots the whole-machine set resolves under.
 //!
-//! The placement engine delivers a demanded bundle's bytes to every detected agent (the shared
-//! `~/.agents/skills` copy plus native dirs); this module keeps those copies CURRENT by
-//! (un)installing each agent's trigger. It iterates registry rows and asks
+//! Which agents GET a hook is the pick's business (`super::agent_hooks`, over the scoped trigger
+//! factory); this module is what a verb DISCLOSES and SCRUBS. It iterates registry rows and asks
 //! [`topos_harness::triggers::adapter_for_slug`] for each row's trigger, so which machinery serves a
 //! harness (a config merge, a dropped file, its own scheduler) is never this module's business. The
 //! honesty rules are the adapters' own: evidence-gated `Active`, consent never forged, fail-closed
 //! config edits.
 //!
-//! **Which rows, though, depends on the direction.** ARMING follows the table this machine
-//! resolved ([`registry::detected_harnesses`], over `known_harnesses`): a row a newer downloaded
-//! table dropped is one topos no longer arms. TEARDOWN follows
-//! [`registry::teardown_harnesses`] — those rows PLUS the bundled floor — because the hook a
-//! dropped row was armed with is still in that agent's config, and a scrub that walked past it
-//! would leave an agent invoking a topos this teardown just deleted.
+//! TEARDOWN follows [`registry::teardown_harnesses`] — the rows this machine resolved PLUS the
+//! bundled floor — because the hook a dropped row was armed with is still in that agent's config,
+//! and a scrub that walked past it would leave an agent invoking a topos this teardown just deleted.
+//! The pick plays no part in a teardown either: an agent somebody picked and later left out may
+//! still hold a hook an earlier build wrote.
 //!
-//! [`Triggers`] is what a verb holds ([`Ctx::triggers`](crate::ctx::Ctx)) — the ACTIVE harness's
-//! trigger plus, in production, the machine roots the whole-machine set resolves under. It is the
-//! reason a preview can DISCLOSE what an apply will touch: [`Triggers::artifacts`] and
+//! [`Triggers`] is what a verb holds ([`Ctx::triggers`](crate::ctx::Ctx)). It is the reason a
+//! preview can DISCLOSE what an apply will touch: [`Triggers::artifacts`] and
 //! [`Triggers::scrub_others`] walk the same set, so `uninstall`'s describe names exactly the
 //! artifacts `uninstall --yes` reaches (and `list --footprint`, a path-typed surface, prints that
-//! set's path rows). The detection-scoped sweeps
-//! ([`arm_detected`], [`probe_detected`], [`register_new_detected`]) stay free functions taking the
-//! ports explicitly, so tests never probe the developer's machine or spawn a harness CLI.
-//!
-//! **Two directions, two rules.** A VERB arms unconditionally ([`arm_detected`] — `login`, `add`:
-//! a person asked for it). The SWEEP offers once per agent ever ([`register_new_detected`], gated
-//! by [`crate::trigger_record`]), because a trigger somebody removed by hand must stay removed.
+//! set's path rows). [`Triggers::project_hook_files`] is the project half of that disclosure: the
+//! hook files a checkout holds, which a teardown lists and leaves. [`Triggers::machine_ports`]
+//! hands the pick-scoped sweeps the same roots and ports, so `status` probes through the one
+//! layer that holds them.
 
 use std::path::{Path, PathBuf};
 
-use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
+use topos_harness::triggers::{TriggerAdapter, TriggerArtifact, TriggerScope};
 use topos_harness::{CommandRunner, ConfigStore, registry, triggers};
 use topos_types::{TriggerReport, TriggerState};
 
 /// The auto-update-trigger ports a verb acts through: the ACTIVE harness's trigger, plus (in
 /// production) the machine root + the two ports every OTHER supported harness's trigger resolves
 /// through. The placement half is [`Ctx::harness`](crate::ctx::Ctx) — a separate port, deliberately:
-/// a verb arms exactly one harness while disclosing the whole machine's trigger footprint.
+/// a verb scrubs exactly one harness on its own account while disclosing the whole machine's
+/// trigger footprint.
 ///
 /// Construction is I/O-free (each adapter is a struct over injected paths), so carrying this on every
 /// invocation costs nothing; the harness detection the breadth set needs runs lazily, only when
@@ -66,6 +61,15 @@ enum Breadth<'a> {
     /// puts that out of reach — an ambient variable has nothing left to redirect.
     #[cfg(test)]
     Explicit(&'a [Box<dyn TriggerAdapter + 'a>]),
+}
+
+/// The machine roots + ports the pick-scoped sweeps resolve triggers through — what
+/// [`Triggers::machine_ports`] hands out in production, and nothing in a rig that stated its
+/// adapters explicitly (there is no home there for a factory to resolve under).
+pub(crate) struct MachinePorts<'a> {
+    pub home: &'a Path,
+    pub cfg: &'a dyn ConfigStore,
+    pub run: &'a dyn CommandRunner,
 }
 
 impl<'a> Triggers<'a> {
@@ -107,9 +111,19 @@ impl<'a> Triggers<'a> {
         }
     }
 
-    /// The active harness's trigger — the one a verb arms on its own receipt.
-    pub(crate) fn active(&self) -> &dyn TriggerAdapter {
-        self.active
+    /// The machine roots + ports, where this set resolves triggers through them (production
+    /// under `$HOME`); `None` with no breadth, and for a rig's explicit set.
+    pub(crate) fn machine_ports(&self) -> Option<MachinePorts<'_>> {
+        match &self.breadth {
+            Some(Breadth::Machine { home, cfg, run }) => Some(MachinePorts {
+                home,
+                cfg: *cfg,
+                run: *run,
+            }),
+            None => None,
+            #[cfg(test)]
+            Some(Breadth::Explicit(_)) => None,
+        }
     }
 
     /// Visit every OTHER supported harness's trigger this machine's scrub reaches. The production
@@ -164,44 +178,6 @@ impl<'a> Triggers<'a> {
         }
     }
 
-    /// Visit every DETECTED trigger-capable harness's adapter — the ACTIVE one INCLUDED, unlike
-    /// [`Self::for_each_other`]. The sweep arms nothing on a verb's account, so the agent topos
-    /// happens to be running inside is a candidate exactly like the rest; the active row rides the
-    /// adapter the composition root built, every other row the registry's.
-    ///
-    /// DETECTION, not the teardown table: this decides who is OFFERED a trigger, and a row a newer
-    /// downloaded table dropped is one topos no longer arms (the scrub's own set is the wider one,
-    /// for the reasons [`Self::for_each_other`] gives).
-    pub(crate) fn for_each_detected(
-        &self,
-        cwd: Option<&Path>,
-        mut f: impl FnMut(&dyn TriggerAdapter),
-    ) {
-        match &self.breadth {
-            None => {}
-            Some(Breadth::Machine { home, cfg, run }) => {
-                for harness in registry::detected_harnesses(home, cwd) {
-                    if harness.slug == self.active.slug() {
-                        f(self.active);
-                    } else if let Some(adapter) =
-                        triggers::adapter_for_slug(harness.slug, home, *cfg, *run)
-                    {
-                        f(adapter.as_ref());
-                    }
-                    // Every other detected harness is placement-only — no trigger surface, nothing
-                    // to offer.
-                }
-            }
-            #[cfg(test)]
-            Some(Breadth::Explicit(adapters)) => {
-                f(self.active);
-                for adapter in *adapters {
-                    f(adapter.as_ref());
-                }
-            }
-        }
-    }
-
     /// Every artifact an `uninstall --yes` REACHES — the active trigger's plus every other
     /// harness's. This is what `uninstall`'s describe discloses (and, filtered to its path rows,
     /// what `list --footprint` prints), so a preview can never name less than the apply touches:
@@ -210,6 +186,28 @@ impl<'a> Triggers<'a> {
     pub(crate) fn artifacts(&self) -> Vec<TriggerArtifact> {
         let mut out = self.active.artifacts();
         self.for_each_other(|adapter| out.extend(adapter.artifacts()));
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The hook files ONE checkout holds, across every project-capable harness in the teardown
+    /// table and REGARDLESS of the pick — each named only while it is provably topos's right now.
+    /// What `uninstall`'s describe lists as left in place: a project hook is inert without the
+    /// binary, so a teardown never edits it. Empty with no machine ports. Sorted.
+    pub(crate) fn project_hook_files(&self, root: &Path) -> Vec<PathBuf> {
+        let Some(ports) = self.machine_ports() else {
+            return Vec::new();
+        };
+        let scope = TriggerScope::Project(root.to_path_buf());
+        let mut out: Vec<PathBuf> = registry::teardown_harnesses()
+            .iter()
+            .filter_map(|h| {
+                triggers::adapter_for_slug_at(h.slug, &scope, ports.home, ports.cfg, ports.run)
+            })
+            .flat_map(|adapter| adapter.artifacts())
+            .filter_map(|artifact| artifact.path().map(Path::to_path_buf))
+            .collect();
         out.sort();
         out.dedup();
         out
@@ -312,118 +310,6 @@ impl InertTrigger {
     }
 }
 
-/// Arm the auto-update trigger of every DETECTED agent other than `active_slug` (the active
-/// adapter's, armed by the verb itself). Best-effort per agent: a degraded row is reported, never
-/// an aborted sweep.
-pub(crate) fn arm_detected(
-    home: &Path,
-    cwd: Option<&Path>,
-    active_slug: &str,
-    cfg: &dyn ConfigStore,
-    run: &dyn CommandRunner,
-) -> Vec<TriggerReport> {
-    let mut out = Vec::new();
-    for harness in registry::detected_harnesses(home, cwd) {
-        if harness.slug == active_slug {
-            continue;
-        }
-        if let Some(adapter) = triggers::adapter_for_slug(harness.slug, home, cfg, run) {
-            out.push(adapter.install());
-        }
-        // Every other detected harness is placement-only (no trigger surface) — its copies stay
-        // current through the harness's own session-start skill scan reading the placed bytes.
-    }
-    out
-}
-
-/// Offer the auto-update trigger to every DETECTED trigger-capable agent this machine has never
-/// been asked about — what the update sweep runs, and the one thing a newly installed agent
-/// lacked. Returns the rows this run ATTEMPTED, for the receipt.
-///
-/// The RECORD ([`crate::trigger_record`]) is the whole gate, and it is asked ONCE PER AGENT EVER:
-/// a hook somebody deleted stays deleted, because the sweep never offers twice. A trigger that
-/// already stands is recorded without an attempt and reported nowhere — nothing happened. A failed
-/// attempt is recorded too and retried on the slow clock, never per sweep. [`arm_detected`]
-/// (`login`, `add`) is the deliberate re-registration and consults no record at all.
-pub(crate) fn register_new_detected(
-    ports: &Triggers<'_>,
-    cwd: Option<&Path>,
-    fs: &dyn crate::fs_seam::FsOps,
-    layout: &crate::sidecar::Layout,
-    now_ms: i64,
-    jitter_ms: i64,
-) -> Vec<TriggerReport> {
-    let Some(record) = crate::trigger_record::read(fs, layout) else {
-        return Vec::new(); // a newer build's document is that build's to decide from
-    };
-    let mut attempted: Vec<TriggerReport> = Vec::new();
-    let mut outcomes: Vec<(String, bool)> = Vec::new();
-    ports.for_each_detected(cwd, |adapter| {
-        if !record.may_offer(adapter.slug(), now_ms) {
-            return;
-        }
-        // A trigger already in place was armed by an earlier run (or by the person): record it, so
-        // a LATER removal is honored, and attempt nothing. The probe is skipped for an adapter
-        // that cannot answer it without running the harness — its install is idempotent, and
-        // dialing a harness twice to learn what one attempt settles is exactly the cost the record
-        // exists to bound.
-        if adapter.offline_probe_refusal().is_none() && adapter.present() {
-            outcomes.push((adapter.slug().to_owned(), true));
-            return;
-        }
-        let report = adapter.install();
-        outcomes.push((report.agent.clone(), crate::trigger_record::stands(&report)));
-        attempted.push(report);
-    });
-    let outcomes: Vec<(&str, bool)> = outcomes.iter().map(|(s, ok)| (s.as_str(), *ok)).collect();
-    crate::trigger_record::record(fs, layout, now_ms, jitter_ms, &outcomes);
-    attempted
-}
-
-/// Probe the auto-update trigger of every DETECTED trigger-capable agent, READ-ONLY — the
-/// `status` half of the sweep above: the same detection, the same adapters, but only their
-/// provable-presence probes (nothing is armed, repaired, or scrubbed). The active adapter's row
-/// rides its own `present` (a config read); an adapter whose trigger lives outside the filesystem
-/// answers `armed: None` with its own reason, because proving it would mean running the harness.
-/// Placement-only harnesses have no trigger surface and no row.
-pub(crate) fn probe_detected(
-    home: &Path,
-    cwd: Option<&Path>,
-    active: &dyn TriggerAdapter,
-    cfg: &dyn ConfigStore,
-    run: &dyn CommandRunner,
-    evidence: &EvidenceView<'_>,
-) -> Vec<topos_types::results::StatusTrigger> {
-    use topos_types::results::StatusTrigger;
-    let active_slug = active.slug();
-    let mut out = Vec::new();
-    for harness in registry::detected_harnesses(home, cwd) {
-        if harness.slug == active_slug {
-            out.push(StatusTrigger {
-                agent: active_slug.to_owned(),
-                armed: Some(active.present()),
-                note: active.pending_step().map(str::to_owned),
-                last_run_age_ms: evidence.age_of(active_slug),
-            });
-        } else if let Some(adapter) = triggers::adapter_for_slug(harness.slug, home, cfg, run) {
-            let (armed, note) = match adapter.offline_probe_refusal() {
-                Some(why) => (None, Some(why.to_owned())),
-                None => (
-                    Some(adapter.present()),
-                    adapter.pending_step().map(str::to_owned),
-                ),
-            };
-            out.push(StatusTrigger {
-                agent: harness.slug.to_owned(),
-                armed,
-                note,
-                last_run_age_ms: evidence.age_of(harness.slug),
-            });
-        }
-    }
-    out
-}
-
 /// The hook-run evidence a probe row joins: when each slug's hook last ran, against now. An
 /// EMPTY view (no document, or a caller with no store) answers `None` for everyone — absence of
 /// evidence is never evidence of absence here.
@@ -433,7 +319,7 @@ pub(crate) struct EvidenceView<'e> {
 }
 
 impl EvidenceView<'_> {
-    fn age_of(&self, slug: &str) -> Option<i64> {
+    pub(crate) fn age_of(&self, slug: &str) -> Option<i64> {
         self.agents
             .get(slug)
             .map(|t| self.now_ms.saturating_sub(*t).max(0))
@@ -485,7 +371,7 @@ mod tests {
             let dir = std::env::temp_dir().join(format!("topos-arm-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            Self(dir.canonicalize().unwrap_or(dir))
         }
     }
     impl Drop for TempHome {
@@ -552,6 +438,14 @@ mod tests {
         triggers::claude_code_at(home.join(".claude"), cfg)
     }
 
+    /// One user-level trigger whose root resolves plainly under the passed home (no env
+    /// override), registered as a picked agent's would be.
+    fn register(slug: &str, home: &Path, cfg: &dyn ConfigStore) -> TriggerReport {
+        triggers::adapter_for_slug(slug, home, cfg, &NoBinary)
+            .unwrap_or_else(|| panic!("{slug} has a trigger"))
+            .install()
+    }
+
     /// The breadth set stated EXPLICITLY, spanning every machinery this port has: cursor + gemini
     /// (a JSON config merge), cline (a dropped file), and openclaw (a job in its own scheduler — no
     /// file anywhere). The three config-file harnesses root plainly under the passed home, so the
@@ -594,124 +488,13 @@ mod tests {
         }
     }
 
-    /// The sweep arms exactly the DETECTED trigger-supported agents, skips the active adapter's
-    /// own slug, and reports each row honestly. (Env-override harnesses may surface extra rows on
-    /// a developer machine — assertions filter to the fixtures' slugs, mirroring the registry's
-    /// own test discipline.)
-    #[test]
-    fn arm_detected_covers_detected_trigger_agents_and_skips_the_active_one() {
-        let home = TempHome::new();
-        // Detected: cursor (trigger-supported), cline (trigger-supported), augment
-        // (placement-only), and claude-code (the ACTIVE adapter — must be skipped).
-        for d in [".cursor", ".cline", ".augment", ".claude"] {
-            std::fs::create_dir_all(home.0.join(d)).unwrap();
-        }
-        let cfg = MemConfig::default();
-        let out = arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
-
-        let cursor = out
-            .iter()
-            .find(|r| r.agent == "cursor")
-            .expect("cursor armed");
-        assert_eq!(cursor.state, TriggerState::Active);
-        let cline = out
-            .iter()
-            .find(|r| r.agent == "cline")
-            .expect("cline armed");
-        assert_eq!(cline.state, TriggerState::Active);
-        assert!(
-            !out.iter().any(|r| r.agent == "claude-code"),
-            "the active adapter is armed by its verb, never double-armed here"
-        );
-        assert!(
-            !out.iter().any(|r| r.agent == "augment"),
-            "a placement-only harness has no trigger row"
-        );
-        // The files landed under the injected home only.
-        assert!(
-            cfg.files
-                .borrow()
-                .keys()
-                .all(|p| p.starts_with(&home.0) || !p.starts_with(std::env::temp_dir())),
-        );
-    }
-
-    /// The status probe is READ-ONLY: it reports presence over the same detection the arming
-    /// sweep uses, writes nothing, answers honestly per agent (an unarmed cursor probes `false`,
-    /// an armed one `true`), refuses OpenClaw's live scheduler query with an explicit unknown,
-    /// and gives a placement-only harness no row.
-    #[test]
-    fn probe_detected_is_read_only_and_honest_per_agent() {
-        let home = TempHome::new();
-        for d in [".cursor", ".augment", ".claude", ".openclaw"] {
-            std::fs::create_dir_all(home.0.join(d)).unwrap();
-        }
-        let cfg = MemConfig::default();
-        let active = claude_trigger(&home.0, &cfg);
-
-        let out = probe_detected(
-            &home.0,
-            None,
-            active.as_ref(),
-            &cfg,
-            &NoBinary,
-            &EvidenceView {
-                agents: &Default::default(),
-                now_ms: 0,
-            },
-        );
-        let by = |slug: &str| out.iter().find(|r| r.agent == slug);
-        assert_eq!(by("claude-code").expect("active row").armed, Some(false));
-        assert_eq!(by("cursor").expect("cursor row").armed, Some(false));
-        let openclaw = by("openclaw").expect("openclaw row");
-        assert_eq!(openclaw.armed, None, "a live-only probe stays unknown");
-        assert!(openclaw.note.is_some(), "the unknown names its reason");
-        assert!(by("augment").is_none(), "placement-only ⇒ no trigger row");
-        assert!(cfg.files.borrow().is_empty(), "the probe writes nothing");
-
-        // Arm cursor through the real sweep, then the probe reports it present.
-        arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
-        let out = probe_detected(
-            &home.0,
-            None,
-            active.as_ref(),
-            &cfg,
-            &NoBinary,
-            &EvidenceView {
-                agents: &Default::default(),
-                now_ms: 0,
-            },
-        );
-        let cursor = out.iter().find(|r| r.agent == "cursor").expect("cursor");
-        assert_eq!(cursor.armed, Some(true));
-    }
-
-    #[test]
-    fn a_detected_openclaw_rides_its_own_adapter_and_degrades_honestly() {
-        let home = TempHome::new();
-        std::fs::create_dir_all(home.0.join(".openclaw")).unwrap();
-        let cfg = MemConfig::default();
-        let out = arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
-        let oc = out
-            .iter()
-            .find(|r| r.agent == "openclaw")
-            .expect("openclaw swept");
-        // No `openclaw` binary in the test runner: the cron cannot be registered — Degraded +
-        // the explicit-pull floor, exactly the adapter's own honesty rule.
-        assert_eq!(oc.state, TriggerState::Degraded);
-        assert_eq!(
-            oc.currency_kind,
-            topos_types::CurrencyKind::ExplicitPullOnly
-        );
-    }
-
     #[test]
     fn scrub_others_reports_only_rows_with_something_to_say() {
         let home = TempHome::new();
         std::fs::create_dir_all(home.0.join(".cursor")).unwrap();
         let cfg = MemConfig::default();
-        // Arm cursor first, then scrub everything: only cursor's removal touched a file.
-        let _ = arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
+        // Register cursor first, then scrub everything: only cursor's removal touched a file.
+        register("cursor", &home.0, &cfg);
         let active = claude_trigger(&home.0, &cfg);
         let out =
             Triggers::machine(active.as_ref(), home.0.clone(), &cfg, &NoBinary).scrub_others();
@@ -719,7 +502,7 @@ mod tests {
             out.iter().any(|s| s.report.agent == "cursor"
                 && s.report.state == TriggerState::Inactive
                 && s.report.touched_path.is_some()),
-            "the armed agent's scrub is disclosed"
+            "the registered agent's scrub is disclosed"
         );
         assert!(
             !out.iter().any(
@@ -741,12 +524,12 @@ mod tests {
         );
     }
 
-    /// **The teardown sweep reads the TEARDOWN table, not the one this machine resolved.** A
-    /// downloaded registry may legitimately drop a row, and the arming sweep honors that — but the
-    /// hook that row was armed with is still in the agent's config, so every harness THIS BUILD
-    /// can arm has to stay reachable by the preview and the scrub. (Where no local table is
-    /// installed the two sets coincide; what this pins is which one the sweep asks for, and the
-    /// bundled floor is the half that cannot be taken away.)
+    /// **The teardown sweep reads the TEARDOWN table, not the pick and not detection.** A
+    /// downloaded registry may legitimately drop a row, and a pick may leave an agent out — but
+    /// the hook that row was registered with is still in the agent's config, so every harness
+    /// THIS BUILD can register has to stay reachable by the preview and the scrub. (Where no local
+    /// table is installed the two sets coincide; what this pins is which one the sweep asks for,
+    /// and the bundled floor is the half that cannot be taken away.)
     #[test]
     fn the_teardown_sweep_covers_every_harness_this_build_can_arm() {
         let home = TempHome::new();
@@ -778,9 +561,9 @@ mod tests {
 
     /// The disclosure contract: the preview names EVERY artifact the apply reaches — every class of
     /// artifact included. The preview walks the ACTIVE trigger plus exactly the set `scrub_others`
-    /// walks, so a machine armed across several harnesses can never be told about one of them and
-    /// have four more scrubbed — and a trigger with no file to name (OpenClaw's scheduler job) can
-    /// never be scrubbed unannounced, which is exactly what a path-only preview did.
+    /// walks, so a machine registered across several harnesses can never be told about one of them
+    /// and have four more scrubbed — and a trigger with no file to name (OpenClaw's scheduler job)
+    /// can never be scrubbed unannounced, which is exactly what a path-only preview did.
     #[test]
     fn the_preview_names_every_artifact_class_the_scrub_reaches() {
         let home = TempHome::new();
@@ -805,10 +588,10 @@ mod tests {
         assert_eq!(
             ports.artifacts(),
             vec![scheduler_job.clone()],
-            "nothing armed → nothing owned on disk, the out-of-process attempt still disclosed"
+            "nothing registered → nothing owned on disk, the out-of-process attempt still disclosed"
         );
 
-        // Arm the whole machine, exactly as a login/add receipt does.
+        // Register the whole machine, exactly as a wide pick does.
         active.install();
         for other in &others {
             other.install();
@@ -839,7 +622,7 @@ mod tests {
                 "no {class:?} artifact in the preview — an apply reaches one: {preview:?}"
             );
         }
-        // Every path named is under the temp home: this rig arms nothing on the real machine.
+        // Every path named is under the temp home: this rig registers nothing on the real machine.
         for artifact in &preview {
             if let Some(path) = artifact.path() {
                 assert!(path.starts_with(&home.0), "{path:?} escaped the temp home");
@@ -860,7 +643,7 @@ mod tests {
         );
         assert!(
             touched.len() >= 4,
-            "the apply reaches every armed harness: {touched:?}"
+            "the apply reaches every registered harness: {touched:?}"
         );
         for path in &touched {
             assert!(
@@ -882,162 +665,61 @@ mod tests {
         );
     }
 
-    /// The sweep's registration rig: the temp home's own `~/.topos` layout, a REAL config store
-    /// (a hand-removal below has to be a real edit of a real file), and the breadth stated
-    /// explicitly so no ambient env can redirect a write.
-    struct SweepRig {
-        home: TempHome,
-        layout: crate::sidecar::Layout,
-    }
-
-    impl SweepRig {
-        fn new() -> Self {
-            let home = TempHome::new();
-            let layout = crate::sidecar::Layout::new(&home.0.join(".topos"));
-            Self { home, layout }
-        }
-
-        /// One sweep's registration, over the explicit breadth set.
-        fn sweep(&self, cfg: &dyn ConfigStore, now_ms: i64) -> Vec<String> {
-            let active = claude_trigger(&self.home.0, cfg);
-            let others = other_triggers(&self.home.0, cfg, &NoBinary);
-            let ports = Triggers::machine_of(active.as_ref(), &others);
-            register_new_detected(
-                &ports,
-                None,
-                &crate::fs_seam::RealFs,
-                &self.layout,
-                now_ms,
-                0,
-            )
-            .into_iter()
-            .map(|r| r.agent)
-            .collect()
-        }
-    }
-
-    const NOW: i64 = 1_700_000_000_000;
-
-    /// **The one-time offer.** A newly detected agent is registered by the sweep — and never
-    /// offered again, which is what makes a hook the person removed stay removed. A failed
-    /// attempt (OpenClaw with no CLI on this machine) is not retried on the next sweep either: it
-    /// waits out the slow clock, because a registration that dials a harness's own program must
-    /// not run once per session start.
+    /// The project half of the disclosure: a checkout's hook files, across the four
+    /// project-capable harnesses, named only while they are topos's — and regardless of any pick,
+    /// because a teardown lists what stands, not what somebody currently wants.
     #[test]
-    fn the_sweep_registers_a_new_agent_once_and_respects_a_hand_removal() {
-        let rig = SweepRig::new();
+    fn project_hook_files_names_a_checkouts_hook_files_regardless_of_the_pick() {
+        let home = TempHome::new();
+        let root = TempHome::new();
         let cfg = crate::fs_seam::RealFs;
-        let cursor_hooks = rig.home.0.join(".cursor").join("hooks.json");
+        let active = claude_trigger(&home.0, &cfg);
+        let ports = Triggers::machine(active.as_ref(), home.0.clone(), &cfg, &NoBinary);
+        assert!(ports.project_hook_files(&root.0).is_empty(), "nothing yet");
 
-        let first = rig.sweep(&cfg, NOW);
-        assert!(
-            first.iter().any(|a| a == "cursor"),
-            "a detected agent with no record is registered: {first:?}"
-        );
-        assert!(
-            first.iter().any(|a| a == "claude-code"),
-            "the ACTIVE agent is a candidate like any other — the sweep arms nobody on a verb's \
-             account: {first:?}"
-        );
-        assert!(cursor_hooks.exists(), "the trigger really landed");
-
-        // The same sweep again: the question has been asked.
-        assert!(
-            rig.sweep(&cfg, NOW).is_empty(),
-            "a recorded agent is never touched again"
-        );
-
-        // The person deletes the hook. The sweep leaves it deleted — forever. (A year on, the one
-        // row still offered is the FAILED one, which is the retry clock and not a second offer.)
-        std::fs::remove_file(&cursor_hooks).unwrap();
-        assert!(rig.sweep(&cfg, NOW).is_empty());
-        let year = rig.sweep(&cfg, NOW + 365 * 24 * 60 * 60 * 1000);
-        assert!(
-            !year.iter().any(|a| a == "cursor"),
-            "not a year later either: {year:?}"
-        );
-        assert!(!cursor_hooks.exists(), "and the removal stands");
-    }
-
-    /// A FAILED attempt is the one row that comes back — on the slow clock, never on the next
-    /// sweep. OpenClaw's registration dials its own CLI, which is absent in the test runner, so it
-    /// degrades exactly as it does on a machine where the harness is not really installed.
-    #[test]
-    fn a_failed_registration_retries_on_the_slow_clock_and_not_before() {
-        let rig = SweepRig::new();
-        let cfg = crate::fs_seam::RealFs;
-        let first = rig.sweep(&cfg, NOW);
-        assert!(first.iter().any(|a| a == "openclaw"), "{first:?}");
-
-        assert!(
-            rig.sweep(&cfg, NOW + crate::trigger_record::RETRY_INTERVAL_MS - 1)
-                .is_empty(),
-            "one ms short of the interval, nothing is dialed again"
-        );
+        let scope = TriggerScope::Project(root.0.clone());
+        for slug in ["cursor", "opencode"] {
+            triggers::adapter_for_slug_at(slug, &scope, &home.0, &cfg, &NoBinary)
+                .unwrap()
+                .install();
+        }
+        // A file at the codex path that is NOT ours is never named.
+        std::fs::create_dir_all(root.0.join(".codex")).unwrap();
+        std::fs::write(root.0.join(".codex").join("hooks.json"), b"{}\n").unwrap();
         assert_eq!(
-            rig.sweep(&cfg, NOW + crate::trigger_record::RETRY_INTERVAL_MS),
-            vec!["openclaw".to_owned()],
-            "and then the FAILED row alone comes back — every registration that stands is done"
+            ports.project_hook_files(&root.0),
+            vec![
+                root.0.join(".cursor").join("hooks.json"),
+                root.0.join(".opencode").join("plugin").join("topos.ts"),
+            ]
         );
-    }
-
-    /// A trigger already in place is RECORDED without being touched: the sweep reports nothing
-    /// (nothing happened), and the record it writes is what honors a removal made afterwards.
-    #[test]
-    fn a_standing_trigger_is_recorded_without_an_attempt() {
-        let rig = SweepRig::new();
-        let cfg = crate::fs_seam::RealFs;
-        let cursor = triggers::adapter_for_slug("cursor", &rig.home.0, &cfg, &NoBinary)
-            .expect("cursor has a trigger");
-        cursor.install();
-        assert!(cursor.present());
-
-        let first = rig.sweep(&cfg, NOW);
+        // Nothing under ~ was named or written.
+        assert!(!home.0.join(".cursor").exists());
+        // And no machine ports (a rig's explicit set) name nothing.
+        let none: Vec<Box<dyn TriggerAdapter>> = Vec::new();
         assert!(
-            !first.iter().any(|a| a == "cursor"),
-            "nothing was installed for cursor, so nothing is reported: {first:?}"
+            Triggers::machine_of(active.as_ref(), &none)
+                .project_hook_files(&root.0)
+                .is_empty()
         );
-        // …and the record still went in, so a later hand-removal is respected.
-        std::fs::remove_file(rig.home.0.join(".cursor").join("hooks.json")).unwrap();
-        assert!(rig.sweep(&cfg, NOW).is_empty());
     }
 
-    /// **`login`/`add` are the deliberate re-registration.** The record gates the SWEEP and
-    /// nothing else: a person who ran a verb that wires topos into their machine asked for exactly
-    /// this, so a recorded — and since removed — trigger is written back.
-    #[test]
-    fn the_record_never_gates_the_verbs_own_arming_sweep() {
-        let rig = SweepRig::new();
-        let cfg = crate::fs_seam::RealFs;
-        std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
-        let cursor_hooks = rig.home.0.join(".cursor").join("hooks.json");
-
-        rig.sweep(&cfg, NOW);
-        std::fs::remove_file(&cursor_hooks).unwrap();
-        assert!(rig.sweep(&cfg, NOW).is_empty(), "the sweep honors it");
-
-        let armed = arm_detected(&rig.home.0, None, "claude-code", &cfg, &NoBinary);
-        assert!(
-            armed.iter().any(|r| r.agent == "cursor"),
-            "the verb arms every detected agent, record or no record: {armed:?}"
-        );
-        assert!(cursor_hooks.exists(), "and the trigger is back");
-    }
-
-    /// With no `$HOME` there is no detection and therefore no breadth: the active trigger is the
-    /// whole surface, both in the preview and in the scrub.
+    /// With no `$HOME` there is no breadth and no machine ports: the active trigger is the whole
+    /// surface, both in the preview and in the scrub, and no project hook file is ever named.
     #[test]
     fn without_a_machine_root_the_active_trigger_is_the_whole_surface() {
         let home = TempHome::new();
         std::fs::create_dir_all(home.0.join(".cursor")).unwrap();
         let cfg = MemConfig::default();
-        // Arm cursor so a breadth-aware sweep would have something to find.
-        arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
+        // Register cursor so a breadth-aware sweep would have something to find.
+        register("cursor", &home.0, &cfg);
 
         let active = claude_trigger(&home.0, &cfg);
         active.install();
         let ports = Triggers::active_only(active.as_ref());
         assert_eq!(ports.artifacts(), active.artifacts());
         assert!(ports.scrub_others().is_empty());
+        assert!(ports.machine_ports().is_none());
+        assert!(ports.project_hook_files(&home.0).is_empty());
     }
 }

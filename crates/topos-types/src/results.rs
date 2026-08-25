@@ -78,10 +78,9 @@ pub struct PullData {
     /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub behind_elsewhere: Vec<BehindElsewhere>,
-    /// The auto-update triggers this run REGISTERED — one row per newly detected agent whose
-    /// trigger the sweep installed, in the same shape `login`/`add` report their own arming. Asked
-    /// once per agent ever, so a trigger somebody removed by hand never reappears here. Empty (and
-    /// omitted) on every run that found nothing new. **INFERRED** (additive).
+    /// The auto-update triggers this run registered. Always empty since 0.1.52; kept for schema
+    /// stability (the sweep registers no agent — hooks follow the agents pick). **INFERRED**
+    /// (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<crate::TriggerReport>,
 }
@@ -1213,13 +1212,12 @@ pub struct AddData {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: Option<String>,
     pub tracked: bool,
-    /// The auto-update-trigger outcome, present when adopting into a recognized harness attempted a
-    /// session-start trigger install — the honest disclosure of the (only) write `add` makes outside
-    /// `~/.topos/`. `None` for a plain directory.
+    /// The auto-update-trigger outcome of an add into a recognized harness. Always empty since
+    /// 0.1.52; kept for schema stability (an add writes no hook — hooks follow the agents pick).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<crate::TriggerReport>,
-    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update
-    /// trigger was (un)installed alongside the active adapter's (`currency` above). **Additive.**
+    /// The other agents' trigger outcomes of the same add. Always empty since 0.1.52; kept for
+    /// schema stability. **Additive.**
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<crate::TriggerReport>,
     /// Where the skill was imported FROM, when `add` fetched it from a remote source. `None` for a
@@ -1751,10 +1749,12 @@ pub struct LoginData {
     /// Present while the login awaits the browser approval (re-run `topos login` to resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<EnrollmentPending>,
-    /// The active adapter's auto-update-trigger outcome, when the login armed it.
+    /// The auto-update-trigger outcome of the login. Always empty since 0.1.52; kept for schema
+    /// stability (a login writes no hook — hooks follow the agents pick).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<crate::TriggerReport>,
-    /// The breadth arming sweep's outcomes (one row per other detected agent).
+    /// The other agents' trigger outcomes of the same login. Always empty since 0.1.52; kept for
+    /// schema stability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<crate::TriggerReport>,
     /// The honest reason this machine's own `topos.toml` was left alone when the login could not
@@ -3088,6 +3088,12 @@ pub struct UninstallDescribe {
     /// so, so a person is not surprised by a leftover.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_drifted: Vec<String>,
+    /// The auto-update hook files the checkout the command ran in holds (the four project-capable
+    /// harnesses', each named only while it is provably topos's). LEFT IN PLACE: a project hook is
+    /// inert without the binary, and a teardown never edits a checkout. Empty outside a project.
+    /// **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_hook_files: Vec<String>,
 }
 
 /// The applied `uninstall` — what was removed. On a teardown that FAILED partway this is the

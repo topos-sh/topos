@@ -374,7 +374,6 @@ fn report_or_forget_connected(
         &session,
         status,
         snapshot.as_ref(),
-        None,
         ReceiptExtras {
             user: me_display(connectors, &session, status),
             ..ReceiptExtras::default()
@@ -552,17 +551,16 @@ fn settle_abandoned(
 }
 
 /// The shared tail of a login that just MINTED a session (the browser grant and the lane-side
-/// connect alike): arm the auto-update trigger, read the acceptance disclosure, write this
-/// workspace's feed line on the machine's first connection, and build the receipt. Every step is
-/// best-effort — a login is never rolled back because a follow-up read failed; the receipt says
-/// so instead.
+/// connect alike): read the acceptance disclosure, write this workspace's feed line on the
+/// machine's first connection, and build the receipt. Every step is best-effort — a login is never
+/// rolled back because a follow-up read failed; the receipt says so instead. A login signs in and
+/// records the workspace line, nothing else: no hook is written and no skill is placed (both
+/// follow the agents pick).
 fn connected_receipt(
     ctx: &Ctx<'_>,
     connectors: &LoginConnectors<'_>,
     session: &Session,
 ) -> LoginData {
-    // Login is the trigger-arming moment for a receiving install (the acceptance event).
-    let currency = Some(ctx.triggers.active().install());
     // What connecting adopts RIGHT NOW (a pending session adopts nothing until an owner approves,
     // so it is never dialed).
     let snapshot = if session.status == SESSION_ACTIVE {
@@ -590,7 +588,6 @@ fn connected_receipt(
         session,
         &session.status,
         snapshot.as_ref(),
-        currency,
         ReceiptExtras {
             user: me_display(connectors, session, &session.status),
             feed_row_added,
@@ -611,13 +608,12 @@ struct ReceiptExtras {
 }
 
 /// The ONE connected-session payload — the browser grant, the lane-side connect, and the
-/// already-connected report all render from this shape (`currency` and the feed-line half of
-/// `extras` are things only a fresh mint can have done).
+/// already-connected report all render from this shape (the feed-line half of `extras` is a
+/// thing only a fresh mint can have done).
 fn connected_data(
     session: &Session,
     status: &str,
     snapshot: Option<&DeliverySnapshot>,
-    currency: Option<topos_types::TriggerReport>,
     extras: ReceiptExtras,
 ) -> LoginData {
     LoginData {
@@ -633,7 +629,8 @@ fn connected_data(
         assigned: snapshot.map(|s| (s.skills.len() + s.mcp_servers.len()) as u64),
         assigned_names: snapshot.map(assigned_names).unwrap_or_default(),
         pending: None,
-        currency,
+        // Always empty since 0.1.52: a login writes no hook (hooks follow the pick).
+        currency: None,
         triggers: Vec::new(),
         manifest_note: extras.manifest_note,
         user: extras.user,
@@ -1019,14 +1016,14 @@ mod tests {
     }
 
     /// The same rig carrying the REAL Claude Code trigger over a temp harness root, handed to the
-    /// closure so the completed-login test can read the config login actually edited. Login is the
-    /// arming moment for a receiving install, and an inert stand-in can only ever prove that some
-    /// report came back — not that a managed entry landed anywhere.
+    /// closure so the completed-login test can prove the config login must NOT edit stayed
+    /// absent. An inert stand-in could only prove that no report came back — not that no
+    /// managed entry landed anywhere.
     ///
     /// The root is INJECTED rather than resolved: the registry's resolver reads
-    /// `$CLAUDE_CONFIG_DIR`, and a rig writing through a real config store would then arm the
+    /// `$CLAUDE_CONFIG_DIR`, and a rig writing through a real config store would then reach the
     /// developer's own `settings.json`.
-    fn with_arming_ctx<R>(home: &Path, f: impl FnOnce(&Ctx<'_>, &Path) -> R) -> R {
+    fn with_claude_ctx<R>(home: &Path, f: impl FnOnce(&Ctx<'_>, &Path) -> R) -> R {
         let fs = RealFs;
         let ids = RealIds;
         let clock = RealClock;
@@ -1384,10 +1381,45 @@ mod tests {
         }
     }
 
+    /// **A login signs in and writes the workspace line, nothing else.** No auto-update hook
+    /// lands in the harness config, and no skill (the built-in included) is placed: both follow
+    /// the agents pick, which a login never touches. Proven over the REAL Claude Code trigger
+    /// and a real, empty harness root — the root stays empty.
+    #[test]
+    fn login_writes_no_hook_and_places_nothing() {
+        let home = scratch("no-hook");
+        with_claude_ctx(&home, |ctx, claude_root| {
+            let rig = Rig::new(vec![granted(LinkStatus::Active)]);
+            rig.with(|connectors| {
+                let start = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                assert!(start.pending.is_some());
+                let done = login(ctx, connectors, None, false).unwrap();
+                assert_eq!(done.session_status, "active");
+                assert!(done.currency.is_none(), "no hook report: none was written");
+                assert!(done.triggers.is_empty(), "no other agent's either");
+                assert!(
+                    !claude_root.join("settings.json").exists(),
+                    "no hook in the harness config"
+                );
+                assert!(
+                    !claude_root.join("skills").exists(),
+                    "no skill placed — not even the built-in"
+                );
+                assert!(
+                    !claude_root.exists()
+                        || std::fs::read_dir(claude_root).unwrap().next().is_none(),
+                    "the harness root is exactly as empty as it started"
+                );
+            });
+            let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
+            assert_eq!(all.sessions.len(), 1, "the session itself was minted");
+        });
+    }
+
     #[test]
     fn login_starts_pends_resumes_and_persists_the_session() {
         let home = scratch("flow");
-        with_arming_ctx(&home, |ctx, claude_root| {
+        with_claude_ctx(&home, |ctx, claude_root| {
             let rig = Rig::new(vec![DeviceAuthPoll::Pending, granted(LinkStatus::Active)]);
             rig.with(|connectors| {
                 // START: writes the WAL, answers the pending disclosure — and the named workspace
@@ -1425,18 +1457,12 @@ mod tests {
                     ("topos.example.com", "eng")
                 );
                 assert_eq!(done.assigned, Some(0));
-                // Login ARMS: the report says the trigger is live, and the harness's own config
-                // carries the managed entry that makes it so — the file, not just the receipt.
-                let armed = done.currency.expect("login arms the trigger");
-                assert_eq!(armed.state, topos_types::TriggerState::Active);
-                let settings = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
+                // A login signs in and records the workspace line — it writes no hook.
+                assert!(done.currency.is_none(), "login registers no trigger");
+                assert!(done.triggers.is_empty());
                 assert!(
-                    settings.contains("topos install --quiet --hook claude-code"),
-                    "the managed sweep landed in the harness config: {settings}"
-                );
-                assert!(
-                    settings.contains("# topos:currency"),
-                    "the entry carries the ownership sentinel: {settings}"
+                    !claude_root.join("settings.json").exists(),
+                    "the harness config is never opened by a login"
                 );
                 assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
             });
@@ -1777,7 +1803,7 @@ mod tests {
                 assert_eq!(out.workspace_id, "w_ops");
                 assert_eq!(out.session_status, "active");
                 assert_eq!(out.assigned, Some(1));
-                assert!(out.currency.is_some(), "a fresh session arms the trigger");
+                assert!(out.currency.is_none(), "a fresh session writes no hook");
                 // The lane connect is a landing too: the first connection writes ops's line.
                 assert!(out.feed_row_added);
                 assert_eq!(out.undo, vec!["remove", "-g", "@ops"]);

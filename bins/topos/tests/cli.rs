@@ -325,8 +325,12 @@ fn the_undo_a_row_removal_prints_runs_and_re_links_the_record_it_kept() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// **An add writes no hook and places nothing.** Adopting a skill from Claude Code's own skills
+/// dir records the row and nothing else: no `settings.json` entry, no built-in skill placed
+/// beside it — both follow the agents pick, which an add never touches. The retained
+/// `topos pull --quiet` alias still exits 0 and stays silent on stdout.
 #[test]
-fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
+fn end_to_end_claude_code_adopt_writes_no_hook_and_pull_is_silent() {
     let home = scratch("cc-home");
     let claude = scratch("cc-claude");
     // A real Claude Code skill under the isolated config home.
@@ -340,7 +344,7 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     .unwrap();
     let before = std::fs::read(&skill_md).unwrap();
 
-    // add → recognized as Claude Code, auto-update armed, hook written to settings.json.
+    // add → recognized as Claude Code and recorded; no hook, no other write outside ~/.topos/.
     // MACHINE-WIDE: the skill lives in the agent's own config home, not in a checkout.
     let (ok, v) = run_in(
         &home,
@@ -349,17 +353,18 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     );
     assert!(ok, "add should exit 0");
     assert_eq!(v["data"]["name"], "pr-describe");
-    assert_eq!(v["data"]["currency"]["state"], "active");
-    assert_eq!(v["data"]["currency"]["currency_kind"], "session_start");
-
-    let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
     assert!(
-        settings.contains("topos install --quiet --hook claude-code"),
-        "the hook command was installed, carrying the dialect marker"
+        v["data"].get("currency").is_none(),
+        "no hook report — none was written: {v}"
+    );
+    assert!(v["data"].get("triggers").is_none(), "{v}");
+    assert!(
+        !claude.join("settings.json").exists(),
+        "the harness config is never opened by an add"
     );
     assert!(
-        settings.contains("# topos:currency"),
-        "the idempotency sentinel is present"
+        !claude.join("skills").join("topos").exists(),
+        "an add places no built-in skill"
     );
 
     // Adopt-in-place wrote nothing into the skill dir.
@@ -955,6 +960,17 @@ fn sweep_raw(
     args: &[&str],
 ) -> std::process::Output {
     seed_pick(topos_home);
+    sweep_raw_unseeded(topos_home, disc_home, claude, args)
+}
+
+/// [`sweep_raw`] over a `$TOPOS_HOME` exactly as the test laid it out — no pick seeded — for
+/// the tests about the pick's absence (the migration seed).
+fn sweep_raw_unseeded(
+    topos_home: &Path,
+    disc_home: &Path,
+    claude: &Path,
+    args: &[&str],
+) -> std::process::Output {
     Command::new(bin())
         .env("TOPOS_HOME", topos_home)
         .env("HOME", disc_home)
@@ -1039,96 +1055,111 @@ fn the_quiet_sweeps_hook_document_follows_the_calling_triggers_dialect() {
     }
 }
 
-/// **A newly installed agent needs no flags.** The sweep registers the auto-update trigger of an
-/// agent it has found for the first time — over the REAL argv, the real detection roots, and the
-/// real config writes, which is the seam the unit tests cannot reach. Three facts, one run each:
-/// the trigger lands, the offer is never repeated (so a hand-removal stands), and the quiet
-/// sweep's stdout is BYTE-IDENTICAL with a registration happening — a hook document that gained a
-/// line, or a `reloadSkills` over bytes that never moved, is a lie a strict-schema agent pays for.
+/// A legacy machine's trigger record, as the last build wrote it: one registered row.
+fn legacy_record(topos_home: &Path, slug: &str) -> PathBuf {
+    let record = topos_home.join("state").join("trigger_registration.json");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(
+        &record,
+        format!(
+            "{{\"schema_version\": 1, \"agents\": {{\"{slug}\": {{\"at_ms\": 1, \"registered\": true, \"retry_at_ms\": 0}}}}}}\n"
+        ),
+    )
+    .unwrap();
+    record
+}
+
+/// **The sweep registers nobody; the seed carries the old answer into the pick.** Over the REAL
+/// argv, the real detection roots and the real config writes — the seam the unit tests cannot
+/// reach. A machine that predates the pick (no `agents.json`, a legacy record saying cursor was
+/// registered) runs a quiet hook sweep: no agent gains a hook, whatever is installed; the legacy
+/// record becomes the machine pick `["cursor"]` and is deleted; the sweep's stdout stays empty.
+/// A non-quiet verb on such a machine says the one line, once.
 #[test]
-fn the_quiet_sweep_registers_a_newly_detected_agent_once_and_says_nothing_about_it() {
-    let home = scratch("register-home");
-    let disc = scratch("register-disc");
-    let claude = scratch("register-claude");
-
-    // Settle the built-in FIRST, with no other agent around: the sweep under test then changes no
-    // bytes at all, so the `reloadSkills` half of this test proves something.
-    let warmup = sweep_raw(&home, &disc, &claude, &["update", "--quiet", "--ttl", "0"]);
-    assert!(warmup.status.success(), "warm-up sweep exits 0");
-    assert!(
-        claude
-            .join("skills")
-            .join("topos")
-            .join("SKILL.md")
-            .exists(),
-        "the warm-up placed the built-in, so the next sweep changes nothing"
-    );
-    // The ACTIVE agent was registered by that first sweep, exactly like any other detected one.
-    assert!(
-        claude.join("settings.json").exists(),
-        "the sweep arms nobody on a verb's account — every detected agent is a candidate"
-    );
-
-    // Now an agent is installed. Its config dir is all detection needs.
+fn the_quiet_sweep_never_registers_an_agent_and_the_seed_moves_the_record_into_the_pick() {
+    let home = scratch("seed-home");
+    let disc = scratch("seed-disc");
+    let claude = scratch("seed-claude");
+    // Two agents installed on the machine; the legacy record names only cursor.
     std::fs::create_dir_all(disc.join(".cursor")).unwrap();
-    let hooks = disc.join(".cursor").join("hooks.json");
+    std::fs::create_dir_all(disc.join(".gemini")).unwrap();
+    let record = legacy_record(&home, "cursor");
+    let pick = home.join("agents.json");
+    let cursor_hooks = disc.join(".cursor").join("hooks.json");
 
-    let record = home.join("state").join("trigger_registration.json");
-    let out = sweep_raw(
+    let out = sweep_raw_unseeded(
         &home,
         &disc,
         &claude,
         &["update", "--quiet", "--ttl", "0", "--hook", "claude-code"],
     );
-    assert!(out.status.success(), "a session-start sweep always exits 0");
-    assert!(hooks.exists(), "the newly detected agent was registered");
-    assert!(record.exists(), "and the offer is written down");
-    // The other half of the same sentence: the delivered bundle reached it too, with no flags.
+    assert!(
+        out.status.success(),
+        "a session-start sweep always exits 0 — stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!cursor_hooks.exists(), "the sweep registers no agent");
+    assert!(
+        !disc.join(".gemini").join("settings.json").exists(),
+        "not the other installed one either"
+    );
+    assert!(
+        !claude.join("settings.json").exists(),
+        "and not the agent whose hook fired the sweep"
+    );
+    let seeded: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&pick).expect("the seed wrote the machine pick"))
+            .unwrap();
+    assert_eq!(seeded["agents"], serde_json::json!(["cursor"]));
+    assert!(!record.exists(), "the legacy record is gone");
+    // The hook document is the ordinary one for a sweep that placed bytes (the first sweep
+    // lands the built-in for the seeded pick): the seed is never a line a person must read.
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        !stdout.contains("additionalContext"),
+        "the seed adds no line to the hook's stdout: {stdout:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("Using "),
+        "and under --quiet it says nothing on stderr either"
+    );
+    // The seeded pick is what the sweep placed for: cursor's skills dir holds the built-in,
+    // the other installed agents' dirs stay untouched.
     assert!(
         disc.join(".cursor")
             .join("skills")
             .join("topos")
             .join("SKILL.md")
             .exists(),
-        "an agent found today gets the machine's bundles"
+        "the picked agent gets the machine's bundles"
     );
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        !stdout.contains("additionalContext"),
-        "a registration is never a line a person must read: {stdout:?}"
-    );
+    assert!(!disc.join(".gemini").join("skills").exists());
 
-    // REGISTRATION ALONE, with no byte anywhere left to move: the record is gone (a lost state
-    // file re-opens the question) and so is the hook, while every placement above still stands.
-    // The trigger goes back in and the hook document is byte-identical to a sweep that did
-    // nothing — a `reloadSkills` here would ask for a re-scan over bytes that never moved.
-    std::fs::remove_file(&record).unwrap();
-    std::fs::remove_file(&hooks).unwrap();
-    let out = sweep_raw(
-        &home,
-        &disc,
-        &claude,
-        &["update", "--quiet", "--ttl", "0", "--hook", "claude-code"],
-    );
-    assert!(out.status.success());
-    assert!(hooks.exists(), "the offer was open again, and it landed");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).as_ref(),
-        "",
-        "a registration adds NOTHING to the hook's stdout — not a line, not a reload"
-    );
-
-    // The person deletes the hook. The sweep leaves it deleted: the question is asked once.
-    std::fs::remove_file(&hooks).unwrap();
-    let out = sweep_raw(&home, &disc, &claude, &["update", "--quiet", "--ttl", "0"]);
-    assert!(out.status.success());
+    // A NON-QUIET verb on a fresh legacy machine says the one line, on stderr, once.
+    let home2 = scratch("seed-home-2");
+    legacy_record(&home2, "cursor");
+    let out = sweep_raw_unseeded(&home2, &disc, &claude, &["list"]);
     assert!(
-        !hooks.exists(),
-        "a trigger somebody removed is never offered again"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).as_ref(), "");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.contains(
+            "Using cursor on this machine (from the auto-update hooks already registered). \
+             Change: topos agents add|remove -g"
+        ),
+        "{stderr:?}"
+    );
+    let again = sweep_raw_unseeded(&home2, &disc, &claude, &["list"]);
+    assert!(
+        !String::from_utf8_lossy(&again.stderr).contains("Using "),
+        "said once"
+    );
 
     let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&home2);
     let _ = std::fs::remove_dir_all(&disc);
     let _ = std::fs::remove_dir_all(&claude);
 }

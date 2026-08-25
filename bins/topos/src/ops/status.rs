@@ -23,8 +23,8 @@ use crate::sessions;
 use super::inventory::{self, ScopeResolution, ScopeView};
 
 /// Assemble the offline status snapshot for `view`. `triggers` stays empty here — the composition
-/// root fills it from the read-only probe (`ops::probe_detected`), the same layering the arming
-/// receipts use.
+/// root fills it from the read-only probe over the effective pick
+/// (`ops::agent_hooks::probe_effective`), the one layer holding the real config port + `$HOME`.
 ///
 /// # Errors
 /// A read failure or a manifest the grammar refuses (typed, naming the fix).
@@ -548,10 +548,10 @@ mod tests {
         };
         let data = status_snapshot(&ctx, ScopeView::Here).expect("status snapshot");
         assert!(data.sessions.is_empty());
-        let _ = crate::ops::probe_detected(
+        let _ = crate::ops::agent_hooks::probe(
             &home.0,
-            None,
-            &crate::ops::INERT_TRIGGER,
+            &topos_harness::triggers::TriggerScope::User,
+            ["cursor", "openclaw"],
             &fs,
             &fs,
             &crate::ops::EvidenceView {
