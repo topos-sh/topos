@@ -32,6 +32,13 @@
         "type": "string"
       }
     },
+    "not_in_table": {
+      "description": "The picked slugs this binary's harness table does not know (a row a newer table dropped,\nor a hand-edited file). Kept in the pick as written; they pick nothing until a table\nknows them again, and `agents remove` takes them out. **Additive.**",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "pick_path": {
       "description": "The pick file in force, as a person reads it; absent when no pick stands.",
       "type": [

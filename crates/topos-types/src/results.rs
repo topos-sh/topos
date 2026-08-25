@@ -1741,6 +1741,11 @@ pub struct AgentsData {
     /// The picked agents' registry slugs, as the file spells them (`"*"` = every installed agent).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
+    /// The picked slugs this binary's harness table does not know (a row a newer table dropped,
+    /// or a hand-edited file). Kept in the pick as written; they pick nothing until a table
+    /// knows them again, and `agents remove` takes them out. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_in_table: Vec<String>,
     /// Every agent installed on this machine (its detect dir exists), in harness-table order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub installed: Vec<String>,
@@ -3228,9 +3233,9 @@ pub struct UninstallDescribe {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_drifted: Vec<String>,
     /// The auto-update hook files the checkout the command ran in holds (the four project-capable
-    /// harnesses', each named only while it is provably topos's). LEFT IN PLACE: a project hook is
-    /// inert without the binary, and a teardown never edits a checkout. Empty outside a project.
-    /// **Additive.**
+    /// harnesses', each named only while it is provably topos's). The apply scrubs the topos entry
+    /// out of each, the way it scrubs the machine's; other checkouts keep theirs. Empty outside a
+    /// project. **Additive.**
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub project_hook_files: Vec<String>,
 }
@@ -3250,6 +3255,11 @@ pub struct UninstallApplied {
     /// disclosed); clean no-ops stay off the receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<crate::TriggerReport>,
+    /// The scrub of the hooks the checkout the command ran in held (`project_hook_files` on the
+    /// describe): one row per file that held a topos entry, removed or (disclosed) not. Empty
+    /// outside a project, and when no project hook was topos's. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_hooks: Vec<crate::TriggerReport>,
     /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete, or
     /// the teardown never got that far).
     pub sidecar_removed: bool,

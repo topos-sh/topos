@@ -2316,6 +2316,111 @@ fn agents_remove_leaves_the_pick_when_cleanup_fails() {
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
+/// A hook removal that DEGRADES is an incomplete cleanup, never a silent one: the entry may
+/// still be live in a file topos could not parse (or reach through the rail), and the presence
+/// probe fails closed there, so it would say nothing. The pick stays, the receipt names the file
+/// and the reason, and the run fails.
+#[test]
+fn agents_remove_keeps_the_pick_when_a_hook_removal_degrades() {
+    let rig = pick_rig("agents-remove-degrades", &["claude-code", "cursor"]);
+    rig.stdout(&["init", "-a", "claude-code", "-a", "cursor"]);
+    let hook = rig.project.join(".cursor/hooks.json");
+    assert!(std::fs::read_to_string(&hook).unwrap().contains("topos"));
+    // The hook file is no longer JSON: nothing in it can be proven, or removed.
+    let malformed = b"{ not json\n";
+    std::fs::write(&hook, malformed).unwrap();
+
+    let (status, v) = rig.json(&["--json", "agents", "remove", "cursor", "--yes"]);
+    assert!(!status.success(), "{v}");
+    assert_eq!(v["error"]["code"], "AGENT_REMOVE_INCOMPLETE", "{v}");
+    let out = rig.run(&["agents", "remove", "cursor", "--yes"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.contains("cursor stays picked"),
+        "the pick stays, said: {stderr}"
+    );
+    assert!(
+        stderr.contains(".cursor/hooks.json (topos could not prove which entry in it is its own)"),
+        "the file and the reason: {stderr}"
+    );
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "cursor"],
+        "the pick is unchanged: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&hook).unwrap(),
+        malformed,
+        "a file topos cannot read is never written"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// A slug the harness table no longer knows (a row a newer downloaded table dropped) is kept in
+/// the pick as written: `topos agents` marks it, an `add` beside it is never blocked by it, and
+/// `agents remove` can always take it out. Only the slugs a verb ADDS are checked against the
+/// table.
+#[test]
+fn a_slug_the_table_dropped_can_still_be_removed_and_never_blocks_an_add() {
+    let rig = pick_rig("dropped-slug", &["claude-code", "codex", "cursor"]);
+    rig.write_manifest("schema = 1\n");
+    rig.write_project_pick(&["claude-code", "old-agent"]);
+    let listing = rig.stdout(&["agents"]);
+    assert!(
+        listing.starts_with(
+            "This project (.topos/agents.json): claude-code, old-agent (not in this table)\n"
+        ),
+        "{listing}"
+    );
+    let (status, v) = rig.json(&["--json", "agents"]);
+    assert!(status.success());
+    assert_eq!(
+        v["data"]["agents"],
+        serde_json::json!(["claude-code", "old-agent"])
+    );
+    assert_eq!(v["data"]["not_in_table"], serde_json::json!(["old-agent"]));
+
+    rig.stdout(&["agents", "add", "codex"]);
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "old-agent", "codex"],
+        "the add lands beside the dropped slug"
+    );
+    // A slug the table does not know that is NOT in the pick is still refused on an add.
+    let (status, v) = rig.json(&["--json", "agents", "add", "never-here"]);
+    assert!(!status.success());
+    assert_eq!(v["error"]["code"], "UNKNOWN_AGENT", "{v}");
+
+    let receipt = rig.stdout(&["agents", "remove", "old-agent", "--yes"]);
+    assert!(
+        receipt.starts_with("Removed old-agent from this project."),
+        "{receipt}"
+    );
+    assert_eq!(
+        agents_of(&rig.project_pick().unwrap()),
+        ["claude-code", "codex"]
+    );
+    // One that is neither in the table nor in the pick is refused by name, as before.
+    let (status, v) = rig.json(&["--json", "agents", "remove", "never-here"]);
+    assert!(!status.success());
+    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{v}");
+    // The machine file the same way.
+    rig.write_machine_pick(&["cursor", "old-agent"]);
+    let out = rig.run_at(
+        &rig.home,
+        &["agents", "remove", "-g", "old-agent", "--yes"],
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(agents_of(&rig.machine_pick().unwrap()), ["cursor"]);
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
 #[test]
 fn gitignore_append_is_idempotent() {
     let rig = pick_rig("gitignore", &["claude-code", "codex"]);
@@ -2554,6 +2659,149 @@ fn a_project_sweep_keeps_the_built_in_for_the_pick() {
     rig.stdout(&["install"]);
     assert!(claude_copy.is_file(), "the sweep put the copy back");
     assert!(!codex_copy.exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// `remove topos` acts at the store the pick stands in where you are: inside a checkout with a
+/// pick of its own it takes the PROJECT copies and records the opt-out in the project store
+/// (the next sweep re-places nothing there); `-g` keeps the machine's. `add topos` restores at
+/// the same scope.
+#[test]
+fn remove_topos_in_a_checkout_with_its_own_pick_acts_on_the_project() {
+    let rig = pick_rig("remove-topos-project", &["claude-code"]);
+    let out = rig.run_at(&rig.home, &["init", "-g", "-a", "claude-code"], &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    rig.stdout(&["init", "-a", "claude-code"]);
+    let home_copy = rig.home.join(".claude/skills/topos/SKILL.md");
+    let project_copy = rig.project.join(".claude/skills/topos/SKILL.md");
+    assert!(home_copy.is_file() && project_copy.is_file());
+
+    // The describe names the project's copy, not the home's.
+    let (status, v) = rig.json(&["--json", "remove", "topos"]);
+    assert!(status.success(), "{v}");
+    let dirs = v["data"]["describe"]["items"][0]["dest_dirs"].clone();
+    assert_eq!(
+        dirs,
+        serde_json::json!([rig.project.join(".claude/skills/topos").to_string_lossy()]),
+        "{v}"
+    );
+    let receipt = rig.stdout(&["remove", "topos", "--yes"]);
+    assert!(receipt.starts_with("Removed 'topos'"), "{receipt}");
+    assert!(!project_copy.exists(), "the project copy is gone");
+    assert!(home_copy.is_file(), "the machine's copy stays");
+    // The opt-out is the project's: neither sweep brings the copy back.
+    rig.stdout(&["install"]);
+    let out = rig.run(&["install", "--quiet", "--ttl", "0", "--hook", "claude-code"]);
+    assert!(out.status.success());
+    assert!(
+        !project_copy.exists(),
+        "the project sweep honors the opt-out"
+    );
+    assert!(home_copy.is_file());
+
+    // `-g` from the same checkout is the machine's opt-out.
+    let receipt = rig.stdout(&["remove", "-g", "topos", "--yes"]);
+    assert!(receipt.starts_with("Removed 'topos'"), "{receipt}");
+    assert!(!home_copy.exists(), "the machine's copy is gone");
+
+    // The restores, each at its own scope.
+    let receipt = rig.stdout(&["add", "topos"]);
+    assert!(receipt.contains(".claude/skills/topos"), "{receipt}");
+    assert!(project_copy.is_file(), "the project copy is back");
+    assert!(!home_copy.exists(), "the machine's opt-out stands");
+    rig.stdout(&["add", "-g", "topos"]);
+    assert!(home_copy.is_file(), "the machine's copy is back");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// `uninstall --yes` scrubs the hooks of the checkout it ran in; another checkout keeps its hook
+/// (the receipt says so), and the `topos install --quiet` that hook fires is INERT once the
+/// machine store is gone: exit 0, nothing on either stream, nothing minted anywhere.
+#[test]
+fn the_quiet_sweep_mints_nothing_after_an_uninstall() {
+    let rig = pick_rig("quiet-after-uninstall", &["claude-code"]);
+    rig.stdout(&["init", "-a", "claude-code"]);
+    let other = rig.root.join("other");
+    std::fs::create_dir_all(other.join(".git")).unwrap();
+    let out = rig.run_at(&other, &["init", "-a", "claude-code"], &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let repo_hook = rig.project.join(".claude/settings.local.json");
+    let other_hook = other.join(".claude/settings.local.json");
+    assert!(
+        std::fs::read_to_string(&repo_hook)
+            .unwrap()
+            .contains("topos install --quiet")
+    );
+    assert!(
+        std::fs::read_to_string(&other_hook)
+            .unwrap()
+            .contains("topos install --quiet")
+    );
+
+    let out = rig.run(&["uninstall", "--yes"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.topos_home().exists(), "the store is gone");
+    assert!(
+        !std::fs::read_to_string(&repo_hook)
+            .unwrap()
+            .contains("topos"),
+        "the checkout the command ran in loses its hook entry"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "claude-code: scrubbed this checkout's auto-update hook from {}",
+            repo_hook.display()
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Other checkouts you set up keep their auto-update hook until you run `topos agents remove` there."
+        ),
+        "{stdout}"
+    );
+    assert!(
+        std::fs::read_to_string(&other_hook)
+            .unwrap()
+            .contains("topos install --quiet"),
+        "the other checkout keeps its hook"
+    );
+
+    // The other checkout's hook fires. With no store there is nothing to do and nothing to say.
+    let other_before = PickRig::files_under(&other, &[]);
+    let home_before = PickRig::files_under(&rig.home, &[]);
+    let out = rig.run_at(
+        &other,
+        &["install", "--quiet", "--ttl", "0", "--hook", "claude-code"],
+        &[],
+    );
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.topos_home().exists(), "the sweep minted no store");
+    assert_eq!(PickRig::files_under(&other, &[]), other_before);
+    assert_eq!(PickRig::files_under(&rig.home, &[]), home_before);
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 

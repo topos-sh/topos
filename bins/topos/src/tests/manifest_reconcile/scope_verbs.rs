@@ -487,8 +487,16 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
     };
-    let err = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true)
-        .expect_err("what a workspace gives you is not this folder's to delete");
+    let err = ops::remove(
+        &ctx,
+        &connectors,
+        &["deploy".to_owned()],
+        &[],
+        None,
+        true,
+        false,
+    )
+    .expect_err("what a workspace gives you is not this folder's to delete");
     let message = crate::render::safe_message(&err);
     assert!(
         message.contains("topos remove -g deploy"),
@@ -1246,8 +1254,16 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
     };
 
     // (a) STILL CLAIMED (the row is in the machine file): today's refusal, verbatim.
-    let err = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, false)
-        .expect_err("a claimed name refuses toward the demand");
+    let err = ops::remove(
+        &ctx,
+        &connectors,
+        &["deploy".to_owned()],
+        &[],
+        None,
+        false,
+        false,
+    )
+    .expect_err("a claimed name refuses toward the demand");
     assert_eq!(
         crate::render::safe_message(&err),
         "'deploy' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
@@ -1259,8 +1275,16 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
     // (b) The row leaves (the ghost window: record + cache provenance remain, demand gone): the
     // false refusal is GONE — the bare run DESCRIBES the permanent delete, note honest.
     rig.write_global("");
-    let outcome = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, false)
-        .expect("the ghost falls through to the classic ladder");
+    let outcome = ops::remove(
+        &ctx,
+        &connectors,
+        &["deploy".to_owned()],
+        &[],
+        None,
+        false,
+        false,
+    )
+    .expect("the ghost falls through to the classic ladder");
     let items = match outcome {
         ops::RemoveOutcome::Described { data, yes_argv } => {
             assert!(yes_argv.contains(&"--yes".to_owned()));
@@ -1281,8 +1305,16 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
     );
 
     // (c) `--yes` applies: dirs + record go, and the receipt's note speaks in the applied tense.
-    let outcome = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true)
-        .expect("the consented apply");
+    let outcome = ops::remove(
+        &ctx,
+        &connectors,
+        &["deploy".to_owned()],
+        &[],
+        None,
+        true,
+        false,
+    )
+    .expect("the consented apply");
     let data = match outcome {
         ops::RemoveOutcome::Applied(d) => d,
         other => panic!("--yes applies: {other:?}"),
@@ -1357,8 +1389,16 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
     // The DESCRIBE names the whole blast radius BEFORE consent: the config files the apply will
     // edit are knowable from the ledger right now, and a `--yes` gate that mentions them only on
     // the receipt afterwards is asking for a decision it did not state.
-    let described = ops::remove(&ctx, &connectors, &["linear".to_owned()], &[], None, false)
-        .expect("the permanent delete describes first");
+    let described = ops::remove(
+        &ctx,
+        &connectors,
+        &["linear".to_owned()],
+        &[],
+        None,
+        false,
+        false,
+    )
+    .expect("the permanent delete describes first");
     let ops::RemoveOutcome::Described { data, .. } = described else {
         panic!("a permanent delete describes first");
     };
@@ -1399,8 +1439,16 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
         "the permanence is the headline, not a clause the note can swallow: {described_tty}"
     );
 
-    let outcome = ops::remove(&ctx, &connectors, &["linear".to_owned()], &[], None, true)
-        .expect("the consented apply");
+    let outcome = ops::remove(
+        &ctx,
+        &connectors,
+        &["linear".to_owned()],
+        &[],
+        None,
+        true,
+        false,
+    )
+    .expect("the consented apply");
     let ops::RemoveOutcome::Applied(data) = outcome else {
         panic!("--yes applies");
     };

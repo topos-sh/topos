@@ -49,8 +49,16 @@ fn a_name_whose_machine_row_still_stands_refuses_toward_the_machine_file() {
     };
 
     // The cwd carries no manifest of its own, so nothing here can drop that row.
-    let err = ops::remove(&ctx, &connectors, &["weather".to_owned()], &[], None, true)
-        .expect_err("a standing machine row is removed by editing the demand");
+    let err = ops::remove(
+        &ctx,
+        &connectors,
+        &["weather".to_owned()],
+        &[],
+        None,
+        true,
+        false,
+    )
+    .expect_err("a standing machine row is removed by editing the demand");
     let detail = err.detail();
     assert!(detail.contains("topos remove -g weather"), "{detail}");
 
@@ -474,8 +482,16 @@ fn a_record_no_row_demands_takes_the_classic_delete_and_spares_the_adopted_folde
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
     };
-    let outcome = ops::remove(&ctx, &connectors, &["weather".to_owned()], &[], None, true)
-        .expect("an undemanded record is the classic ladder's business");
+    let outcome = ops::remove(
+        &ctx,
+        &connectors,
+        &["weather".to_owned()],
+        &[],
+        None,
+        true,
+        false,
+    )
+    .expect("an undemanded record is the classic ladder's business");
     // The RECORD is what ends.
     assert!(
         !rig.layout().skill_dir(&sid).exists(),
@@ -563,6 +579,7 @@ fn a_parent_checkouts_row_refuses_the_nested_classic_delete() {
         &[],
         None,
         true,
+        false,
     )
     .expect_err("a row in the parent checkout is a standing demand");
     let msg = crate::render::safe_message(&err);
@@ -584,6 +601,7 @@ fn a_parent_checkouts_row_refuses_the_nested_classic_delete() {
         &[],
         None,
         true,
+        false,
     )
     .expect("with no row anywhere the classic ladder owns it");
     let ops::RemoveOutcome::Applied(data) = outcome else {

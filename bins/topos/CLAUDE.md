@@ -213,8 +213,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
   machine root + ports the whole-machine set resolves under, so `artifacts` (the uninstall
   describe, and its path rows `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE
-  SAME set, `project_hook_files` names the checkout's hook files a teardown lists and leaves, and
-  `machine_ports` hands the pick-scoped sweeps the same roots. TEARDOWN iterates
+  SAME set, `project_hook_files` + `scrub_project` do the same for the hooks of the checkout the
+  command ran in (named, then scrubbed; other checkouts keep theirs), and `machine_ports` hands
+  the pick-scoped sweeps the same roots. A quiet sweep with no machine store is inert (exit 0,
+  nothing minted), so a hook left in a checkout after `uninstall` costs nothing. TEARDOWN iterates
   `registry::teardown_harnesses()` (the table this machine resolved plus the bundled floor) and
   asks `topos-harness::triggers` for each row's adapter, so no caller knows which machinery
   serves which agent, and a row a newer downloaded table dropped is never one topos stops

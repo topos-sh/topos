@@ -78,9 +78,13 @@ enum Removal {
     },
     /// An untracked copy in an agent dir → a permanent delete of that directory.
     Untracked { name: String, dir: PathBuf },
-    /// The built-in `topos` skill → the durable device opt-out (no sweep re-places it;
-    /// `topos add topos` brings it back).
-    Builtin { dirs: Vec<PathBuf> },
+    /// The built-in `topos` skill → the durable opt-out (no sweep re-places it; `topos add topos`
+    /// brings it back) at the store the pick stands in where the command ran: a checkout's own
+    /// project store (`layout` set), else the machine's ([`super::builtin::scope_layout`]).
+    Builtin {
+        layout: Option<crate::sidecar::Layout>,
+        dirs: Vec<PathBuf>,
+    },
 }
 
 /// Dispatch the `remove` verb: resolve every target (all-or-none), describe (bare) or apply (`--yes`).
@@ -95,6 +99,7 @@ pub(crate) fn remove(
     agents: &[String],
     roots: Option<&DiscoveryRoots>,
     yes: bool,
+    global: bool,
 ) -> Result<RemoveOutcome, ClientError> {
     if targets.is_empty() {
         return Err(ClientError::InvalidArgument(
@@ -123,6 +128,7 @@ pub(crate) fn remove(
             roots,
             agent_filter,
             token,
+            global,
         )?);
     }
 
@@ -206,8 +212,11 @@ pub(crate) fn remove(
                     ctx.fs.remove_dir_all(dir)?;
                 }
             }
-            Removal::Builtin { .. } => {
-                super::builtin::remove_builtin(ctx)?;
+            Removal::Builtin { layout, .. } => {
+                let scoped = layout
+                    .as_ref()
+                    .map(|l| super::pull::ctx_with_layout(ctx, l));
+                super::builtin::remove_builtin(scoped.as_ref().unwrap_or(ctx))?;
             }
         }
     }
@@ -457,6 +466,7 @@ fn project_demand(
 
 /// Classify ONE target: a followed catalog skill (exclusion), a tracked-local (permanent), or an
 /// untracked agent-dir copy (permanent). A workspace / channel target is refused toward the right verb.
+#[allow(clippy::too_many_arguments)] // The one resolver every target passes; each input is a distinct question.
 fn classify(
     ctx: &Ctx<'_>,
     universe: &[resolve::WorkspaceNames],
@@ -464,16 +474,22 @@ fn classify(
     roots: Option<&DiscoveryRoots>,
     agent_filter: Option<&str>,
     token: &str,
+    global: bool,
 ) -> Result<Removal, ClientError> {
     // The built-in `topos` skill — recognized before the grammar (the name is reserved end-to-end,
-    // so it can never shadow a workspace resource): removal is the durable device opt-out.
+    // so it can never shadow a workspace resource): removal is the durable opt-out, at the store
+    // the pick stands in where the command ran (the checkout's own with a pick of its own, else
+    // the machine's; `-g` is the machine's).
     if super::builtin::is_builtin(token) {
-        return Ok(Removal::Builtin {
-            dirs: super::builtin::placement_dirs(ctx)?
-                .into_iter()
-                .map(PathBuf::from)
-                .collect(),
-        });
+        let layout = super::builtin::scope_layout(ctx, global)?;
+        let scoped = layout
+            .as_ref()
+            .map(|l| super::pull::ctx_with_layout(ctx, l));
+        let dirs = super::builtin::placement_dirs(scoped.as_ref().unwrap_or(ctx))?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        return Ok(Removal::Builtin { layout, dirs });
     }
     let parsed = resolve::parse_target(token)?;
     // An explicit `<name>@<agent>` names an untracked agent-dir copy — resolve it through discovery
@@ -703,7 +719,7 @@ fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
             bytes_kept: false,
             note: None,
         },
-        Removal::Builtin { dirs } => RemoveItem {
+        Removal::Builtin { dirs, .. } => RemoveItem {
             name: super::builtin::BUILTIN_NAME.to_owned(),
             kind: RemoveKind::BuiltinOptOut,
             manifest: None,

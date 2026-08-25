@@ -43,6 +43,13 @@
         "type": "string"
       }
     },
+    "project_hooks": {
+      "description": "The scrub of the hooks the checkout the command ran in held (`project_hook_files` on the\ndescribe): one row per file that held a topos entry, removed or (disclosed) not. Empty\noutside a project, and when no project hook was topos's. **Additive.**",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TriggerReport"
+      }
+    },
     "sidecar_removed": {
       "description": "Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete, or\nthe teardown never got that far).",
       "type": "boolean"

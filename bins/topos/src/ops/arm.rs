@@ -18,10 +18,11 @@
 //! preview can DISCLOSE what an apply will touch: [`Triggers::artifacts`] and
 //! [`Triggers::scrub_others`] walk the same set, so `uninstall`'s describe names exactly the
 //! artifacts `uninstall --yes` reaches (and `list --footprint`, a path-typed surface, prints that
-//! set's path rows). [`Triggers::project_hook_files`] is the project half of that disclosure: the
-//! hook files a checkout holds, which a teardown lists and leaves. [`Triggers::machine_ports`]
-//! hands the pick-scoped sweeps the same roots and ports, so `status` probes through the one
-//! layer that holds them.
+//! set's path rows). [`Triggers::project_hook_files`] and [`Triggers::scrub_project`] are the
+//! project half of that pair: the hook files ONE checkout holds (the one the command ran in),
+//! which a teardown names and then scrubs the same way. [`Triggers::machine_ports`] hands the
+//! pick-scoped sweeps the same roots and ports, so `status` probes through the one layer that
+//! holds them.
 
 use std::path::{Path, PathBuf};
 
@@ -58,14 +59,20 @@ enum Breadth<'a> {
     /// resolution above reads `$CLAUDE_CONFIG_DIR` / `$CODEX_HOME` / `$XDG_CONFIG_HOME`, so a rig
     /// that took its breadth from there would aim writes at the developer's real config whenever
     /// one of those happens to be set, whatever temp home it passed. Injecting the adapters is what
-    /// puts that out of reach — an ambient variable has nothing left to redirect.
+    /// puts that out of reach — an ambient variable has nothing left to redirect. `project` is the
+    /// ports the PROJECT walks resolve through when a rig wants them (a project adapter takes an
+    /// explicit root, so no ambient variable can redirect it); `None` keeps those walks empty.
     #[cfg(test)]
-    Explicit(&'a [Box<dyn TriggerAdapter + 'a>]),
+    Explicit {
+        adapters: &'a [Box<dyn TriggerAdapter + 'a>],
+        project: Option<MachinePorts<'a>>,
+    },
 }
 
 /// The machine roots + ports the pick-scoped sweeps resolve triggers through — what
 /// [`Triggers::machine_ports`] hands out in production, and nothing in a rig that stated its
 /// adapters explicitly (there is no home there for a factory to resolve under).
+#[derive(Clone, Copy)]
 pub(crate) struct MachinePorts<'a> {
     pub home: &'a Path,
     pub cfg: &'a dyn ConfigStore,
@@ -107,7 +114,31 @@ impl<'a> Triggers<'a> {
     ) -> Self {
         Self {
             active,
-            breadth: Some(Breadth::Explicit(others)),
+            breadth: Some(Breadth::Explicit {
+                adapters: others,
+                project: None,
+            }),
+        }
+    }
+
+    /// [`Self::machine_of`] whose PROJECT walks ([`Self::project_hook_files`],
+    /// [`Self::scrub_project`]) resolve through `cfg` + `run` under `home` — for the rigs whose
+    /// subject is a checkout's hooks. The user-level breadth stays the explicit set: nothing here
+    /// reaches a config outside the root the test names.
+    #[cfg(test)]
+    pub(crate) fn machine_of_with_project_ports(
+        active: &'a dyn TriggerAdapter,
+        others: &'a [Box<dyn TriggerAdapter + 'a>],
+        home: &'a Path,
+        cfg: &'a dyn ConfigStore,
+        run: &'a dyn CommandRunner,
+    ) -> Self {
+        Self {
+            active,
+            breadth: Some(Breadth::Explicit {
+                adapters: others,
+                project: Some(MachinePorts { home, cfg, run }),
+            }),
         }
     }
 
@@ -122,8 +153,18 @@ impl<'a> Triggers<'a> {
             }),
             None => None,
             #[cfg(test)]
-            Some(Breadth::Explicit(_)) => None,
+            Some(Breadth::Explicit { .. }) => None,
         }
+    }
+
+    /// The ports the PROJECT walks resolve through: the machine's in production, a rig's stated
+    /// project ports otherwise. `None` = no project walk at all.
+    fn project_ports(&self) -> Option<MachinePorts<'_>> {
+        #[cfg(test)]
+        if let Some(Breadth::Explicit { project, .. }) = &self.breadth {
+            return *project;
+        }
+        self.machine_ports()
     }
 
     /// Visit every OTHER supported harness's trigger this machine's scrub reaches. The production
@@ -170,7 +211,7 @@ impl<'a> Triggers<'a> {
                 }
             }
             #[cfg(test)]
-            Some(Breadth::Explicit(adapters)) => {
+            Some(Breadth::Explicit { adapters, .. }) => {
                 for adapter in *adapters {
                     f(adapter.as_ref());
                 }
@@ -191,25 +232,58 @@ impl<'a> Triggers<'a> {
         out
     }
 
-    /// The hook files ONE checkout holds, across every project-capable harness in the teardown
-    /// table and REGARDLESS of the pick — each named only while it is provably topos's right now.
-    /// What `uninstall`'s describe lists as left in place: a project hook is inert without the
-    /// binary, so a teardown never edits it. Empty with no machine ports. Sorted.
-    pub(crate) fn project_hook_files(&self, root: &Path) -> Vec<PathBuf> {
-        let Some(ports) = self.machine_ports() else {
-            return Vec::new();
+    /// Visit every project-capable harness's trigger at ONE checkout, over the teardown table and
+    /// REGARDLESS of the pick (an agent somebody picked and later left out may still hold a hook
+    /// an earlier build wrote there). Nothing with no project ports.
+    fn for_each_project(&self, root: &Path, mut f: impl FnMut(&dyn TriggerAdapter)) {
+        let Some(ports) = self.project_ports() else {
+            return;
         };
         let scope = TriggerScope::Project(root.to_path_buf());
-        let mut out: Vec<PathBuf> = registry::teardown_harnesses()
-            .iter()
-            .filter_map(|h| {
-                triggers::adapter_for_slug_at(h.slug, &scope, ports.home, ports.cfg, ports.run)
-            })
-            .flat_map(|adapter| adapter.artifacts())
-            .filter_map(|artifact| artifact.path().map(Path::to_path_buf))
-            .collect();
+        for harness in registry::teardown_harnesses() {
+            if let Some(adapter) = triggers::adapter_for_slug_at(
+                harness.slug,
+                &scope,
+                ports.home,
+                ports.cfg,
+                ports.run,
+            ) {
+                f(adapter.as_ref());
+            }
+        }
+    }
+
+    /// The hook files ONE checkout holds, across every project-capable harness in the teardown
+    /// table and REGARDLESS of the pick — each named only while it is provably topos's right now.
+    /// What `uninstall`'s describe lists for the checkout the command ran in, and exactly what
+    /// [`Self::scrub_project`] then edits. Empty with no project ports. Sorted.
+    pub(crate) fn project_hook_files(&self, root: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        self.for_each_project(root, |adapter| {
+            out.extend(
+                adapter
+                    .artifacts()
+                    .iter()
+                    .filter_map(|artifact| artifact.path().map(Path::to_path_buf)),
+            );
+        });
         out.sort();
         out.dedup();
+        out
+    }
+
+    /// Scrub the hooks ONE checkout holds (the `uninstall --yes` half of
+    /// [`Self::project_hook_files`]): every project trigger that is provably topos's right now is
+    /// removed surgically, and the rows report what happened. A file that holds no topos entry is
+    /// never opened, so the receipt names exactly the files the describe named. Other checkouts
+    /// keep theirs: a teardown reaches the one it stands in.
+    pub(crate) fn scrub_project(&self, root: &Path) -> Vec<Scrubbed> {
+        let mut out = Vec::new();
+        self.for_each_project(root, |adapter| {
+            if adapter.present() {
+                out.push(Scrubbed::of(adapter, adapter.remove()));
+            }
+        });
         out
     }
 
