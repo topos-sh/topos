@@ -1641,12 +1641,56 @@ pub(crate) fn prefetch_version(
     skill_id: &crate::id::SkillId,
     version_hex: &str,
 ) -> Result<(), ClientError> {
-    let sp = ctx.layout.published(skill_id);
-    // Open the standing store, or birth one — the fresh-checkout case is exactly what a
-    // preflight meets first.
-    let store = match Store::open(&sp.store) {
+    // A bundle this scope ALREADY holds prefetches straight into its own store: the objects land
+    // where the arm below reads them, and nothing else about the run changes.
+    if ctx.fs.exists(&ctx.layout.skill_dir(skill_id)) {
+        return prefetch_into(
+            ctx,
+            &ctx.layout.published(skill_id).store,
+            skill_id,
+            version_hex,
+        );
+    }
+    // A bundle it has NEVER held has no store yet — the ordinary state of a genuine clone, whose
+    // `.topos/` is gitignored whole and so never travels. The proof still has to run, but it must
+    // not mint the PUBLISHED directory: the arm's never-received baseline keys off that
+    // directory's absence, and a store-only directory there would make it skip the sidecar
+    // documents it lays, leaving the rest of the run reading state nobody wrote. So the proof
+    // runs in the scope's staging namespace and is torn down again; what survives it is the
+    // machine-wide blob cache the arm's own fetch then reads — `npm ci` fills a cache and
+    // installs out of it the same way.
+    let (scratch, sp) = ctx.layout.staging(skill_id);
+    if ctx.fs.exists(&scratch) {
+        ctx.fs.remove_dir_all(&scratch)?;
+    }
+    let proved = prefetch_into(ctx, &sp.store, skill_id, version_hex);
+    // Torn down whichever way the proof went: a refused `--frozen` run promises the checkout AND
+    // the store behind it are exactly as it found them.
+    let _ = ctx.fs.remove_dir_all(&scratch);
+    proved
+}
+
+/// Fetch + digest-verify one version into the bare store at `store_dir`, birthing the store when it
+/// is not there yet.
+///
+/// # Errors
+/// The store/plane failure that stopped the fetch, or the integrity failure that stopped the verify.
+fn prefetch_into(
+    ctx: &Ctx<'_>,
+    store_dir: &std::path::Path,
+    skill_id: &crate::id::SkillId,
+    version_hex: &str,
+) -> Result<(), ClientError> {
+    // Open the standing store, or birth one. `Store::init` is `init_bare`: it creates the store
+    // directory itself and NOT the directories above it, so a scope whose store tree does not
+    // exist at all — every genuine clone — needs those laid first. Without that the preflight met
+    // its own first customer with "the local skill store reported an error".
+    let store = match Store::open(store_dir) {
         Ok(store) => store,
-        Err(_) => Store::init(&sp.store)?,
+        Err(_) => {
+            ctx.fs.create_dir_all(store_dir)?;
+            Store::init(store_dir)?
+        }
     };
     let commit = super::parse_hex32(version_hex)?;
     let mut written = WriteBatch::default();

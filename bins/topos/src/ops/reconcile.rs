@@ -1869,6 +1869,16 @@ pub(crate) fn manifest_update(
                             unstageable.push(format!("{name} (malformed id)"));
                             continue;
                         };
+                        // TEACH THE LANE THE PAIR IT JUST RESOLVED. The read lane routes every
+                        // per-skill request by a skill → workspace map it is BORN with, seeded
+                        // from the offline delivery cache — and a genuine clone's store has no
+                        // delivery record for anything, because the whole `.topos/` is gitignored.
+                        // Unbound, `fetch_version` answers `NotFound` for a version the server
+                        // serves perfectly well, and the preflight refused the run.
+                        run.transports
+                            .plane
+                            .as_plane()
+                            .bind_skill(&run.session.workspace_id, &skill_id);
                         let run_ctx = super::pull::ctx_with_store(
                             ctx,
                             &store_layout,
@@ -1883,8 +1893,17 @@ pub(crate) fn manifest_update(
                 }
             }
             if !unstageable.is_empty() {
-                return Err(ClientError::InvalidArgument(format!(
-                    "--frozen: could not stage {} — nothing was placed",
+                // The preflight refuses BEFORE the first placement, so the state this names is
+                // the state the checkout is in: nothing here is half-installed, and the same
+                // command is what runs next.
+                let noun = if unstageable.len() == 1 {
+                    "bundle"
+                } else {
+                    "bundles"
+                };
+                return Err(ClientError::FrozenStageFailed(format!(
+                    "--frozen: could not stage {noun} {} — nothing was placed, so `topos install \
+                     --frozen` is safe to run again",
                     unstageable.join(", ")
                 )));
             }

@@ -580,6 +580,14 @@ pub(crate) enum ClientError {
     /// what the user needs. Sidecar-document parse failures stay [`ClientError::Corrupt`].
     #[error("{0}")]
     InvalidArgument(String),
+    /// `--frozen` could not stage every version `topos.lock` names, so nothing was placed. NOT an
+    /// argument error: the argv was right and the lock was right — the run could not obtain what
+    /// they name (the local store, the filesystem, or the server answering for a version). The
+    /// message is this code's own words — a manifest name plus an already-redacted summary
+    /// ([`crate::render::safe_message`]) — so it is shown VERBATIM, and it names the command to
+    /// run again, which a refused frozen install always leaves safe.
+    #[error("{0}")]
+    FrozenStageFailed(String),
     /// A write-side git store failure.
     #[error("the local skill store reported an error — {0}")]
     Gitstore(#[from] GitstoreError),
@@ -1356,6 +1364,10 @@ impl ClientError {
             // set (which is closed on the client side; agents branch on `outcome`/`retryable`).
             ClientError::Io(_) | ClientError::IoKind { .. } => "IO_ERROR",
             ClientError::InvalidArgument(_) => "INVALID_ARGUMENT",
+            // A run that could not obtain the bytes the lock names is a local/remote FAULT, not a
+            // wrong argv — it takes the filesystem family's code so an agent branches on the same
+            // word it does for every other "this machine could not get at it".
+            ClientError::FrozenStageFailed(_) => "IO_ERROR",
             ClientError::Gitstore(_) => "GIT_STORE_ERROR",
             ClientError::Verify(_) => "INTEGRITY_ERROR",
             ClientError::UnknownSchemaVersion { .. } => "UPGRADE_REQUIRED",
@@ -1523,6 +1535,9 @@ impl ClientError {
             ClientError::Io(_)
             | ClientError::Gitstore(GitstoreError::Io(_))
             | ClientError::Plane(_) => TerminalOutcome::RetryableFailure,
+            // The frozen preflight refuses BEFORE the first placement, so the same command is
+            // exactly what runs next — the retryable class, and the message says so out loud.
+            ClientError::FrozenStageFailed(_) => TerminalOutcome::RetryableFailure,
             // With the OS kind in hand, permanence is decidable: permission-denied, a read-only
             // filesystem, and disk-full will NOT heal on a retry — the retryable bit is the load-bearing
             // part of the machine contract, so it must not steer the agent into a loop. Everything else
