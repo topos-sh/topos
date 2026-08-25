@@ -10,6 +10,16 @@ import "@fontsource/ibm-plex-sans/500.css";
 import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
+/* The app's own stylesheet, imported for its SIDE EFFECT — never as a `?url` string. A `?url`
+   import bakes the hashed asset path into whichever bundle is being built, and this module is
+   built TWICE (once for the server render, once for the browser). The two builds compile
+   app.css independently, so the two copies of that string can name DIFFERENT files: the
+   document then links one stylesheet and the hydrating client asks for another, React finds no
+   match for the `<link>` it is hydrating, and the whole document is thrown away and re-rendered
+   (React #418) — which silently kills every form on the page until it re-mounts. A side-effect
+   import instead puts the file in the route's own CSS chunk, whose URL both sides read from the
+   ONE build manifest, so they cannot disagree. */
+import "./app.css";
 import type { ReactNode } from "react";
 import type { LinksFunction, MetaFunction } from "react-router";
 import {
@@ -22,7 +32,6 @@ import {
   useRouteError,
   useRouteLoaderData,
 } from "react-router";
-import appStylesHref from "./app.css?url";
 import { ErrorScreen } from "./components/error-screen";
 
 export const links: LinksFunction = () => [
@@ -33,7 +42,6 @@ export const links: LinksFunction = () => [
   { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
   { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
   { rel: "manifest", href: "/site.webmanifest" },
-  { rel: "stylesheet", href: appStylesHref },
 ];
 
 /**
