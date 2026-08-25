@@ -789,3 +789,42 @@ pub(super) fn seed_harness_dirs(home: &Path) {
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(home.join(".openclaw")).unwrap();
 }
+
+/// **Claude Code's own configuration under a fake home** — the one file both its scopes' servers
+/// live in. `~/.claude.json` at the default; a test never sets `$CLAUDE_CONFIG_DIR`.
+pub(super) fn claude_json(home: &Path) -> serde_json::Value {
+    std::fs::read_to_string(home.join(".claude.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The servers Claude Code sees in EVERY project — the file's top-level `mcpServers` — as text, so
+/// the same `contains` assertions every other surface takes read the same way here. `""` when the
+/// file or the slot is absent.
+pub(super) fn claude_user_servers(home: &Path) -> String {
+    slot_text(&claude_json(home), &["mcpServers"])
+}
+
+/// The servers Claude Code sees in ONE checkout — `projects.<its own absolute path>.mcpServers`,
+/// keyed exactly as the agent keys it (the checkout with its symlinks resolved).
+pub(super) fn claude_project_servers(home: &Path, project: &Path) -> String {
+    let key = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
+    slot_text(
+        &claude_json(home),
+        &["projects", &key.to_string_lossy(), "mcpServers"],
+    )
+}
+
+fn slot_text(root: &serde_json::Value, path: &[&str]) -> String {
+    let mut here = root;
+    for key in path {
+        match here.get(*key) {
+            Some(next) => here = next,
+            None => return String::new(),
+        }
+    }
+    here.to_string()
+}

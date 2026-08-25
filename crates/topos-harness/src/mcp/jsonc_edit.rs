@@ -24,6 +24,14 @@
 //! a failed verification never writes. (Byte preservation outside our entries is additionally
 //! pinned by the golden tests; the CST guarantees it by construction.)
 //!
+//! **The SLOT.** Every dialect names the key path its entries sit under; one surface names its own
+//! instead. Claude Code's `.claude.json` holds servers twice — top-level `mcpServers` for every
+//! project, and `projects.<the checkout's absolute path>.mcpServers` for one directory — and the
+//! second path is only knowable at runtime. A caller may therefore pass a `slot` that replaces the
+//! dialect's path for that one edit; everything else (creation of missing parents, the prune of
+//! what a removal emptied, and every verification) reads the path it was handed, so a nested slot
+//! is edited under exactly the rules a top-level one is.
+//!
 //! When the file is absent (or holds only whitespace) a minimal document is synthesized —
 //! 2-space indent, trailing newline — and the outcome reports `created_file` so the caller can
 //! record whole-file ownership.
@@ -145,6 +153,17 @@ fn dialect_spec(dialect: McpDialect) -> Option<DialectSpec> {
     })
 }
 
+/// The key path THIS edit works under: the caller's `slot` when it named one, else the dialect's
+/// own. One resolution, read by every step of an edit — the classification, the CST walk, the
+/// prune, and both halves of the verification — so a nested slot can never be edited under one
+/// path and verified under another.
+fn key_path<'s>(spec: &DialectSpec, slot: Option<&'s [String]>) -> Vec<&'s str> {
+    match slot {
+        Some(keys) => keys.iter().map(String::as_str).collect(),
+        None => spec.path.to_vec(),
+    }
+}
+
 /// Compute the placement plan for one JSON(C) surface. See the module doc for the contract.
 #[must_use]
 pub fn apply(
@@ -152,6 +171,7 @@ pub fn apply(
     current: Option<&[u8]>,
     desired: &[McpEntry],
     prior: &BTreeMap<String, String>,
+    slot: Option<&[String]>,
 ) -> ApplyOutcome {
     // UNREPRESENTABLE, not reworded: the dialect set is closed and [`super::apply`] — the one
     // dispatcher — routes `CodexToml` and `HermesYaml` to their own editors before this is
@@ -160,6 +180,8 @@ pub fn apply(
     // do nothing with it; a dispatcher invariant is asserted, never worded.
     let spec = dialect_spec(dialect)
         .unwrap_or_else(|| unreachable!("mcp::apply routes non-JSON(C) dialects to their editor"));
+    let path = key_path(&spec, slot);
+    let path = path.as_slice();
     if let Err(reason) = validate_desired(desired) {
         return unprovable(reason);
     }
@@ -179,7 +201,7 @@ pub fn apply(
                 .push((e.key.clone(), desired_fps[i].clone()));
         }
         return outcome(
-            EditPlan::Write(fresh_doc(dialect, &spec, desired)),
+            EditPlan::Write(fresh_doc(dialect, path, desired)),
             rec,
             true,
         );
@@ -192,7 +214,7 @@ pub fn apply(
         Ok(v) => v,
         Err(reason) => return unprovable(reason),
     };
-    let entries_in = match entries_view(&view, spec.path) {
+    let entries_in = match entries_view(&view, path) {
         Ok(map) => map,
         Err(reason) => return unprovable(reason),
     };
@@ -224,11 +246,11 @@ pub fn apply(
             spec.name
         ));
     }
-    if let Err(reason) = edit(&root, &spec, dialect, desired, &rec) {
+    if let Err(reason) = edit(&root, path, dialect, desired, &rec) {
         return unprovable(reason);
     }
     let out_text = root.to_string();
-    if let Err(reason) = verify(&spec, text, &out_text, desired, &desired_fps, &rec) {
+    if let Err(reason) = verify(&spec, path, text, &out_text, desired, &desired_fps, &rec) {
         return unprovable(reason);
     }
     outcome(EditPlan::Write(out_text.into_bytes()), rec, false)
@@ -248,7 +270,7 @@ pub(crate) fn round_trips(dialect: McpDialect, text: &str) -> bool {
 
 /// Read the surface without writing: `key → fingerprint` for every `topos-`-prefixed entry.
 #[must_use]
-pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
+pub fn observe(dialect: McpDialect, current: Option<&[u8]>, slot: Option<&[String]>) -> Observed {
     let unreadable = Observed {
         entries: BTreeMap::new(),
         parseable: false,
@@ -268,7 +290,7 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
     let Ok(view) = parse_view(&spec, text) else {
         return unreadable;
     };
-    let Ok(entries) = entries_view(&view, spec.path) else {
+    let Ok(entries) = entries_view(&view, &key_path(&spec, slot)) else {
         return unreadable;
     };
     let mut out = BTreeMap::new();
@@ -354,14 +376,14 @@ fn walk_selector(value: &Value, path: &[&str], out: &mut Vec<super::SeenEntry>) 
 /// unreadable answers `true` (the caller's whole-file-ownership reasoning fails TOWARD keeping
 /// the file).
 #[must_use]
-pub fn holds_unmanaged(dialect: McpDialect, bytes: &[u8]) -> bool {
+pub fn holds_unmanaged(dialect: McpDialect, bytes: &[u8], slot: Option<&[String]>) -> bool {
     let Some(spec) = dialect_spec(dialect) else {
         return true;
     };
     let Ok(root) = serde_json::from_slice::<Value>(bytes) else {
         return true;
     };
-    walk_unmanaged(&root, spec.path, dialect)
+    walk_unmanaged(&root, &key_path(&spec, slot), dialect)
 }
 
 /// The recursive half of [`holds_unmanaged`]: at each level of the key path only the slot key
@@ -518,7 +540,7 @@ fn navigate(root: &CstRootNode, path: &[&str]) -> Option<CstObject> {
 
 fn edit(
     root: &CstRootNode,
-    spec: &DialectSpec,
+    path: &[&str],
     dialect: McpDialect,
     desired: &[McpEntry],
     rec: &Reconcile,
@@ -526,7 +548,7 @@ fn edit(
     let mut obj = root
         .object_value()
         .ok_or_else(|| "config root is not a JSON object".to_owned())?;
-    for key in spec.path {
+    for key in path {
         obj = match obj.get(key) {
             Some(prop) => prop
                 .object_value()
@@ -556,7 +578,7 @@ fn edit(
         obj.append(&entry.key, to_input(&rendered(dialect, entry)?));
     }
     if !rec.removes.is_empty() {
-        prune_emptied_path(root, spec.path);
+        prune_emptied_path(root, path);
     }
     Ok(())
 }
@@ -616,7 +638,7 @@ fn to_input(v: &Value) -> CstInputValue {
 
 /// The minimal fresh document for an absent file — 2-space indent, trailing newline, entries
 /// sorted by key.
-fn fresh_doc(dialect: McpDialect, spec: &DialectSpec, desired: &[McpEntry]) -> Vec<u8> {
+fn fresh_doc(dialect: McpDialect, path: &[&str], desired: &[McpEntry]) -> Vec<u8> {
     let mut entries = Map::new();
     let sorted: BTreeMap<&str, &McpEntry> = desired.iter().map(|e| (e.key.as_str(), e)).collect();
     for (key, entry) in sorted {
@@ -629,7 +651,7 @@ fn fresh_doc(dialect: McpDialect, spec: &DialectSpec, desired: &[McpEntry]) -> V
     // Build outside-in along the path, then add the dialect's fresh-file siblings. Keys are
     // inserted alphabetically so serialization is deterministic under either map backend.
     let mut value = Value::Object(entries);
-    for key in spec.path.iter().rev() {
+    for key in path.iter().rev() {
         let mut wrap = Map::new();
         wrap.insert((*key).to_owned(), value);
         value = Value::Object(wrap);
@@ -656,6 +678,7 @@ fn fresh_doc(dialect: McpDialect, spec: &DialectSpec, desired: &[McpEntry]) -> V
 /// downgrades to `Unprovable` — a failed verification never writes.
 fn verify(
     spec: &DialectSpec,
+    path: &[&str],
     input: &str,
     output: &str,
     desired: &[McpEntry],
@@ -677,10 +700,10 @@ fn verify(
         .collect();
 
     let empty = Map::new();
-    let out_entries = entries_view(&out_view, spec.path)
+    let out_entries = entries_view(&out_view, path)
         .map_err(|_| surprise("output key path"))?
         .unwrap_or(&empty);
-    let in_entries = entries_view(&in_view, spec.path)
+    let in_entries = entries_view(&in_view, path)
         .map_err(|_| surprise("input key path"))?
         .unwrap_or(&empty);
 
@@ -713,7 +736,7 @@ fn verify(
     }
     // Everything OUTSIDE the key path is structurally unchanged (the path itself is stripped
     // from both sides, normalizing the remove-emptied prune).
-    if strip_path(in_view, spec.path) != strip_path(out_view, spec.path) {
+    if strip_path(in_view, path) != strip_path(out_view, path) {
         return Err(surprise("content outside the managed path changed"));
     }
     Ok(())
@@ -808,6 +831,7 @@ mod tests {
             None,
             std::slice::from_ref(&e),
             &none,
+            None,
         );
         assert!(out.created_file);
         assert_eq!(
@@ -824,6 +848,7 @@ mod tests {
             None,
             std::slice::from_ref(&e),
             &none,
+            None,
         );
         assert_eq!(
             write_of(&out),
@@ -835,13 +860,14 @@ mod tests {
             None,
             std::slice::from_ref(&e),
             &none,
+            None,
         );
         assert_eq!(
             write_of(&out),
             "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {\n    \"topos-acme-linear\": {\n      \"enabled\": true,\n      \"type\": \"remote\",\n      \"url\": \"https://mcp.example/linear\"\n    }\n  }\n}\n"
         );
 
-        let out = apply(McpDialect::OpenclawJson, None, &[e], &none);
+        let out = apply(McpDialect::OpenclawJson, None, &[e], &none, None);
         assert_eq!(
             write_of(&out),
             "{\n  \"mcp\": {\n    \"servers\": {\n      \"topos-acme-linear\": {\n        \"transport\": \"streamable-http\",\n        \"url\": \"https://mcp.example/linear\"\n      }\n    }\n  }\n}\n"
@@ -856,6 +882,7 @@ mod tests {
             Some(b"  \n"),
             std::slice::from_ref(&e),
             &BTreeMap::new(),
+            None,
         );
         assert!(out.created_file, "whitespace carries no user content");
         assert!(matches!(out.plan, EditPlan::Write(_)));
@@ -875,6 +902,7 @@ mod tests {
             Some(USER.as_bytes()),
             std::slice::from_ref(&v1),
             &BTreeMap::new(),
+            None,
         );
         assert!(!out.created_file);
         let after_add = write_of(&out);
@@ -892,6 +920,7 @@ mod tests {
             Some(after_add.as_bytes()),
             std::slice::from_ref(&v1),
             &ledger1,
+            None,
         );
         assert_eq!(again.plan, EditPlan::Leave);
         assert_eq!(
@@ -905,6 +934,7 @@ mod tests {
             Some(after_add.as_bytes()),
             std::slice::from_ref(&v2),
             &ledger1,
+            None,
         );
         assert_eq!(
             out.states,
@@ -924,6 +954,7 @@ mod tests {
             Some(after_update.as_bytes()),
             &[],
             &ledger2,
+            None,
         );
         assert_eq!(
             out.states,
@@ -948,6 +979,7 @@ mod tests {
             Some(USER.as_bytes()),
             std::slice::from_ref(&e),
             &BTreeMap::new(),
+            None,
         );
         let after_add = write_of(&out);
         assert!(after_add.contains(
@@ -968,6 +1000,7 @@ mod tests {
             Some(after_add.as_bytes()),
             &[],
             &ledger1,
+            None,
         );
         assert_eq!(write_of(&out), USER);
     }
@@ -991,6 +1024,7 @@ mod tests {
             Some(USER.as_bytes()),
             std::slice::from_ref(&v1),
             &BTreeMap::new(),
+            None,
         );
         let after_add = write_of(&out);
         assert!(after_add.contains("\"command\": \"npx\""), "{after_add}");
@@ -1012,6 +1046,7 @@ mod tests {
             Some(after_add.as_bytes()),
             std::slice::from_ref(&v1),
             &ledger,
+            None,
         );
         assert_eq!(again.plan, EditPlan::Leave);
         assert_eq!(
@@ -1023,6 +1058,7 @@ mod tests {
             Some(after_add.as_bytes()),
             std::slice::from_ref(&v2),
             &ledger,
+            None,
         );
         assert_eq!(
             updated.states,
@@ -1040,6 +1076,7 @@ mod tests {
             Some(after_update.as_bytes()),
             &[],
             &ledger2,
+            None,
         );
         assert_eq!(write_of(&removed), USER);
 
@@ -1049,6 +1086,7 @@ mod tests {
             None,
             std::slice::from_ref(&v1),
             &BTreeMap::new(),
+            None,
         );
         let fresh = write_of(&out);
         assert!(
@@ -1076,6 +1114,7 @@ mod tests {
             Some(DRIFTED.as_bytes()),
             &[newer],
             &prior,
+            None,
         );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
@@ -1094,6 +1133,7 @@ mod tests {
             Some(DRIFTED.as_bytes()),
             &[],
             &prior,
+            None,
         );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
@@ -1112,6 +1152,7 @@ mod tests {
             Some(FOREIGN.as_bytes()),
             &[],
             &BTreeMap::new(),
+            None,
         );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
@@ -1126,6 +1167,7 @@ mod tests {
             Some(FOREIGN.as_bytes()),
             &[entry("topos-y", "https://ours")],
             &BTreeMap::new(),
+            None,
         );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
@@ -1144,6 +1186,7 @@ mod tests {
             Some(b"// mine\n{\"mcpServers\": {}}\n"),
             &e,
             &none,
+            None,
         );
         let EditPlan::Unprovable(reason) = &out.plan else {
             panic!("expected Unprovable")
@@ -1152,10 +1195,10 @@ mod tests {
         assert!(out.states.is_empty() && out.fingerprints.is_empty());
 
         // Plain garbage.
-        let out = apply(McpDialect::CursorJson, Some(b"not json"), &e, &none);
+        let out = apply(McpDialect::CursorJson, Some(b"not json"), &e, &none, None);
         assert!(matches!(out.plan, EditPlan::Unprovable(_)));
         // A non-object root.
-        let out = apply(McpDialect::CursorJson, Some(b"[1,2]\n"), &e, &none);
+        let out = apply(McpDialect::CursorJson, Some(b"[1,2]\n"), &e, &none, None);
         assert!(matches!(out.plan, EditPlan::Unprovable(_)));
         // The key path present but not an object.
         let out = apply(
@@ -1163,10 +1206,11 @@ mod tests {
             Some(b"{\"mcpServers\": 3}\n"),
             &e,
             &none,
+            None,
         );
         assert!(matches!(out.plan, EditPlan::Unprovable(_)));
         // Non-UTF-8 bytes.
-        let out = apply(McpDialect::CursorJson, Some(&[0xff, 0xfe]), &e, &none);
+        let out = apply(McpDialect::CursorJson, Some(&[0xff, 0xfe]), &e, &none, None);
         assert!(matches!(out.plan, EditPlan::Unprovable(_)));
     }
 
@@ -1177,7 +1221,13 @@ mod tests {
         // Comments + trailing commas are legal JSONC — the edit proceeds and preserves them
         // byte-for-byte.
         const JSONC: &str = "{\n  // gateway config\n  \"mcp\": {\n    \"servers\": {\n      \"mine\": {\n        \"url\": \"https://user\",\n      },\n    },\n  },\n}\n";
-        let out = apply(McpDialect::OpenclawJson, Some(JSONC.as_bytes()), &e, &none);
+        let out = apply(
+            McpDialect::OpenclawJson,
+            Some(JSONC.as_bytes()),
+            &e,
+            &none,
+            None,
+        );
         let text = write_of(&out);
         assert!(
             text.contains("// gateway config"),
@@ -1187,7 +1237,13 @@ mod tests {
         assert!(text.contains("\"topos-a\""));
 
         // Single quotes are JSON5, beyond JSONC — Unprovable with an honest reason.
-        let out = apply(McpDialect::OpenclawJson, Some(b"{'mcp': {}}\n"), &e, &none);
+        let out = apply(
+            McpDialect::OpenclawJson,
+            Some(b"{'mcp': {}}\n"),
+            &e,
+            &none,
+            None,
+        );
         let EditPlan::Unprovable(reason) = &out.plan else {
             panic!("expected Unprovable")
         };
@@ -1207,6 +1263,7 @@ mod tests {
             Some(HAS_MCP.as_bytes()),
             &e,
             &none,
+            None,
         );
         let text = write_of(&out);
         assert!(text.contains("\"port\": 9000"), "{text}");
@@ -1216,7 +1273,13 @@ mod tests {
 
         // Neither `mcp` nor `servers` exists.
         const NO_MCP: &str = "{\n  \"theme\": \"dark\"\n}\n";
-        let out = apply(McpDialect::OpenclawJson, Some(NO_MCP.as_bytes()), &e, &none);
+        let out = apply(
+            McpDialect::OpenclawJson,
+            Some(NO_MCP.as_bytes()),
+            &e,
+            &none,
+            None,
+        );
         let text = write_of(&out);
         assert!(text.contains("\"theme\": \"dark\""));
         assert!(text.contains("\"mcp\""));
@@ -1229,6 +1292,7 @@ mod tests {
             Some(text.as_bytes()),
             &[],
             &ledger1,
+            None,
         );
         assert_eq!(write_of(&out), NO_MCP, "created parents pruned on remove");
     }
@@ -1247,7 +1311,7 @@ mod tests {
             McpDialect::OpencodeJson,
             McpDialect::OpenclawJson,
         ] {
-            let out = apply(dialect, None, &e, &none);
+            let out = apply(dialect, None, &e, &none, None);
             let text = write_of(&out);
             assert!(text.contains("\"headers\""), "{dialect:?}: {text}");
             assert!(text.contains("\"X-T\": \"v\""), "{dialect:?}: {text}");
@@ -1262,7 +1326,7 @@ mod tests {
     #[test]
     fn observe_reads_without_writing() {
         // Absent → readable, empty.
-        let o = observe(McpDialect::CursorJson, None);
+        let o = observe(McpDialect::CursorJson, None, None);
         assert!(o.parseable && o.entries.is_empty());
         // A user + managed mix → only the topos- entries, fingerprinted.
         let placed = entry("topos-x", "https://one");
@@ -1271,18 +1335,18 @@ mod tests {
             Some(b"{\n  \"mcpServers\": {\n    \"linear\": {\n      \"url\": \"https://u\"\n    }\n  }\n}\n"),
             std::slice::from_ref(&placed),
             &BTreeMap::new(),
-        ));
-        let o = observe(McpDialect::CursorJson, Some(text.as_bytes()));
+        None));
+        let o = observe(McpDialect::CursorJson, Some(text.as_bytes()), None);
         assert!(o.parseable);
         assert_eq!(
             o.entries,
             ledger(&[("topos-x".to_owned(), fp(McpDialect::CursorJson, &placed))])
         );
         // Unparsable → parseable: false, never a guess.
-        let o = observe(McpDialect::CursorJson, Some(b"{broken"));
+        let o = observe(McpDialect::CursorJson, Some(b"{broken"), None);
         assert!(!o.parseable && o.entries.is_empty());
         // A strict surface carrying comments is unreadable FOR THAT HARNESS.
-        let o = observe(McpDialect::CursorJson, Some(b"// c\n{}"));
+        let o = observe(McpDialect::CursorJson, Some(b"// c\n{}"), None);
         assert!(!o.parseable);
     }
 
@@ -1293,6 +1357,7 @@ mod tests {
             None,
             &[entry("linear", "https://x")],
             &BTreeMap::new(),
+            None,
         );
         assert!(matches!(out.plan, EditPlan::Unprovable(_)));
     }

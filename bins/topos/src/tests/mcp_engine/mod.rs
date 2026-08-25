@@ -11,6 +11,7 @@
 //! states.
 
 mod channel;
+mod claude_json;
 mod engine;
 mod marker;
 mod reconcile;

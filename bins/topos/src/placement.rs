@@ -86,6 +86,70 @@ pub(crate) struct EntriesTarget {
     /// The registry slug whose config this is.
     pub agent: String,
     pub dialect: McpDialect,
+    /// The key path inside that file the entries sit under, when it is not the dialect's own —
+    /// see [`ConfigSurface::Ready`].
+    pub slot: Option<Vec<String>>,
+    /// Whether the containment rail governs this file (see [`ConfigSurface::Ready`]).
+    pub in_checkout: bool,
+}
+
+impl EntriesTarget {
+    /// This target as the surface the converge acts on.
+    pub(crate) fn surface(&self) -> SurfaceAt {
+        SurfaceAt {
+            file: self.file.clone(),
+            dialect: self.dialect,
+            slot: self.slot.clone(),
+            in_checkout: self.in_checkout,
+        }
+    }
+}
+
+/// **One resolved config surface, as everything downstream of the planner acts on it**: which file,
+/// which dialect, which key path inside it, and whether the containment rail governs it. The four
+/// travel together because acting on three of them and re-deriving the fourth is how an edit lands
+/// under one path and is verified under another.
+#[derive(Debug, Clone)]
+pub(crate) struct SurfaceAt {
+    /// The driver surface file.
+    pub file: PathBuf,
+    /// The syntax that file speaks.
+    pub dialect: McpDialect,
+    /// The key path the entries sit under, `None` = the dialect's own.
+    pub slot: Option<Vec<String>>,
+    /// `false` for a MACHINE file a project scope writes — nothing about it is inside the
+    /// checkout, so there is no containment to prove.
+    pub in_checkout: bool,
+}
+
+impl SurfaceAt {
+    /// The slot as the drivers take it.
+    pub(crate) fn slot(&self) -> Option<&[String]> {
+        self.slot.as_deref()
+    }
+}
+
+/// **One agent a plan REACHES, and WHICH of that agent's surfaces at this scope.** Reach is a list
+/// of these rather than of bare slugs because one agent can have two project files: the one a
+/// checkout gets by default, and the second one a row's own `dest` may name instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reach {
+    /// The registry slug.
+    pub slug: String,
+    /// Whether a `dest` entry named the agent's SECOND project file rather than the surface the
+    /// default reach writes. Always `false` at machine scope, where an agent has one surface.
+    pub dest_named: bool,
+}
+
+impl From<&str> for Reach {
+    /// A bare slug reaches the agent's DEFAULT surface at this scope — the one a row with no
+    /// `dest`, and every caller that narrows by agent rather than by file, means.
+    fn from(slug: &str) -> Self {
+        Self {
+            slug: slug.to_owned(),
+            dest_named: false,
+        }
+    }
 }
 
 /// One planned target — the two shapes a bundle's bytes reach an agent through: a DIRECTORY this
@@ -546,12 +610,9 @@ pub(crate) fn dest_plan(
 /// planner (which decides reach) and the converge (which must find the files custody names) ask.
 #[derive(Debug, Clone)]
 pub(crate) enum ConfigSurface {
-    /// A usable surface: the driver file, the path engagement is probed at, and the dialect.
-    Ready {
-        root: PathBuf,
-        file: PathBuf,
-        dialect: McpDialect,
-    },
+    /// A usable surface: the path engagement is probed at, plus the surface the converge acts on
+    /// (its driver file, dialect, key path and containment).
+    Ready { root: PathBuf, at: SurfaceAt },
     /// The harness has no config surface AT THIS SCOPE (a project scope never falls back to the
     /// user surface). `note` is the phrase the receipt states.
     NotSupported { note: &'static str },
@@ -567,29 +628,89 @@ pub(crate) fn config_surface(
     home: &Path,
     project_root: Option<&Path>,
 ) -> ConfigSurface {
+    config_surface_at(h, home, project_root, false)
+}
+
+/// [`config_surface`], told which of the agent's project files a row asked for. `dest_named` picks
+/// the SECOND project file — the one only an explicit `dest` reaches — and is meaningless at
+/// machine scope, where an agent has one surface.
+///
+/// Three shapes resolve here, and the third is why this is one function:
+/// - a project file INSIDE the checkout (`.mcp.json`, `.cursor/mcp.json`): the containment rail
+///   runs before any read or write, and a path that leaves the checkout is refused, never
+///   redirected;
+/// - a MACHINE file at machine scope (the ordinary user surface);
+/// - a MACHINE file at PROJECT scope — Claude Code's own `.claude.json`, whose entries for this
+///   checkout sit in a slot keyed by the checkout's absolute path. Nothing is written inside the
+///   checkout, so there is nothing for the rail to prove; what stands in its place is that the
+///   edit touches exactly the one slot and leaves every other byte of the file alone.
+pub(crate) fn config_surface_at(
+    h: &registry::KnownHarness,
+    home: &Path,
+    project_root: Option<&Path>,
+    dest_named: bool,
+) -> ConfigSurface {
     let resolved = match project_root {
-        Some(root) => match h.mcp().and_then(|m| m.project) {
-            Some((rel, dialect)) => {
-                let path = root.join(rel);
-                // THE CONTAINMENT RAIL, before ANY read or write: the resolved path (symlinks
-                // followed for the check) must stay inside the checkout.
-                if !within_project(root, &path) {
-                    return ConfigSurface::Escaped { path };
+        Some(root) => {
+            let mcp = h.mcp();
+            let named = dest_named
+                .then(|| mcp.and_then(|m| m.project_dest))
+                .flatten()
+                .map(|(rel, dialect)| registry::McpProjectSurface {
+                    loc: registry::McpProjectLoc::InCheckout(rel),
+                    dialect,
+                });
+            match named.or_else(|| mcp.and_then(|m| m.project)) {
+                Some(registry::McpProjectSurface {
+                    loc: registry::McpProjectLoc::InCheckout(rel),
+                    dialect,
+                }) => {
+                    let path = root.join(rel);
+                    // THE CONTAINMENT RAIL, before ANY read or write: the resolved path (symlinks
+                    // followed for the check) must stay inside the checkout.
+                    if !within_project(root, &path) {
+                        return ConfigSurface::Escaped { path };
+                    }
+                    Some((path, dialect, None, true))
                 }
-                Some((path, dialect))
+                Some(registry::McpProjectSurface {
+                    loc: registry::McpProjectLoc::Machine(spec),
+                    dialect,
+                }) => {
+                    let Some(path) = registry::resolve_spec(&spec, home, None) else {
+                        return ConfigSurface::NotSupported {
+                            note: "no project-level config",
+                        };
+                    };
+                    // The slot key IS the directory the agent will see itself started in — the
+                    // checkout with every symlink resolved, which is what a process reports as its
+                    // own working directory.
+                    let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+                    let Some(key) = key.to_str() else {
+                        return ConfigSurface::NotSupported {
+                            note: "this checkout's path cannot be spelled in the agent's config",
+                        };
+                    };
+                    let slot = topos_harness::mcp::project_slot(dialect, key);
+                    Some((path, dialect, slot, false))
+                }
+                None => None,
             }
-            None => None,
-        },
+        }
         None => h
             .mcp()
             .and_then(|m| m.user)
-            .and_then(|s| h.mcp_user_path(home).map(|p| (p, s.dialect))),
+            .and_then(|s| h.mcp_user_path(home).map(|p| (p, s.dialect, None, false))),
     };
     match resolved {
-        Some((root, dialect)) => ConfigSurface::Ready {
-            file: surface_file(&root, dialect),
+        Some((root, dialect, slot, in_checkout)) => ConfigSurface::Ready {
+            at: SurfaceAt {
+                file: surface_file(&root, dialect),
+                dialect,
+                slot,
+                in_checkout,
+            },
             root,
-            dialect,
         },
         None => ConfigSurface::NotSupported {
             note: if project_root.is_some() {
@@ -630,7 +751,7 @@ pub(crate) fn surface_file(path: &Path, dialect: McpDialect) -> PathBuf {
 pub(crate) fn entries_plan(
     ctx: &Ctx<'_>,
     project_root: Option<&Path>,
-    reach: Option<&[String]>,
+    reach: Option<&[Reach]>,
 ) -> PlacementPlan {
     let Some(roots) = &ctx.roots else {
         return PlacementPlan::default(); // no machine roots: no config surface is resolvable
@@ -653,11 +774,12 @@ pub(crate) fn entries_plan_at(
     home: &Path,
     picked: &BTreeSet<String>,
     project_root: Option<&Path>,
-    reach: Option<&[String]>,
+    reach: Option<&[Reach]>,
 ) -> PlacementPlan {
     let mut plan = PlacementPlan::default();
     for h in descriptors {
-        let named = reach.is_some_and(|r| r.iter().any(|s| s == h.slug));
+        let asked = reach.and_then(|r| r.iter().find(|x| x.slug == h.slug));
+        let named = asked.is_some();
         if reach.is_some() && !named {
             continue;
         }
@@ -677,7 +799,7 @@ pub(crate) fn entries_plan_at(
             }
             continue;
         }
-        match config_surface(h, home, project_root) {
+        match config_surface_at(h, home, project_root, asked.is_some_and(|a| a.dest_named)) {
             ConfigSurface::NotSupported { note } => plan.withheld.push(WithheldSurface {
                 agent: h.slug.to_owned(),
                 state: TargetOutcome::Withheld,
@@ -690,11 +812,13 @@ pub(crate) fn entries_plan_at(
                 note: "the config path does not resolve inside this checkout".to_owned(),
                 reason: WithheldReason::Escaped,
             }),
-            ConfigSurface::Ready { file, dialect, .. } => {
+            ConfigSurface::Ready { at, .. } => {
                 plan.targets.push(PlannedTarget::Entries(EntriesTarget {
-                    file,
+                    file: at.file,
                     agent: h.slug.to_owned(),
-                    dialect,
+                    dialect: at.dialect,
+                    slot: at.slot,
+                    in_checkout: at.in_checkout,
                 }));
             }
         }

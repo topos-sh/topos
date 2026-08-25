@@ -210,17 +210,39 @@ mod tests {
         assert!(mcp_harness("not-a-harness").is_none());
     }
 
+    /// A project surface stated as a checkout-relative path — what every row but Claude Code's has.
+    fn in_checkout(path: &'static str, dialect: McpDialect) -> crate::registry::McpProjectSurface {
+        crate::registry::McpProjectSurface {
+            loc: crate::registry::McpProjectLoc::InCheckout(path),
+            dialect,
+        }
+    }
+
     #[test]
     fn surfaces_are_as_specified() {
         let get = |slug: &str| bundled_mcp_row(slug).unwrap().mcp().unwrap();
 
+        // Claude Code alone keeps BOTH scopes in one machine file — its own `.claude.json`, whose
+        // top-level slot serves every project and whose `projects.<dir>` slot serves one checkout.
+        // The `.mcp.json` beside it is the second project file, reached only by a row's `dest`.
         let cc = get("claude-code");
         let s = cc.user.unwrap();
-        assert_eq!(s.dir.root(), Root::ClaudeHome);
-        assert_eq!(s.dir.suffix(), "skills/topos-mcp");
-        assert_eq!(s.dialect, McpDialect::ClaudePluginDir);
+        assert_eq!(s.dir.root(), Root::ClaudeJsonHome);
+        assert_eq!(s.dir.suffix(), ".claude.json");
+        assert_eq!(s.dialect, McpDialect::ClaudeProjectJson);
+        let project = cc.project.expect("claude-code has a project surface");
+        assert_eq!(project.dialect, McpDialect::ClaudeProjectJson);
+        match project.loc {
+            crate::registry::McpProjectLoc::Machine(dir) => {
+                assert_eq!(
+                    (dir.root(), dir.suffix()),
+                    (Root::ClaudeJsonHome, ".claude.json")
+                );
+            }
+            crate::registry::McpProjectLoc::InCheckout(p) => panic!("a machine file, not {p}"),
+        }
         assert_eq!(
-            cc.project,
+            cc.project_dest,
             Some((".mcp.json", McpDialect::ClaudeProjectJson))
         );
 
@@ -233,7 +255,7 @@ mod tests {
         assert_eq!(s.dialect, McpDialect::CodexToml);
         assert_eq!(
             codex.project,
-            Some((".codex/config.toml", McpDialect::CodexToml))
+            Some(in_checkout(".codex/config.toml", McpDialect::CodexToml))
         );
 
         let cursor = get("cursor");
@@ -245,7 +267,7 @@ mod tests {
         assert_eq!(s.dialect, McpDialect::CursorJson);
         assert_eq!(
             cursor.project,
-            Some((".cursor/mcp.json", McpDialect::CursorJson))
+            Some(in_checkout(".cursor/mcp.json", McpDialect::CursorJson))
         );
 
         let oc = get("opencode");
@@ -257,7 +279,7 @@ mod tests {
         assert_eq!(s.dialect, McpDialect::OpencodeJson);
         assert_eq!(
             oc.project,
-            Some(("opencode.json", McpDialect::OpencodeJson))
+            Some(in_checkout("opencode.json", McpDialect::OpencodeJson))
         );
 
         let claw = get("openclaw");
@@ -300,7 +322,7 @@ mod tests {
         );
         assert_eq!(
             get("vscode").project,
-            Some((".vscode/mcp.json", McpDialect::VscodeJson))
+            Some(in_checkout(".vscode/mcp.json", McpDialect::VscodeJson))
         );
         assert_eq!(
             user_of("github-copilot"),
@@ -317,7 +339,7 @@ mod tests {
         );
         assert_eq!(
             get("gemini-cli").project,
-            Some((".gemini/settings.json", McpDialect::GeminiJson))
+            Some(in_checkout(".gemini/settings.json", McpDialect::GeminiJson))
         );
         // Cline's own home — shared by its editor, JetBrains and CLI clients — and NOT the VS Code
         // extension storage older builds used.
@@ -339,7 +361,7 @@ mod tests {
         );
         assert_eq!(
             get("roo").project,
-            Some((".roo/mcp.json", McpDialect::RooJson))
+            Some(in_checkout(".roo/mcp.json", McpDialect::RooJson))
         );
         assert_eq!(
             user_of("windsurf"),
@@ -450,7 +472,7 @@ mod tests {
         // capability narrowing depends on.
         for h in bundled_mcp_rows() {
             let mcp = h.mcp().expect("mcp row");
-            for surface in [mcp.user.map(|u| u.dialect), mcp.project.map(|(_, d)| d)]
+            for surface in [mcp.user.map(|u| u.dialect), mcp.project.map(|p| p.dialect)]
                 .into_iter()
                 .flatten()
             {
@@ -499,7 +521,7 @@ mod tests {
         // Env-rooted rows resolve to the developer's REAL override when one is set (a test can't
         // unset env vars here), so assert the invariant part: the suffix.
         let cc = path("claude-code").unwrap();
-        assert!(cc.ends_with("skills/topos-mcp"), "{cc:?}");
+        assert!(cc.ends_with(".claude.json"), "{cc:?}");
         let codex = path("codex").unwrap();
         assert!(codex.ends_with("config.toml"), "{codex:?}");
         let hermes = path("hermes-agent").unwrap();

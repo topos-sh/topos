@@ -292,7 +292,9 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
 #[test]
 fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
     let home = Scratch::new("entries-plan");
-    let plan_at = |picked: &BTreeSet<String>, project: Option<&Path>, reach: Option<&[String]>| {
+    let plan_at = |picked: &BTreeSet<String>,
+                   project: Option<&Path>,
+                   reach: Option<&[crate::placement::Reach]>| {
         crate::placement::entries_plan_at(&synthetic(), &home.0, picked, project, reach)
     };
     let slugs = |p: &crate::placement::PlacementPlan| -> Vec<String> {
@@ -318,7 +320,7 @@ fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
     );
 
     // A narrowing admits exactly what it names — and says nothing about the rest.
-    let narrowed = plan_at(&all_slugs(), None, Some(&["cursor".to_owned()]));
+    let narrowed = plan_at(&all_slugs(), None, Some(&["cursor".into()]));
     assert_eq!(slugs(&narrowed), vec!["cursor".to_owned()]);
     assert!(withheld(&narrowed).is_empty(), "{:?}", withheld(&narrowed));
 
@@ -341,7 +343,7 @@ fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
     // The row's own `dest` names an agent nobody picked: no entry, and the one line that says
     // why, spelled for the scope (the machine's command carries `-g`).
     let only_claude: BTreeSet<String> = BTreeSet::from(["claude-code".to_owned()]);
-    let asked = plan_at(&only_claude, None, Some(&["cursor".to_owned()]));
+    let asked = plan_at(&only_claude, None, Some(&["cursor".into()]));
     assert!(slugs(&asked).is_empty(), "{:?}", slugs(&asked));
     let w = asked.withheld_for("cursor").expect("disclosed");
     assert_eq!(
@@ -352,7 +354,7 @@ fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
             crate::placement::WithheldReason::NotPicked
         )
     );
-    let asked = plan_at(&only_claude, Some(&project.0), Some(&["cursor".to_owned()]));
+    let asked = plan_at(&only_claude, Some(&project.0), Some(&["cursor".into()]));
     assert_eq!(
         asked.withheld_for("cursor").map(|w| w.note.as_str()),
         Some("not picked: topos agents add cursor")
@@ -423,6 +425,7 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
             None,
             std::slice::from_ref(&entry),
             &BTreeMap::new(),
+            None,
         )
         .plan
         {
@@ -464,7 +467,7 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
         let slug = k.split('/').next().unwrap();
         let h = synthetic().into_iter().find(|h| h.slug == slug).unwrap();
         let dialect = h.mcp().unwrap().user.unwrap().dialect;
-        let observed = mcp::observe(dialect, std::fs::read(&e.file).ok().as_deref());
+        let observed = mcp::observe(dialect, std::fs::read(&e.file).ok().as_deref(), None);
         assert_eq!(
             observed.entries.get("topos-eng-linear"),
             Some(&e.fingerprint),
@@ -2312,7 +2315,7 @@ fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.reach = Some(vec![slug.to_owned()]);
+        d.reach = Some(vec![slug.into()]);
         mcp_engine::converge(
             &io,
             &plan(&io, vec![d.clone()]),
@@ -2503,7 +2506,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
     let cursor = home.0.join(".cursor/mcp.json");
     let placed = std::fs::read_to_string(&cursor).unwrap();
     let real_fp =
-        mcp::observe(McpDialect::CursorJson, Some(placed.as_bytes())).entries["topos-eng-alpha"]
+        mcp::observe(McpDialect::CursorJson, Some(placed.as_bytes()), None).entries["topos-eng-alpha"]
             .clone();
 
     // ORDER (b): the config write LANDED, the custody promotion did not — on disk the custody
@@ -2820,6 +2823,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
         let real_fp = mcp::observe(
             McpDialect::CursorJson,
             std::fs::read(&cursor).ok().as_deref(),
+            None,
         )
         .entries["topos-eng-alpha"]
             .clone();
@@ -3245,7 +3249,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             "fail_at={fail_at}: {out:?}"
         );
         let bytes = std::fs::read(home.0.join(".cursor/mcp.json")).unwrap();
-        let observed = mcp::observe(McpDialect::CursorJson, Some(&bytes));
+        let observed = mcp::observe(McpDialect::CursorJson, Some(&bytes), None);
         let custody = ScopeEntries::load(&fs, &layout).unwrap();
         assert!(custody.doc.pending.is_empty(), "fail_at={fail_at}");
         assert_eq!(
@@ -3320,6 +3324,7 @@ fn a_delivered_gateway_document_places_the_relay_in_every_dialect() {
             None,
             std::slice::from_ref(&entry),
             &BTreeMap::new(),
+            None,
         )
         .plan
         {
@@ -3370,7 +3375,7 @@ fn a_delivered_gateway_document_places_the_relay_in_every_dialect() {
         let slug = k.split('/').next().unwrap();
         let h = synthetic().into_iter().find(|h| h.slug == slug).unwrap();
         let dialect = h.mcp().unwrap().user.unwrap().dialect;
-        let observed = mcp::observe(dialect, std::fs::read(&e.file).ok().as_deref());
+        let observed = mcp::observe(dialect, std::fs::read(&e.file).ok().as_deref(), None);
         assert_eq!(
             observed.entries.get("topos-eng-linear"),
             Some(&e.fingerprint),

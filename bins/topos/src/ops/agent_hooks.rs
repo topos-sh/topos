@@ -425,7 +425,7 @@ mod tests {
         }
         assert!(
             std::fs::read_dir(&home.0).unwrap().next().is_none(),
-            "a project pick writes nothing under ~"
+            "a project pick's hooks write nothing under ~"
         );
         let notes: Vec<(&str, &str)> = absent
             .iter()

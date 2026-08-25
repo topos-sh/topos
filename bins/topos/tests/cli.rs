@@ -1803,6 +1803,23 @@ impl PickRig {
         (out.status, value)
     }
 
+    /// **Claude Code's own configuration on this rig's machine** — where both its machine-wide
+    /// and its per-checkout servers live. The rig isolates `$CLAUDE_CONFIG_DIR`, so the file sits
+    /// inside it exactly as the agent puts it there.
+    fn claude_json(&self) -> PathBuf {
+        self.home.join(".claude").join(".claude.json")
+    }
+
+    /// The key Claude Code files this checkout's own servers under: its absolute path, symlinks
+    /// resolved, which is what a process started there reports as its working directory.
+    fn project_key(&self) -> String {
+        self.project
+            .canonicalize()
+            .unwrap_or_else(|_| self.project.clone())
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn project_pick(&self) -> Option<serde_json::Value> {
         std::fs::read(self.project.join(".topos").join("agents.json"))
             .ok()
@@ -2115,7 +2132,7 @@ fn agents_remove_without_yes_describes_the_loss() {
     mcp_project(&rig);
     let receipt = rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
     assert!(
-        receipt.contains("1 MCP server to .mcp.json"),
+        receipt.contains("1 MCP server to ~/.claude/.claude.json and .codex/config.toml"),
         "the server landed for the picked agents: {receipt}"
     );
     let before = PickRig::files_under(&rig.project, &[".git"]);
@@ -2176,8 +2193,8 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
     let rig = pick_rig("agents-remove-apply", &["claude-code", "codex"]);
     mcp_project(&rig);
     rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
-    let mcp_json = std::fs::read_to_string(rig.project.join(".mcp.json")).unwrap();
-    assert!(mcp_json.contains("weather"), "{mcp_json}");
+    let claude_json = std::fs::read_to_string(rig.claude_json()).unwrap();
+    assert!(claude_json.contains("weather"), "{claude_json}");
     let codex_config = rig.project.join(".codex/config.toml");
     let codex_had_entry = std::fs::read_to_string(&codex_config)
         .map(|t| t.contains("weather"))
@@ -2226,8 +2243,8 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
     );
     assert!(rig.project.join(".claude/settings.local.json").exists());
     assert_eq!(
-        std::fs::read_to_string(rig.project.join(".mcp.json")).unwrap(),
-        mcp_json,
+        std::fs::read_to_string(rig.claude_json()).unwrap(),
+        claude_json,
         "claude-code's entry stays byte-identical"
     );
     assert_eq!(agents_of(&rig.project_pick().unwrap()), ["claude-code"]);
@@ -2244,8 +2261,8 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
         "no empty folder left"
     );
     assert!(
-        !rig.project.join(".mcp.json").exists(),
-        "a wholly-owned config file leaves with its last entry"
+        !std::fs::read_to_string(rig.claude_json()).is_ok_and(|t| t.contains(&rig.project_key())),
+        "the checkout's own slot leaves with its last entry"
     );
     assert!(agents_of(&rig.project_pick().unwrap()).is_empty());
     // A slug not in the pick is refused by name; nothing changes.
@@ -2524,11 +2541,11 @@ fn gitignore_append_is_idempotent() {
     std::fs::write(rig.project.join(".gitignore"), "node_modules\n").unwrap();
     let receipt = rig.stdout(&["init", "-a", "claude-code", "-a", "codex", "--gitignore"]);
     assert!(
-        receipt.contains("Added to .gitignore: .claude/, .mcp.json, .codex/, .agents/.\n"),
+        receipt.contains("Added to .gitignore: .claude/, .codex/, .agents/.\n"),
         "{receipt}"
     );
     assert!(!receipt.contains("not ignored by git"), "{receipt}");
-    let expected = "node_modules\n.claude/\n.mcp.json\n.codex/\n.agents/\n";
+    let expected = "node_modules\n.claude/\n.codex/\n.agents/\n";
     assert_eq!(
         std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
         expected
@@ -2760,9 +2777,16 @@ fn a_fresh_clone_picks_for_itself() {
     // The clone picks, and the same `install` lands the server entry.
     rig.stdout(&["init", "-a", "claude-code"]);
     rig.stdout(&["install"]);
-    let mcp_json = std::fs::read_to_string(rig.project.join(".mcp.json"))
+    let claude_json = std::fs::read_to_string(rig.claude_json())
         .expect("the project's own pick gets the project's server entry");
-    assert!(mcp_json.contains("weather"), "{mcp_json}");
+    assert!(
+        claude_json.contains("weather") && claude_json.contains(&rig.project_key()),
+        "the entry is in THIS checkout's own slot: {claude_json}"
+    );
+    assert!(
+        !rig.project.join(".mcp.json").exists(),
+        "and nothing is written in the repo root"
+    );
     assert!(
         !rig.project.join(".cursor").exists(),
         "the unpicked agent gets nothing"
@@ -3268,14 +3292,14 @@ fn init_gitignore_appends_over_a_standing_pick() {
     assert!(!rig.project.join(".gitignore").exists());
     let again = rig.stdout(&["init", "--gitignore"]);
     assert!(
-        again.contains("Added to .gitignore: .claude/, .mcp.json, .codex/, .agents/.\n"),
+        again.contains("Added to .gitignore: .claude/, .codex/, .agents/.\n"),
         "{again}"
     );
     assert!(!again.contains("not ignored by git"), "{again}");
     assert!(!again.contains("already exists"), "{again}");
     assert_eq!(
         std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
-        ".claude/\n.mcp.json\n.codex/\n.agents/\n"
+        ".claude/\n.codex/\n.agents/\n"
     );
     // A plain `init` on the same tree is still the no-op receipt.
     let plain = rig.stdout(&["init"]);
@@ -3570,7 +3594,7 @@ fn frozen_install_with_a_pick_places_as_before() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("nothing placed"), "{err}");
     assert!(
-        rig.project.join(".mcp.json").exists(),
+        std::fs::read_to_string(rig.claude_json()).is_ok_and(|t| t.contains(&rig.project_key())),
         "the picked agent's config holds the entry"
     );
     assert!(

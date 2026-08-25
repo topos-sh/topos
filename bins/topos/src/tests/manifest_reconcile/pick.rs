@@ -1,6 +1,7 @@
 //! The agents PICK is the one thing placement follows: topos never touches an agent the person
-//! did not pick, whatever is installed; a project pick writes no agent file under the home; and a
-//! `dest` folder the row names is placed as typed, whatever the pick says.
+//! did not pick, whatever is installed; a project pick writes exactly ONE agent file under the
+//! home and nothing else; and a `dest` folder the row names is placed as typed, whatever the pick
+//! says.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -106,10 +107,15 @@ fn a_pick_of_claude_code_writes_nothing_under_cursor_or_codex_dirs() {
     assert!(!proj.0.join(".agents").exists());
 }
 
-/// I2: a PROJECT pick writes no agent file under the home — no skills folder, whatever is
-/// installed there — even with no machine pick at all.
+/// I2: **a PROJECT pick writes exactly one thing under the home, and it is enumerated here.**
+///
+/// Every skills folder a checkout gets is in the checkout: no machine skills root is written,
+/// whatever is installed there, and with no machine pick at all. The ONE exception is deliberate:
+/// Claude Code keeps a checkout's own MCP servers in its own configuration file, under a slot
+/// keyed by that checkout's path — there is no per-project file for them to go in. So the
+/// allowance is that file by name, and the assertion below lists it rather than loosening.
 #[test]
-fn a_project_pick_writes_nothing_under_home() {
+fn a_project_pick_writes_exactly_one_file_under_home() {
     let (rig, plane, dir) = deploy_rig("i2");
     std::fs::remove_file(crate::agents_pick::machine_path(&rig.layout())).unwrap();
     for d in [
@@ -121,12 +127,22 @@ fn a_project_pick_writes_nothing_under_home() {
     ] {
         std::fs::create_dir_all(rig.home.0.join(d)).unwrap();
     }
+    // A SERVER as well as a skill, because the server is the one thing with somewhere to go under
+    // the home: without it this would pass by never exercising the allowance.
+    let dir = dir.with_server(catalog_server(
+        "s_linear",
+        "linear",
+        "https://mcp.example/linear",
+    ));
     let proj = project(
         "i2-co",
-        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+        &format!(
+            "workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n\n[mcp]\nlinear = \
+             \"latest\"\n"
+        ),
     );
     rig.project_pick(&proj.0, &["claude-code", "cursor"]);
-    let before = agent_trees(&rig.home.0);
+    let before = tree(&rig.home.0);
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
     for rel in [".claude/skills/deploy", ".cursor/skills/deploy"] {
@@ -136,11 +152,56 @@ fn a_project_pick_writes_nothing_under_home() {
             out.data.skills
         );
     }
+    // The server landed for the checkout, in the checkout's own slot.
+    let claude = std::fs::read_to_string(rig.home.0.join(".claude.json")).expect("claude's config");
+    let key = proj
+        .0
+        .canonicalize()
+        .unwrap_or_else(|_| proj.0.clone())
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        claude.contains(&key) && claude.contains("linear"),
+        "the checkout's own slot: {claude}"
+    );
+
+    // WHAT IS ALLOWED, enumerated: every path under the home that was not there before is either
+    // topos's own store or that one file. No agent folder, no skills root, nothing else.
+    let after = tree(&rig.home.0);
+    let added: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
+    let allowed = |p: &str| p == ".claude.json" || p == ".topos" || p.starts_with(".topos/");
+    assert!(
+        added.iter().all(|p| allowed(p)),
+        "a project pick wrote something else under the home: {added:?}"
+    );
+    assert!(
+        added.iter().any(|p| *p == ".claude.json"),
+        "the allowance is exercised, not merely permitted: {added:?}"
+    );
     assert_eq!(
         agent_trees(&rig.home.0),
-        before,
-        "no agent file under the home"
+        agent_trees_before(&before),
+        "no agent FOLDER under the home moved"
     );
+}
+
+/// The agent-folder half of [`agent_trees`], recomputed from a whole-home snapshot — so I2 can
+/// take one snapshot and still say the folder rule and the one-file rule separately.
+fn agent_trees_before(before: &[String]) -> Vec<(String, Vec<String>)> {
+    AGENT_DIRS
+        .iter()
+        .map(|d| {
+            let prefix = format!("{d}/");
+            (
+                (*d).to_owned(),
+                before
+                    .iter()
+                    .filter(|p| p.starts_with(&prefix))
+                    .map(|p| p[prefix.len()..].to_owned())
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// The PROJECT SWEEP keeps the built-in in place for the checkout's own pick. No manifest row

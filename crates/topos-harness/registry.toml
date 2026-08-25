@@ -31,8 +31,8 @@
 # `brace-env` = `{env:VAR}`, `dollar-brace-env` = `${env:VAR}`; `dollar-brace` unless stated).
 
 schema_version = 1
-version = "2026.8.24.1"
-min_engine_version = 3
+version = "2026.8.25.1"
+min_engine_version = 4
 
 # The remote-to-stdio BRIDGE: the program topos runs so an agent that cannot dial an MCP address
 # reaches one anyway. Pinned to one exact version, because every machine in a workspace runs the
@@ -108,37 +108,23 @@ project_dir = ".claude/skills"
 detect_dirs = ["claudeHome"]
 
 [harness.mcp]
-reload_note = "loads next session; /reload-plugins reloads live; sign in with /mcp"
-# An OWNED plugin DIRECTORY: the `.mcp.json` under it is patched through the strict JSON
-# driver; `plugin_dir` renders the constant `.claude-plugin/plugin.json` beside it.
-user = { dir = "claudeHome/skills/topos-mcp", dialect = "claude-plugin-dir" }
-project = { path = ".mcp.json", dialect = "claude-project-json" }
-
-# READ-ONLY. Claude Code also keeps MCP servers in `~/.claude.json` — once at user scope and once
-# per project it remembers — and de-duplicates servers BY URL, with those scopes winning over the
-# plugin dir topos writes. An entry placed over one of them would never appear in the agent while
-# topos reported it installed, so both slots are read before a placement and never written.
-# `.claude.json` sits beside the config dir, so it is named under BOTH roots: `$HOME` when Claude
-# Code is at its default, and the config dir itself when `$CLAUDE_CONFIG_DIR` moves it.
-[[harness.mcp.conflict_paths]]
-file = "home/.claude.json"
-dialect = "claude-project-json"
-selector = "mcpServers"
-
-[[harness.mcp.conflict_paths]]
-file = "home/.claude.json"
-dialect = "claude-project-json"
-selector = "projects.*.mcpServers"
-
-[[harness.mcp.conflict_paths]]
-file = "claudeHome/.claude.json"
-dialect = "claude-project-json"
-selector = "mcpServers"
-
-[[harness.mcp.conflict_paths]]
-file = "claudeHome/.claude.json"
-dialect = "claude-project-json"
-selector = "projects.*.mcpServers"
+reload_note = "loads next session; sign in with /mcp"
+# ONE FILE, TWO SLOTS, both WRITTEN. `.claude.json` is Claude Code's own configuration — sign-in,
+# trust decisions, per-project state — and it holds MCP servers twice: top-level `mcpServers`,
+# which every project sees, and `projects.<the checkout's own absolute path>.mcpServers`, which
+# only a session started in that exact directory sees. topos edits the slot for the scope it is
+# acting in, under the server's own name, and leaves every other byte of the file alone.
+#
+# `.claude.json` sits BESIDE the config dir at the default (`~/.claude.json` next to `~/.claude/`)
+# and INSIDE it when `$CLAUDE_CONFIG_DIR` moves the config dir — which is what `claudeJsonHome`
+# resolves. Nothing here is read-only any more: the two slots this row names are the two slots the
+# agent keeps servers in.
+user = { dir = "claudeJsonHome/.claude.json", dialect = "claude-project-json" }
+project = { file = "claudeJsonHome/.claude.json", dialect = "claude-project-json" }
+# The ESCAPE HATCH, written only when a row's own `dest` names it. The project slot above is keyed
+# by the checkout's EXACT directory, so a session started in a subdirectory of the repo does not
+# see it; a committed `.mcp.json` in the repo root is read by every session under it.
+project_dest = { path = ".mcp.json", dialect = "claude-project-json" }
 
 [[harness]]
 # Verified against a live containerized install of openclaw@2026.7.1 on 2026-07-16:

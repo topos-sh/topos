@@ -14,22 +14,17 @@ use crate::{ops, sync_status};
 
 use super::rig::*;
 
-/// **THE RECEIPT'S OWN SPELLING IS A LEGAL `dest`.** Claude Code's MCP surface is a topos-owned
-/// plugin DIRECTORY, and every receipt names the `.mcp.json` inside it — while the teaching list
-/// taught the directory, so pasting what you had just been shown was refused as "not a known MCP
-/// config file". The file spelling is now the one the teaching prints AND one `dest` accepts, and
-/// it delivers.
+/// **THE RECEIPT'S OWN SPELLING IS A LEGAL `dest`.** Claude Code's machine-wide servers live in
+/// its own configuration file, and every receipt names that file — so the string a person was just
+/// shown is the string `dest` takes, and it delivers.
 #[test]
-fn the_claude_plugin_dirs_file_spelling_is_taught_and_delivers() {
+fn the_claude_config_files_spelling_is_taught_and_delivers() {
     // The teaching list names the FILE — the same string the receipts print.
     let taught =
         crate::manifest::dest::known_mcp_files(crate::manifest::document::ManifestScope::Global);
-    assert!(
-        taught.contains(&"~/.claude/skills/topos-mcp/.mcp.json".to_owned()),
-        "{taught:?}"
-    );
+    assert!(taught.contains(&"~/.claude.json".to_owned()), "{taught:?}");
 
-    let rig = Rig::new("plugin-dest");
+    let rig = Rig::new("claude-dest");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
@@ -38,8 +33,7 @@ fn the_claude_plugin_dirs_file_spelling_is_taught_and_delivers() {
     plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
     let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
     rig.write_global(&format!(
-        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = \
-         {{ dest = [\"~/.claude/skills/topos-mcp/.mcp.json\"] }}\n"
+        "[mcp]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.claude.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -54,8 +48,7 @@ fn the_claude_plugin_dirs_file_spelling_is_taught_and_delivers() {
         out.warnings,
         out.advisories
     );
-    let placed = std::fs::read_to_string(rig.home.0.join(".claude/skills/topos-mcp/.mcp.json"))
-        .expect("the plugin dir's config");
+    let placed = claude_user_servers(&rig.home.0);
     assert!(
         placed.contains("topos-eng-linear") && placed.contains("https://mcp.example/linear"),
         "{placed}"
@@ -857,17 +850,23 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
 
-    // The FOUR project surfaces (and nothing under the home).
-    for rel in [
-        ".mcp.json",
-        ".codex/config.toml",
-        ".cursor/mcp.json",
-        "opencode.json",
-    ] {
+    // The FOUR project surfaces — three in the checkout, and Claude Code's own slot for THIS
+    // checkout inside its machine file. Nothing else under the home moved.
+    for rel in [".codex/config.toml", ".cursor/mcp.json", "opencode.json"] {
         let text =
             std::fs::read_to_string(proj.0.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(text.contains("topos-eng-linear"), "{rel}: {text}");
     }
+    let claude = claude_project_servers(&rig.home.0, &proj.0);
+    assert!(claude.contains("topos-eng-linear"), "{claude}");
+    assert!(
+        !claude_user_servers(&rig.home.0).contains("topos-eng-linear"),
+        "a project pick never writes the slot every project reads"
+    );
+    assert!(
+        !proj.0.join(".mcp.json").exists(),
+        "nothing in the repo root"
+    );
     assert!(
         !rig.home.0.join(".cursor/mcp.json").exists(),
         "person scope untouched"
@@ -1300,7 +1299,7 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
     rig.project_pick(&proj.0, &["claude-code", "codex"]);
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep(&ctx, &plane, &dir);
-    assert!(proj.0.join(".mcp.json").exists());
+    assert!(!claude_project_servers(&rig.home.0, &proj.0).is_empty());
     assert!(proj.0.join(".codex/config.toml").exists());
 
     // A NEW agent is picked after the channel row was written.
@@ -1325,7 +1324,7 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
 
     // A NON-ASKED surface is not rewritten by an add about another one: the converge is
     // idempotent, and a byte moving here would be a config file edited for nobody's benefit.
-    let untouched = proj.0.join(".mcp.json");
+    let untouched = rig.home.0.join(".claude.json");
     let before_bytes = std::fs::read(&untouched).unwrap();
 
     let data = add("opencode");
@@ -1363,7 +1362,7 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
     );
     assert_eq!(
         crate::render::add_tty(&data),
-        "sentry already reaches claude-code through channels/everyone (.mcp.json — \
+        "sentry already reaches claude-code through channels/everyone (~/.claude.json — \
          current).\nnothing changed",
         "{data:?}"
     );
@@ -1430,7 +1429,7 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     row("\"latest\"");
     let ctx = rig.ctx_at(Some(&proj.0));
     sweep(&ctx, &plane, &dir);
-    assert!(proj.0.join(".mcp.json").exists());
+    assert!(!claude_project_servers(&rig.home.0, &proj.0).is_empty());
     assert!(proj.0.join("opencode.json").exists());
 
     row("{ dest = [\"opencode.json\"] }");
@@ -1447,7 +1446,7 @@ fn a_hand_narrowed_row_leads_the_receipt_with_the_entries_it_retired() {
     assert!(
         receipt.contains(
             "sentry now delivers only to project/opencode.json — removed its entries from:\n  \
-             claude-code: project/.mcp.json\n  codex: project/.codex/config.toml\n"
+             claude-code: ~/.claude.json\n  codex: project/.codex/config.toml\n"
         ),
         "{receipt}"
     );

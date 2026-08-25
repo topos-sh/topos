@@ -98,16 +98,18 @@ fn a_channel_dest_places_its_skills_while_its_servers_reach_every_agent() {
         "the default project dirs get nothing — the channel froze its skills' destination"
     );
     // The MCP member reached every project surface: the channel's `dest` said nothing about it.
-    for rel in [
-        ".mcp.json",
-        ".codex/config.toml",
-        ".cursor/mcp.json",
-        "opencode.json",
-    ] {
+    for rel in [".codex/config.toml", ".cursor/mcp.json", "opencode.json"] {
         let text =
             std::fs::read_to_string(proj.0.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(text.contains("topos-eng-alpha"), "{rel}: {text}");
     }
+    // Claude Code's is the checkout's own slot in its machine file, and nothing in the checkout.
+    let claude = claude_project_servers(&rig.home.0, &proj.0);
+    assert!(claude.contains("topos-eng-alpha"), "{claude}");
+    assert!(
+        !proj.0.join(".mcp.json").exists(),
+        "nothing in the repo root"
+    );
     assert!(
         !proj.0.join("prompts/skills/alpha").exists(),
         "a server is never placed as a folder"
@@ -329,16 +331,18 @@ fn a_config_file_path_in_a_channels_dest_is_a_folder_to_skills_and_nothing_to_se
     );
     assert!(as_folder.is_dir(), "never a config file topos wrote");
     // To the SERVER it is nothing at all: it reached every project surface, unnarrowed.
-    for rel in [
-        ".mcp.json",
-        ".codex/config.toml",
-        ".cursor/mcp.json",
-        "opencode.json",
-    ] {
+    for rel in [".codex/config.toml", ".cursor/mcp.json", "opencode.json"] {
         let text =
             std::fs::read_to_string(proj.0.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(text.contains("topos-eng-alpha"), "{rel}: {text}");
     }
+    // Claude Code's is the checkout's own slot in its machine file, and nothing in the checkout.
+    let claude = claude_project_servers(&rig.home.0, &proj.0);
+    assert!(claude.contains("topos-eng-alpha"), "{claude}");
+    assert!(
+        !proj.0.join(".mcp.json").exists(),
+        "nothing in the repo root"
+    );
     assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
 }
 

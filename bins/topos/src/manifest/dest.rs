@@ -107,7 +107,19 @@ pub(crate) fn mcp_dest_spelling_of(harness: &KnownHarness, scope: ManifestScope)
                 _ => base,
             })
         }
-        ManifestScope::Project => mcp.project.map(|(rel, _)| rel.to_owned()),
+        // A project `dest` is a path IN THE CHECKOUT — the manifest grammar takes nothing else —
+        // so the spelling is the harness's in-checkout project file: the second one where a
+        // harness has one (Claude Code's `.mcp.json`, beside the machine file the default reach
+        // writes), the only one everywhere else. A harness whose ONLY project surface is a machine
+        // file has no project `dest` spelling at all.
+        ManifestScope::Project => {
+            mcp.project_dest
+                .map(|(rel, _)| rel.to_owned())
+                .or_else(|| match mcp.project?.loc {
+                    registry::McpProjectLoc::InCheckout(rel) => Some(rel.to_owned()),
+                    registry::McpProjectLoc::Machine(_) => None,
+                })
+        }
     }
 }
 
@@ -248,9 +260,23 @@ pub(crate) fn dest_names_no_mcp_file_remedy(unknown: &[String], scope: ManifestS
 /// the descriptor's DEFAULT spelling, and against the resolved env-override path (a moved
 /// `$CODEX_HOME` still names a known file). `None` when no harness claims the file.
 pub(crate) fn mcp_slug_for_dest(entry: &str, scope: ManifestScope) -> Option<&'static str> {
+    mcp_reach_for_dest(entry, scope).map(|r| r.0)
+}
+
+/// [`mcp_slug_for_dest`], answering WHICH of the harness's surfaces the entry named: `true` when it
+/// is the second project file, the one the default reach does not write. The pair is what a plan
+/// needs — the slug alone cannot tell `.mcp.json` from the machine file beside it.
+pub(crate) fn mcp_reach_for_dest(
+    entry: &str,
+    scope: ManifestScope,
+) -> Option<(&'static str, bool)> {
     for h in descriptor::mcp_harnesses() {
         if dest_names_mcp_surface(entry, scope, h) {
-            return Some(h.slug);
+            let second = scope == ManifestScope::Project
+                && h.mcp()
+                    .and_then(|m| m.project_dest)
+                    .is_some_and(|(rel, _)| entry.trim_start_matches("./") == rel);
+            return Some((h.slug, second));
         }
     }
     None
@@ -262,10 +288,19 @@ pub(crate) fn mcp_slug_for_dest(entry: &str, scope: ManifestScope) -> Option<&'s
 /// surface path the engine would edit.
 fn dest_names_mcp_surface(entry: &str, scope: ManifestScope, h: &KnownHarness) -> bool {
     match scope {
-        ManifestScope::Project => h
-            .mcp()
-            .and_then(|m| m.project)
-            .is_some_and(|(rel, _)| entry.trim_start_matches("./") == rel),
+        // BOTH project files answer: the one the default reach writes when it is in the checkout,
+        // and the second one a `dest` may name instead.
+        ManifestScope::Project => {
+            let entry = entry.trim_start_matches("./");
+            let Some(mcp) = h.mcp() else {
+                return false;
+            };
+            let default = match mcp.project.map(|p| p.loc) {
+                Some(registry::McpProjectLoc::InCheckout(rel)) => rel == entry,
+                Some(registry::McpProjectLoc::Machine(_)) | None => false,
+            };
+            default || mcp.project_dest.is_some_and(|(rel, _)| rel == entry)
+        }
         ManifestScope::Global => {
             let Some(user) = h.mcp().and_then(|m| m.user) else {
                 return false;
@@ -304,10 +339,10 @@ mod tests {
             mcp_dest_spelling("codex", ManifestScope::Global).as_deref(),
             Some("~/.codex/config.toml")
         );
-        // The FILE, not the directory holding it — the spelling every receipt prints.
+        // Claude Code's own configuration, which holds its machine-wide servers.
         assert_eq!(
             mcp_dest_spelling("claude-code", ManifestScope::Global).as_deref(),
-            Some("~/.claude/skills/topos-mcp/.mcp.json")
+            Some("~/.claude.json")
         );
         assert_eq!(
             mcp_dest_spelling("opencode", ManifestScope::Global).as_deref(),
@@ -318,6 +353,8 @@ mod tests {
             mcp_dest_spelling("codex", ManifestScope::Project).as_deref(),
             Some(".codex/config.toml")
         );
+        // A project `dest` is a path in the checkout, so Claude Code's is the second project
+        // file — the machine file its default reach writes has no project-scope spelling.
         assert_eq!(
             mcp_dest_spelling("claude-code", ManifestScope::Project).as_deref(),
             Some(".mcp.json")
@@ -406,18 +443,20 @@ mod tests {
             mcp_slug_for_dest("./.mcp.json", ManifestScope::Project),
             Some("claude-code")
         );
-        // Claude Code's plugin-dir surface answers to BOTH its spellings — the file a receipt
-        // prints, and the directory the table holds.
         assert_eq!(
-            mcp_slug_for_dest(
-                "~/.claude/skills/topos-mcp/.mcp.json",
-                ManifestScope::Global
-            ),
+            mcp_slug_for_dest("~/.claude.json", ManifestScope::Global),
             Some("claude-code")
         );
+        // `.mcp.json` names Claude Code's SECOND project file — the one the default reach does
+        // not write, and the answer says so.
         assert_eq!(
-            mcp_slug_for_dest("~/.claude/skills/topos-mcp", ManifestScope::Global),
-            Some("claude-code")
+            mcp_reach_for_dest("./.mcp.json", ManifestScope::Project),
+            Some(("claude-code", true))
+        );
+        // Every other agent has one project file, and naming it asks for that one.
+        assert_eq!(
+            mcp_reach_for_dest(".codex/config.toml", ManifestScope::Project),
+            Some(("codex", false))
         );
         assert_eq!(
             mcp_slug_for_dest("~/.codex/skills", ManifestScope::Global),

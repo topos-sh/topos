@@ -50,7 +50,10 @@ use std::sync::OnceLock;
 
 use toml_edit::{DocumentMut, Item, TableLike};
 
-use super::{DirSpec, KnownHarness, McpBridge, McpConflictPath, McpSurface, McpSurfaces, Root};
+use super::{
+    DirSpec, KnownHarness, McpBridge, McpConflictPath, McpProjectLoc, McpProjectSurface,
+    McpSurface, McpSurfaces, Root,
+};
 use crate::mcp::descriptor::{EnvRef, McpDialect};
 
 /// The GRAMMAR version this build reads. A file naming any other number is refused whole — the
@@ -73,7 +76,13 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// the MCP dialects spoken by the agents that keep their servers there. A build that knows neither
 /// would refuse the file one row at a time with a puzzle of a message; the version says the same
 /// thing once, quietly, and the bundled table answers instead.
-pub const REGISTRY_ENGINE_VERSION: u32 = 3;
+///
+/// 4 — the `claudeJsonHome` root ([`Root::ClaudeJsonHome`], the dir Claude Code keeps
+/// `.claude.json` in), a project surface stated as a machine `file` rather than a checkout-relative
+/// `path` (its entries sit in a slot keyed by the checkout), and the `project_dest` column (a
+/// second project file reached only by a row's own `dest`). A build that cannot read those would
+/// read the row's silence as "no project surface" and place a checkout's servers nowhere.
+pub const REGISTRY_ENGINE_VERSION: u32 = 4;
 
 /// The widest registry file anything here will read, fetch, or accept from disk. The real table is
 /// a few tens of kilobytes; this is the "no surprises" ceiling on a lane that runs unattended.
@@ -337,12 +346,21 @@ impl OwnedDir {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnedMcp {
     user: Option<(OwnedDir, McpDialect)>,
-    project: Option<(String, McpDialect)>,
+    project: Option<OwnedProject>,
+    project_dest: Option<(String, McpDialect)>,
     reload_note: String,
     conflict_paths: Vec<OwnedConflictPath>,
     remote: bool,
     stdio: bool,
     env_ref: EnvRef,
+}
+
+/// One row's project MCP surface before it is leaked: either a checkout-relative `path`, or a
+/// machine `file` whose entries sit in a slot keyed by the checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OwnedProject {
+    InCheckout(String, McpDialect),
+    Machine(OwnedDir, McpDialect),
 }
 
 /// The file's bridge pin before it is leaked.
@@ -602,23 +620,65 @@ fn mcp_at(table: &dyn TableLike, origin: Origin) -> Result<Option<OwnedMcp>, Reg
             ))
         }
     };
+    // A project surface names EITHER a checkout-relative `path` or a machine `file` — one key or
+    // the other, never both, because "which of the two is it" must have exactly one answer.
     let project = match mcp.get("project") {
         None => None,
         Some(entry) => {
             let surface = entry.as_table_like().ok_or_else(|| {
-                RegistryError("mcp.project: expected { path = …, dialect = … }".into())
+                RegistryError(
+                    "mcp.project: expected { path = …, dialect = … } or { file = …, dialect = … }"
+                        .into(),
+                )
             })?;
-            let path = str_at(surface, "path")
-                .map_err(|e| RegistryError(format!("mcp.project.{}", e.message())))?;
             let dialect = str_at(surface, "dialect")
                 .map_err(|e| RegistryError(format!("mcp.project.{}", e.message())))?;
+            let dialect =
+                parse_dialect(dialect).map_err(|e| RegistryError(format!("mcp.project.{e}")))?;
+            match (surface.get("path"), surface.get("file")) {
+                (Some(_), Some(_)) => {
+                    return refuse("mcp.project: names both a path and a file — expected one");
+                }
+                (None, Some(_)) => {
+                    let file = str_at(surface, "file")
+                        .map_err(|e| RegistryError(format!("mcp.project.{}", e.message())))?;
+                    Some(OwnedProject::Machine(
+                        parse_dir(file, origin)
+                            .map_err(|e| RegistryError(format!("mcp.project.file: {e}")))?,
+                        dialect,
+                    ))
+                }
+                _ => {
+                    let path = str_at(surface, "path")
+                        .map_err(|e| RegistryError(format!("mcp.project.{}", e.message())))?;
+                    if origin.fenced() {
+                        validate_suffix(path)
+                            .map_err(|e| RegistryError(format!("mcp.project.path {e}")))?;
+                    }
+                    Some(OwnedProject::InCheckout(path.to_owned(), dialect))
+                }
+            }
+        }
+    };
+    // The second project file, in the checkout, reached only by a row's own `dest`.
+    let project_dest = match mcp.get("project_dest") {
+        None => None,
+        Some(entry) => {
+            let surface = entry.as_table_like().ok_or_else(|| {
+                RegistryError("mcp.project_dest: expected { path = …, dialect = … }".into())
+            })?;
+            let path = str_at(surface, "path")
+                .map_err(|e| RegistryError(format!("mcp.project_dest.{}", e.message())))?;
+            let dialect = str_at(surface, "dialect")
+                .map_err(|e| RegistryError(format!("mcp.project_dest.{}", e.message())))?;
             if origin.fenced() {
                 validate_suffix(path)
-                    .map_err(|e| RegistryError(format!("mcp.project.path {e}")))?;
+                    .map_err(|e| RegistryError(format!("mcp.project_dest.path {e}")))?;
             }
             Some((
                 path.to_owned(),
-                parse_dialect(dialect).map_err(|e| RegistryError(format!("mcp.project.{e}")))?,
+                parse_dialect(dialect)
+                    .map_err(|e| RegistryError(format!("mcp.project_dest.{e}")))?,
             ))
         }
     };
@@ -647,6 +707,7 @@ fn mcp_at(table: &dyn TableLike, origin: Origin) -> Result<Option<OwnedMcp>, Reg
     Ok(Some(OwnedMcp {
         user,
         project,
+        project_dest,
         reload_note,
         conflict_paths,
         remote,
@@ -1090,7 +1151,19 @@ fn leak(rows: Vec<HarnessRow>) -> &'static [KnownHarness] {
                     dir: leak_dir(dir),
                     dialect,
                 }),
-                project: mcp.project.map(|(path, dialect)| (leak_str(path), dialect)),
+                project: mcp.project.map(|project| match project {
+                    OwnedProject::InCheckout(path, dialect) => McpProjectSurface {
+                        loc: McpProjectLoc::InCheckout(leak_str(path)),
+                        dialect,
+                    },
+                    OwnedProject::Machine(file, dialect) => McpProjectSurface {
+                        loc: McpProjectLoc::Machine(leak_dir(file)),
+                        dialect,
+                    },
+                }),
+                project_dest: mcp
+                    .project_dest
+                    .map(|(path, dialect)| (leak_str(path), dialect)),
                 reload_note: leak_str(mcp.reload_note),
                 conflict_paths: Vec::leak(
                     mcp.conflict_paths
@@ -1185,10 +1258,21 @@ pub(super) fn render_row(row: &KnownHarness) -> String {
                 quote(dialect_word(user.dialect))
             );
         }
-        if let Some((path, dialect)) = mcp.project {
+        if let Some(project) = mcp.project {
+            let (key, value) = match project.loc {
+                McpProjectLoc::InCheckout(path) => ("path", quote(path)),
+                McpProjectLoc::Machine(file) => ("file", quote(&file.raw())),
+            };
             let _ = writeln!(
                 out,
-                "project = {{ path = {}, dialect = {} }}",
+                "project = {{ {key} = {value}, dialect = {} }}",
+                quote(dialect_word(project.dialect))
+            );
+        }
+        if let Some((path, dialect)) = mcp.project_dest {
+            let _ = writeln!(
+                out,
+                "project_dest = {{ path = {}, dialect = {} }}",
                 quote(path),
                 quote(dialect_word(dialect))
             );
@@ -1687,52 +1771,46 @@ mod tests {
         }
     }
 
-    /// The one row that names them today: Claude Code reads `~/.claude.json` at user scope and once
-    /// per project it remembers, so both slots are read before a placement — under both roots the
-    /// file can sit at.
+    /// **No bundled row reads a file topos does not write.** Claude Code used to: its servers lived
+    /// in a plugin folder while the agent ALSO read `~/.claude.json`, so both slots of that file had
+    /// to be read before a placement. topos writes those two slots itself now — the user one at
+    /// machine scope, the checkout-keyed one at project scope — so the read-only list is empty, and
+    /// the grammar for it stays exercised by the parser tests above (a downloaded table may still
+    /// name one).
     #[test]
-    fn claude_code_names_the_file_it_also_reads_servers_from() {
-        let claude = bundled_harnesses()
-            .iter()
-            .find(|h| h.slug == "claude-code")
-            .expect("claude-code is in the table");
-        let paths: Vec<(String, String)> = claude
-            .mcp
-            .as_ref()
-            .expect("an mcp block")
-            .conflict_paths
-            .iter()
-            .map(|c| (c.file.raw(), c.selector.to_owned()))
-            .collect();
-        assert_eq!(
-            paths,
-            [
-                ("home/.claude.json".to_owned(), "mcpServers".to_owned()),
-                (
-                    "home/.claude.json".to_owned(),
-                    "projects.*.mcpServers".to_owned()
-                ),
-                (
-                    "claudeHome/.claude.json".to_owned(),
-                    "mcpServers".to_owned()
-                ),
-                (
-                    "claudeHome/.claude.json".to_owned(),
-                    "projects.*.mcpServers".to_owned()
-                ),
-            ]
-        );
-        // …and no other row claims to read a file topos does not write.
+    fn the_bundled_table_reads_no_file_it_does_not_write() {
         for row in bundled_harnesses() {
-            if row.slug == "claude-code" {
-                continue;
-            }
             assert!(
                 row.mcp.as_ref().is_none_or(|m| m.conflict_paths.is_empty()),
                 "{}: an unexplained conflict path",
                 row.slug
             );
         }
+    }
+
+    /// Claude Code's two scopes are ONE file, and the project one is a MACHINE file rather than a
+    /// path in the checkout — the shape the whole `.claude.json` placement rests on. Beside it
+    /// stands the second project file a row's own `dest` may name.
+    #[test]
+    fn claude_code_keeps_both_scopes_in_one_machine_file() {
+        let claude = bundled_harnesses()
+            .iter()
+            .find(|h| h.slug == "claude-code")
+            .expect("claude-code is in the table");
+        let mcp = claude.mcp.as_ref().expect("an mcp block");
+        let user = mcp.user.expect("a user surface");
+        assert_eq!(user.dir.raw(), "claudeJsonHome/.claude.json");
+        assert_eq!(user.dialect, McpDialect::ClaudeProjectJson);
+        let project = mcp.project.expect("a project surface");
+        assert_eq!(project.dialect, McpDialect::ClaudeProjectJson);
+        match project.loc {
+            McpProjectLoc::Machine(file) => assert_eq!(file.raw(), "claudeJsonHome/.claude.json"),
+            McpProjectLoc::InCheckout(path) => panic!("a machine file, not {path}"),
+        }
+        assert_eq!(
+            mcp.project_dest,
+            Some((".mcp.json", McpDialect::ClaudeProjectJson))
+        );
     }
 
     #[test]
@@ -1948,10 +2026,22 @@ mod tests {
                     row.slug
                 );
                 assert_eq!(
-                    back.project
+                    back.project.as_ref().map(|p| match p {
+                        OwnedProject::InCheckout(path, dialect) => (false, path.clone(), *dialect),
+                        OwnedProject::Machine(file, dialect) => (true, file.raw(), *dialect),
+                    }),
+                    mine.project.map(|p| match p.loc {
+                        McpProjectLoc::InCheckout(path) => (false, path.to_owned(), p.dialect),
+                        McpProjectLoc::Machine(file) => (true, file.raw(), p.dialect),
+                    }),
+                    "{}",
+                    row.slug
+                );
+                assert_eq!(
+                    back.project_dest
                         .as_ref()
                         .map(|(p, dialect)| (p.as_str(), *dialect)),
-                    mine.project,
+                    mine.project_dest,
                     "{}",
                     row.slug
                 );

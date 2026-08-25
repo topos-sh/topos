@@ -101,11 +101,11 @@ A `—` means the agent has no folder at that scope. An agent absent from the ta
 
 ### MCP server config files
 
-An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. Claude Code's machine entry is a topos-owned plugin folder, not a single file. A machine path starting `<application support>/` is the one directory that differs by platform — `~/Library/Application Support` on macOS, `%APPDATA%` on Windows, `~/.config` elsewhere; `-a <slug>` resolves it for the machine it runs on, and `--dest` takes that resolved path.
+An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. In a project, Claude Code's servers go in its own `~/.claude.json`, in a section for that checkout — the `.mcp.json` in the project column is the file `--dest .mcp.json` writes instead, which every session under the repo reads. A machine path starting `<application support>/` is the one directory that differs by platform — `~/Library/Application Support` on macOS, `%APPDATA%` on Windows, `~/.config` elsewhere; `-a <slug>` resolves it for the machine it runs on, and `--dest` takes that resolved path.
 
 | Agent | Machine config file | Project config file |
 |---|---|---|
-| `claude-code` | `~/.claude/skills/topos-mcp/.mcp.json` | `.mcp.json` |
+| `claude-code` | `~/.claude.json` | `.mcp.json` |
 | `openclaw` | `~/.openclaw/openclaw.json` | — |
 | `cline` | `~/.cline/data/settings/cline_mcp_settings.json` | — |
 | `codex` | `~/.codex/config.toml` | `.codex/config.toml` |

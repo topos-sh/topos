@@ -336,11 +336,13 @@ fn render_agents(out: &mut String, table: &[&'static KnownHarness]) {
     out.push_str("### MCP server config files\n\n");
     out.push_str(
         "An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a \
-         skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. \
-         Claude Code's machine entry is a topos-owned plugin folder, not a single file. A machine \
-         path starting `<application support>/` is the one directory that differs by platform — \
-         `~/Library/Application Support` on macOS, `%APPDATA%` on Windows, `~/.config` elsewhere; \
-         `-a <slug>` resolves it for the machine it runs on, and `--dest` takes that resolved \
+         skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. In \
+         a project, Claude Code's servers go in its own `~/.claude.json`, in a section for that \
+         checkout — the `.mcp.json` in the project column is the file `--dest .mcp.json` writes \
+         instead, which every session under the repo reads. A machine path starting \
+         `<application support>/` is the one directory that differs by platform — `~/Library/\
+         Application Support` on macOS, `%APPDATA%` on Windows, `~/.config` elsewhere; `-a \
+         <slug>` resolves it for the machine it runs on, and `--dest` takes that resolved \
          path.\n\n",
     );
     out.push_str("| Agent | Machine config file | Project config file |\n|---|---|---|\n");

@@ -423,16 +423,14 @@ mod ladder_tests {
         assert_eq!(d, root.join(RESERVED_SKILL_DIR));
     }
 
-    /// The reservation is only worth anything while it names the dir the MCP surface actually
-    /// writes: the descriptor table's Claude Code user surface is a suffix under the skills root,
-    /// and its LAST component is the reserved name.
+    /// The reservation is only worth anything while it names the folder topos's own cleanup is
+    /// still going to visit: the retired Claude Code plugin dir's LAST component is the reserved
+    /// name, so a bundle can never take the folder out from under a retirement that has not run.
     #[test]
-    fn the_reserved_plugin_dir_is_the_claude_code_mcp_surfaces_own_component() {
-        let surface = mcp::descriptor::mcp_harness("claude-code")
-            .and_then(|h| h.mcp()?.user)
-            .expect("claude-code has a user MCP surface");
+    fn the_reserved_plugin_dir_is_the_retired_claude_code_folders_own_component() {
+        let dir = mcp::plugin_dir::retired_user_dir(std::path::Path::new("/test-home"));
         assert_eq!(
-            surface.dir.suffix().rsplit('/').next(),
+            dir.file_name().and_then(std::ffi::OsStr::to_str),
             Some(RESERVED_MCP_PLUGIN_DIR)
         );
     }

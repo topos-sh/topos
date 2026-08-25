@@ -663,6 +663,7 @@ pub fn apply(
     current: Option<&[u8]>,
     desired: &[McpEntry],
     prior: &BTreeMap<String, String>,
+    slot: Option<&[String]>,
 ) -> ApplyOutcome {
     let outcome = match dialect {
         McpDialect::ClaudeProjectJson
@@ -678,7 +679,11 @@ pub fn apply(
         | McpDialect::WindsurfJson
         | McpDialect::ClineJson
         | McpDialect::RooJson
-        | McpDialect::ZedJson => jsonc_edit::apply(dialect, current, desired, prior),
+        | McpDialect::ZedJson => jsonc_edit::apply(dialect, current, desired, prior, slot),
+        // A SLOT is a JSON-driver idea: it exists because one JSON file holds a SECOND entries
+        // object, keyed by a value only the run knows. A TOML or YAML surface has one home for
+        // its entries and no row names another, so neither is ever handed one — [`project_slot`]
+        // answers `None` for every dialect but the one that has a second slot.
         McpDialect::CodexToml => toml_patch::apply(current, desired, prior),
         McpDialect::HermesYaml | McpDialect::GooseYaml => {
             yaml_splice::apply(dialect, current, desired, prior)
@@ -730,7 +735,7 @@ fn input_round_trips(dialect: McpDialect, bytes: &[u8]) -> bool {
 /// Observe one config surface in its dialect (routes to the driver). For
 /// [`McpDialect::ClaudePluginDir`] pass the plugin dir's `.mcp.json` bytes.
 #[must_use]
-pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
+pub fn observe(dialect: McpDialect, current: Option<&[u8]>, slot: Option<&[String]>) -> Observed {
     match dialect {
         McpDialect::ClaudeProjectJson
         | McpDialect::CursorJson
@@ -745,7 +750,7 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
         | McpDialect::WindsurfJson
         | McpDialect::ClineJson
         | McpDialect::RooJson
-        | McpDialect::ZedJson => jsonc_edit::observe(dialect, current),
+        | McpDialect::ZedJson => jsonc_edit::observe(dialect, current, slot),
         McpDialect::CodexToml => toml_patch::observe(current),
         McpDialect::HermesYaml | McpDialect::GooseYaml => yaml_splice::observe(dialect, current),
     }
@@ -759,7 +764,11 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
 /// surface answers `false` (there is nothing there at all). Managed-LOOKING entries that are
 /// not in the caller's ledger are NOT this question — the drivers' `Foreign` state names them.
 #[must_use]
-pub fn holds_unmanaged_content(dialect: McpDialect, current: Option<&[u8]>) -> bool {
+pub fn holds_unmanaged_content(
+    dialect: McpDialect,
+    current: Option<&[u8]>,
+    slot: Option<&[String]>,
+) -> bool {
     if effectively_absent(current) {
         return false;
     }
@@ -781,7 +790,7 @@ pub fn holds_unmanaged_content(dialect: McpDialect, current: Option<&[u8]>) -> b
         | McpDialect::WindsurfJson
         | McpDialect::ClineJson
         | McpDialect::RooJson
-        | McpDialect::ZedJson => jsonc_edit::holds_unmanaged(dialect, bytes),
+        | McpDialect::ZedJson => jsonc_edit::holds_unmanaged(dialect, bytes, slot),
         McpDialect::CodexToml => toml_patch::holds_unmanaged(bytes),
         McpDialect::HermesYaml | McpDialect::GooseYaml => {
             yaml_splice::holds_unmanaged(dialect, bytes)
@@ -1113,6 +1122,28 @@ pub fn entry_value(dialect: McpDialect, entry: &McpEntry) -> Option<Value> {
 /// it only spells the answer where the file expects one.
 fn all_tools() -> Value {
     Value::Array(vec![Value::String("*".to_owned())])
+}
+
+/// The key holding the per-directory objects in Claude Code's own configuration.
+pub const PROJECTS_KEY: &str = "projects";
+
+/// **The nested slot a checkout's own entries sit in, inside a MACHINE file.** Claude Code keeps a
+/// project's servers in its `.claude.json` under `projects.<the checkout's absolute path>`, beside
+/// the top-level slot that serves every project. The key IS the directory, spelled as the agent
+/// spells it, so the caller passes the path it resolved.
+///
+/// `None` for a dialect whose file holds no second entries object — every dialect but the one
+/// Claude Code's own configuration speaks.
+#[must_use]
+pub fn project_slot(dialect: McpDialect, project_key: &str) -> Option<Vec<String>> {
+    match dialect {
+        McpDialect::ClaudeProjectJson => Some(vec![
+            PROJECTS_KEY.to_owned(),
+            project_key.to_owned(),
+            "mcpServers".to_owned(),
+        ]),
+        _ => None,
+    }
 }
 
 /// Whether `dialect` can express `target` at all — [`entry_value`]'s question, asked before a
@@ -1823,7 +1854,13 @@ mod tests {
             McpDialect::LmStudioJson,
             &program.target
         ));
-        let out = apply(McpDialect::LmStudioJson, None, &[program], &BTreeMap::new());
+        let out = apply(
+            McpDialect::LmStudioJson,
+            None,
+            &[program],
+            &BTreeMap::new(),
+            None,
+        );
         let EditPlan::Unprovable(reason) = &out.plan else {
             panic!("a program in LM Studio must refuse: {:?}", out.plan);
         };
@@ -2603,16 +2640,22 @@ mod tests {
         ];
         for d in file_dialects {
             // Absent / whitespace-only: nothing there at all.
-            assert!(!holds_unmanaged_content(d, None), "{d:?}");
-            assert!(!holds_unmanaged_content(d, Some(b"  \n")), "{d:?}");
+            assert!(!holds_unmanaged_content(d, None, None), "{d:?}");
+            assert!(!holds_unmanaged_content(d, Some(b"  \n"), None), "{d:?}");
             // A file topos created from scratch holds nothing unmanaged.
-            let created = apply(d, None, &[entry("topos-x", "https://x")], &BTreeMap::new());
+            let created = apply(
+                d,
+                None,
+                &[entry("topos-x", "https://x")],
+                &BTreeMap::new(),
+                None,
+            );
             let EditPlan::Write(bytes) = &created.plan else {
                 panic!("{d:?}: fresh apply writes");
             };
-            assert!(!holds_unmanaged_content(d, Some(bytes)), "{d:?}");
+            assert!(!holds_unmanaged_content(d, Some(bytes), None), "{d:?}");
             // Garbage is indeterminate → true (fail toward keeping).
-            assert!(holds_unmanaged_content(d, Some(b"\xff\xfe")), "{d:?}");
+            assert!(holds_unmanaged_content(d, Some(b"\xff\xfe"), None), "{d:?}");
         }
         // A NON-prefixed user entry inside the managed slot answers true in every dialect.
         for (d, text) in [
@@ -2637,42 +2680,52 @@ mod tests {
                 "mcp_servers:\n  mine: {url: \"https://u\"}\n",
             ),
         ] {
-            assert!(holds_unmanaged_content(d, Some(text.as_bytes())), "{d:?}");
+            assert!(
+                holds_unmanaged_content(d, Some(text.as_bytes()), None),
+                "{d:?}"
+            );
         }
         // Content OUTSIDE the managed slot answers true; OpenCode's own $schema line does not.
         assert!(holds_unmanaged_content(
             McpDialect::CursorJson,
             Some(b"{\n  \"mcpServers\": {},\n  \"theme\": \"dark\"\n}\n"),
+            None
         ));
         assert!(holds_unmanaged_content(
             McpDialect::CodexToml,
             Some(b"model = \"o5\"\n"),
+            None
         ));
         assert!(!holds_unmanaged_content(
             McpDialect::OpencodeJson,
             Some(b"{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {}\n}\n"),
+            None
         ));
         assert!(holds_unmanaged_content(
             McpDialect::OpencodeJson,
             Some(
                 b"{\n  \"$schema\": \"https://elsewhere.example/schema.json\",\n  \"mcp\": {}\n}\n"
             ),
+            None
         ));
         // A comment is user content even where the harness tolerates it (topos writes strict
         // JSON everywhere).
         assert!(holds_unmanaged_content(
             McpDialect::OpenclawJson,
             Some(b"// mine\n{\n  \"mcp\": { \"servers\": {} }\n}\n"),
+            None
         ));
         // The plugin dir's .mcp.json: its own shape is managed; anything else is not.
         let rendered = plugin_dir::render_plugin_dir(&[entry("topos-a", "https://a")]);
         assert!(!holds_unmanaged_content(
             McpDialect::ClaudePluginDir,
             Some(&rendered[1].1),
+            None
         ));
         assert!(holds_unmanaged_content(
             McpDialect::ClaudePluginDir,
             Some(b"{\n  \"mcpServers\": {\n    \"mine\": {}\n  }\n}\n"),
+            None
         ));
     }
 
@@ -2687,7 +2740,13 @@ mod tests {
         // CRLF TOML: toml_edit re-serializes LF, so an insert would rewrite the user's whole
         // file with foreign line endings — refused at the dispatcher, honestly.
         const CRLF_TOML: &str = "# my codex config\r\nmodel = \"o5\"\r\n";
-        let out = apply(McpDialect::CodexToml, Some(CRLF_TOML.as_bytes()), &e, &none);
+        let out = apply(
+            McpDialect::CodexToml,
+            Some(CRLF_TOML.as_bytes()),
+            &e,
+            &none,
+            None,
+        );
         let EditPlan::Unprovable(reason) = &out.plan else {
             panic!("CRLF TOML must refuse the edit: {:?}", out.plan);
         };
@@ -2699,7 +2758,13 @@ mod tests {
 
         // A BOM-carrying TOML file: the BOM would be stripped on rewrite — refused.
         const BOM_TOML: &str = "\u{feff}model = \"o5\"\n";
-        let out = apply(McpDialect::CodexToml, Some(BOM_TOML.as_bytes()), &e, &none);
+        let out = apply(
+            McpDialect::CodexToml,
+            Some(BOM_TOML.as_bytes()),
+            &e,
+            &none,
+            None,
+        );
         assert!(
             matches!(out.plan, EditPlan::Unprovable(_)),
             "BOM TOML must refuse the edit: {:?}",
@@ -2721,6 +2786,7 @@ mod tests {
             Some(current_crlf.as_bytes()),
             std::slice::from_ref(&placed),
             &prior,
+            None,
         );
         assert_eq!(out.plan, EditPlan::Leave);
         assert_eq!(
@@ -2729,7 +2795,7 @@ mod tests {
         );
 
         // A whitespace-only CRLF file is a CREATION (no user content to preserve) — it writes.
-        let out = apply(McpDialect::CodexToml, Some(b" \r\n"), &e, &none);
+        let out = apply(McpDialect::CodexToml, Some(b" \r\n"), &e, &none, None);
         assert!(out.created_file, "{:?}", out.plan);
         assert!(matches!(out.plan, EditPlan::Write(_)));
     }
@@ -2744,6 +2810,7 @@ mod tests {
             Some(CRLF.as_bytes()),
             &[entry("topos-a", "https://a")],
             &BTreeMap::new(),
+            None,
         );
         let EditPlan::Write(bytes) = &out.plan else {
             panic!("CRLF JSON is losslessly editable: {:?}", out.plan);
@@ -2767,6 +2834,7 @@ mod tests {
             Some(CRLF.as_bytes()),
             &[entry("topos-a", "https://a")],
             &BTreeMap::new(),
+            None,
         );
         let EditPlan::Write(bytes) = &out.plan else {
             panic!("CRLF YAML is line-surgically editable: {:?}", out.plan);
@@ -2786,7 +2854,7 @@ mod tests {
     #[test]
     fn the_dispatcher_routes_every_dialect_including_the_plugin_dir() {
         // A JSON dialect routes (absent + nothing desired = Leave).
-        let out = apply(McpDialect::CursorJson, None, &[], &BTreeMap::new());
+        let out = apply(McpDialect::CursorJson, None, &[], &BTreeMap::new(), None);
         assert_eq!(out.plan, EditPlan::Leave);
         // The plugin dir's `.mcp.json` is a real driver surface: a fresh apply writes exactly
         // what the whole-dir renderer would, and the standard drift/removal rules run on it.
@@ -2796,6 +2864,7 @@ mod tests {
             None,
             std::slice::from_ref(&e),
             &BTreeMap::new(),
+            None,
         );
         assert!(out.created_file);
         let EditPlan::Write(bytes) = &out.plan else {
@@ -2805,9 +2874,15 @@ mod tests {
         assert_eq!(bytes, &rendered[1].1, "driver bytes == the renderer's");
         // Idempotent re-apply → Leave; removal returns the managed document to empty.
         let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
-        let again = apply(McpDialect::ClaudePluginDir, Some(bytes), &[e], &ledger);
+        let again = apply(
+            McpDialect::ClaudePluginDir,
+            Some(bytes),
+            &[e],
+            &ledger,
+            None,
+        );
         assert_eq!(again.plan, EditPlan::Leave);
-        let removed = apply(McpDialect::ClaudePluginDir, Some(bytes), &[], &ledger);
+        let removed = apply(McpDialect::ClaudePluginDir, Some(bytes), &[], &ledger, None);
         assert_eq!(
             removed.states,
             vec![("topos-a".to_owned(), EntryState::Removed)]
