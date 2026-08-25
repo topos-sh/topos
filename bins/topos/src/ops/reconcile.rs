@@ -4546,6 +4546,17 @@ impl Step {
     }
 }
 
+/// The version a scope's copy of `sid` HOLDS right now — `lock.base_commit`, the id every other
+/// surface reports for it. `None` when there is no lock yet, or when it carries the never-received
+/// baseline's empty id (nothing is held, so nothing can be replaced).
+fn held_version(ctx: &Ctx<'_>, sid: &SkillId) -> Option<String> {
+    doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(sid).lock)
+        .ok()
+        .flatten()
+        .map(|l| l.base_commit)
+        .filter(|v| !v.is_empty())
+}
+
 /// Sync ONE workspace bundle toward its served (or pinned) version, at the resolved scope.
 fn sync_workspace_skill<'a>(
     env: &Env<'a>,
@@ -4743,6 +4754,10 @@ fn sync_workspace_skill<'a>(
                     .collect()
             })
             .unwrap_or_default();
+    // The version this scope HOLDS going in — the half of the replaced-version disclosure below
+    // that stops existing the moment the engine writes, so it is read here, from the same store
+    // the sync is about to move. Empty = a never-received baseline (nothing was replaced).
+    let held_before = held_version(&run_ctx, &sid);
     let outcome = sync_engine::sync_one_planned(
         &run_ctx,
         &sid,
@@ -4818,6 +4833,27 @@ fn sync_workspace_skill<'a>(
                 sweep
                     .disclosures
                     .push(draft_synced_line(&target.name, row.synced_placements));
+            }
+            // WHICH VERSION THIS COPY REPLACED. A project scope says it from `topos.lock` — the
+            // `LOCK_MOVED` line the write-back builds from the old and the new document — and the
+            // machine has no lock, so a `-g` sweep printed `fast-forwarded` and never named
+            // either end of the move. The lock did not move here; the COPY did, and the copy is
+            // what the line is about. Same wording, same channel, same place in the receipt.
+            if matches!(sc.scope, ResolvedScope::Person)
+                && row.action == PullAction::FastForwarded
+                && let Some(before) = held_before.as_deref()
+                && let Some(after) = held_version(&run_ctx, &sid)
+                && before != after
+            {
+                sweep.disclosures.push(crate::message::disclosure(
+                    "COPY_MOVED",
+                    format!(
+                        "{}: {} → {}",
+                        st.display,
+                        crate::render::short(before),
+                        crate::render::short(&after)
+                    ),
+                ));
             }
             // Disclose a delivery the naming ladder had to place BESIDE a same-named occupant the
             // record does not own (the never-clobber outcome) — and a project placement a
