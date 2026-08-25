@@ -103,6 +103,13 @@ test("an unknown code is an honest in-page state, never a 404", async ({ page })
   await expect(page.getByText("No pending request for that code")).toBeVisible();
 });
 
+test("a code typed without its hyphen is the same code", async ({ page }) => {
+  // The grouping is there so a code can be read aloud; it is not part of what a code is.
+  const flow = await startLoginFlow(page, "e2e-hyphenless");
+  await lookUp(page, flow.user_code.replace("-", ""));
+  await expect(page.getByText("\u201ce2e-hyphenless\u201d", { exact: true })).toBeVisible();
+});
+
 test("an empty submit says what to do, and the field takes no more than a code", async ({
   page,
 }) => {

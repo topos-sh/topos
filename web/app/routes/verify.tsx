@@ -148,11 +148,37 @@ const TOO_MANY_LOOKUPS = "Too many attempts — wait a few seconds and try again
 
 /**
  * THE CODE'S OWN SHAPE — `XXXX-XXXX`: eight characters from the unambiguous alphabet plus the
- * hyphen that groups them for reading aloud. It is the field's maxlength AND the server's cap:
- * the input used to take any amount of text, so a stray paste (a whole command line, a URL) went
- * to the lookup as if it might be a code.
+ * hyphen that groups them for reading aloud. The full spelling is the field's maxlength AND the
+ * server's cap: the input used to take any amount of text, so a stray paste (a whole command
+ * line, a URL) went to the lookup as if it might be a code.
  */
 const USER_CODE_LENGTH = 9;
+const USER_CODE_BARE_LENGTH = 8;
+
+/**
+ * THE CODE AS THE PERSON MEANT IT.
+ *
+ * The hyphen is there so a code can be read aloud; it is not part of what a code IS. Someone
+ * reading `AB29-CD34` off their terminal and typing `AB29CD34`, or saying it to a colleague who
+ * writes `AB29 CD34`, has typed the same code — and both used to miss, sending a person back to
+ * re-read a code they had already read correctly. Case is normalised for the same reason.
+ *
+ * Only the eight-character spelling is re-hyphenated: anything else is handed back trimmed and
+ * upper-cased, so the length cap still sees what was actually typed rather than something this
+ * function invented. A submission carrying nothing a code is MADE of — spaces, a stray hyphen —
+ * is empty, and gets the empty submit's line rather than being spent as a guess.
+ */
+function normalizeUserCode(typed: string): string {
+  const said = typed.trim().toUpperCase();
+  const bare = said.replaceAll(/[\s-]/g, "");
+  if (bare.length === 0) {
+    return "";
+  }
+  if (bare.length !== USER_CODE_BARE_LENGTH) {
+    return said;
+  }
+  return `${bare.slice(0, 4)}-${bare.slice(4)}`;
+}
 
 /** The empty submit's answer. A form that does nothing and says nothing on a click is the one
  *  outcome a person cannot learn anything from — this is the same sentence the page opens with,
@@ -236,17 +262,15 @@ export async function action({ request }: ActionFunctionArgs) {
   if (intent !== "approve" && intent !== "deny") {
     // The two-state page's first state: resolve the typed code into the request card. A POST,
     // deliberately — the code never rides a URL (history, logs, referers all stay clean).
-    const userCode = String(form.get("code") ?? "")
-      .trim()
-      .toUpperCase();
+    const userCode = normalizeUserCode(String(form.get("code") ?? ""));
     if (userCode === "") {
       // In the page, not the house fault screen: an empty submit is the commonest thing a person
       // does by accident, and it has an answer they can act on.
       return data({ kind: "refused" as const, error: CODE_REQUIRED }, { status: 400 });
     }
-    // Longer than a code can be: answered like any other code that names nothing, and for free —
-    // a string that cannot be a code is not a guess of the code space, so it never spends the belt
-    // and never reaches the database.
+    // Longer than a code can be, once it has been spelled the way a code is spelled: answered
+    // like any other code that names nothing, and for free — a string that cannot be a code is not
+    // a guess of the code space, so it never spends the belt and never reaches the database.
     if (userCode.length > USER_CODE_LENGTH) {
       return { kind: "miss" as const };
     }
@@ -513,7 +537,9 @@ function CodeLookup() {
           <span className="mb-1 block font-medium text-dim text-sm">Code</span>
           {/* No `required`: the browser's own bubble is not this form's voice, and an empty
               submit has one answer — the action's line, in the app's words, in the same place
-              every other refusal on this page appears. */}
+              every other refusal on this page appears. The maxlength is the FULL spelling, so
+              typing the code without its hyphen (or with a space) still fits; the action puts the
+              hyphen back. */}
           <input
             type="text"
             name="code"
