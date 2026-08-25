@@ -7688,6 +7688,67 @@ pub(super) fn clean_dest_roots(
     retire_split(ctx, sid, &lock, &map, &targets)
 }
 
+/// Retire the copies a MOVED agent folder left behind — the same run's other half of landing them
+/// in the folder that agent's row names now ([`placement::moved_out`] decides which). `Ok(None)`
+/// when nothing moved; otherwise the map as it stands afterwards.
+///
+/// A move is not a loss and says nothing on the receipt: the bundle stands, in a folder the agent
+/// reads. What the ordinary retirement rail already guarantees still holds — an edited copy is
+/// snapshotted and KEPT in place, its record released, and a foreign dir is never touched.
+///
+/// The emptied FOLDER goes too, up to the checkout (or the home) that holds it — but only while it
+/// is empty. Anything a person put beside topos's copy keeps the folder exactly as it is.
+///
+/// THE CALLER HOLDS THE SKILL's writer flock.
+///
+/// # Errors
+/// A scan, store, or filesystem failure from the retirement, or an unreadable map afterwards.
+pub(super) fn retire_moved_copies(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    lock: &Lock,
+    map: &PlacementMap,
+    plan: &placement::PlacementPlan,
+) -> Result<Option<PlacementMap>, ClientError> {
+    let moved = placement::moved_out(map, plan);
+    if moved.is_empty() {
+        return Ok(None);
+    }
+    let folders: Vec<PathBuf> = moved
+        .iter()
+        .filter_map(|&i| {
+            Path::new(&map.placements[i])
+                .parent()
+                .map(Path::to_path_buf)
+        })
+        .collect();
+    retire_split(ctx, sid, lock, map, &moved)?;
+    for folder in &folders {
+        if let Some(boundary) = moved_prune_boundary(ctx, folder) {
+            super::agent_hooks::prune_emptied_dirs(ctx.fs, &boundary, std::slice::from_ref(folder));
+        }
+    }
+    doc::read_map(ctx.fs, &ctx.layout.published(sid).map)
+}
+
+/// How far up the emptied-folder prune may walk from a folder topos just emptied: the checkout
+/// whose manifest covers it, else this machine's home. Nothing at or above the boundary is ever
+/// removed, and with no home known nothing is pruned at all.
+fn moved_prune_boundary(ctx: &Ctx<'_>, folder: &Path) -> Option<PathBuf> {
+    let home = ctx.roots.as_ref().map(|r| r.home.as_path());
+    let mut cur = folder.parent();
+    while let Some(d) = cur {
+        if home == Some(d) {
+            break;
+        }
+        if ctx.fs.exists(&d.join(crate::manifest::MANIFEST_FILE)) {
+            return Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    home.map(Path::to_path_buf)
+}
+
 /// Retire exactly the named placements BY CHOICE, for a caller that already holds the skill's
 /// writer flock and has already decided WHICH — the identity claim's twin retirement, whose
 /// candidate is one duplicate directory it proved clean under that same lock.

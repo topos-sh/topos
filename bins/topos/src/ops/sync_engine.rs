@@ -261,6 +261,7 @@ fn sync_one_placed(
     let explicit = inv.is_explicit();
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
+    let sid = skill_id;
     let skill_id = skill_id.as_str();
     let mut sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
@@ -388,6 +389,11 @@ fn sync_one_placed(
         None => placement::plan_for_skill(ctx, skill_id, &lock, map),
     };
     let plan = make_plan(&map);
+    // A picked agent whose skills FOLDER moved (its registry row, or this machine's table, names
+    // another one now) takes its copy with it: the copy left behind retires in the same run that
+    // lands the new one, so nothing stale stands and an agent reading both folders never lists
+    // the bundle twice.
+    let map = super::reconcile::retire_moved_copies(ctx, sid, &lock, &map, &plan)?.unwrap_or(map);
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);
     let work = compute_work(ctx, &map, &lock, &name)?;

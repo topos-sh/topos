@@ -1316,7 +1316,7 @@ fn a_project_invoked_answer_never_offers_a_home_folder() {
     // SCOPE, as everywhere: the copies a project answer offers are the checkout's own.
     let rig = Rig::new("options-scope");
     // Two agents are installed here: Claude Code (whose project dir holds the record) and Codex
-    // (whose project dir is `.agents/skills`).
+    // (whose project dir is `.codex/skills`).
     std::fs::create_dir_all(rig.work.0.join(".claude")).unwrap();
     std::fs::create_dir_all(rig.work.0.join(".codex")).unwrap();
     let project = rig.work.0.join("repo");
@@ -1339,7 +1339,7 @@ fn a_project_invoked_answer_never_offers_a_home_folder() {
 
     // A byte-identical copy in the HOME tree, and one inside the checkout.
     rig.folder(".cursor/skills/pr-describe", "# pr\n");
-    let in_project = project.join(".agents/skills/pr-describe");
+    let in_project = project.join(".codex/skills/pr-describe");
     std::fs::create_dir_all(&in_project).unwrap();
     std::fs::write(in_project.join("SKILL.md"), "# pr\n").unwrap();
 
@@ -1502,7 +1502,7 @@ fn a_claimed_folder_in_a_project_is_planned_for_a_delivered_bundle() {
     ops::note_added_path_in(&pctx, &mut data, &scope.target, &source).unwrap();
     let id = data.skill_id.clone().unwrap();
 
-    let copy = project.join(".agents/skills/pr-describe");
+    let copy = project.join(".codex/skills/pr-describe");
     std::fs::create_dir_all(&copy).unwrap();
     std::fs::write(copy.join("SKILL.md"), "# pr\n").unwrap();
     ops::claim(&pctx, &scope, &copy, "pr-describe").unwrap();

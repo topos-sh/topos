@@ -26,7 +26,7 @@ Some folders are cross-agent conventions that several agents read, so each is na
 
 - `~/.agents/skills` — the machine folder read by cline, dexto, kimi-code-cli, loaf, warp, zed.
 - `~/.config/agents/skills` — the machine folder read by amp, replit, universal.
-- `.agents/skills` — the project folder read by amp, antigravity, antigravity-cli, cline, codex, deepagents, dexto, firebender, gemini-cli, github-copilot, kimi-code-cli, loaf, promptscript, replit, universal, warp, zed. A `shared` cell below means this folder.
+- `.agents/skills` — the project folder read by amp, antigravity, antigravity-cli, cline, deepagents, dexto, firebender, gemini-cli, github-copilot, kimi-code-cli, loaf, promptscript, replit, universal, warp, zed. A `shared` cell below means this folder.
 
 | Agent | Machine folder | Project folder |
 |---|---|---|
@@ -43,7 +43,7 @@ Some folders are cross-agent conventions that several agents read, so each is na
 | `codebuddy` | `~/.codebuddy/skills` | `.codebuddy/skills` |
 | `codemaker` | `~/.codemaker/skills` | `.codemaker/skills` |
 | `codestudio` | `~/.codestudio/skills` | `.codestudio/skills` |
-| `codex` | `~/.codex/skills` | shared |
+| `codex` | `~/.codex/skills` | `.codex/skills` |
 | `command-code` | `~/.commandcode/skills` | `.commandcode/skills` |
 | `continue` | `~/.continue/skills` | `.continue/skills` |
 | `cortex` | `~/.snowflake/cortex/skills` | `.cortex/skills` |

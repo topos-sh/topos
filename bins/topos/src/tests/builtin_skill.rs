@@ -225,7 +225,7 @@ fn the_built_in_lands_in_the_picked_agents_project_dirs() {
     assert!(sync.changed, "first contact lands bytes");
     let copies = [
         proj.0.join(".claude/skills/topos"),
-        proj.0.join(".agents/skills/topos"),
+        proj.0.join(".codex/skills/topos"),
     ];
     for dir in &copies {
         assert_eq!(

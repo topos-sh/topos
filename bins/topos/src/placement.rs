@@ -307,12 +307,18 @@ pub(crate) fn plan_targets(
     // One native copy per picked agent — EVERY picked agent, the active one included, takes its
     // user skills root from its registry row, through one resolver and the one naming discipline.
     for h in crate::agents_pick::picked_harnesses(ctx, None) {
-        let dir = match prior_dir(ctx, prior, PlacementKind::Native, Some(h.slug), adopt) {
+        let root = registry::skills_root(h.slug, registry::SkillScope::User, home, cwd);
+        let dir = match prior_dir(
+            ctx,
+            prior,
+            PlacementKind::Native,
+            Some(h.slug),
+            root.as_deref(),
+            adopt,
+        ) {
             Some(dir) => dir,
             None => {
-                let Some(root) =
-                    registry::skills_root(h.slug, registry::SkillScope::User, home, cwd)
-                else {
+                let Some(root) = root else {
                     continue; // a cwd-only harness has no user-scope dir — nothing to place
                 };
                 adopt_override(
@@ -398,14 +404,16 @@ pub(crate) fn project_plan(
     let taken =
         |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
     // Prior stability, PROJECT-LOCAL: the recorded dir for an agent is reused only when it sits
-    // under this project (a home-dir record for the same agent belongs to the person scope).
+    // under this project (a home-dir record for the same agent belongs to the person scope) AND
+    // still sits directly in the folder that agent's row names today (see [`prior_dir`]: a folder
+    // that moved moves the bytes with it).
     //
     // A record is not a permission. `starts_with` is LEXICAL — it proves the string, not the path —
     // and the checkout can turn any recorded ancestor into a symlink after the record was written.
     // So a reused prior path passes the SAME containment proof a fresh root does, and one that
     // fails is refused exactly like a fresh escape: a typed line, the placement skipped, the link
     // never followed.
-    let prior_in = |agent: &str| -> PriorProjectDir {
+    let prior_in = |agent: &str, root: &Path| -> PriorProjectDir {
         let Some(map) = prior else {
             return PriorProjectDir::None;
         };
@@ -417,6 +425,7 @@ pub(crate) fn project_plan(
                 Path::new(dir).starts_with(project_dir)
                     && st.kind == PlacementKind::Native
                     && st.agent.as_deref() == Some(agent)
+                    && in_root(Path::new(dir), Some(root))
                     && (st.materialized_sha.is_some()
                         || !topos_harness::dir_taken(Path::new(dir))
                         || adoption_reservation_holds(dir, st, adopt))
@@ -451,7 +460,7 @@ pub(crate) fn project_plan(
         }) else {
             continue; // no project-scope dir for this harness — nothing to place in-project
         };
-        let dir = match prior_in(h.slug) {
+        let dir = match prior_in(h.slug, &root) {
             PriorProjectDir::Reuse(dir) => dir,
             // A recorded dir that no longer resolves inside the checkout is refused, never
             // followed — the rail does not care whether a path is fresh or remembered.
@@ -988,11 +997,18 @@ fn adopt_override(
 /// version's digest, that version is still the recorded one (an adoption recorded for version A is
 /// never reused for an apply of version B). A failed scan or any mismatch means the reservation
 /// lapsed: NOT reusable, and it is replaced like any other stale reservation.
+///
+/// **Stability holds the NAME, never the folder.** A record is only reusable while it still sits
+/// directly in `root` — the skills folder that agent's registry row names TODAY. A row (or a
+/// machine-local table) that moved the folder moves the bytes with it: the key re-chooses under the
+/// new root, and [`moved_out`] retires the copy left behind. `None` root — a harness with no dir at
+/// this scope at all — has nothing to prove against, so the record answers as it did.
 fn prior_dir(
     ctx: &Ctx<'_>,
     prior: Option<&PlacementMap>,
     kind: PlacementKind,
     agent: Option<&str>,
+    root: Option<&Path>,
     adopt: Option<[u8; 32]>,
 ) -> Option<PathBuf> {
     let map = prior?;
@@ -1002,6 +1018,7 @@ fn prior_dir(
         .find(|(dir, st)| {
             st.kind == kind
                 && st.agent.as_deref() == agent
+                && in_root(Path::new(dir), root)
                 // The mirror of `project_plan`'s project-local rule: a dir recorded INSIDE a
                 // project checkout belongs to that scope — the person plan never reuses it as its
                 // own (kind, agent) slot (it would swallow the home placement whole).
@@ -1011,6 +1028,12 @@ fn prior_dir(
                     || adoption_reservation_holds(dir, st, adopt))
         })
         .map(|(dir, _)| PathBuf::from(dir))
+}
+
+/// Whether a recorded placement still sits directly inside the skills folder its agent reads.
+/// A caller with no folder to prove against (`None`) accepts the record as it stands.
+fn in_root(dir: &Path, root: Option<&Path>) -> bool {
+    root.is_none_or(|root| dir.parent() == Some(root))
 }
 
 /// **The containment rail every PROJECT-scope path passes** — the override's proof, generalized to
@@ -1283,6 +1306,40 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
         });
     }
     next
+}
+
+/// The indices of `map`'s placements that a picked agent's folder MOVED OUT FROM — the copies a
+/// run retires in the same sweep that lands the new ones.
+///
+/// One shape only, and every clause is load-bearing: a copy topos itself wrote (`materialized`,
+/// never an adopted source and never a claimed folder), recorded for an agent this plan still
+/// places — SOMEWHERE ELSE. The plan no longer names that dir, and no planned copy sits in the
+/// folder it sits in, so nothing picked still reads it. That last clause is what keeps a folder
+/// several rows share: while ANOTHER picked agent's copy lands in it, the folder is still read
+/// here and the copy stays.
+///
+/// An agent simply dropped from the pick is not this: nothing is planned for it at all, so its
+/// copy freezes in place exactly as before ([`managed_indices`]).
+pub(crate) fn moved_out(map: &PlacementMap, plan: &PlacementPlan) -> Vec<usize> {
+    map.placements
+        .iter()
+        .zip(&map.placement_state)
+        .enumerate()
+        .filter(|(_, (dir, st))| {
+            let Some(agent) = st.agent.as_deref() else {
+                return false;
+            };
+            let dir = Path::new(dir);
+            st.kind == PlacementKind::Native
+                && st.materialized_sha.is_some()
+                && !st.adopted_source
+                && st.claim.is_none()
+                && !plan.holds_dir(dir)
+                && plan.dirs().any(|t| t.agent.as_deref() == Some(agent))
+                && !plan.dirs().any(|t| t.dir.parent() == dir.parent())
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// The indices of `map`'s placements the CURRENT plan manages — the apply set. A recorded placement

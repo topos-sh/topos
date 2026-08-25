@@ -31,7 +31,7 @@
 # `brace-env` = `{env:VAR}`, `dollar-brace-env` = `${env:VAR}`; `dollar-brace` unless stated).
 
 schema_version = 1
-version = "2026.8.25.1"
+version = "2026.8.25.2"
 min_engine_version = 4
 
 # The remote-to-stdio BRIDGE: the program topos runs so an agent that cannot dial an MCP address
@@ -184,14 +184,20 @@ project_dir = ".codestudio/skills"
 detect_dirs = ["home/.codestudio"]
 
 [[harness]]
-# Verified against a live codex-cli 0.144.4 binary on 2026-07-16: no `.agents/skills` path
-# literal exists in the build; its only user skills root is `$CODEX_HOME/skills`.
+# Verified against a live codex-cli 0.144.4 binary on 2026-07-16: its only user skills root is
+# `$CODEX_HOME/skills`.
 # The Linux system-install probe (`/etc/codex`) is deliberately GONE: an absolute path makes this
 # file unreadable at every fenced origin, and this file is also the served one.
+# `project_dir` deliberately DIFFERS from the upstream table's `.agents/skills`. Verified against
+# codex-cli 0.147.0 on 2026-08-25 with `codex debug prompt-input`: a skill in
+# `<repo>/.codex/skills/<name>/SKILL.md` is discovered exactly like one in
+# `<repo>/.agents/skills/<name>/SKILL.md`, and one present in BOTH is listed TWICE (Codex does not
+# deduplicate). So Codex reads its own folder, and everything topos writes for it — skills, hook,
+# MCP config — sits under `.codex/`, one folder per agent like every other row.
 slug = "codex"
 display_name = "Codex"
 user_dirs = ["codexHome/skills"]
-project_dir = ".agents/skills"
+project_dir = ".codex/skills"
 detect_dirs = ["codexHome"]
 
 [harness.mcp]
