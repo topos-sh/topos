@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use topos_types::persisted::SyncState;
-use topos_types::results::{ExchangeFault, PullData, ResetData};
+use topos_types::results::{ExchangeFault, PullData, PullSkill, ResetData};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -421,6 +421,8 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             // The go-back and the `--keep-mine` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
             let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::KeepMine);
+            // Whether the LOCK follows this invocation — decided before `mode` is consumed below.
+            let went_back = matches!(mode, TargetMode::GoBack(_));
             let mut row = match mode {
                 TargetMode::GoBack(vref) => sync_engine::go_back(&sctx, &skill_id, &vref)?,
                 // The escape consults NO follow state: it finishes a stopped merge from the local
@@ -448,12 +450,23 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             // Stamp the row's workspace provenance from the follow-state (a retained-but-paused entry still
             // resolves; a purely local go-back / tracked-only skill is honestly `None`).
             row.workspace_id = super::followed_workspace(ctx, skill_id.as_str());
+            // THE LOCK RECORDS WHAT THE COPY HOLDS. A go-back inside a checkout replaces that
+            // checkout's copy with an earlier version — and left `topos.lock` naming the team's,
+            // so the file a project COMMITS said the project runs a version no folder there held,
+            // and `install --frozen` would have rebuilt exactly the copy the go-back replaced.
+            // The entry moves the way a publish or a revert moves it (a pin still holds, and says
+            // so), and the receipt names the file.
+            let lock_lines: Vec<topos_types::Message> = went_back
+                .then(|| go_back_lock_line(ctx, &layout, &skill_id, &row))
+                .flatten()
+                .into_iter()
+                .collect();
             let proposals_awaiting = if plane_independent {
                 0
             } else {
                 sum_open_proposals(ctx)
             };
-            Ok(PullOutcome::plain(
+            let mut out = PullOutcome::plain(
                 PullData {
                     skills: vec![row],
                     proposals_awaiting,
@@ -465,9 +478,68 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                 },
                 Vec::new(),
                 BTreeSet::new(),
-            ))
+            );
+            out.disclosures = lock_lines;
+            Ok(out)
         }
     }
+}
+
+/// The cwd project's `topos.lock`, moved to the version a landed GO-BACK now holds — and the line
+/// the receipt says it with. `None` when the go-back acted on a store this checkout does not own,
+/// when there is no project lock entry to move, or when the copy is not a workspace bundle a lock
+/// records.
+///
+/// Best-effort, exactly like the publish/revert rail it shares: the bytes have already landed, and
+/// a lock this run could not move is said on stderr and converged by the next `topos update`.
+fn go_back_lock_line(
+    ctx: &Ctx<'_>,
+    layout: &sidecar::Layout,
+    skill_id: &crate::id::SkillId,
+    row: &PullSkill,
+) -> Option<topos_types::Message> {
+    // ONLY the checkout whose OWN copy just moved. A go-back acts on one store: run from inside a
+    // project with `-g`, it is the MACHINE's copy that went back, and moving the project's lock
+    // then would put a version in the committed file that the checkout's own folder does not hold
+    // — the very thing this rail exists to stop.
+    let root = layout.project_root()?;
+    let roots = ctx.roots.as_ref()?;
+    let cwd = roots.cwd.as_deref()?;
+    let nearest = crate::manifest::scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home))?;
+    if nearest != root {
+        return None;
+    }
+    // The version the copy HOLDS after the go-back — read from the store the go-back wrote, never
+    // from the ref the person typed (a short ref resolved to it; the record is what landed).
+    let lock =
+        doc::read_doc::<topos_types::persisted::Lock>(ctx.fs, &layout.published(skill_id).lock)
+            .ok()
+            .flatten()?;
+    let ws = super::followed_workspace(ctx, skill_id.as_str())
+        .and_then(|id| super::workspace_ref(ctx, &id))?;
+    let moved =
+        super::advance_project_lock(ctx, &row.skill, &lock.base_commit, &ws.host, &ws.name)?;
+    let short = crate::render::short(&moved.version);
+    Some(if moved.held {
+        crate::message::disclosure(
+            "LOCK_HELD",
+            format!(
+                "{} pins {}, so it keeps {short} — this copy holds {} until the pin changes",
+                crate::manifest::MANIFEST_FILE,
+                row.skill,
+                crate::render::short(&lock.base_commit),
+            ),
+        )
+    } else {
+        crate::message::disclosure(
+            "LOCK_MOVED",
+            format!(
+                "{} now records {}@{short} — the version this copy holds",
+                crate::manifest::lock::LOCK_FILE,
+                row.skill,
+            ),
+        )
+    })
 }
 
 /// `update --reset <skill>...` — the loss-led two-phase discard. Refuses without a named skill (a reset
