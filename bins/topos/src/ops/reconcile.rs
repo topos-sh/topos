@@ -631,6 +631,8 @@ struct Env<'a> {
     /// The activity verb the progress lines lead with — "installing" on install-semantics runs
     /// (install, the quiet hooks), "updating" on a typed update.
     verb: &'static str,
+    /// The run's ONE activity counter — and the flag that makes the fan-out a counting pass.
+    steps: RunSteps,
 }
 
 impl Env<'_> {
@@ -1616,6 +1618,7 @@ pub(crate) fn manifest_update(
         } else {
             "installing"
         },
+        steps: RunSteps::default(),
     };
 
     // ---- 3. `--force`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project.
@@ -1888,28 +1891,48 @@ pub(crate) fn manifest_update(
     }
 
     // ---- 4. Reconcile the driven scope(s), unblended. ----
-    let mut targets = Targets::new(&opts.targets);
+    // The driven scopes, resolved ONCE and visited twice (the counting pass, then the real one) —
+    // in the order that decides collisions: the project's own recipe, then the machine's.
+    let mut scopes: Vec<ScopeCtx<'_>> = Vec::new();
     if driven.project
         && let Some((dir, plan)) = &project
     {
-        let sc = ScopeCtx {
+        scopes.push(ScopeCtx {
             scope: ResolvedScope::Project { dir: dir.clone() },
             label: ResolvedScope::Project { dir: dir.clone() }.label(),
             plan,
             lock: lock_state.as_ref(),
-        };
-        reconcile_scope(&env, &sc, &mut targets, &mut sweep);
+        });
     }
     if driven.person
         && let Some(plan) = &person
     {
-        let sc = ScopeCtx {
+        scopes.push(ScopeCtx {
             scope: ResolvedScope::Person,
             label: ResolvedScope::Person.label(),
             plan,
             lock: None,
-        };
-        reconcile_scope(&env, &sc, &mut targets, &mut sweep);
+        });
+    }
+
+    // ---- 4a. COUNT first, over a throwaway sweep: the run's activity counter has to promise a
+    // total before the first item opens its line, and the only honest total is the one the same
+    // filters produce (see [`RunSteps`]). Nothing here writes, and nothing here is dialed that the
+    // pass below would not have dialed anyway — the per-session indexes are fetched once and
+    // cached on the run.
+    env.steps.counting.set(true);
+    {
+        let mut probe = Sweep::default();
+        let mut probe_targets = Targets::new(&opts.targets);
+        for sc in &scopes {
+            reconcile_scope(&env, sc, &mut probe_targets, &mut probe);
+        }
+    }
+    env.steps.counting.set(false);
+
+    let mut targets = Targets::new(&opts.targets);
+    for sc in &scopes {
+        reconcile_scope(&env, sc, &mut targets, &mut sweep);
     }
     if let Some(t) = targets.unmatched() {
         // A dial that already happened must be paid for even though this run is about to refuse:
@@ -2753,6 +2776,12 @@ fn reconcile_thing<'a>(
         return;
     }
     sweep.mention(&sc.label, &display);
+    // An explicit row is a batch of one and takes no number, so the counting pass has nothing to
+    // learn from the arms that never reach a workspace sync — and every one of them reads a
+    // folder or dials a forge, which a counting pass must not do twice.
+    if env.steps.counting.get() && !matches!(row.shape, KeyShape::WorkspaceBundle { .. }) {
+        return;
+    }
     match &row.shape {
         KeyShape::WorkspaceBundle {
             host,
@@ -2827,7 +2856,7 @@ fn reconcile_thing<'a>(
                                 // it does on the ordinary arm — the row must not read as a
                                 // healthy install when nothing was placed.
                                 unreachable: narrowing.unreachable,
-                                step: None,
+                                counted: false,
                             },
                             sweep,
                         );
@@ -2913,7 +2942,7 @@ fn reconcile_thing<'a>(
                         delivered: Some(delivered),
                         reach: narrowing.filter,
                         unreachable: narrowing.unreachable,
-                        step: None,
+                        counted: false,
                     },
                     sweep,
                 );
@@ -2993,7 +3022,7 @@ fn reconcile_thing<'a>(
                 display: display.clone(),
                 // A skill row's dest is its frozen placement plan.
                 dest: row.fields().dest,
-                step: None,
+                counted: false,
             };
             sync_workspace_skill(env, sc, run, &st, sweep);
         }
@@ -3587,12 +3616,7 @@ fn reconcile_set<'a>(
                 .channels
                 .insert(channel.clone(), full_names);
         }
-        let total = batch.len();
-        for (position, member) in batch.into_iter().enumerate() {
-            let step = Some(Step {
-                index: position + 1,
-                total,
-            });
+        for member in batch {
             // Book the provenance BEFORE the sync (a per-item failure does not unmake the fact
             // that this channel provides the name).
             sweep.delivered.push((
@@ -3673,7 +3697,7 @@ fn reconcile_set<'a>(
                                     delivered,
                                     reach: narrowing.filter,
                                     unreachable: narrowing.unreachable,
-                                    step,
+                                    counted: true,
                                 },
                                 sweep,
                             );
@@ -3755,7 +3779,7 @@ fn reconcile_set<'a>(
                             delivered: Some(delivered),
                             reach: narrowing.filter,
                             unreachable: narrowing.unreachable,
-                            step,
+                            counted: true,
                         },
                         sweep,
                     );
@@ -3784,7 +3808,7 @@ fn reconcile_set<'a>(
                 pin_from_row: false,
                 display,
                 dest: row.fields().dest,
-                step,
+                counted: true,
             };
             sync_workspace_skill(env, sc, run, &st, sweep);
         }
@@ -3889,8 +3913,7 @@ fn reconcile_feed<'a>(
                     picked.insert(ds.skill_id.as_str())
                 })
                 .collect();
-            let total = batch.len() + server_batch.len();
-            for (position, ds) in batch.into_iter().enumerate() {
+            for ds in batch {
                 let st = SyncTarget {
                     target: CatalogTarget {
                         skill_id: ds.skill_id.clone(),
@@ -3907,15 +3930,11 @@ fn reconcile_feed<'a>(
                     display: ds.name.clone(),
                     // A feed item has no row — no dest, no narrowing: the default placement.
                     dest: None,
-                    step: Some(Step {
-                        index: position + 1,
-                        total,
-                    }),
+                    counted: true,
                 };
                 sync_workspace_skill(env, sc, run, &st, sweep);
             }
-            let placed = total - server_batch.len();
-            for (position, ds) in server_batch.into_iter().enumerate() {
+            for ds in server_batch {
                 sync_workspace_server(
                     env,
                     sc,
@@ -3926,16 +3945,18 @@ fn reconcile_feed<'a>(
                         delivered: Some(ServerDelivery::from_feed(ds)),
                         reach: None,
                         unreachable: None,
-                        step: Some(Step {
-                            index: placed + position + 1,
-                            total,
-                        }),
+                        counted: true,
                     },
                     sweep,
                 );
             }
         }
         None => {
+            // Nothing on this arm takes a number, and it walks the local store — so the counting
+            // pass has no business here.
+            if env.steps.counting.get() {
+                return;
+            }
             // No fresh delivery: converge what the cache says this workspace last served, from the
             // LOCAL store. Nothing is dialed; nothing is cleaned.
             let Some(prior) = env.prior.workspaces.get(&run.session.workspace_id) else {
@@ -3987,7 +4008,7 @@ fn reconcile_feed<'a>(
                             delivered: None,
                             reach: None,
                             unreachable: None,
-                            step: None,
+                            counted: false,
                         },
                         sweep,
                     );
@@ -4137,10 +4158,10 @@ struct SyncTarget {
     /// The row's `dest` — the FROZEN destination set a skill bundle's plan becomes (one target
     /// per entry, detection ignored). `None` = no dest: today's default placement, every agent.
     dest: Option<Vec<String>>,
-    /// Where this bundle sits in the BATCH its source is converging — what turns the activity line
-    /// into "updating docs (2 of 7)". `None` for a lone explicit row, which is a batch of one and
-    /// says so by not counting.
-    step: Option<Step>,
+    /// Whether this bundle takes a number in the run's activity counter — what turns the line into
+    /// "updating docs (2 of 7)". `false` for a lone explicit row, which is a batch of one and says
+    /// so by not counting.
+    counted: bool,
 }
 
 /// What one lane said about a connected server — the facts its record is written from. Both lanes
@@ -4231,19 +4252,55 @@ struct ServerTarget<'a> {
     /// Why the row's own `dest` leaves this bundle reaching no agent at all, when it does — so
     /// the receipt row says it instead of printing a healthy install.
     unreachable: Option<String>,
-    /// Where this bundle sits in the BATCH its source is converging.
-    step: Option<Step>,
+    /// Whether this bundle takes a number in the run's activity counter.
+    counted: bool,
 }
 
-/// One bundle's position in the batch a channel or a feed is converging. Counted over the set the
-/// source actually hands this scope, AFTER the purely-local withholdings (an `"off"` switch, a row
-/// that claims the name) — a denominator that includes rows nothing will ever visit is a wrong
-/// denominator.
+/// One bundle's position in THE RUN — not in the source it came from. Counted over the set this
+/// run actually converges, AFTER the purely-local withholdings (an `"off"` switch, a row that
+/// claims the name, an earlier source that already took the id): a denominator that includes rows
+/// nothing will ever visit is a wrong denominator.
 #[derive(Debug, Clone, Copy)]
 struct Step {
     /// 1-based, so the first item reads "1 of 7" rather than "0 of 7".
     index: usize,
     total: usize,
+}
+
+/// The run's ONE activity counter.
+///
+/// A counter per SOURCE restarted at every workspace: `update -g` over two feeds read
+/// `(1 of 2) (2 of 2) (1 of 5) … (5 of 5)` and then `Checked 7 bundles`, telling a person watching
+/// it that the run had finished twice. One run, one counter — which means the total has to be
+/// known before the first line opens.
+///
+/// So the fan-out runs TWICE: once with [`RunSteps::counting`] set, over a throwaway sweep, where
+/// every sync books its item and returns without touching a byte; then for real, drawing indices
+/// from the total the first pass established. The counting pass walks the SAME filters the sync
+/// walks (there is no second copy of the rules to drift), and dials nothing extra — the per-run
+/// catalog and channel indexes are fetched once and cached on the session run.
+#[derive(Default)]
+struct RunSteps {
+    counting: std::cell::Cell<bool>,
+    total: std::cell::Cell<usize>,
+    done: std::cell::Cell<usize>,
+}
+
+impl RunSteps {
+    /// Counting pass: book one more item this run will converge.
+    fn plan(&self) {
+        self.total.set(self.total.get() + 1);
+    }
+
+    /// Real pass: this item's place in the run.
+    fn take(&self) -> Step {
+        let index = self.done.get() + 1;
+        self.done.set(index);
+        Step {
+            index,
+            total: self.total.get().max(index),
+        }
+    }
 }
 
 impl Step {
@@ -4274,10 +4331,19 @@ fn sync_workspace_skill<'a>(
     if !sweep.claim(&sc.label, &target.skill_id) {
         return; // already reconciled in this scope under another row
     }
+    // The COUNTING pass stops here: it books what the run will converge and touches nothing (see
+    // [`RunSteps`]). It stops AFTER the claim so the dedupe it depends on is the real one.
+    if env.steps.counting.get() {
+        if st.counted {
+            env.steps.plan();
+        }
+        return;
+    }
     // The activity line for this item — opened AFTER the dedupe claim, so a bundle two rows both
     // name is announced once, and held for the whole converge (the engine's own `downloading …`
     // fallback stays quiet underneath it: naming the item beats naming the step).
-    let _phase = crate::progress::phase(ctx.progress, &Step::label(st.step, &st.display, env.verb));
+    let step = st.counted.then(|| env.steps.take());
+    let _phase = crate::progress::phase(ctx.progress, &Step::label(step, &st.display, env.verb));
     // The row's pin overrides the served version (the engine fetches by version id, so an older pin
     // resolves as long as the plane still serves its bytes).
     let version_id = st
@@ -4658,7 +4724,15 @@ fn sync_workspace_server(
     if !sweep.claim(&sc.label, st.skill_id) {
         return; // already reconciled in this scope under another row
     }
-    let _phase = crate::progress::phase(ctx.progress, &Step::label(st.step, st.name, env.verb));
+    // The COUNTING pass books and stops (see [`RunSteps`]), after the dedupe claim it relies on.
+    if env.steps.counting.get() {
+        if st.counted {
+            env.steps.plan();
+        }
+        return;
+    }
+    let step = st.counted.then(|| env.steps.take());
+    let _phase = crate::progress::phase(ctx.progress, &Step::label(step, st.name, env.verb));
     // The scope decides the STORE the record lives in: person → the home layout; project → the
     // checkout's own store. Per-scope state is the independence guarantee, exactly as for files.
     let store_layout = match &sc.scope {
