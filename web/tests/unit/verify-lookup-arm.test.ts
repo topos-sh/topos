@@ -250,3 +250,59 @@ describe("a guessed DECISION pays per miss; a decision on a resolved code never 
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
   });
 });
+
+/**
+ * THE HYPHEN IS FOR READING ALOUD, NOT PART OF THE CODE.
+ *
+ * `AB29-CD34` is grouped so a person can read it off a terminal or say it to someone across the
+ * room. Typing it back without the group — `AB29CD34` — or writing down what was said as
+ * `AB29 CD34` is the same code, and both used to miss: the person was sent back to re-read a code
+ * they had already read correctly, and each attempt spent a token off the guessing belt.
+ *
+ * The lookup spells the code the way a code is spelled before it looks anything up. The length
+ * cap runs AFTER that, so the eight-character spelling is not mistaken for a short code and a real
+ * paste is still refused free.
+ */
+describe("the code lookup reads a code however it was written down", () => {
+  it("resolves the same request from the hyphenless and the spaced spelling", async () => {
+    session = { user: { id: "u_own", name: "Owner", email: "owner@example.com" } };
+    const identity = await import("@/lib/db/identity.server");
+    const flow = await identity.startLoginFlow("spelled-box", null);
+    const bare = flow.userCode.replace("-", "");
+
+    for (const spelling of [flow.userCode, bare, `${bare.slice(0, 4)} ${bare.slice(4)}`]) {
+      expect(await postVerify({ code: spelling })).toMatchObject({
+        kind: "resolved",
+        pending: { requestedName: "spelled-box" },
+      });
+    }
+    // Lower case is the same code too — the alphabet is upper case, the keyboard need not be.
+    expect(await postVerify({ code: bare.toLowerCase() })).toMatchObject({ kind: "resolved" });
+    // Looking a request up decides nothing, however it was spelled.
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
+  });
+
+  it("caps AFTER spelling it out, so a real paste is still the free miss", async () => {
+    await seedUser(db, "u_spell", "Speller", "speller@example.com");
+    await seatUser(db, wsId, "u_spell", "member");
+    session = { user: { id: "u_spell", name: "Speller", email: "speller@example.com" } };
+
+    // Nine bare characters is not a code however it is spaced, and it never reaches the belt.
+    for (let i = 0; i < 11; i++) {
+      expect(await postVerify({ code: "AB29 CD34 X" })).toEqual({ kind: "miss" });
+    }
+    const identity = await import("@/lib/db/identity.server");
+    const flow = await identity.startLoginFlow("speller-box", null);
+    expect(await postVerify({ code: flow.userCode.replace("-", "") })).toMatchObject({
+      kind: "resolved",
+      pending: { requestedName: "speller-box" },
+    });
+  });
+
+  it("still calls an empty submit empty, however much whitespace it carried", async () => {
+    expect(bodyOf(await postVerify({ code: " - " }))).toEqual({
+      kind: "refused",
+      error: "Enter the code your terminal shows",
+    });
+  });
+});
