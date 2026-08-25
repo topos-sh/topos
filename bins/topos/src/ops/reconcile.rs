@@ -194,6 +194,141 @@ impl Driven {
     }
 }
 
+/// One bundle the `--frozen` preflight could not stage. The REASON is the whole point: it decides
+/// whether the refusal an agent reads is permanent or worth running again, and what it should run
+/// instead.
+struct FrozenGap {
+    /// The bundle's bare name, as `topos.lock` keys it.
+    name: String,
+    kind: FrozenGapKind,
+}
+
+/// Why one locked entry could not be staged — in the order of severity [`frozen_refusal`] reads.
+enum FrozenGapKind {
+    /// No connected workspace serves that version to this login (or carries the bundle at all).
+    /// The plane ANSWERED; the answer is settled. The cure is a login that reaches the workspace
+    /// carrying it, or a lock that names something this one does serve.
+    NotServed {
+        /// The workspace that answered, when the run knows which one to name.
+        address: Option<String>,
+        /// The locked version, already proved to be a version id.
+        version: String,
+    },
+    /// The lock's own `version` is not a version id, so it names nothing any server could answer
+    /// for. The cure is in the file.
+    MalformedLockId,
+    /// A transport or store fault — the ONE reason re-running the same command is worth anything.
+    Fault { why: String },
+}
+
+/// The address a not-served refusal names when the run cannot say which workspace it means — the
+/// spelling the login prose already uses everywhere else, so it reads as the blank it is.
+const ANY_WORKSPACE: &str = "<server>/<workspace>";
+
+/// The ONE refusal a preflight with gaps answers with.
+///
+/// **Any permanent gap makes the whole run permanent.** A run whose lock names a version nobody
+/// serves cannot succeed however many times it is re-run, so an outcome that invites a retry is an
+/// instruction to loop forever — which is exactly what a CI agent does with it. Faults ALONE keep
+/// the retryable class and the safe-re-run sentence `--frozen` has always carried, because the
+/// preflight refuses before the first placement and the checkout is untouched either way.
+///
+/// The code follows the same precedence: the uniform `NOT_FOUND` for a version no workspace
+/// serves, `INVALID_ARGUMENT` for a lock this build cannot read, `IO_ERROR` for a fault.
+fn frozen_refusal(gaps: &[FrozenGap], lock_path: &std::path::Path) -> ClientError {
+    let mut sentences: Vec<String> = Vec::new();
+    let mut faults: Vec<String> = Vec::new();
+    let mut actions: Vec<Vec<String>> = Vec::new();
+    let mut code: Option<&'static str> = None;
+    // One command per way out, however many entries name the same one: two bundles missing from
+    // the same workspace are one login, not two identical offers.
+    fn push(actions: &mut Vec<Vec<String>>, argv: Vec<String>) {
+        if !actions.contains(&argv) {
+            actions.push(argv);
+        }
+    }
+    for gap in gaps {
+        let name = &gap.name;
+        match &gap.kind {
+            FrozenGapKind::NotServed { address, version } => {
+                code = Some("NOT_FOUND");
+                let address = address.as_deref().unwrap_or(ANY_WORKSPACE);
+                sentences.push(format!(
+                    "the lock names {name}@{} but {address} does not serve that version to this \
+                     login — log in to the workspace that carries it (`topos login {address}`) or \
+                     update the lock (`topos update {name}`)",
+                    crate::render::short(version)
+                ));
+                push(
+                    &mut actions,
+                    vec![
+                        "topos".to_owned(),
+                        "login".to_owned(),
+                        address.to_owned(),
+                        "--json".to_owned(),
+                    ],
+                );
+                push(
+                    &mut actions,
+                    vec![
+                        "topos".to_owned(),
+                        "update".to_owned(),
+                        name.clone(),
+                        "--json".to_owned(),
+                    ],
+                );
+            }
+            FrozenGapKind::MalformedLockId => {
+                code = code.or(Some("INVALID_ARGUMENT"));
+                // The VALUE is never echoed — it is whatever bytes the file holds. The block and
+                // the file are what a person opens, and what the fix acts on.
+                sentences.push(format!(
+                    "{}: [skills.{name}] records a `version` that is not a version id — fix that \
+                     entry, or delete the block and run `topos update {name}`",
+                    lock_path.display()
+                ));
+                push(
+                    &mut actions,
+                    vec![
+                        "topos".to_owned(),
+                        "update".to_owned(),
+                        name.clone(),
+                        "--json".to_owned(),
+                    ],
+                );
+            }
+            FrozenGapKind::Fault { why } => faults.push(format!("{name} ({why})")),
+        }
+    }
+    if !faults.is_empty() {
+        let noun = if faults.len() == 1 {
+            "bundle"
+        } else {
+            "bundles"
+        };
+        sentences.push(format!(
+            "--frozen: could not stage {noun} {} — nothing was placed, so `topos install \
+             --frozen` is safe to run again",
+            faults.join(", ")
+        ));
+    }
+    let message = if sentences.len() == 1 {
+        sentences.remove(0)
+    } else {
+        format!(
+            "--frozen: nothing was placed — these entries of topos.lock could not be staged:\n  \
+             - {}",
+            sentences.join("\n  - ")
+        )
+    };
+    ClientError::FrozenStageFailed {
+        message,
+        code: code.unwrap_or("IO_ERROR"),
+        retryable: code.is_none(),
+        actions,
+    }
+}
+
 /// One session's runtime state for this sweep.
 struct SessionRun {
     session: Session,
@@ -1834,7 +1969,11 @@ pub(crate) fn manifest_update(
                     demanded.extend(members.iter().map(String::as_str));
                 }
             }
-            let mut unstageable: Vec<String> = Vec::new();
+            let mut gaps: Vec<FrozenGap> = Vec::new();
+            // WHOSE lock this is — the address the block above has already proved `topos.toml`
+            // and `topos.lock` agree on. A refusal about a version nobody serves is useless
+            // without it: "log in to the workspace that carries it" needs the workspace.
+            let ws_address = plan.workspace.as_ref().map(|(h, w)| format!("{h}/{w}"));
             match sidecar::ensure_project_store(ctx.fs, dir) {
                 Err(e) => return Err(e),
                 Ok(store_layout) => {
@@ -1845,8 +1984,26 @@ pub(crate) fn manifest_update(
                         let Some(version) = entry.version.as_deref() else {
                             continue; // repo entries stage in their own arm
                         };
+                        // The lock's OWN entry, read before anything is dialed on its behalf: a
+                        // `version` that is not a version id names nothing any server could
+                        // answer for, now or on the thousandth re-run. The cure is in the file.
+                        if super::parse_hex32(version).is_err() {
+                            gaps.push(FrozenGap {
+                                name: name.clone(),
+                                kind: FrozenGapKind::MalformedLockId,
+                            });
+                            continue;
+                        }
+                        // A catalog this run could not READ is not a workspace that does not
+                        // carry the bundle — `catalog()` answers `None` for both, and folding
+                        // them together made an unreachable directory look like a settled
+                        // absence. The flag keeps the two apart.
+                        let mut catalog_unread = false;
                         let found = runs.iter().find_map(|r| {
-                            let catalog = r.catalog(&mut sweep.warnings)?;
+                            let Some(catalog) = r.catalog(&mut sweep.warnings) else {
+                                catalog_unread = true;
+                                return None;
+                            };
                             let id = catalog
                                 .skills
                                 .iter()
@@ -1862,11 +2019,31 @@ pub(crate) fn manifest_update(
                             Some((r, id))
                         });
                         let Some((run, skill_id)) = found else {
-                            unstageable.push(format!("{name} (no connected catalog serves it)"));
+                            gaps.push(FrozenGap {
+                                name: name.clone(),
+                                kind: if catalog_unread {
+                                    FrozenGapKind::Fault {
+                                        why: "topos could not read a connected workspace's list \
+                                              of bundles"
+                                            .to_owned(),
+                                    }
+                                } else {
+                                    FrozenGapKind::NotServed {
+                                        address: ws_address.clone(),
+                                        version: version.to_owned(),
+                                    }
+                                },
+                            });
                             continue;
                         };
                         let Ok(sid) = SkillId::parse(&skill_id) else {
-                            unstageable.push(format!("{name} (malformed id)"));
+                            gaps.push(FrozenGap {
+                                name: name.clone(),
+                                kind: FrozenGapKind::Fault {
+                                    why: "the workspace lists it under an id topos could not read"
+                                        .to_owned(),
+                                },
+                            });
                             continue;
                         };
                         // TEACH THE LANE THE PAIR IT JUST RESOLVED. The read lane routes every
@@ -1886,26 +2063,32 @@ pub(crate) fn manifest_update(
                             &follow,
                         );
                         if let Err(e) = sync_engine::prefetch_version(&run_ctx, &sid, version) {
-                            unstageable
-                                .push(format!("{name} ({})", crate::render::safe_message(&e)));
+                            // The server ANSWERED and said it serves no such version — to this
+                            // login, at least. That answer does not change on a re-run; every
+                            // other failure here is a fault that might.
+                            gaps.push(FrozenGap {
+                                name: name.clone(),
+                                kind: match &e {
+                                    ClientError::VersionNotServed { .. } => {
+                                        FrozenGapKind::NotServed {
+                                            address: Some(format!(
+                                                "{}/{}",
+                                                run.session.host, run.session.workspace_name
+                                            )),
+                                            version: version.to_owned(),
+                                        }
+                                    }
+                                    other => FrozenGapKind::Fault {
+                                        why: crate::render::safe_message(other),
+                                    },
+                                },
+                            });
                         }
                     }
                 }
             }
-            if !unstageable.is_empty() {
-                // The preflight refuses BEFORE the first placement, so the state this names is
-                // the state the checkout is in: nothing here is half-installed, and the same
-                // command is what runs next.
-                let noun = if unstageable.len() == 1 {
-                    "bundle"
-                } else {
-                    "bundles"
-                };
-                return Err(ClientError::FrozenStageFailed(format!(
-                    "--frozen: could not stage {noun} {} — nothing was placed, so `topos install \
-                     --frozen` is safe to run again",
-                    unstageable.join(", ")
-                )));
+            if !gaps.is_empty() {
+                return Err(frozen_refusal(&gaps, &lock_path));
             }
         }
         lock_state = Some(LockState {

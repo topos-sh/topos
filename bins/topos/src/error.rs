@@ -581,13 +581,29 @@ pub(crate) enum ClientError {
     #[error("{0}")]
     InvalidArgument(String),
     /// `--frozen` could not stage every version `topos.lock` names, so nothing was placed. NOT an
-    /// argument error: the argv was right and the lock was right — the run could not obtain what
-    /// they name (the local store, the filesystem, or the server answering for a version). The
-    /// message is this code's own words — a manifest name plus an already-redacted summary
-    /// ([`crate::render::safe_message`]) — so it is shown VERBATIM, and it names the command to
-    /// run again, which a refused frozen install always leaves safe.
-    #[error("{0}")]
-    FrozenStageFailed(String),
+    /// argument error: the argv was right — the run could not obtain what the lock names.
+    ///
+    /// WHY it could not decides everything an agent does next, so the reason travels with the
+    /// refusal instead of being flattened into one code. A version the workspace does not serve
+    /// this login, and a lock entry that is not a version id, are settled facts: the same command
+    /// meets the same answer forever, and the way out is a different login or a different lock.
+    /// Only a transport or store fault is worth a re-run. Folding all three into one retryable
+    /// `IO_ERROR` told a CI agent to loop on a state that could never change.
+    ///
+    /// The message is this code's own words — manifest names, addresses, and already-redacted
+    /// summaries ([`crate::render::safe_message`]) — so it is shown VERBATIM, and it names the
+    /// commands that cure it. `actions` carries those same commands as argv, so the machine
+    /// surface offers them without re-reading the prose.
+    #[error("{message}")]
+    FrozenStageFailed {
+        message: String,
+        /// The wire code this refusal wears — the reason's own word, chosen where the gap was met.
+        code: &'static str,
+        /// Whether re-running the very same command could succeed.
+        retryable: bool,
+        /// The runnable ways out, each already tokenized (never re-parsed out of the sentence).
+        actions: Vec<Vec<String>>,
+    },
     /// A write-side git store failure.
     #[error("the local skill store reported an error — {0}")]
     Gitstore(#[from] GitstoreError),
@@ -1165,6 +1181,14 @@ pub(crate) enum ClientError {
     /// [`ClientError::TargetNotFound`] template.
     #[error("{0}")]
     NotAvailable(String),
+    /// The plane answered about a VERSION and said it serves no such thing — the same non-oracle
+    /// answer the address family gets ("does not exist" and "not yours" are one reply), met one
+    /// level down, where the id is already in hand. Its own variant because permanence is the
+    /// whole point: a version the server does not serve will not appear on a re-run, so this must
+    /// never wear the transport family's retryable class the way a bare
+    /// [`ClientError::Plane`] string did.
+    #[error("the server does not serve version {version}, or not to you")]
+    VersionNotServed { version: String },
     /// A name resolved to MORE than one thing the invocation could have meant — several workspace
     /// resources (across workspaces, or across the channel/skill kinds), or several lines of one
     /// manifest. Each way out rides as a STRUCTURED [`TargetCandidate`]
@@ -1364,10 +1388,11 @@ impl ClientError {
             // set (which is closed on the client side; agents branch on `outcome`/`retryable`).
             ClientError::Io(_) | ClientError::IoKind { .. } => "IO_ERROR",
             ClientError::InvalidArgument(_) => "INVALID_ARGUMENT",
-            // A run that could not obtain the bytes the lock names is a local/remote FAULT, not a
-            // wrong argv — it takes the filesystem family's code so an agent branches on the same
-            // word it does for every other "this machine could not get at it".
-            ClientError::FrozenStageFailed(_) => "IO_ERROR",
+            // The frozen preflight's code is the REASON's, decided where the gap was met: the
+            // filesystem family's `IO_ERROR` for a fault this machine could not get past, the
+            // uniform `NOT_FOUND` for a version no connected workspace serves, `INVALID_ARGUMENT`
+            // for a lock entry that is not a version id.
+            ClientError::FrozenStageFailed { code, .. } => code,
             ClientError::Gitstore(_) => "GIT_STORE_ERROR",
             ClientError::Verify(_) => "INTEGRITY_ERROR",
             ClientError::UnknownSchemaVersion { .. } => "UPGRADE_REQUIRED",
@@ -1479,8 +1504,9 @@ impl ClientError {
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
             ClientError::UpgradeAmbiguous => "UPGRADE_AMBIGUOUS",
             ClientError::TargetNotFound { .. } => "NOT_FOUND",
-            // The context-phrased miss shares the uniform code (agents branch the same).
-            ClientError::NotAvailable(_) => "NOT_FOUND",
+            // The context-phrased miss shares the uniform code (agents branch the same) — and so
+            // does the version-level one, which is that same non-answer about an id.
+            ClientError::NotAvailable(_) | ClientError::VersionNotServed { .. } => "NOT_FOUND",
             // The address-grammar ambiguity shares the tracked-name ambiguity's code (agents branch the
             // same); the candidates additionally ride the envelope's `data.candidates`.
             ClientError::AmbiguousTarget { .. } => "AMBIGUOUS_NAME",
@@ -1535,9 +1561,17 @@ impl ClientError {
             ClientError::Io(_)
             | ClientError::Gitstore(GitstoreError::Io(_))
             | ClientError::Plane(_) => TerminalOutcome::RetryableFailure,
-            // The frozen preflight refuses BEFORE the first placement, so the same command is
-            // exactly what runs next — the retryable class, and the message says so out loud.
-            ClientError::FrozenStageFailed(_) => TerminalOutcome::RetryableFailure,
+            // The frozen preflight refuses BEFORE the first placement, so a run stopped by a
+            // FAULT leaves the same command safe to run again — and says so out loud. A run
+            // stopped by a version nobody serves, or by a lock entry that is not a version id,
+            // would meet the identical answer forever: retrying is a loop, not a recovery.
+            ClientError::FrozenStageFailed { retryable, .. } => {
+                if *retryable {
+                    TerminalOutcome::RetryableFailure
+                } else {
+                    TerminalOutcome::PermanentFailure
+                }
+            }
             // With the OS kind in hand, permanence is decidable: permission-denied, a read-only
             // filesystem, and disk-full will NOT heal on a retry — the retryable bit is the load-bearing
             // part of the machine contract, so it must not steer the agent into a loop. Everything else
