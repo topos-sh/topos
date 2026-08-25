@@ -3461,7 +3461,7 @@ const CHANNEL_MCP_DEST_NO_AGENT: &str = "the channel's mcp_dest in topos.toml na
 /// What [`mcp_filter`] hands one demand: the harness narrowing itself, plus the clause the row
 /// must state when that narrowing leaves the bundle reaching NOTHING.
 struct McpNarrowing {
-    filter: Option<Vec<String>>,
+    filter: Option<Vec<crate::placement::Reach>>,
     unreachable: Option<String>,
 }
 
@@ -3478,7 +3478,7 @@ pub(crate) struct DestNarrowing {
     /// The harnesses to place into. `None` = the row has no `dest` (every MCP-capable agent, now
     /// and later); `Some` = exactly the named files' agents — possibly EMPTY, because a dest row
     /// is FROZEN to what it names.
-    pub filter: Option<Vec<String>>,
+    pub filter: Option<Vec<crate::placement::Reach>>,
     /// The dest entries no MCP-capable harness claims, in row order.
     pub unknown: Vec<String>,
 }
@@ -3513,13 +3513,18 @@ pub(crate) fn mcp_dest_narrowing(
         };
     };
     let default_reach = crate::manifest::dest::carries_default_reach(&dest);
-    let mut mapped: Vec<String> = Vec::new();
+    let mut mapped: Vec<crate::placement::Reach> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     for entry in crate::manifest::dest::named_entries(&dest) {
-        match crate::manifest::dest::mcp_slug_for_dest(&entry, scope) {
-            Some(slug) => {
-                if !mapped.iter().any(|s| s == slug) {
-                    mapped.push(slug.to_owned());
+        match crate::manifest::dest::mcp_reach_for_dest(&entry, scope) {
+            // WHICH of the agent's files the entry named travels with the slug: one agent can
+            // have two project files, and the slug alone cannot tell them apart.
+            Some((slug, dest_named)) => {
+                if !mapped.iter().any(|r| r.slug == slug) {
+                    mapped.push(crate::placement::Reach {
+                        slug: slug.to_owned(),
+                        dest_named,
+                    });
                 }
             }
             None => {
@@ -4473,9 +4478,10 @@ struct ServerTarget<'a> {
     skill_id: &'a str,
     name: &'a str,
     delivered: Option<ServerDelivery>,
-    /// The harnesses whose config files the row's `dest` names — carried onto the scope's
-    /// [`mcp_engine::DemandedBundle`]. `None` = every MCP-capable harness.
-    reach: Option<Vec<String>>,
+    /// The harnesses whose config files the row's `dest` names, and which of each agent's files
+    /// — carried onto the scope's [`mcp_engine::DemandedBundle`]. `None` = every MCP-capable
+    /// harness, each at the surface it gets by default.
+    reach: Option<Vec<crate::placement::Reach>>,
     /// Why the row's own `dest` leaves this bundle reaching no agent at all, when it does — so
     /// the receipt row says it instead of printing a healthy install.
     unreachable: Option<String>,
@@ -8419,7 +8425,10 @@ mod tests {
         };
         // Without the token: exactly the agents the named files belong to.
         let narrowed = narrowing(&["~/.cursor/mcp.json"]);
-        assert_eq!(narrowed.filter.as_deref(), Some(&["cursor".to_owned()][..]));
+        assert_eq!(
+            narrowed.filter,
+            Some(vec![crate::placement::Reach::from("cursor")])
+        );
         // With it: no filter at all — the unnarrowed answer, which is what `None` means.
         let open = narrowing(&["*", "~/.cursor/mcp.json"]);
         assert_eq!(open.filter, None);

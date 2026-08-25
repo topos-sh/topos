@@ -260,7 +260,15 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   a DIRECTORY the bundle owns (the picked agents' folders; project-rooted with containment
   proven at the write boundary), or ENTRIES it owns inside a config file shared with the whole
   machine (`entries_plan` — the harness table's MCP surfaces joined onto the pick, narrowed by
-  the reach the caller resolved, with the surfaces it withheld and their reasons). A kind picks
+  the reach the caller resolved, with the surfaces it withheld and their reasons). A resolved
+  surface (`SurfaceAt`) carries four things together — the file, its dialect, the key path its
+  entries sit under, and whether the containment rail governs it — because acting on three and
+  re-deriving the fourth is how an edit lands under one path and is verified under another. A
+  PROJECT surface is usually a file in the checkout, proven inside it at every write; Claude Code's
+  is its own MACHINE file, whose entries for a checkout sit in a slot keyed by that checkout's
+  absolute path, so nothing is written in the repository and the rail has nothing to prove. One
+  agent can therefore have TWO project files — the default one, and a second (`.mcp.json`) reached
+  only when a row's `dest` names it — which is what `Reach` carries beside each slug. A kind picks
   which arm plans and which mechanic applies; a plan says what SHOULD stand and never what does
   (that is the bundle record's custody). Composes `topos-harness::{registry,mcp}`. `Drift`
   is the ONE payload-free vocabulary both shapes project onto (Absent/Clean/Modified/Foreign/
@@ -327,7 +335,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   PLANNING and nowhere else: a row's `dest` config-file entries map to the harnesses that claim
   them (no dest — or a dest carrying `"*"` — = every MCP-capable agent), a targeted verb plans only the harnesses whose
   recorded rows prove the bundle already stands there (`recorded_reach`), and the plan carries the
-  surfaces it withheld so a receipt still says what reach cost. Every demand the sweep and `add`
+  surfaces it withheld so a receipt still says what reach cost; a `dest` entry naming an agent's
+  SECOND project file selects that file rather than the one the default reach writes. Every demand
+  the sweep and `add`
   converge is built by `DemandedBundle::planned`, so a caller cannot hand the converge a reach the
   planner did not compute; the targeted converge builds its own demand from a reach it re-derives
   from the record immediately before the lock, because a verb plans at its top and converges after
@@ -335,8 +345,13 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   never places where the next sweep would claw it back. Removal and
   key retirement resolve their surfaces from the descriptor table and their reach from the
   recorded rows — prior-matched keys, with drift left in place. ONE converge path serves every
-  surface, the wholly-topos-owned Claude plugin dir included (its `.mcp.json` is an ordinary
-  driver surface; content topos did not write backs the whole surface off), and every entry
+  surface, and it runs first over the RETIRED ones (`retired_surfaces`): the surfaces an older
+  topos wrote this harness's entries into and this one does not — Claude Code's wholly-owned
+  plugin folder, and the `.mcp.json` a project used to get — converged with an empty desired set,
+  so their rows leave through the ordinary prior-matched removal and the file (or folder) goes
+  with the last of them, and no server is registered twice under two names. They are code and not
+  a table column: which files a PAST topos wrote is this binary's own history, and a downloaded
+  table must never aim a cleanup. Every entry
   point — the sweep, add's inline converge, a targeted accept/go-back, `remove` — serializes on
   the per-scope `locks/mcp.lock` (unavailable = a refusal, never a fallback), over the ONE
   scope-store resolution (`manifest_edit::mcp_scope_target`).

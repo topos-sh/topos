@@ -127,13 +127,22 @@ impl Install {
 
 // ── the six user-scope config surfaces ──────────────────────────────────────────────────────────
 
-/// The Claude Code plugin dir topos owns whole.
-fn claude_plugin_dir(home: &Path) -> PathBuf {
-    home.join(".claude").join("skills").join("topos-mcp")
+/// **Claude Code's own configuration** — one file holding two entries objects: top-level
+/// `mcpServers`, which every project reads, and `projects.<a checkout's absolute path>.mcpServers`,
+/// which only a session started in that directory reads. The suite unsets `$CLAUDE_CONFIG_DIR`, so
+/// it sits at the default, beside the config dir.
+fn claude_config(home: &Path) -> PathBuf {
+    home.join(".claude.json")
 }
 
-/// The person's OWN content in each PATCHED surface (the Claude plugin dir is rendered whole and
-/// asserted separately), written before topos ever touches them — the
+/// The servers Claude Code sees in ONE checkout — its own slot in the file above.
+fn claude_project_servers(home: &Path, project: &Path) -> Value {
+    read_json(&claude_config(home))["projects"][canon(project)]["mcpServers"].clone()
+}
+
+/// The person's OWN content in each PATCHED surface (Claude Code's own configuration is asserted
+/// separately: topos creates it here, so what a removal must do to it is DELETE it), written
+/// before topos ever touches them — the
 /// byte-exact baseline a removal must restore.
 fn seed_user_configs(home: &Path) -> Vec<(&'static str, PathBuf, String)> {
     let seeds: Vec<(&'static str, PathBuf, String)> = vec![
@@ -295,18 +304,12 @@ fn mcp_row<'a>(answer: &'a Value, name: &str) -> &'a Value {
 /// beside it. Asserted for every machine this suite gives the server to, because a dialect that
 /// is right on one machine and wrong on the next is the failure this matrix exists to catch.
 fn assert_the_six_dialects(home: &Path) {
-    // Claude Code — a wholly topos-owned plugin DIR, both files rendered whole.
-    let plugin = claude_plugin_dir(home);
+    // Claude Code — its own configuration file, the slot every project reads, under the server's
+    // own name. The FILE is the agent's whole configuration and holds whatever else it holds; the
+    // entry is what topos owns, and its shape is what a wrong key would brick.
     assert_eq!(
-        read(&plugin.join(".claude-plugin").join("plugin.json")),
-        "{\n  \"description\": \"Team-shared MCP servers delivered by Topos\",\n  \"displayName\": \"Topos MCP\",\n  \"name\": \"topos-mcp\",\n  \"version\": \"0.1.0\"\n}\n",
-        "the plugin manifest is the constant"
-    );
-    assert_eq!(
-        read(&plugin.join(".mcp.json")),
-        format!(
-            "{{\n  \"mcpServers\": {{\n    \"{KEY}\": {{\n      \"type\": \"http\",\n      \"url\": \"{SERVER_URL}\"\n    }}\n  }}\n}}\n"
-        ),
+        read_json(&claude_config(home))["mcpServers"][KEY],
+        json!({ "type": "http", "url": SERVER_URL }),
         "claude: `type: http` is mandatory"
     );
 
@@ -634,8 +637,8 @@ fn the_connected_server_loop_across_six_agents() {
         .run(dev.root(), &["update", "--json"])
         .data("update after remove");
     assert!(
-        !claude_plugin_dir(&home).exists(),
-        "the wholly-owned plugin dir goes with its last entry"
+        !claude_config(&home).exists(),
+        "a file topos created and still wholly owned goes with its last entry"
     );
     for (slug, path, seeded) in &seeds {
         assert_eq!(
@@ -749,11 +752,15 @@ fn the_connected_server_loop_across_six_agents() {
         .run(&proj, &["update", "--json"])
         .data("update (project)");
 
-    let proj_claude = read_json(&proj.join(".mcp.json"));
+    let proj_claude = claude_project_servers(&home, &proj);
     assert_eq!(
-        proj_claude["mcpServers"][KEY],
+        proj_claude[KEY],
         json!({ "type": "http", "url": SERVER_URL }),
-        "the project `.mcp.json`: {proj_claude}"
+        "this checkout's own slot in Claude Code's configuration: {proj_claude}"
+    );
+    assert!(
+        !proj.join(".mcp.json").exists(),
+        "and not a byte in the repository"
     );
     let proj_codex = read(&proj.join(".codex").join("config.toml"));
     assert_eq!(
@@ -778,8 +785,8 @@ fn the_connected_server_loop_across_six_agents() {
     );
     // …and NOTHING reached the user surfaces (they still hold exactly the person's own bytes).
     assert!(
-        !claude_plugin_dir(&home).exists(),
-        "no user-scope plugin dir was written"
+        read_json(&claude_config(&home)).get("mcpServers").is_none(),
+        "a project row never writes the slot every project reads"
     );
     for (slug, path, seeded) in &seeds {
         assert_eq!(
@@ -816,7 +823,7 @@ fn the_connected_server_loop_across_six_agents() {
         deep["detail"]["harnesses"],
         json!([
             { "agent": "claude-code", "state": "current",
-              "file": canon(&proj.join(".mcp.json")) },
+              "file": canon(&claude_config(&home)) },
             { "agent": "openclaw", "state": "not-supported", "note": "no project-level config" },
             { "agent": "codex", "state": "current",
               "file": canon(&proj.join(".codex").join("config.toml")) },
@@ -856,9 +863,10 @@ fn the_connected_server_loop_across_six_agents() {
         local_bytes,
         "the person's same-named skill dir is untouched"
     );
-    assert!(
-        claude_plugin_dir(&home).join(".mcp.json").is_file(),
-        "the plugin dir is its own sibling under the same skills root"
+    assert_eq!(
+        read_json(&claude_config(&home))["mcpServers"][KEY]["url"],
+        SERVER_URL,
+        "the config entry is a file beside the skills root, never inside it"
     );
     assert_eq!(
         read_json(&cursor_path)["mcpServers"][KEY]["url"],
@@ -1127,7 +1135,7 @@ fn a_committed_lock_installs_the_mcp_revision_it_names() {
         "the locked revision is served, so CI installs it: {} {}",
         frozen.stdout, frozen.stderr
     );
-    let placed = read(&clone.join(".mcp.json"));
+    let placed = claude_project_servers(&dev.root().join("home"), &clone).to_string();
     assert!(
         placed.contains(SERVER_URL) && !placed.contains(SERVER_URL_V2),
         "the checkout receives the document its lock names, not today's:\n{placed}"
@@ -1140,7 +1148,7 @@ fn a_committed_lock_installs_the_mcp_revision_it_names() {
 
     // ── `topos update` is what moves it — both halves, together ─────────────────────────────────
     dev.run(&clone, &["update", "--json"]).data("update");
-    let placed = read(&clone.join(".mcp.json"));
+    let placed = claude_project_servers(&dev.root().join("home"), &clone).to_string();
     assert!(
         placed.contains(SERVER_URL_V2) && !placed.contains(SERVER_URL),
         "update takes the served revision:\n{placed}"

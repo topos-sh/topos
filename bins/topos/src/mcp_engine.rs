@@ -107,7 +107,7 @@ pub(crate) struct DemandedBundle {
     /// names, or (for a targeted verb) the harnesses whose recorded rows prove the bundle already
     /// stands there. `None` = every MCP-capable harness. It is a PLANNER INPUT and nothing else:
     /// the plan turns it into targets, and no downstream step re-derives reach.
-    pub reach: Option<Vec<String>>,
+    pub reach: Option<Vec<crate::placement::Reach>>,
     /// **The session this delivery ran under**, for the one document shape that needs one: a
     /// workspace that reaches the server on the agent's behalf delivers a document saying so, and
     /// the entry is then dialed with this machine's own credential for THAT workspace
@@ -365,7 +365,8 @@ pub(crate) fn converge(
 
     // Crash recovery over the intent journal, BEFORE any prior map is built (a landed-but-
     // unpromoted write would otherwise read as user drift forever).
-    let dialect_of = config_custody::dialect_lookup(descriptors, io.project_root.is_some());
+    let dialect_of =
+        config_custody::dialect_lookup(descriptors, &io.home, io.project_root.as_deref());
     if custody.recover(io.fs, &dialect_of) {
         let failures = custody.flush(io.fs, io.layout);
         if !failures.is_empty() {
@@ -456,6 +457,10 @@ pub(crate) fn converge(
         })
         .collect();
 
+    // Every key this run may place, anywhere. A retirement asks it so an entry that is MOVING
+    // between files is never reported as one that left.
+    let desired_keys: BTreeSet<&str> = minted.values().map(String::as_str).collect();
+
     // Per-bundle state collector, keyed by demand index (order preserved for the receipt).
     let mut states: BTreeMap<usize, Vec<McpAgentState>> = BTreeMap::new();
     // The demands whose config entries this run WROTE somewhere — see [`BundleStates::wrote`].
@@ -478,6 +483,20 @@ pub(crate) fn converge(
             who.insert(demand);
         }
         None => standing.push((code, text, BTreeSet::from([demand]))),
+    };
+
+    // Keys PRESERVED from removal on ANY surface: a held bundle's, and — on a run that may not
+    // remove — every undemanded bundle's. Excluded from the drivers' prior map, so the drivers
+    // read them as foreign and leave them byte-identical. It answers on the BUNDLE, never on the
+    // file, which is why one closure serves every surface this run touches.
+    let preserved = |custody: &ScopeEntries, entry_key: &str| -> bool {
+        let Some(bundle) = custody.bundle_of_key(entry_key) else {
+            return false;
+        };
+        if demanded_ids.contains(bundle) && !held(bundle) {
+            return false;
+        }
+        held(bundle) || !allow_removals
     };
 
     for h in descriptors {
@@ -513,223 +532,263 @@ pub(crate) fn converge(
                 }
             }
         }
-        // WHERE this surface's file is. A harness some plan REACHES answers with the plan's own
-        // target — the file the demand named, and engagement already proven when it was planned.
-        // A harness only CUSTODY names (an undemanded bundle's standing entry, a narrowing change,
-        // a removal-only run) has no plan to read, so it resolves through the same shared
-        // resolution the planner used — because a removal must still reach the files it wrote.
-        let planned = parsed
-            .iter()
-            .find_map(|(i, _)| demands[*i].plan.entries_for(h.slug));
-        let (file, dialect) = match planned {
-            Some(t) => (t.file.clone(), t.dialect),
-            None => {
-                let surface =
-                    crate::placement::config_surface(h, &io.home, io.project_root.as_deref());
-                let crate::placement::ConfigSurface::Ready {
-                    root,
-                    file,
-                    dialect,
-                } = surface
-                else {
-                    // A project surface the containment rail refused earns ONE scope-level
-                    // disclosure (the per-bundle states rode the plans above); a harness with no
-                    // surface at this scope is simply not here.
-                    if let crate::placement::ConfigSurface::Escaped { path } = surface {
-                        let line = crate::placement::escape_message(h.slug, &path);
-                        if !out.warnings.contains(&line) {
-                            out.warnings.push(line);
-                        }
-                    }
-                    continue;
-                };
-                // Engagement: the harness is picked on this machine, OR its config surface
-                // already exists (entries were placed while it was picked — removal must still
-                // reach them; the plan admits no new entry for an unpicked agent).
-                if !(picked.contains(h.slug) || io.fs.exists(&root)) {
-                    continue;
-                }
-                (file, dialect)
+        // WHERE this harness's entries go — one surface per distinct FILE the plans name, because
+        // one agent can have two of them: the file a checkout gets by default, and the second one
+        // a row's own `dest` names instead. A harness some plan REACHES answers with the plans'
+        // own targets (engagement was proven when they were planned); a harness only CUSTODY names
+        // (an undemanded bundle's standing entry, a narrowing change, a removal-only run) has no
+        // plan to read, so it resolves through the same shared resolution the planner used —
+        // because a removal must still reach the files it wrote.
+        let mut surfaces: Vec<crate::placement::SurfaceAt> = Vec::new();
+        for (i, _) in &parsed {
+            if let Some(t) = demands[*i].plan.entries_for(h.slug)
+                && !surfaces.iter().any(|s| s.file == t.file)
+            {
+                surfaces.push(t.surface());
             }
-        };
+        }
+        if surfaces.is_empty() {
+            let surface = crate::placement::config_surface(h, &io.home, io.project_root.as_deref());
+            match surface {
+                crate::placement::ConfigSurface::Ready { root, at } => {
+                    // Engagement: the harness is picked on this machine, OR its config surface
+                    // already exists (entries were placed while it was picked — removal must still
+                    // reach them; the plan admits no new entry for an unpicked agent).
+                    if picked.contains(h.slug) || io.fs.exists(&root) {
+                        surfaces.push(at);
+                    }
+                }
+                // A project surface the containment rail refused earns ONE scope-level
+                // disclosure (the per-bundle states rode the plans above); a harness with no
+                // surface at this scope is simply not here.
+                crate::placement::ConfigSurface::Escaped { path } => {
+                    let line = crate::placement::escape_message(h.slug, &path);
+                    if !out.warnings.contains(&line) {
+                        out.warnings.push(line);
+                    }
+                }
+                crate::placement::ConfigSurface::NotSupported { .. } => {}
+            }
+        }
 
-        // The desired set for this harness: the placeable demands whose PLAN puts an entries
-        // target here. Nothing is re-narrowed — the plan already answered.
-        //
-        // WHAT each of them becomes is decided per harness, here and nowhere else
-        // ([`crate::mcp_render::select`]): the address this agent dials, the bridge that gets the
-        // address to an agent that dials nothing, or the package it runs. A bundle this MACHINE
-        // cannot set up for this agent — a registry with no runtime arm, a runtime that is not
-        // installed, a value only a person can fill in — is WITHHELD with the reason said in
-        // plain words, and re-decided from scratch on the next sweep.
-        let caps = h.mcp().map(|m| crate::mcp_render::HarnessCaps {
-            // A ROW may not promise a shape its DIALECT has no grammar for — in EITHER direction.
-            // The capability and the dialect are separate columns, and a table that set them at
-            // odds (a downloaded one, an override) would have the driver refuse the whole surface,
-            // taking every OTHER bundle's entry in that file down with it. Answering here
-            // withholds one placement instead, which is what a capability gap is supposed to cost.
-            // Both questions are asked of an EMPTY target, because the dialect answers on the
-            // shape and never on the contents.
-            remote: m.remote && mcp::dialect_expresses(dialect, &EMPTY_ADDRESS),
-            stdio: m.stdio && mcp::dialect_expresses(dialect, &EMPTY_PROGRAM),
-            env_ref: m.env_ref,
-        });
-        let machine = crate::mcp_render::Machine::at(&file);
-        let mut desired: Vec<McpEntry> = Vec::new();
-        let mut desired_bundles: BTreeMap<String, usize> = BTreeMap::new();
-        for (i, doc) in &parsed {
-            if demands[*i].plan.entries_for(h.slug).is_none() {
+        // RETIREMENT, before any placement: the surfaces an OLDER topos wrote this harness's
+        // entries into and this one does not. Each is converged with an EMPTY desired set, so its
+        // rows leave through the same prior-matched removal every entry leaves by — and the file
+        // (or the whole folder topos owned) goes with the last of them. Nothing topos did not
+        // record is touched: a surface with no rows of ours is not even parsed. It runs FIRST so
+        // one server is never registered twice, under two names, for the length of a run.
+        for old in retired_surfaces(io, h) {
+            if surfaces.iter().any(|s| s.file == old.file) {
+                continue; // still the surface in hand — a row's own `dest` names it
+            }
+            if custody.rows_at(h.slug, &old.file).is_empty() {
+                // Nothing of topos's is recorded there, so there is nothing to retire — and a file
+                // (or folder) topos does not own is not one it reads, let alone removes. A person's
+                // own `.mcp.json` passes here on every run and is never opened.
                 continue;
             }
-            let Some(caps) = caps else { continue };
-            let gateway = demands[*i].gateway_bearer();
-            let target = match crate::mcp_render::select(
-                doc,
-                caps,
-                topos_harness::registry::mcp_bridge(),
-                Some(&io.relay_program),
-                io.runtimes,
-                machine,
-                gateway,
-            ) {
-                Ok(target) => target,
-                Err(gap) => {
+            // `converge_surface`, not `converge_file`: the stale-row disclosure that wraps it
+            // asks "is a row recorded somewhere OTHER than this surface", and a retired surface is
+            // by definition not where this harness's config is — asking it here would warn about
+            // the rows standing at the surface topos is converging two lines down.
+            let retired_out =
+                converge_surface(io, &mut custody, h, &old, &[], &preserved, &BTreeMap::new());
+            out.warnings.extend(retired_out.warnings);
+            out.notices.extend(retired_out.notices);
+            for (key, state) in retired_out.states {
+                // A key this run is PLACING elsewhere is moving, not leaving: reporting it removed
+                // beside its own placement would say two things about one entry.
+                if desired_keys.contains(key.as_str()) {
+                    continue;
+                }
+                if matches!(state.state, TargetOutcome::Removed | TargetOutcome::Drifted)
+                    && let Some(bundle) = custody.bundle_of_key(&key)
+                {
+                    out.removed.push(RemovedEntry {
+                        bundle_id: bundle.to_owned(),
+                        state,
+                    });
+                }
+            }
+        }
+
+        for at in surfaces {
+            let (file, dialect) = (at.file.clone(), at.dialect);
+
+            // The desired set for this harness: the placeable demands whose PLAN puts an entries
+            // target here. Nothing is re-narrowed — the plan already answered.
+            //
+            // WHAT each of them becomes is decided per harness, here and nowhere else
+            // ([`crate::mcp_render::select`]): the address this agent dials, the bridge that gets the
+            // address to an agent that dials nothing, or the package it runs. A bundle this MACHINE
+            // cannot set up for this agent — a registry with no runtime arm, a runtime that is not
+            // installed, a value only a person can fill in — is WITHHELD with the reason said in
+            // plain words, and re-decided from scratch on the next sweep.
+            let caps = h.mcp().map(|m| crate::mcp_render::HarnessCaps {
+                // A ROW may not promise a shape its DIALECT has no grammar for — in EITHER direction.
+                // The capability and the dialect are separate columns, and a table that set them at
+                // odds (a downloaded one, an override) would have the driver refuse the whole surface,
+                // taking every OTHER bundle's entry in that file down with it. Answering here
+                // withholds one placement instead, which is what a capability gap is supposed to cost.
+                // Both questions are asked of an EMPTY target, because the dialect answers on the
+                // shape and never on the contents.
+                remote: m.remote && mcp::dialect_expresses(dialect, &EMPTY_ADDRESS),
+                stdio: m.stdio && mcp::dialect_expresses(dialect, &EMPTY_PROGRAM),
+                env_ref: m.env_ref,
+            });
+            let machine = crate::mcp_render::Machine::at(&file);
+            let mut desired: Vec<McpEntry> = Vec::new();
+            let mut desired_bundles: BTreeMap<String, usize> = BTreeMap::new();
+            for (i, doc) in &parsed {
+                // The plan named the FILE, not just the agent: a demand whose `dest` picked this
+                // harness's other project file belongs to that surface's pass, not to this one.
+                if demands[*i]
+                    .plan
+                    .entries_for(h.slug)
+                    .is_none_or(|t| t.file != at.file)
+                {
+                    continue;
+                }
+                let Some(caps) = caps else { continue };
+                let gateway = demands[*i].gateway_bearer();
+                let target = match crate::mcp_render::select(
+                    doc,
+                    caps,
+                    topos_harness::registry::mcp_bridge(),
+                    Some(&io.relay_program),
+                    io.runtimes,
+                    machine,
+                    gateway,
+                ) {
+                    Ok(target) => target,
+                    Err(gap) => {
+                        push_state(
+                            &mut states,
+                            *i,
+                            agent_state(
+                                h.slug,
+                                TargetOutcome::Withheld,
+                                Some(&gap.note(h.slug)),
+                                None,
+                            ),
+                        );
+                        note_standing(gap.code(), gap.message(h.slug), *i);
+                        capability_gaps.insert(*i);
+                        continue;
+                    }
+                };
+                let key = minted[i].clone();
+                desired_bundles.insert(key.clone(), *i);
+                desired.push(McpEntry {
+                    key,
+                    target,
+                    // The publisher's word, EXCEPT where the workspace reaches the server itself: that
+                    // entry is dialed with the credential the target already carries, so there is no
+                    // sign-in for a harness to start and no hint to give it.
+                    auth: doc.entry_auth(gateway),
+                });
+            }
+            // THE COLLISION PRE-FLIGHT — asked before the drivers, because the drivers can only see
+            // entries that LOOK like topos's. A server the agent already has under somebody else's
+            // name, here or in a file this harness also reads, is not something to write over or
+            // beside: the placement is skipped whole and the reason is said with the way out.
+            let blocked = collisions(io, &custody, h, &file, dialect, &desired);
+            for (key, hit) in &blocked {
+                if let Some(i) = desired_bundles.get(key) {
                     push_state(
                         &mut states,
                         *i,
                         agent_state(
                             h.slug,
-                            TargetOutcome::Withheld,
-                            Some(&gap.note(h.slug)),
+                            TargetOutcome::Conflicting,
+                            Some(&hit.note()),
+                            Some(&hit.path),
+                        ),
+                    );
+                    let (code, text) = hit.message(h.slug, &io.home);
+                    note_standing(code, text, *i);
+                }
+            }
+            if !blocked.is_empty() {
+                desired.retain(|e| !blocked.contains_key(&e.key));
+                desired_bundles.retain(|key, _| !blocked.contains_key(key));
+            }
+
+            // Parse-failed demands report per engaged harness (their entries are held above).
+            for (i, reason) in &failed {
+                if demands[*i]
+                    .plan
+                    .entries_for(h.slug)
+                    .is_some_and(|t| t.file == at.file)
+                {
+                    push_state(
+                        &mut states,
+                        *i,
+                        agent_state(
+                            h.slug,
+                            TargetOutcome::Unprovable,
+                            Some(reason.as_str()),
                             None,
                         ),
                     );
-                    note_standing(gap.code(), gap.message(h.slug), *i);
-                    capability_gaps.insert(*i);
-                    continue;
                 }
-            };
-            let key = minted[i].clone();
-            desired_bundles.insert(key.clone(), *i);
-            desired.push(McpEntry {
-                key,
-                target,
-                // The publisher's word, EXCEPT where the workspace reaches the server itself: that
-                // entry is dialed with the credential the target already carries, so there is no
-                // sign-in for a harness to start and no hint to give it.
-                auth: doc.entry_auth(gateway),
-            });
-        }
-        // THE COLLISION PRE-FLIGHT — asked before the drivers, because the drivers can only see
-        // entries that LOOK like topos's. A server the agent already has under somebody else's
-        // name, here or in a file this harness also reads, is not something to write over or
-        // beside: the placement is skipped whole and the reason is said with the way out.
-        let blocked = collisions(io, &custody, h, &file, dialect, &desired);
-        for (key, hit) in &blocked {
-            if let Some(i) = desired_bundles.get(key) {
-                push_state(
-                    &mut states,
-                    *i,
-                    agent_state(
-                        h.slug,
-                        TargetOutcome::Conflicting,
-                        Some(&hit.note()),
-                        Some(&hit.path),
-                    ),
-                );
-                let (code, text) = hit.message(h.slug, &io.home);
-                note_standing(code, text, *i);
             }
-        }
-        if !blocked.is_empty() {
-            desired.retain(|e| !blocked.contains_key(&e.key));
-            desired_bundles.retain(|key, _| !blocked.contains_key(key));
-        }
 
-        // Parse-failed demands report per engaged harness (their entries are held above).
-        for (i, reason) in &failed {
-            if demands[*i].plan.entries_for(h.slug).is_some() {
-                push_state(
-                    &mut states,
-                    *i,
-                    agent_state(
-                        h.slug,
-                        TargetOutcome::Unprovable,
-                        Some(reason.as_str()),
-                        None,
-                    ),
-                );
+            // Provenance for the custody rows this surface may write: key → (bundle, version).
+            let provenance: BTreeMap<String, (String, String)> = desired_bundles
+                .iter()
+                .map(|(key, i)| {
+                    let d = &demands[*i];
+                    (key.clone(), (d.bundle_id.clone(), d.version_id.clone()))
+                })
+                .collect();
+            // The plugin dir's driver surface is its `.mcp.json` (resolved with the surface); the
+            // manifest beside it and the dir prune are `converge_file`'s dialect-specific I/O.
+            let surface_out = converge_file(
+                io,
+                &mut custody,
+                h,
+                &at,
+                &desired,
+                &preserved,
+                &provenance,
+                &names,
+            );
+            out.warnings.extend(surface_out.warnings);
+            out.notices.extend(surface_out.notices);
+            for key in &surface_out.wrote {
+                if let Some(i) = desired_bundles.get(key) {
+                    wrote.insert(*i);
+                }
             }
-        }
-
-        // Keys PRESERVED from removal on this surface: a held bundle's, and — on a run that may
-        // not remove — every undemanded bundle's. Excluded from the drivers' prior map, so the
-        // drivers read them as foreign and leave them byte-identical.
-        let preserved = |custody: &ScopeEntries, entry_key: &str| -> bool {
-            let Some(bundle) = custody.bundle_of_key(entry_key) else {
-                return false;
-            };
-            if demanded_ids.contains(bundle) && !held(bundle) {
-                return false;
-            }
-            held(bundle) || !allow_removals
-        };
-
-        // Provenance for the custody rows this surface may write: key → (bundle, version).
-        let provenance: BTreeMap<String, (String, String)> = desired_bundles
-            .iter()
-            .map(|(key, i)| {
-                let d = &demands[*i];
-                (key.clone(), (d.bundle_id.clone(), d.version_id.clone()))
-            })
-            .collect();
-        // The plugin dir's driver surface is its `.mcp.json` (resolved with the surface); the
-        // manifest beside it and the dir prune are `converge_file`'s dialect-specific I/O.
-        let surface_out = converge_file(
-            io,
-            &mut custody,
-            h,
-            &file,
-            dialect,
-            &desired,
-            &preserved,
-            &provenance,
-            &names,
-        );
-        out.warnings.extend(surface_out.warnings);
-        out.notices.extend(surface_out.notices);
-        for key in &surface_out.wrote {
-            if let Some(i) = desired_bundles.get(key) {
-                wrote.insert(*i);
-            }
-        }
-        // WHAT ELSE DIALS THIS SERVER, asked of the entries topos already HOLDS. The pre-flight
-        // above deliberately never blocks a key topos owns here — dropping it would uninstall a
-        // placement that stands — but "never block it" is not "never mention it": a foreign entry
-        // for the same server in a file this agent reads FIRST makes topos's own entry dead
-        // config, and the machine looked converged while the agent used somebody else's copy.
-        // Re-read from the files every run and stored nowhere, so it clears itself the moment the
-        // other entry goes.
-        let shadowed = shadows(io, h, &desired, &blocked);
-        for (key, state) in surface_out.states {
-            let mut state = state;
-            if state.state == TargetOutcome::Current
-                && let Some(note) = shadowed.get(&key)
-            {
-                state.note = Some(note.clone());
-            }
-            match desired_bundles.get(&key) {
-                Some(i) => push_state(&mut states, *i, state),
-                None => {
-                    // A key outside the desired set: a removal (or a drifted survivor of one),
-                    // reported with its bundle.
-                    if matches!(state.state, TargetOutcome::Removed | TargetOutcome::Drifted)
-                        && let Some(bundle) = custody.bundle_of_key(&key)
-                    {
-                        out.removed.push(RemovedEntry {
-                            bundle_id: bundle.to_owned(),
-                            state,
-                        });
+            // WHAT ELSE DIALS THIS SERVER, asked of the entries topos already HOLDS. The pre-flight
+            // above deliberately never blocks a key topos owns here — dropping it would uninstall a
+            // placement that stands — but "never block it" is not "never mention it": a foreign entry
+            // for the same server in a file this agent reads FIRST makes topos's own entry dead
+            // config, and the machine looked converged while the agent used somebody else's copy.
+            // Re-read from the files every run and stored nowhere, so it clears itself the moment the
+            // other entry goes.
+            let shadowed = shadows(io, h, &desired, &blocked);
+            for (key, state) in surface_out.states {
+                let mut state = state;
+                if state.state == TargetOutcome::Current
+                    && let Some(note) = shadowed.get(&key)
+                {
+                    state.note = Some(note.clone());
+                }
+                match desired_bundles.get(&key) {
+                    Some(i) => push_state(&mut states, *i, state),
+                    None => {
+                        // A key outside the desired set: a removal (or a drifted survivor of one),
+                        // reported with its bundle.
+                        if matches!(state.state, TargetOutcome::Removed | TargetOutcome::Drifted)
+                            && let Some(bundle) = custody.bundle_of_key(&key)
+                        {
+                            out.removed.push(RemovedEntry {
+                                bundle_id: bundle.to_owned(),
+                                state,
+                            });
+                        }
                     }
                 }
             }
@@ -845,7 +904,8 @@ pub(crate) fn remove_bundle(
     // removal below journals its own intents, and `journal` replaces `pending` wholesale. A
     // recovery left only in memory would be overwritten by that write and the crashed run's
     // outstanding intent lost — so the promotion lands on disk here or this run does nothing.
-    let dialect_of = config_custody::dialect_lookup(descriptors, io.project_root.is_some());
+    let dialect_of =
+        config_custody::dialect_lookup(descriptors, &io.home, io.project_root.as_deref());
     if custody.recover(io.fs, &dialect_of) {
         let failures = custody.flush(io.fs, io.layout);
         if !failures.is_empty() {
@@ -867,11 +927,8 @@ pub(crate) fn remove_bundle(
         // A removal resolves its surfaces from the DESCRIPTOR table and its reach from the
         // RECORDED rows — never from a plan. A bundle being removed has no demand left to plan
         // from, and custody is the only thing that knows where its entries actually went.
-        let crate::placement::ConfigSurface::Ready {
-            root,
-            file,
-            dialect,
-        } = crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
+        let crate::placement::ConfigSurface::Ready { root, at } =
+            crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
         else {
             continue;
         };
@@ -889,8 +946,7 @@ pub(crate) fn remove_bundle(
             io,
             &mut custody,
             h,
-            &file,
-            dialect,
+            &at,
             &[],
             &only_this,
             &provenance,
@@ -1172,8 +1228,8 @@ fn shadows(
 /// the server address). It reads EVERY file a harness reads servers from: the surface topos writes
 /// AND the read-only [`KnownHarness::mcp_conflict_paths`] the collision pre-flight already asks. A
 /// key still standing in one of those is exactly as inheritable as one in the writable surface —
-/// leaving them out let a reservation go back while an entry stood under it in Claude's own
-/// `~/.claude.json`.
+/// leaving them out let a reservation go back while an entry stood under it in a file topos reads
+/// but does not write.
 ///
 /// It answers `None` the moment ONE of those files cannot be read or parsed: absence is then
 /// unprovable, and a reservation dropped on an unreadable file is a name handed to a new bundle
@@ -1187,15 +1243,15 @@ fn standing_keys(
 ) -> Option<BTreeSet<String>> {
     let mut keys = BTreeSet::new();
     for h in descriptors {
-        if let crate::placement::ConfigSurface::Ready { file, dialect, .. } =
+        if let crate::placement::ConfigSurface::Ready { at, .. } =
             crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
         {
-            let Ok(current) = io.fs.read_opt(&file) else {
+            let Ok(current) = io.fs.read_opt(&at.file) else {
                 return None; // unreadable: nothing about this scope's names is provable
             };
             // No file, no entries — the one honest absence.
             if let Some(bytes) = current {
-                let observed = mcp::observe(dialect, Some(&bytes));
+                let observed = mcp::observe(at.dialect, Some(&bytes), at.slot());
                 if !observed.parseable {
                     return None;
                 }
@@ -1457,8 +1513,19 @@ enum WriteFault {
 /// moves, over every path this surface is about to touch (the config file, and the plugin manifest
 /// beside it). `None` at the person scope — there is no checkout to be inside of — and when every
 /// path still proves.
-fn write_escape(io: &ScopeIo<'_>, paths: &[&Path]) -> Option<PathBuf> {
+fn write_escape(
+    io: &ScopeIo<'_>,
+    at: &crate::placement::SurfaceAt,
+    paths: &[&Path],
+) -> Option<PathBuf> {
     let root = io.project_root.as_deref()?;
+    // A MACHINE file a project scope writes has nothing inside the checkout to prove: the row
+    // names it deliberately, the entries for this checkout sit in a slot keyed by its own path,
+    // and the rail would refuse it on every run. What stands in the rail's place there is the
+    // edit itself — one slot touched, every other byte of the file left alone.
+    if !at.in_checkout {
+        return None;
+    }
     paths
         .iter()
         .find(|p| !crate::placement::within_project(root, p))
@@ -1535,8 +1602,7 @@ fn converge_file(
     io: &ScopeIo<'_>,
     custody: &mut ScopeEntries,
     h: &KnownHarness,
-    path: &Path,
-    dialect: McpDialect,
+    at: &crate::placement::SurfaceAt,
     desired: &[McpEntry],
     preserved: &dyn Fn(&ScopeEntries, &str) -> bool,
     provenance: &BTreeMap<String, (String, String)>,
@@ -1545,6 +1611,7 @@ fn converge_file(
     // all there is.
     names: &BTreeMap<String, String>,
 ) -> SurfaceOutcome {
+    let path = at.file.as_path();
     let stale: Vec<Message> = custody
         .stale_rows(h.slug, path)
         .into_iter()
@@ -1567,9 +1634,7 @@ fn converge_file(
             )
         })
         .collect();
-    let mut out = converge_surface(
-        io, custody, h, path, dialect, desired, preserved, provenance,
-    );
+    let mut out = converge_surface(io, custody, h, at, desired, preserved, provenance);
     if !stale.is_empty() {
         out.warnings.splice(0..0, stale);
     }
@@ -1581,12 +1646,13 @@ fn converge_surface(
     io: &ScopeIo<'_>,
     custody: &mut ScopeEntries,
     h: &KnownHarness,
-    path: &Path,
-    dialect: McpDialect,
+    at: &crate::placement::SurfaceAt,
     desired: &[McpEntry],
     preserved: &dyn Fn(&ScopeEntries, &str) -> bool,
     provenance: &BTreeMap<String, (String, String)>,
 ) -> SurfaceOutcome {
+    let path = at.file.as_path();
+    let dialect = at.dialect;
     let mut prior = custody.prior_for(h.slug, path);
     let kept: BTreeSet<String> = prior
         .keys()
@@ -1615,7 +1681,7 @@ fn converge_surface(
     // Whether the file holds ANY content beyond topos-managed entries. The drivers classify only
     // managed-LOOKING keys, so a plain user entry added to a topos-created file is invisible to
     // their states — this is the sighting that makes the whole-file-ownership flag stop lying.
-    let unmanaged = mcp::holds_unmanaged_content(dialect, current.as_deref());
+    let unmanaged = mcp::holds_unmanaged_content(dialect, current.as_deref(), at.slot());
     // The plugin dir is wholly topos-owned by construction, so content topos did not write is
     // not a mere loss of whole-file ownership — it is a takeover. Back the surface off whole:
     // unprovable, disclosed, byte-identical (a user's sibling key is never dropped by a rewrite,
@@ -1629,7 +1695,7 @@ fn converge_surface(
             "the folder topos owns for this agent holds files topos did not write",
         );
     }
-    let outcome = mcp::apply(dialect, current.as_deref(), desired, &prior);
+    let outcome = mcp::apply(dialect, current.as_deref(), desired, &prior, at.slot());
     match outcome.plan {
         EditPlan::Unprovable(reason) => SurfaceOutcome::unprovable(desired, h, path, &reason),
         EditPlan::Leave => {
@@ -1655,7 +1721,7 @@ fn converge_surface(
                 && let Some(manifest) = plugin_manifest_path(path)
                 && !io.fs.exists(&manifest)
                 // Healing the manifest is a WRITE — it passes the same write-boundary proof.
-                && write_escape(io, &[&manifest]).is_none()
+                && write_escape(io, at, &[&manifest]).is_none()
                 && crate::config_io::replace_config(io.fs, &manifest, &plugin_dir::manifest_bytes())
                     .is_ok()
             {
@@ -1711,7 +1777,7 @@ fn converge_surface(
             if let Some(m) = &manifest {
                 to_write.push(m);
             }
-            if let Some(escape) = write_escape(io, &to_write) {
+            if let Some(escape) = write_escape(io, at, &to_write) {
                 return SurfaceOutcome::escaped(desired, h, &escape);
             }
             let intents = write_intents(
@@ -1743,7 +1809,7 @@ fn converge_surface(
                     if desired.is_empty()
                         && owns_file
                         && custody.rows_at(h.slug, path).is_empty()
-                        && post_image_structurally_empty(io, dialect, path)
+                        && post_image_structurally_empty(io, at)
                         && io.fs.remove_file(path).is_ok()
                     {
                         if is_plugin {
@@ -1789,18 +1855,62 @@ fn converge_surface(
     }
 }
 
+/// **The surfaces an OLDER topos wrote this harness's entries into, and this one does not.** Read
+/// only so the entries topos itself RECORDED there can be retired in the same run the row moves;
+/// never a placement target, and never touched where topos has no record of its own.
+///
+/// It is code rather than a registry column on purpose: which files a PAST topos wrote is this
+/// binary's own history, not a fact about the agent — and a downloaded table must never be able to
+/// aim a cleanup at a path of its choosing.
+///
+/// Claude Code is the one harness with any: its machine entries lived in a topos-owned plugin
+/// FOLDER that renamed every server it carried, and its project entries lived in a `.mcp.json` in
+/// the checkout root. Both are gone from the row; the `.mcp.json` is still reachable by a row's own
+/// `dest`, so the caller skips a retired surface that is the surface in hand.
+fn retired_surfaces(io: &ScopeIo<'_>, h: &KnownHarness) -> Vec<crate::placement::SurfaceAt> {
+    if h.slug != "claude-code" {
+        return Vec::new();
+    }
+    let at = match io.project_root.as_deref() {
+        None => crate::placement::SurfaceAt {
+            file: plugin_dir::retired_user_dir(&io.home).join(plugin_dir::PLUGIN_MCP_PATH),
+            dialect: McpDialect::ClaudePluginDir,
+            slot: None,
+            in_checkout: false,
+        },
+        Some(root) => {
+            let Some((rel, dialect)) = h.mcp().and_then(|m| m.project_dest) else {
+                return Vec::new();
+            };
+            let path = root.join(rel);
+            // The same containment proof any in-checkout path passes before it is read: a
+            // `.mcp.json` reached through a symlink out of the repo is not this checkout's.
+            if !crate::placement::within_project(root, &path) {
+                return Vec::new();
+            }
+            crate::placement::SurfaceAt {
+                file: path,
+                dialect,
+                slot: None,
+                in_checkout: true,
+            }
+        }
+    };
+    vec![at]
+}
+
 /// Belt one, at the delete boundary: re-read the just-written post-image and answer whether
 /// NOTHING but our removal remains — provably readable, zero managed entries, and no content
 /// beyond what a fresh topos-created file would hold. Any read failure or indeterminate shape
 /// answers `false` (the file is kept; a stray skeleton is recoverable, destroyed bytes are not).
-fn post_image_structurally_empty(io: &ScopeIo<'_>, dialect: McpDialect, path: &Path) -> bool {
-    let Ok(post) = io.fs.read_opt(path) else {
+fn post_image_structurally_empty(io: &ScopeIo<'_>, at: &crate::placement::SurfaceAt) -> bool {
+    let Ok(post) = io.fs.read_opt(&at.file) else {
         return false;
     };
-    let observed = mcp::observe(dialect, post.as_deref());
+    let observed = mcp::observe(at.dialect, post.as_deref(), at.slot());
     observed.parseable
         && observed.entries.is_empty()
-        && !mcp::holds_unmanaged_content(dialect, post.as_deref())
+        && !mcp::holds_unmanaged_content(at.dialect, post.as_deref(), at.slot())
 }
 
 /// The pending intents one Write commits: every fingerprint that differs from the standing entry
@@ -2086,23 +2196,23 @@ pub(crate) fn recorded_surfaces(
         return out;
     };
     for h in descriptors {
-        let crate::placement::ConfigSurface::Ready { file, dialect, .. } =
+        let crate::placement::ConfigSurface::Ready { at, .. } =
             crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
         else {
             continue;
         };
-        let recorded = custody.prior_for(h.slug, &file);
+        let recorded = custody.prior_for(h.slug, &at.file);
         if recorded.is_empty() {
             continue;
         }
-        let Ok(current) = io.fs.read_opt(&file) else {
+        let Ok(current) = io.fs.read_opt(&at.file) else {
             continue;
         };
-        let observed = mcp::observe(dialect, current.as_deref());
+        let observed = mcp::observe(at.dialect, current.as_deref(), at.slot());
         if !observed.parseable {
             continue;
         }
-        let path = file.to_string_lossy().into_owned();
+        let path = at.file.to_string_lossy().into_owned();
         let mut owned = false;
         let mut drifted = false;
         for (key, fingerprint) in &recorded {

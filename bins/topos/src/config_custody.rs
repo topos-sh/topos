@@ -747,7 +747,7 @@ impl<'a> ScopeEntries<'a> {
     pub(crate) fn recover(
         &mut self,
         fs: &dyn FsOps,
-        dialect_of: &dyn Fn(&str) -> Option<topos_harness::mcp::McpDialect>,
+        dialect_of: &dyn Fn(&str) -> Option<EntrySlot>,
     ) -> bool {
         if self.doc.pending.is_empty() {
             return false;
@@ -758,7 +758,7 @@ impl<'a> ScopeEntries<'a> {
             let Some((slug, entry_key)) = custody_key.split_once('/') else {
                 continue;
             };
-            let Some(dialect) = dialect_of(slug) else {
+            let Some((dialect, slot)) = dialect_of(slug) else {
                 continue;
             };
             // A read ERROR is not absence: whether the write landed is unknowable, so the intent
@@ -768,7 +768,7 @@ impl<'a> ScopeEntries<'a> {
             let Ok(bytes) = fs.read_opt(Path::new(&intent.file)) else {
                 continue;
             };
-            let observed = topos_harness::mcp::observe(dialect, bytes.as_deref());
+            let observed = topos_harness::mcp::observe(dialect, bytes.as_deref(), slot.as_deref());
             let landed = if intent.fingerprint.is_empty() {
                 // A removal intent: landed when the key is gone (an unparseable file answers
                 // "unknowable", which keeps the standing row — fail toward keeping).
@@ -1020,20 +1020,28 @@ pub(crate) fn entries_of_any(
         .unwrap_or_default()
 }
 
-/// The engine's "which dialect does this slug's file speak in this scope" recovery lookup, derived
-/// from the MCP-capable registry rows (see [`ScopeEntries::recover`]).
+/// **Where one harness's entries sit at a scope**, for the READ half of recovery: the dialect the
+/// file speaks, and the key path the entries sit under inside it (`None` = the dialect's own). Two
+/// facts, never one: a file whose entries can sit in more than one slot is read wrong under the
+/// wrong path, and reads wrong silently.
+pub(crate) type EntrySlot = (topos_harness::mcp::McpDialect, Option<Vec<String>>);
+
+/// The engine's "where does this slug's entries sit in this scope" recovery lookup, resolved
+/// through the ONE surface resolution the planner and the converge use (see
+/// [`ScopeEntries::recover`]).
 pub(crate) fn dialect_lookup<'a>(
     descriptors: &'a [&'static topos_harness::registry::KnownHarness],
-    project: bool,
-) -> impl Fn(&str) -> Option<topos_harness::mcp::McpDialect> + 'a {
+    home: &'a Path,
+    project_root: Option<&'a Path>,
+) -> impl Fn(&str) -> Option<EntrySlot> + 'a {
     move |slug: &str| {
         let h = descriptors.iter().find(|h| h.slug == slug)?;
-        if project {
-            h.mcp().and_then(|m| m.project).map(|(_, d)| d)
-        } else {
-            // The intent journal records the driver surface FILE — for the plugin dir that is
-            // its `.mcp.json`, which observes through the same dialect as every other surface.
-            h.mcp().and_then(|m| m.user).map(|s| s.dialect)
+        // The one resolution the planner and the converge use, so a recovery reads the intended
+        // file under exactly the key path the write used. The intent journal records the driver
+        // surface FILE, which observes through the same dialect as every other surface.
+        match crate::placement::config_surface(h, home, project_root) {
+            crate::placement::ConfigSurface::Ready { at, .. } => Some((at.dialect, at.slot)),
+            _ => None,
         }
     }
 }

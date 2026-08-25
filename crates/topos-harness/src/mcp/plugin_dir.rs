@@ -19,6 +19,7 @@
 //!   to what the JSON driver's fresh-file synthesis writes.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
@@ -29,6 +30,21 @@ pub const PLUGIN_MANIFEST_PATH: &str = ".claude-plugin/plugin.json";
 
 /// The MCP config file's dir-relative path.
 pub const PLUGIN_MCP_PATH: &str = ".mcp.json";
+
+/// **The folder an OLDER topos wrote Claude Code's machine-wide MCP entries into**, resolved
+/// against `home`. It registered every server under a plugin-scoped name, which is why no row
+/// names it any more: Claude Code's servers now live in its own `.claude.json` under the names
+/// their bundles give them.
+///
+/// It is resolved HERE, in code, and never from a registry row: which folder a PAST topos wrote
+/// is this binary's own history, and a downloaded table must never be able to aim a cleanup at a
+/// directory of its choosing.
+#[must_use]
+pub fn retired_user_dir(home: &Path) -> PathBuf {
+    crate::registry::config_root(crate::registry::Root::ClaudeHome, home)
+        .join("skills")
+        .join(crate::RESERVED_MCP_PLUGIN_DIR)
+}
 
 /// Render the whole plugin dir: `(dir-relative path, bytes)` for the manifest and the MCP
 /// config. Deterministic — same entries, same bytes.

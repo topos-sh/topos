@@ -1150,7 +1150,11 @@ pub(crate) fn status_pick(ctx: &Ctx<'_>, project_dir: Option<&Path>) -> PickStat
 pub(crate) fn gitignore_entries(slug: &str) -> Vec<String> {
     let owned = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect();
     match slug {
-        "claude-code" => owned(&[".claude/", ".mcp.json"]),
+        // Claude Code's MCP entries live in its own machine file now, so the only thing topos
+        // writes into this checkout for it is `.claude/`. A `.mcp.json` is written only where a
+        // row's own `dest` names it — and a committed one is the whole point of naming it, so it
+        // is never ignored on topos's say-so.
+        "claude-code" => owned(&[".claude/"]),
         "cursor" => owned(&[".cursor/"]),
         "codex" => owned(&[".codex/", ".agents/"]),
         "opencode" => owned(&[".opencode/", "opencode.json"]),
@@ -1164,7 +1168,11 @@ pub(crate) fn gitignore_entries(slug: &str) -> Vec<String> {
             {
                 out.push(format!("{first}/"));
             }
-            if let Some((path, _)) = h.mcp().and_then(|m| m.project) {
+            // Only an IN-CHECKOUT project surface earns a line: a machine file this scope writes
+            // puts nothing in the repo to ignore.
+            if let Some(registry::McpProjectLoc::InCheckout(path)) =
+                h.mcp().and_then(|m| m.project).map(|p| p.loc)
+            {
                 let entry = match path.split_once('/') {
                     Some((first, _)) => format!("{first}/"),
                     None => path.to_owned(),
@@ -1325,7 +1333,7 @@ mod tests {
 
     #[test]
     fn the_gitignore_table_names_whole_folders_per_agent() {
-        assert_eq!(gitignore_entries("claude-code"), [".claude/", ".mcp.json"]);
+        assert_eq!(gitignore_entries("claude-code"), [".claude/"]);
         assert_eq!(gitignore_entries("cursor"), [".cursor/"]);
         assert_eq!(gitignore_entries("codex"), [".codex/", ".agents/"]);
         assert_eq!(
@@ -1342,7 +1350,7 @@ mod tests {
             .collect();
         assert_eq!(
             gitignore_entries_for(&rows),
-            [".claude/", ".mcp.json", ".codex/", ".agents/", ".gemini/"],
+            [".claude/", ".codex/", ".agents/", ".gemini/"],
             "deduplicated, pick order"
         );
     }

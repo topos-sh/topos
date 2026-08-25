@@ -93,6 +93,7 @@ fn converges(
         Some(bytes),
         std::slice::from_ref(&want),
         &BTreeMap::new(),
+        None,
     );
     let added = written(&out);
     assert_eq!(state(&out, KEY), EntryState::PlacedNew, "{dialect:?}");
@@ -117,6 +118,7 @@ fn converges(
         Some(added.as_bytes()),
         std::slice::from_ref(&want),
         &after_add,
+        None,
     );
     assert_eq!(again.plan, EditPlan::Leave, "{dialect:?}: idempotent");
     assert_eq!(state(&again, KEY), EntryState::Current, "{dialect:?}");
@@ -128,6 +130,7 @@ fn converges(
         Some(added.as_bytes()),
         std::slice::from_ref(&moved),
         &after_add,
+        None,
     );
     let updated = written(&out);
     assert_eq!(state(&out, KEY), EntryState::Updated, "{dialect:?}");
@@ -145,6 +148,7 @@ fn converges(
         Some(edited.as_bytes()),
         std::slice::from_ref(&moved),
         &after_update,
+        None,
     );
     assert_eq!(state(&out, KEY), EntryState::Drifted, "{dialect:?}");
     assert_eq!(
@@ -159,7 +163,7 @@ fn converges(
     );
 
     // 5. REMOVE — and the file comes back.
-    let out = apply(dialect, Some(updated.as_bytes()), &[], &after_update);
+    let out = apply(dialect, Some(updated.as_bytes()), &[], &after_update, None);
     let removed = written(&out);
     assert_eq!(state(&out, KEY), EntryState::Removed, "{dialect:?}");
     keeps(&removed, "remove");
@@ -381,6 +385,7 @@ fn claude_desktop_converges_on_the_program_the_bridge_renders() {
         Some(before.as_bytes()),
         std::slice::from_ref(&bridged),
         &BTreeMap::new(),
+        None,
     );
     let text = written(&out);
     assert_eq!(state(&out, KEY), EntryState::PlacedNew);
@@ -405,6 +410,7 @@ fn claude_desktop_converges_on_the_program_the_bridge_renders() {
         Some(text.as_bytes()),
         &[],
         &prior,
+        None,
     );
     assert_eq!(state(&out, KEY), EntryState::Removed);
     assert_eq!(written(&out), before, "the file comes back byte for byte");
@@ -437,6 +443,7 @@ extensions:
         Some(before.as_bytes()),
         std::slice::from_ref(&want),
         &BTreeMap::new(),
+        None,
     );
     let added = written(&out);
     assert_eq!(state(&out, KEY), EntryState::PlacedNew);
@@ -464,11 +471,18 @@ extensions:
         Some(added.as_bytes()),
         std::slice::from_ref(&want),
         &prior,
+        None,
     );
     assert_eq!(again.plan, EditPlan::Leave);
     assert_eq!(state(&again, KEY), EntryState::Current);
 
-    let out = apply(McpDialect::GooseYaml, Some(added.as_bytes()), &[], &prior);
+    let out = apply(
+        McpDialect::GooseYaml,
+        Some(added.as_bytes()),
+        &[],
+        &prior,
+        None,
+    );
     assert_eq!(state(&out, KEY), EntryState::Removed);
     assert_eq!(written(&out), before, "goose's own file, back as it was");
 }
@@ -501,6 +515,7 @@ extensions:
         Some(before.as_bytes()),
         std::slice::from_ref(&want),
         &BTreeMap::new(),
+        None,
     );
     let added = written(&out);
     assert_eq!(state(&out, KEY), EntryState::PlacedNew);
@@ -533,11 +548,18 @@ extensions:
         Some(added.as_bytes()),
         std::slice::from_ref(&want),
         &prior,
+        None,
     );
     assert_eq!(again.plan, EditPlan::Leave);
     assert_eq!(state(&again, KEY), EntryState::Current);
 
-    let out = apply(McpDialect::GooseYaml, Some(added.as_bytes()), &[], &prior);
+    let out = apply(
+        McpDialect::GooseYaml,
+        Some(added.as_bytes()),
+        &[],
+        &prior,
+        None,
+    );
     assert_eq!(state(&out, KEY), EntryState::Removed);
     assert_eq!(written(&out), before, "goose's own file, back as it was");
 }
@@ -557,6 +579,7 @@ extensions:
         Some(before.as_bytes()),
         std::slice::from_ref(&want),
         &BTreeMap::new(),
+        None,
     );
     let added = written(&out);
     // The lookalike is managed-LOOKING, so it is REPORTED — as somebody else's, and left alone.
@@ -592,10 +615,11 @@ fn goose_entry_round_trips_to_the_value_it_was_rendered_from() {
         None,
         std::slice::from_ref(&want),
         &BTreeMap::new(),
+        None,
     );
     assert!(out.created_file);
     let text = written(&out);
-    let observed = super::observe(McpDialect::GooseYaml, Some(text.as_bytes()));
+    let observed = super::observe(McpDialect::GooseYaml, Some(text.as_bytes()), None);
     assert!(observed.parseable);
     assert_eq!(
         observed.entries.get(KEY),
@@ -686,7 +710,13 @@ fn an_inherited_slot_is_spelled_in_each_agents_own_reference_syntax() {
 fn a_fresh_file_is_the_minimal_document_under_the_right_key() {
     let want = entry(KEY, URL);
     let fresh = |dialect| {
-        let out = apply(dialect, None, std::slice::from_ref(&want), &BTreeMap::new());
+        let out = apply(
+            dialect,
+            None,
+            std::slice::from_ref(&want),
+            &BTreeMap::new(),
+            None,
+        );
         assert!(out.created_file, "{dialect:?}");
         written(&out)
     };
@@ -716,6 +746,7 @@ fn a_commented_file_is_edited_only_where_that_agents_parser_reads_comments() {
             Some(text.as_bytes()),
             std::slice::from_ref(&want),
             &BTreeMap::new(),
+            None,
         )
         .plan
     };

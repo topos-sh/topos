@@ -317,7 +317,7 @@ fn row_narrowing(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     name: &str,
-) -> (Option<Vec<String>>, Vec<String>) {
+) -> (Option<Vec<crate::placement::Reach>>, Vec<String>) {
     let Ok(Some(text)) = medit::read_text(ctx, &target.path) else {
         return (None, Vec::new());
     };
@@ -367,7 +367,7 @@ fn engaged_agents(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     global: bool,
-    filter: Option<&[String]>,
+    filter: Option<&[crate::placement::Reach]>,
 ) -> Vec<String> {
     let Some(roots) = ctx.roots.clone() else {
         return Vec::new();
@@ -376,17 +376,16 @@ fn engaged_agents(
     let picked = crate::agents_pick::picked_slugs(ctx, project_root.as_deref());
     let mut out = Vec::new();
     for h in topos_harness::mcp::descriptor::mcp_harnesses() {
-        if filter.is_some_and(|f| !f.iter().any(|s| s == h.slug)) {
+        if filter.is_some_and(|f| !f.iter().any(|r| r.slug == h.slug)) {
             continue;
         }
-        let surface = match &project_root {
-            Some(root) => h.mcp().and_then(|m| m.project).and_then(|(rel, _)| {
-                let path = root.join(rel);
-                crate::placement::within_project(root, &path).then_some(path)
-            }),
-            None => h.mcp_user_path(&roots.home),
-        };
-        if surface.is_some() && picked.contains(h.slug) {
+        // The ONE surface resolution the planner and the converge use — so what this line names
+        // and what the next sweep writes cannot disagree.
+        let ready = matches!(
+            crate::placement::config_surface(h, &roots.home, project_root.as_deref()),
+            crate::placement::ConfigSurface::Ready { .. }
+        );
+        if ready && picked.contains(h.slug) {
             out.push(h.display_name.to_owned());
         }
     }

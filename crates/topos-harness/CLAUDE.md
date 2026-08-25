@@ -101,16 +101,21 @@ never learns which machinery served which harness.
   the two pairs no vendor evidence covers — a program in LM Studio's config, and an ADDRESS in
   Claude Desktop's — and every driver turns that into a refusal, never a
   guess. The
-  surfaces (user/project + dialect + reload copy + the read-only `conflict_paths` a harness ALSO
-  reads servers from) and the CAPABILITY columns (does it dial an address, does it run a program,
+  surfaces (user/project + dialect + reload copy, plus `project_dest` — a second project file
+  reached only by a row's own `dest` — and the read-only `conflict_paths` a harness ALSO reads
+  servers from) and the CAPABILITY columns (does it dial an address, does it run a program,
   which env-reference syntax) are registry-row
   columns; `descriptor` holds the dialect + env-reference vocabularies and the filtered views,
   over three editing drivers: `jsonc_edit` (Cursor / Claude-project /
-  OpenCode strict JSON + OpenClaw JSONC — and the Claude Code plugin dir's `.mcp.json` — through
-  a lossless CST, comments and formatting preserved), `toml_patch` (Codex `[mcp_servers.*]` via
-  `toml_edit`) and `yaml_splice` (Hermes one-line sentinel-marked flow entries, the `hermes.rs`
-  line-surgical idiom); `plugin_dir` renders only what a driver cannot know — the constant
-  `.claude-plugin/plugin.json` manifest and the fresh-dir shape. Ownership keys on the `topos-`
+  OpenCode strict JSON + OpenClaw JSONC — and the retired Claude Code plugin dir's `.mcp.json` —
+  through a lossless CST, comments and formatting preserved), `toml_patch` (Codex
+  `[mcp_servers.*]` via `toml_edit`) and `yaml_splice` (Hermes one-line sentinel-marked flow
+  entries, the `hermes.rs` line-surgical idiom). A caller may hand `jsonc_edit` a SLOT — a key
+  path replacing the dialect's own — which is how Claude Code's `.claude.json` is edited at both
+  its scopes: `mcpServers` for the machine, `projects.<the checkout's absolute path>.mcpServers`
+  for one checkout (`project_slot`). `plugin_dir` renders what a driver cannot know — the
+  constant `.claude-plugin/plugin.json` manifest and the fresh-dir shape — and names the folder
+  an older topos owned (`retired_user_dir`), which this build reads only to retire. Ownership keys on the `topos-`
   key prefix PLUS the caller's `key → fingerprint` ledger (sha256 over a canonical structural
   rendering, so reflow never reads as drift); a prior-mismatched entry is `Drifted` and a
   ledger-less one `Foreign` — both untouched, always; per-dialect entry shapes are exact (a

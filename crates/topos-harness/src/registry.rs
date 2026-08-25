@@ -109,8 +109,13 @@ pub struct KnownHarness {
 pub struct McpSurfaces {
     /// The user/global config surface, if the harness has one.
     pub user: Option<McpSurface>,
-    /// Project-relative config path + dialect (`None` = no project surface).
-    pub project: Option<(&'static str, McpDialect)>,
+    /// Where a CHECKOUT's own entries go (`None` = no project surface).
+    pub project: Option<McpProjectSurface>,
+    /// A SECOND project file this harness reads, inside the checkout, written only when a row's
+    /// own `dest` names it. Never the default reach: it exists for the surface the default one
+    /// cannot serve — a session started in a subdirectory, which a machine file keyed by the
+    /// checkout's exact path does not reach.
+    pub project_dest: Option<(&'static str, McpDialect)>,
     /// Receipt copy: how config changes get picked up.
     pub reload_note: &'static str,
     /// Files this harness ALSO reads MCP servers from, which topos never writes — the places an
@@ -135,6 +140,29 @@ pub struct McpSurface {
     /// The file's location, resolved like every other dir in this table ([`resolve_spec`]).
     pub dir: DirSpec,
     pub dialect: McpDialect,
+}
+
+/// One harness's PROJECT MCP config surface — where a checkout's own servers are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpProjectSurface {
+    /// Which file, and how it is found.
+    pub loc: McpProjectLoc,
+    /// The syntax that file speaks.
+    pub dialect: McpDialect,
+}
+
+/// Where a [`McpProjectSurface`]'s file lives — the one thing a project surface can disagree
+/// about, and the one that decides whether the containment rail governs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpProjectLoc {
+    /// A path relative to the checkout (`.mcp.json`, `.cursor/mcp.json`). The file travels with
+    /// the repo, and every write to it is proven to stay inside the checkout.
+    InCheckout(&'static str),
+    /// A file on the MACHINE, whose entries sit in a slot keyed by the checkout's own absolute
+    /// path — one file, one slot per project. Nothing is written inside the checkout, so the
+    /// containment rail has nothing to govern; what protects it instead is that topos edits only
+    /// the one slot it minted and leaves every other byte of the file alone.
+    Machine(DirSpec),
 }
 
 /// One READ-ONLY place a harness also finds MCP servers — a file topos does not write, with the
@@ -193,6 +221,11 @@ pub enum Root {
     CodexHome,
     /// `$CLAUDE_CONFIG_DIR`, else `home/.claude`.
     ClaudeHome,
+    /// `$CLAUDE_CONFIG_DIR`, else `home` — **the dir Claude Code keeps `.claude.json` in**. At the
+    /// default that file sits BESIDE the config dir (`~/.claude.json` next to `~/.claude/`), and
+    /// when the variable moves the config dir the file moves INSIDE it. Neither [`Root::Home`] nor
+    /// [`Root::ClaudeHome`] resolves to both, which is why this root exists.
+    ClaudeJsonHome,
     /// `$VIBE_HOME`, else `home/.vibe`.
     VibeHome,
     /// `$HERMES_HOME`, else `home/.hermes`.
@@ -228,6 +261,7 @@ impl Root {
         Root::AppSupport,
         Root::CodexHome,
         Root::ClaudeHome,
+        Root::ClaudeJsonHome,
         Root::VibeHome,
         Root::HermesHome,
         Root::AutohandHome,
@@ -258,6 +292,7 @@ impl Root {
             Root::AppSupport => "appSupport",
             Root::CodexHome => "codexHome",
             Root::ClaudeHome => "claudeHome",
+            Root::ClaudeJsonHome => "claudeJsonHome",
             Root::VibeHome => "vibeHome",
             Root::HermesHome => "hermesHome",
             Root::AutohandHome => "autohandHome",
@@ -283,6 +318,7 @@ impl Root {
             Root::Config => "~/.config",
             Root::CodexHome => "~/.codex",
             Root::ClaudeHome => "~/.claude",
+            Root::ClaudeJsonHome => "~",
             Root::VibeHome => "~/.vibe",
             Root::HermesHome => "~/.hermes",
             Root::AutohandHome => "~/.autohand",
@@ -438,7 +474,14 @@ pub const fn home_rooted_mcp_row(
             dir: home(user_suffix),
             dialect: user_dialect,
         }),
-        project,
+        project: match project {
+            Some((rel, dialect)) => Some(McpProjectSurface {
+                loc: McpProjectLoc::InCheckout(rel),
+                dialect,
+            }),
+            None => None,
+        },
+        project_dest: None,
         reload_note,
         conflict_paths: &[],
         remote: true,
@@ -471,7 +514,14 @@ pub const fn home_rooted_mcp_row_with_caps(
             dir: home(user_suffix),
             dialect: user_dialect,
         }),
-        project,
+        project: match project {
+            Some((rel, dialect)) => Some(McpProjectSurface {
+                loc: McpProjectLoc::InCheckout(rel),
+                dialect,
+            }),
+            None => None,
+        },
+        project_dest: None,
         reload_note,
         conflict_paths: &[],
         remote,
@@ -512,7 +562,14 @@ pub const fn home_rooted_mcp_row_with_conflicts(
             dir: home(user_suffix),
             dialect: user_dialect,
         }),
-        project,
+        project: match project {
+            Some((rel, dialect)) => Some(McpProjectSurface {
+                loc: McpProjectLoc::InCheckout(rel),
+                dialect,
+            }),
+            None => None,
+        },
+        project_dest: None,
         reload_note,
         conflict_paths,
         remote: true,
@@ -799,6 +856,9 @@ pub fn resolve_root(root: Root, home: &Path, cwd: Option<&Path>) -> Option<PathB
         Root::CodexHome => Some(env_override("CODEX_HOME").unwrap_or_else(|| home.join(".codex"))),
         Root::ClaudeHome => {
             Some(env_override("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude")))
+        }
+        Root::ClaudeJsonHome => {
+            Some(env_override("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.to_path_buf()))
         }
         Root::VibeHome => Some(env_override("VIBE_HOME").unwrap_or_else(|| home.join(".vibe"))),
         Root::HermesHome => {
