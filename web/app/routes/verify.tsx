@@ -192,7 +192,19 @@ export async function action({ request }: ActionFunctionArgs) {
     throw data(null, { status: 429 });
   }
 
-  if (intent === "lookup") {
+  // THE LOOKUP IS THE DEFAULT ARM. `approve` and `deny` are the two acts that DECIDE a request,
+  // and each names itself; every other submission of this page is the code lookup — including one
+  // that arrives with no `intent` field at all.
+  //
+  // Pressing Enter in the code field IS clicking "Look up", and it has to answer like it. A
+  // submission can reach here without the form's hidden field for reasons the person who typed
+  // the code cannot see (a form re-submitted by something else on the page carries no submitter;
+  // a script or extension between the two can drop a hidden input), and keying the lookup on that
+  // field being present turned every one of those into a bare 400 — a page with no card, no
+  // message, and nothing to do next. Reading the lookup as the default costs nothing: it resolves
+  // only a flow THIS actor may approve, under the same rate belt as the other two arms, so a
+  // submission that loses a hidden field loses no protection with it.
+  if (intent !== "approve" && intent !== "deny") {
     // The two-state page's first state: resolve the typed code into the request card. A POST,
     // deliberately — the code never rides a URL (history, logs, referers all stay clean).
     const userCode = String(form.get("code") ?? "")
@@ -209,7 +221,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const userCode = String(form.get("code") ?? "").trim();
-  if (userCode === "" || (intent !== "approve" && intent !== "deny")) {
+  if (userCode === "") {
     throw data(null, { status: 400 });
   }
 
