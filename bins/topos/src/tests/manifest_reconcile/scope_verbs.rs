@@ -1983,3 +1983,62 @@ fn revert_surfaces_the_manifest_error_its_listing_would_print() {
         "one file, one answer"
     );
 }
+
+/// The delivery cache outlives a logout, so `topos auth status` kept a posture line for a
+/// workspace this machine no longer holds a session for. A posture is about a standing
+/// connection; without one there is nothing to report about, and the line was a raw workspace id
+/// and a bare epoch nobody could act on.
+#[test]
+fn auth_status_drops_the_posture_of_a_workspace_this_machine_left() {
+    let rig = Rig::new("zq-auth-posture");
+    rig.seed_session();
+    crate::sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[
+            (
+                WS.to_owned(),
+                crate::sync_status::WorkspaceSync {
+                    host: Some(HOST.to_owned()),
+                    workspace_name: Some(WS_NAME.to_owned()),
+                    last_report_at: Some(1_700_086_400_000),
+                    ..Default::default()
+                },
+            ),
+            // A workspace this machine has logged out of: the cache row survives the session.
+            (
+                "w_gone".to_owned(),
+                crate::sync_status::WorkspaceSync {
+                    host: Some(HOST.to_owned()),
+                    workspace_name: Some("gone".to_owned()),
+                    last_report_at: Some(1_700_086_400_000),
+                    ..Default::default()
+                },
+            ),
+        ],
+    )
+    .unwrap();
+
+    let ctx = rig.ctx_at(None);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let sessions = connect(&plane, &dir);
+    let data = ops::status(&ctx, &ops::AuthConnectors { session: &sessions }).unwrap();
+
+    let reported: Vec<&str> = data
+        .reporting
+        .iter()
+        .map(|r| r.workspace_id.as_str())
+        .collect();
+    assert_eq!(
+        reported,
+        vec![WS],
+        "only a workspace this machine is still signed into has a posture"
+    );
+    let text = crate::render::auth_status_tty(&data);
+    assert!(
+        text.contains(&format!("reporting {HOST}/{WS_NAME}: last report 2023-11-15 22:13")),
+        "the address and a date, never the id and an epoch: {text}"
+    );
+}

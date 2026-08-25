@@ -3066,11 +3066,17 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     for r in &d.reporting {
         let last = r
             .last_report_at
-            .map(|t| format!("last report at {t}"))
+            .and_then(|t| u64::try_from(t).ok())
+            .map(|t| format!("last report {}", fmt_utc_millis(t)))
             .unwrap_or_else(|| "never reported".to_owned());
+        // The ADDRESS, not the opaque id: this line is read by a person, and `w_6525a2e9…` names
+        // nothing they can act on. The id stays on the wire, where a caller joins by it.
+        let label = r
+            .workspace
+            .as_ref()
+            .map_or_else(|| r.workspace_id.clone(), topos_types::results::WorkspaceRef::address);
         s.push_str(&format!(
-            "\n  reporting {}: {last}{}",
-            r.workspace_id,
+            "\n  reporting {label}: {last}{}",
             if r.stale { " — STALE" } else { "" }
         ));
     }
@@ -10461,6 +10467,39 @@ mod tests {
             reporting: Vec::new(),
         };
         assert!(auth_status_next_actions(&signed_in).is_empty());
+    }
+
+    /// The reporting posture is read by a person, so it names the workspace the way a person
+    /// addresses it and dates the last report. It printed `reporting w_6525a2e9…: last report at
+    /// 1787625955552` — an opaque id and a bare epoch, neither of which anyone can act on.
+    #[test]
+    fn the_reporting_posture_names_the_address_and_a_date() {
+        use crate::ops::AuthStatusData;
+        use topos_types::results::{AuthReportingStatus, WorkspaceRef};
+        let data = AuthStatusData {
+            server: Some("https://topos.sh/api".to_owned()),
+            principal: None,
+            signed_in: true,
+            workspaces: Vec::new(),
+            hook_armed: true,
+            reporting: vec![AuthReportingStatus {
+                workspace_id: "w_6525a2e9".to_owned(),
+                workspace: Some(WorkspaceRef {
+                    host: "topos.sh".to_owned(),
+                    name: "northwind".to_owned(),
+                }),
+                last_delivery_at: Some(1_700_086_400_000),
+                last_report_at: Some(1_700_086_400_000),
+                staleness_window_ms: 0,
+                stale: false,
+            }],
+        };
+        let text = auth_status_tty(&data);
+        assert!(
+            text.contains("reporting topos.sh/northwind: last report 2023-11-15 22:13"),
+            "{text}"
+        );
+        assert!(!text.contains("w_6525a2e9"), "the opaque id is not copy: {text}");
     }
 
     #[test]
