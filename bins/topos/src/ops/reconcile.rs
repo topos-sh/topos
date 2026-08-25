@@ -494,6 +494,11 @@ struct Sweep {
     /// Bundles whose harvested lock value came from a TOML PIN — the write-back lets these win
     /// over a standing entry (the pin is intent; recording it is filling, not moving).
     lock_pin_overrides: std::collections::BTreeSet<String>,
+    /// Lock entries that must STAND where they are, with the clause saying why — a bundle whose
+    /// merge STOPPED, whose copy therefore still holds the version it held before. The write-back
+    /// takes no harvest for these and discloses the reason instead of the "could not re-resolve"
+    /// line, which would name the wrong cause.
+    lock_stands: BTreeMap<String, String>,
     /// Feed ADDRESSES whose empty serve is already disclosed. A feed may be adopted by more than
     /// one recipe; the fact is the workspace's, not a scope's, so it is said once per run.
     empty_feeds: HashSet<String>,
@@ -2437,6 +2442,12 @@ pub(crate) fn manifest_update(
                 // An update that could not re-resolve a still-demanded entry KEEPS it — say so.
                 if update {
                     for (name, kept) in &newdoc.skills {
+                        // A STOPPED MERGE has its own line below, naming the real cause: this
+                        // one would say the workspace could not be re-read, which is not what
+                        // happened.
+                        if sweep.lock_stands.contains_key(name) {
+                            continue;
+                        }
                         if !sweep.lock_harvest.skills.contains_key(name) {
                             pin_lines.push(crate::message::disclosure(
                                 "LOCK_KEPT",
@@ -2512,6 +2523,16 @@ pub(crate) fn manifest_update(
                     }
                 }
             }
+            // An entry the lock KEEPS because the copy still holds it — said whether or not the
+            // file itself changed, because "nothing moved" is exactly the fact worth stating over
+            // a bundle whose update was expected to move it.
+            let stood: Vec<Message> = sweep
+                .lock_stands
+                .iter()
+                .filter(|(name, _)| newdoc.skills.contains_key(*name))
+                .map(|(_, why)| crate::message::disclosure("LOCK_STANDS", why.clone()))
+                .collect();
+            sweep.disclosures.extend(stood);
             newdoc.workspace = plan.workspace.as_ref().map(|(h, w)| format!("{h}/{w}"));
             let has_entries =
                 !(newdoc.skills.is_empty() && newdoc.mcp.is_empty() && newdoc.channels.is_empty());
@@ -3001,20 +3022,20 @@ fn reconcile_thing<'a>(
             let row_pin = row.pin();
             let pin_from_row = row_pin.is_some();
             let pin = row_pin.or_else(|| sc.lock_pin(bundle));
-            if sc.lock.is_some() {
-                // A toml PIN is intent — the lock reconciles TO it (an exact resolution is a
-                // fill, not a move), so the write-back must let this harvest value win.
-                if pin_from_row {
-                    sweep.lock_pin_overrides.insert(bundle.clone());
-                }
-                sweep.lock_harvest.skills.insert(
+            // A toml PIN is intent — the lock reconciles TO it (an exact resolution is a fill,
+            // not a move), so the write-back must let this harvest value win.
+            if sc.lock.is_some() && pin_from_row {
+                sweep.lock_pin_overrides.insert(bundle.clone());
+            }
+            let lock_entry = sc.lock.is_some().then(|| {
+                (
                     bundle.clone(),
                     LockSkill {
                         version: Some(pin.clone().unwrap_or_else(|| target.version_id.clone())),
                         ..LockSkill::default()
                     },
-                );
-            }
+                )
+            });
             let st = SyncTarget {
                 target,
                 pin,
@@ -3023,6 +3044,7 @@ fn reconcile_thing<'a>(
                 // A skill row's dest is its frozen placement plan.
                 dest: row.fields().dest,
                 counted: true,
+                lock_entry,
             };
             sync_workspace_skill(env, sc, run, &st, sweep);
         }
@@ -3792,16 +3814,16 @@ fn reconcile_set<'a>(
             };
             let display = entry.name.clone();
             let pin = sc.lock_pin(&entry.name);
-            if sc.lock.is_some() {
-                sweep.lock_harvest.skills.insert(
+            let lock_entry = sc.lock.is_some().then(|| {
+                (
                     entry.name.clone(),
                     LockSkill {
                         version: Some(pin.clone().unwrap_or_else(|| entry.version_id.clone())),
                         via: Some(channel.clone()),
                         ..LockSkill::default()
                     },
-                );
-            }
+                )
+            });
             let st = SyncTarget {
                 target: CatalogTarget::from_entry(entry, kind),
                 pin,
@@ -3809,6 +3831,7 @@ fn reconcile_set<'a>(
                 display,
                 dest: row.fields().dest,
                 counted: true,
+                lock_entry,
             };
             sync_workspace_skill(env, sc, run, &st, sweep);
         }
@@ -3931,6 +3954,8 @@ fn reconcile_feed<'a>(
                     // A feed item has no row — no dest, no narrowing: the default placement.
                     dest: None,
                     counted: true,
+                    // A feed is person-scope by nature, and the person scope has no lock.
+                    lock_entry: None,
                 };
                 sync_workspace_skill(env, sc, run, &st, sweep);
             }
@@ -4159,9 +4184,18 @@ struct SyncTarget {
     /// per entry, detection ignored). `None` = no dest: today's default placement, every agent.
     dest: Option<Vec<String>>,
     /// Whether this bundle takes a number in the run's activity counter — what turns the line into
-    /// "updating docs (2 of 7)". `false` for a lone explicit row, which is a batch of one and says
-    /// so by not counting.
+    /// "updating docs (2 of 7)". `false` only for the offline converge, which runs after the
+    /// counting pass has returned.
     counted: bool,
+    /// The `topos.lock` entry this row WOULD record, under the key it records it by — `None` when
+    /// the scope has no lock at all.
+    ///
+    /// Harvested only once the sync has said what the copy HOLDS (see [`sync_workspace_skill`]).
+    /// Recorded up front, it recorded the version the row RESOLVED to whatever became of it: a
+    /// bundle whose merge conflicted kept the person's own bytes on disk while the lock advanced
+    /// to the team's, and a bundle whose fetch failed put a version in the committed file that no
+    /// folder in the checkout held.
+    lock_entry: Option<(String, LockSkill)>,
 }
 
 /// What one lane said about a connected server — the facts its record is written from. Both lanes
@@ -4533,6 +4567,28 @@ fn sync_workspace_skill<'a>(
             if !sweep.warnings.contains(&line) {
                 sweep.warnings.push(line);
             }
+        }
+    }
+    // THE LOCK RECORDS WHAT THE COPY HOLDS. The harvest is taken HERE, from the outcome, and not
+    // from the version the row resolved to before anything was fetched: a merge that STOPPED
+    // leaves the person's own bytes in every folder, and a sync that failed leaves whatever stood
+    // there — in both cases the version this row resolved to is one no folder in the checkout
+    // holds, and writing it into a committed file is the reproducibility lie the lock exists to
+    // prevent. A stopped merge KEEPS the standing entry (said out loud); a failure harvests
+    // nothing, which is the state the write-back's "could not re-resolve" line already describes.
+    if let Some((key, entry)) = &st.lock_entry {
+        match &outcome {
+            Ok(row) if row.action == PullAction::Conflicted => {
+                let why = format!(
+                    "{}: the merge here has stopped — topos.lock keeps the version this copy holds",
+                    st.display
+                );
+                sweep.lock_stands.insert(key.clone(), why);
+            }
+            Ok(_) => {
+                sweep.lock_harvest.skills.insert(key.clone(), entry.clone());
+            }
+            Err(_) => {}
         }
     }
     let mut row_index = None;
