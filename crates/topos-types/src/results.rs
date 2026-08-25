@@ -1941,6 +1941,11 @@ pub struct LoginData {
     /// present iff `feed_row_added`. **Additive.**
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undo: Vec<String>,
+    /// Whether an agents pick already stands for this machine. What the workspace delivers reaches
+    /// the agents that pick names, so with no pick yet nothing installs anywhere and the receipt
+    /// says how to pick instead of promising an install. **Additive.**
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub machine_pick: bool,
 }
 
 /// `logout [<workspace>|--all]` — end this installation's session(s). **INFERRED** (additive-only).

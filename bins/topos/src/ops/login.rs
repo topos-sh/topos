@@ -317,6 +317,8 @@ fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
         user: None,
         feed_row_added: false,
         undo: Vec::new(),
+        // Nothing is signed in yet, so there is no receipt line for the pick to shape.
+        machine_pick: false,
     }
 }
 
@@ -593,8 +595,21 @@ fn connected_receipt(
             feed_row_added,
             undo,
             manifest_note,
+            machine_pick: machine_pick_stands(ctx),
         },
     )
+}
+
+/// Whether this machine has an agents pick at all. Delivery follows the pick, so a receipt that
+/// promises an install here without one would be promising something that cannot happen yet.
+/// An unreadable pick answers `false`: the receipt then names the way to pick, which is never
+/// wrong advice.
+fn machine_pick_stands(ctx: &Ctx<'_>) -> bool {
+    let path = crate::agents_pick::machine_path(&ctx.layout);
+    crate::agents_pick::read(ctx.fs, &path, true)
+        .ok()
+        .flatten()
+        .is_some_and(|pick| !pick.agents.is_empty())
 }
 
 /// What only the receipt carries beyond the session row: the signed-in identity, the
@@ -605,6 +620,8 @@ struct ReceiptExtras {
     feed_row_added: bool,
     undo: Vec<String>,
     manifest_note: Option<String>,
+    /// Whether an agents pick already stands for this machine ([`machine_pick_stands`]).
+    machine_pick: bool,
 }
 
 /// The ONE connected-session payload — the browser grant, the lane-side connect, and the
@@ -636,6 +653,7 @@ fn connected_data(
         user: extras.user,
         feed_row_added: extras.feed_row_added,
         undo: extras.undo,
+        machine_pick: extras.machine_pick,
     }
 }
 
@@ -1969,13 +1987,22 @@ mod tests {
                     ),
                     crate::connected::Witness::Held
                 );
-                // The receipt: the first-connection copy, byte-exact.
+                // The receipt: the first-connection copy, byte-exact. No agent is picked on
+                // this machine yet, so delivery reaches nothing and the line says how to pick.
+                assert!(!done.machine_pick);
                 assert_eq!(
                     crate::render::session_login_tty(&done),
                     "signed in to topos.example.com/eng as robert\n\
-                     what eng delivers to you installs on this machine\n\
+                     what eng delivers reaches the agents you pick: topos init -a <agent>, or -g \
+                     for this machine\n\
                      (undo: topos remove -g @eng)"
                 );
+                // With a pick standing, the promise is true and the receipt makes it.
+                crate::agents_pick::write_pick(
+                    &crate::agents_pick::machine_path(&ctx.layout),
+                    &["claude-code"],
+                );
+                assert!(machine_pick_stands(ctx));
             });
         });
     }

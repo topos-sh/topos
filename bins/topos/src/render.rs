@@ -739,10 +739,17 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
     }
     if data.feed_row_added {
         // The feed line this login wrote (only ever on the machine's first connection): what it
-        // means, then the paste-ready inverse.
-        s.push_str(&format!(
-            "\nwhat {name} delivers to you installs on this machine"
-        ));
+        // means, then the paste-ready inverse. What it means depends on whether agents are picked
+        // yet: delivery follows the pick, so with none standing nothing installs anywhere, and
+        // the line names the way to pick rather than promising an install that cannot happen.
+        s.push_str(&if data.machine_pick {
+            format!("\nwhat {name} delivers to you installs on this machine")
+        } else {
+            format!(
+                "\nwhat {name} delivers reaches the agents you pick: topos init -a <agent>, or \
+                 -g for this machine"
+            )
+        });
         if !data.undo.is_empty() {
             s.push_str(&format!("\n(undo: topos {})", data.undo.join(" ")));
         }
@@ -11887,6 +11894,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            machine_pick: true,
         };
 
         // The FIRST connection: who + where, what the feed line means, the paste-ready inverse —
@@ -11895,6 +11903,18 @@ mod tests {
             session_login_tty(&connected(true)),
             "signed in to topos.sh/acme as robert\n\
              what acme delivers to you installs on this machine\n\
+             (undo: topos remove -g @acme)"
+        );
+
+        // With NO pick standing, delivery reaches nothing yet — so the line names the way to
+        // pick instead of promising an install.
+        let mut unpicked = connected(true);
+        unpicked.machine_pick = false;
+        assert_eq!(
+            session_login_tty(&unpicked),
+            "signed in to topos.sh/acme as robert\n\
+             what acme delivers reaches the agents you pick: topos init -a <agent>, or -g for \
+             this machine\n\
              (undo: topos remove -g @acme)"
         );
 
@@ -11959,6 +11979,7 @@ mod tests {
             user: None,
             feed_row_added: false,
             undo: Vec::new(),
+            machine_pick: false,
         };
         let bare = session_login_tty(&pending(""));
         assert!(

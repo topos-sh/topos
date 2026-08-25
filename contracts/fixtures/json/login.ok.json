@@ -11,6 +11,7 @@
     ],
     "display_name": "Acme",
     "feed_row_added": true,
+    "machine_pick": true,
     "server": "https://topos.sh/api",
     "session_id": "sn_01hzy3",
     "session_status": "active",

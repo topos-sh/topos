@@ -429,7 +429,7 @@ fn a_login_completes_on_the_poll_when_no_redirect_ever_arrives() {
         "the signed-in receipt prints: {printed}"
     );
     assert!(
-        printed.contains("what eng delivers to you installs on this machine"),
+        printed.contains("what eng delivers reaches the agents you pick"),
         "the first connection discloses the feed line: {printed}"
     );
     let sessions =

@@ -41,6 +41,10 @@
       "description": "Whether THIS login wrote the workspace's feed row into the machine's own `topos.toml` —\ntrue only on this machine's first connection to the workspace (login never re-adds a row\nsomeone deleted). **Additive.**",
       "type": "boolean"
     },
+    "machine_pick": {
+      "description": "Whether an agents pick already stands for this machine. What the workspace delivers reaches\nthe agents that pick names, so with no pick yet nothing installs anywhere and the receipt\nsays how to pick instead of promising an install. **Additive.**",
+      "type": "boolean"
+    },
     "manifest_note": {
       "description": "The honest reason this machine's own `topos.toml` was left alone when the login could not\nrecord the workspace's feed row there (an unreadable or unwritable file). Absent on every\nclean login. **Additive.**",
       "type": [
