@@ -140,6 +140,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
   };
 }
 
+/** The lookup belt's own in-page line. A refusal a PERSON meets has to be a sentence on the form
+ * they are standing at, with the wait in it — the house fault screen says nothing they can act
+ * on, and mistyping a code is the commonest way to arrive here. */
+const TOO_MANY_LOOKUPS = "Too many attempts — wait a few seconds and try again";
+
 const REQUEST_GONE =
   "That request expired or was already handled — nothing was approved. Ask the device to start again.";
 
@@ -185,13 +190,6 @@ export async function action({ request }: ActionFunctionArgs) {
   // card approved from a loopback-armed URL must not spend the listener's one wake.
   const { device, loopback } = loopbackFrom(form);
 
-  // ONE belt over all three arms: `approve` and `deny` resolve a flow by the same typed code
-  // `lookup` does, so leaving them unbelted would just move an enumeration loop one intent to
-  // the left. Page actions never reach the /api/v1 door belt, so the action wears it.
-  if (!allowVerifyLookup(actor.userId)) {
-    throw data(null, { status: 429 });
-  }
-
   // THE LOOKUP IS THE DEFAULT ARM. `approve` and `deny` are the two acts that DECIDE a request,
   // and each names itself; every other submission of this page is the code lookup — including one
   // that arrives with no `intent` field at all.
@@ -202,7 +200,7 @@ export async function action({ request }: ActionFunctionArgs) {
   // a script or extension between the two can drop a hidden input), and keying the lookup on that
   // field being present turned every one of those into a bare 400 — a page with no card, no
   // message, and nothing to do next. Reading the lookup as the default costs nothing: it resolves
-  // only a flow THIS actor may approve, under the same rate belt as the other two arms, so a
+  // only a flow THIS actor may approve, and it is the arm the guessing belt sits on, so a
   // submission that loses a hidden field loses no protection with it.
   if (intent !== "approve" && intent !== "deny") {
     // The two-state page's first state: resolve the typed code into the request card. A POST,
@@ -212,6 +210,15 @@ export async function action({ request }: ActionFunctionArgs) {
       .toUpperCase();
     if (userCode === "") {
       throw data(null, { status: 400 });
+    }
+    // THE GUESSING BELT, keyed per acting person and spent HERE — on the one arm that turns a
+    // typed code into a request. A code space of ~2^40 has to meet a wall long before it matters,
+    // and this is the only door that answers "is this a code at all". Deciding a request you have
+    // already looked up is not a guess, so `approve` and `deny` spend nothing: the person with a
+    // card in front of them can always act on it, however many codes they mistyped getting there.
+    // Page actions never reach the /api/v1 door belt, so the action wears its own.
+    if (!allowVerifyLookup(actor.userId)) {
+      return data({ kind: "refused" as const, error: TOO_MANY_LOOKUPS }, { status: 429 });
     }
     const pending = await pendingLoginFlow(userCode, actor.userId);
     if (pending === null) {
