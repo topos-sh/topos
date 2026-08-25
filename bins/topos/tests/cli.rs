@@ -3332,6 +3332,154 @@ fn zero_installed_agents_is_not_an_ask() {
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
+/// **`--frozen` never asks, and never refuses over a pick no clone can carry.** A CI runner
+/// checks out a project, exports a machine token and runs `topos install --frozen`. It has no
+/// agents pick and cannot be given one: the pick is personal and topos git-ignores the file it
+/// lives in. Asking was a prompt nobody could answer, and refusing was a red pipeline over a
+/// question with no answer — so a frozen run picks nobody, fetches and verifies what the project
+/// names, places nothing, exits 0, and says so once. The ask itself is untouched: a person at a
+/// keyboard still gets it.
+#[test]
+fn frozen_install_with_no_pick_fetches_and_places_nothing() {
+    let rig = pick_rig("frozen-no-pick", &["claude-code", "cursor"]);
+    write_weather(&rig);
+    let said = "No agents picked here; nothing placed. Pick with: topos init -a <agent>\n";
+
+    // SEVERAL installed, none picked: the run goes through and states the fact.
+    let out = rig.run(&["install", "--frozen"]);
+    assert!(
+        out.status.success(),
+        "frozen goes through: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    assert_no_agent_files(&rig);
+    assert!(
+        rig.project_pick().is_none() && rig.machine_pick().is_none(),
+        "a run that asked nothing decided nothing"
+    );
+
+    // `--json`: the same fact as a coded line on the one document, and the run is `ok`.
+    let (status, v) = rig.json(&["--json", "install", "--frozen"]);
+    assert!(status.success(), "{v}");
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        v["messages"][0],
+        serde_json::json!({
+            "code": "NO_PICK",
+            "kind": "disclosure",
+            "text": "No agents picked here; nothing placed. Pick with: topos init -a <agent>"
+        }),
+        "{v}"
+    );
+    assert_no_agent_files(&rig);
+
+    // Inside an agent that announces itself, a frozen run STILL picks nobody. The ask's
+    // agent-friendly shortcut is a guess about this machine, and a posture whose promise is "the
+    // same bytes everywhere" must not answer differently depending on what started it.
+    let out = rig.run_at(
+        &rig.project,
+        &["install", "--frozen"],
+        &[("CLAUDECODE", "1")],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    assert!(rig.project_pick().is_none() && rig.machine_pick().is_none());
+    assert_no_agent_files(&rig);
+
+    // WITHOUT `--frozen` the ask stands: a person ran this, and the way out is theirs to take.
+    let out = rig.run(&["install"]);
+    assert_eq!(out.status.code(), Some(2), "the ask is unchanged");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no agents picked yet in this project")
+            || String::from_utf8_lossy(&out.stderr)
+                .contains("No agents picked yet in this project")
+    );
+
+    // ZERO installed: the sentence is the agentless one, and the run still goes on.
+    let bare = pick_rig("frozen-zero-agents", &[]);
+    write_weather(&bare);
+    let out = bare.run(&["install", "--frozen"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "No agent topos knows is installed here; nothing placed.\n"
+    );
+    assert_no_agent_files(&bare);
+    assert!(bare.project_pick().is_none() && bare.machine_pick().is_none());
+    let (status, v) = bare.json(&["--json", "install", "--frozen"]);
+    assert!(status.success(), "{v}");
+    assert_eq!(v["messages"][0]["code"], "NO_AGENT_INSTALLED", "{v}");
+
+    let _ = std::fs::remove_dir_all(&rig.root);
+    let _ = std::fs::remove_dir_all(&bare.root);
+}
+
+/// The other half of the same rule: with a pick standing, `install --frozen` places exactly what
+/// it always placed and says nothing about picking.
+#[test]
+fn frozen_install_with_a_pick_places_as_before() {
+    let rig = pick_rig("frozen-picked", &["claude-code", "cursor"]);
+    write_weather(&rig);
+    rig.run(&["init", "-a", "claude-code"]);
+    assert!(rig.project_pick().is_some(), "the pick stands");
+
+    let out = rig.run(&["install", "--frozen"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("nothing placed"), "{err}");
+    assert!(
+        rig.project.join(".mcp.json").exists(),
+        "the picked agent's config holds the entry"
+    );
+    assert!(
+        rig.project.join(".claude/skills/topos").exists(),
+        "the picked agent's skills folder holds what topos delivers"
+    );
+    // The agent nobody picked is untouched, frozen or not.
+    assert!(!rig.project.join(".cursor").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// A project whose only demand is a local MCP server bundle — something that PLACES when an agent
+/// is picked (a config entry) and places nothing when none is.
+fn write_weather(rig: &PickRig) {
+    std::fs::create_dir_all(rig.project.join("weather")).unwrap();
+    std::fs::write(
+        rig.project.join("weather/server.json"),
+        r#"{"name":"io.github.acme/weather","description":"Conditions.","version":"1.4.0","remotes":[{"type":"streamable-http","url":"https://weather.acme.example/mcp"}]}"#,
+    )
+    .unwrap();
+    rig.write_manifest("schema = 1\n\n[mcp]\nweather = { path = \"./weather\", kind = \"mcp\" }\n");
+}
+
+/// Nothing an agent reads was written, in the checkout or under `$HOME`.
+fn assert_no_agent_files(rig: &PickRig) {
+    for dir in [".claude", ".codex", ".cursor", ".agents", ".opencode"] {
+        assert!(!rig.project.join(dir).exists(), "{dir} in the checkout");
+        assert!(
+            !rig.home.join(dir).join("skills").exists(),
+            "{dir} under HOME"
+        );
+    }
+    assert!(
+        !rig.project.join(".mcp.json").exists(),
+        "an MCP entry landed"
+    );
+}
+
 /// **`add` checks its SOURCE before the pick rule.** A path that is not on this machine is
 /// refused with its own code, on a machine with several agents and no pick: the pick rule
 /// records a decision, so it must not run — and answer about agents — for a command that was

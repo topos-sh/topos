@@ -1039,6 +1039,9 @@ pub(crate) enum PickDerived {
     /// No agent topos knows is installed here. Nothing was recorded (a pick naming nobody is a
     /// decision nobody made), the verb goes on and places nothing, and the caller says so.
     NoneInstalled,
+    /// Several agents are installed and this run may not ask which (`--frozen`). Nothing was
+    /// recorded and nothing is refused: the run goes on, places nothing, and the caller says so.
+    NotPicked,
 }
 
 /// The sentence a scope with no installed agent earns, said once per run: nothing was picked,
@@ -1052,11 +1055,28 @@ pub(crate) fn no_agent_installed_line() -> Message {
     crate::message::disclosure("NO_AGENT_INSTALLED", NO_AGENT_INSTALLED.to_owned())
 }
 
+/// The sentence a `--frozen` run earns where several agents are installed and none is picked:
+/// what happened, then the command that changes it. A frozen run may not ask, so this is the
+/// whole answer — and it is a statement, not a refusal, because a build box has nothing to
+/// answer with (the pick is personal and never in git).
+pub(crate) fn no_pick(global: bool) -> String {
+    format!(
+        "No agents picked here; nothing placed. Pick with: {}",
+        crate::error::pick_command(global)
+    )
+}
+
+/// [`no_pick`] as the machine-readable line a `--json` envelope carries.
+pub(crate) fn no_pick_line(global: bool) -> Message {
+    crate::message::disclosure("NO_PICK", no_pick(global))
+}
+
 /// Before a verb lands anything at `scope` with no effective pick (`install`, `update`, `init`,
 /// every `add`): one agent installed here is the pick (recorded at that scope, then reread, so
 /// the converge reads what the file says, and the caller says so); several are asked for per
 /// `ask`; none at all is [`PickDerived::NoneInstalled`] — not an ask, not a refusal, and no file
-/// written. The quiet hook sweep never calls this: it asks nothing, derives nothing and places
+/// written. A `--frozen` run never reaches the ask: several installed agents are
+/// [`PickDerived::NotPicked`], on the same terms. The quiet hook sweep never calls this: it asks nothing, derives nothing and places
 /// nothing for a scope with no pick.
 ///
 /// # Errors
@@ -1074,6 +1094,12 @@ pub(crate) fn derive_pick_if_missing(
         global: matches!(scope, PickScope::Machine),
         ..*ask
     };
+    // FROZEN never asks and never guesses. One installed agent is not a question and stays the
+    // pick; an ambiguous machine gets no pick at all, because the answer would otherwise depend
+    // on which runner the pipeline landed on.
+    if inputs.frozen && installed.len() > 1 {
+        return Ok(PickDerived::NotPicked);
+    }
     let chosen = agents_ask::choose(&installed, &inputs)?;
     if chosen.is_empty() {
         return Ok(PickDerived::NoneInstalled);

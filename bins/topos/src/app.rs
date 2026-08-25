@@ -1770,7 +1770,13 @@ fn run_command(
                     (false, Some(dir)) => crate::agents_pick::PickScope::Project(dir),
                     _ => crate::agents_pick::PickScope::Machine,
                 };
-                match derive_pick_and_say(&ctx, &scope, json, global) {
+                match derive_pick_and_say_frozen(
+                    &ctx,
+                    &scope,
+                    json,
+                    global,
+                    lock_mode == ops::LockMode::Frozen,
+                ) {
                     Ok(lines) => pick_disclosures = lines,
                     Err(e) => return emit_err(json, cmd_name, &e, &diag),
                 }
@@ -2164,7 +2170,24 @@ fn derive_pick_and_say(
     json: bool,
     global: bool,
 ) -> Result<Vec<topos_types::Message>, ClientError> {
-    match ops::agents::derive_pick_if_missing(ctx, scope, &ask_inputs(json, global))? {
+    derive_pick_and_say_frozen(ctx, scope, json, global, false)
+}
+
+/// [`derive_pick_and_say`] for a run that may be `--frozen`.
+///
+/// A frozen run asks nothing, so an ambiguous machine is not a refusal here either: it is the
+/// same kind of fact as an agentless one, said the same way and on the same channel, and the run
+/// goes on to fetch and verify everything the lock names. A CI box has no pick and cannot get one
+/// from a clone, and a pipeline must not fail on a question no runner can answer.
+fn derive_pick_and_say_frozen(
+    ctx: &Ctx<'_>,
+    scope: &crate::agents_pick::PickScope,
+    json: bool,
+    global: bool,
+    frozen: bool,
+) -> Result<Vec<topos_types::Message>, ClientError> {
+    let ask = ask_inputs_frozen(json, global, frozen);
+    match ops::agents::derive_pick_if_missing(ctx, scope, &ask)? {
         ops::agents::PickDerived::Stood => Ok(Vec::new()),
         ops::agents::PickDerived::Recorded(agents) => {
             errln!("{}", render::using_line(&agents, scope));
@@ -2175,6 +2198,11 @@ fn derive_pick_and_say(
         }
         ops::agents::PickDerived::NoneInstalled => {
             errln!("{}", ops::agents::NO_AGENT_INSTALLED);
+            Ok(Vec::new())
+        }
+        ops::agents::PickDerived::NotPicked if json => Ok(vec![ops::agents::no_pick_line(global)]),
+        ops::agents::PickDerived::NotPicked => {
+            errln!("{}", ops::agents::no_pick(global));
             Ok(Vec::new())
         }
     }
@@ -2232,12 +2260,18 @@ fn finish_pick<T: Serialize>(
 /// stdin is a terminal a prompt can be read from, whether Claude Code announced itself in the
 /// environment, and whether `--json` holds stdout to one document.
 fn ask_inputs(json: bool, global: bool) -> ops::agents_ask::AskInputs {
+    ask_inputs_frozen(json, global, false)
+}
+
+/// [`ask_inputs`] for a run that may be `--frozen` — the one invocation shape that never asks.
+fn ask_inputs_frozen(json: bool, global: bool, frozen: bool) -> ops::agents_ask::AskInputs {
     use std::io::IsTerminal;
     ops::agents_ask::AskInputs {
         stdin_tty: std::io::stdin().is_terminal(),
         in_claude_code: std::env::var_os("CLAUDECODE").is_some(),
         json,
         global,
+        frozen,
     }
 }
 
