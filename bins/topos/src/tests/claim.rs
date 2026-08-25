@@ -1313,10 +1313,10 @@ fn the_already_added_answer_lists_every_folder_and_offers_only_provable_bytes() 
 fn a_project_invoked_answer_never_offers_a_home_folder() {
     // SCOPE, as everywhere: the copies a project answer offers are the checkout's own.
     let rig = Rig::new("options-scope");
-    // Two agents are installed here: Claude Code (whose project dir holds the record) and Cursor
-    // (whose project dir is the shared `.agents/skills`).
+    // Two agents are installed here: Claude Code (whose project dir holds the record) and Codex
+    // (whose project dir is `.agents/skills`).
     std::fs::create_dir_all(rig.work.0.join(".claude")).unwrap();
-    std::fs::create_dir_all(rig.work.0.join(".cursor")).unwrap();
+    std::fs::create_dir_all(rig.work.0.join(".codex")).unwrap();
     let project = rig.work.0.join("repo");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("topos.toml"), "schema = 1\n").unwrap();

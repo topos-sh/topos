@@ -798,7 +798,8 @@ fn the_connected_server_loop_across_six_agents() {
         );
     }
 
-    // The deep dive answers the same thing offline, per agent, with the file it lives in.
+    // The deep dive answers the same thing offline, per agent, with the file it lives in — for
+    // the six PICKED agents alone (an agent outside the pick earns neither a file nor a line).
     let deep = dev
         .run(&proj, &["list", BUNDLE, "--json"])
         .data("list <bundle>");
@@ -810,20 +811,13 @@ fn the_connected_server_loop_across_six_agents() {
             { "agent": "claude-code", "state": "current",
               "file": canon(&proj.join(".mcp.json")) },
             { "agent": "openclaw", "state": "not-supported", "note": "no project-level config" },
-            { "agent": "cline", "state": "not-supported", "note": "no project-level config" },
             { "agent": "codex", "state": "current",
               "file": canon(&proj.join(".codex").join("config.toml")) },
             { "agent": "cursor", "state": "current",
               "file": canon(&proj.join(".cursor").join("mcp.json")) },
-            { "agent": "github-copilot", "state": "not-supported", "note": "no project-level config" },
-            { "agent": "goose", "state": "not-supported", "note": "no project-level config" },
             { "agent": "hermes-agent", "state": "not-supported", "note": "no project-level config" },
             { "agent": "opencode", "state": "current",
               "file": canon(&proj_opencode) },
-            { "agent": "windsurf", "state": "not-supported", "note": "no project-level config" },
-            { "agent": "zed", "state": "not-supported", "note": "no project-level config" },
-            { "agent": "lm-studio", "state": "not-supported", "note": "no project-level config" },
-            { "agent": "claude-desktop", "state": "not-supported", "note": "no project-level config" },
         ]),
         "the deep dive answers per agent, with the file: {deep}"
     );

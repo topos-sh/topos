@@ -96,6 +96,12 @@ impl Rig {
     pub(super) fn pick(&self, agents: &[&str]) {
         crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&self.layout()), agents);
     }
+    /// Write a project's own agents pick (`<dir>/.topos/agents.json`) — a picked agent engages
+    /// at project scope whether or not it is installed, which is what keeps a checkout's four
+    /// project surfaces hermetic.
+    pub(super) fn project_pick(&self, dir: &Path, agents: &[&str]) {
+        crate::agents_pick::write_pick(&crate::agents_pick::project_path(dir), agents);
+    }
     pub(super) fn ctx_at<'a>(&'a self, cwd: Option<&Path>) -> Ctx<'a> {
         Ctx {
             progress: crate::progress::silent(),

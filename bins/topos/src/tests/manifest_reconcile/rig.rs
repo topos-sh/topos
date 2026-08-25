@@ -75,8 +75,8 @@ pub(super) struct Rig {
 impl Rig {
     pub(super) fn new(tag: &str) -> Self {
         let home = Scratch::new(&format!("{tag}-home"));
-        // Make claude-code DETECTED (its config home exists) so the shared-dir-first policy
-        // engages: person scope → `<home>/.agents/skills`, project scope → `<proj>/.agents/skills`.
+        // Make claude-code DETECTED (its config home exists), so the wildcard pick below picks
+        // it: person scope → `<home>/.claude/skills`, project scope → `<proj>/.claude/skills`.
         std::fs::create_dir_all(home.0.join(".claude")).unwrap();
         let work = Scratch::new(&format!("{tag}-work"));
         // The fake adapter answers with the ROW's root — the same answer the placement engine
@@ -101,6 +101,11 @@ impl Rig {
     /// Replace this machine's agents pick (`<home>/.topos/agents.json`).
     pub(super) fn pick(&self, agents: &[&str]) {
         crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&self.layout()), agents);
+    }
+
+    /// Write a project's own agents pick (`<dir>/.topos/agents.json`).
+    pub(super) fn project_pick(&self, dir: &std::path::Path, agents: &[&str]) {
+        crate::agents_pick::write_pick(&crate::agents_pick::project_path(dir), agents);
     }
 
     /// Where this rig's ACTIVE-harness (native, machine-scope) copies land.

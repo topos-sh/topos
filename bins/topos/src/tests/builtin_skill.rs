@@ -1,5 +1,5 @@
-//! The BUILT-IN `topos` skill suite: placement through the one engine (shared-dir-first over the
-//! detected agents), the force-sync (a hand edit is overwritten, snapshot-first; a binary change
+//! The BUILT-IN `topos` skill suite: placement through the one engine (one copy per picked
+//! agent, at the pick's own scope), the force-sync (a hand edit is overwritten, snapshot-first; a binary change
 //! refreshes every copy), the Foreign freeze (the sweep never writes a pre-existing dir — marked
 //! or not; only the consented `follow topos --yes` adopts a MARKED downloaded copy,
 //! snapshot-first), the provenance matcher's fail-closed shapes, the durable `remove topos`
@@ -97,7 +97,12 @@ impl Rig {
             }),
         }
     }
-    /// The shared convention dir's placed copy.
+    /// Every path (dirs and files) under the agent home, relative and sorted — the "nothing
+    /// under the home moved" witness.
+    fn agent_home_tree(&self) -> Vec<String> {
+        tree(&self.agent_home.0)
+    }
+    /// Cline's placed copy: its user skills root is the cross-agent `~/.agents/skills` folder.
     fn shared_copy(&self) -> PathBuf {
         self.agent_home
             .0
@@ -105,6 +110,27 @@ impl Rig {
             .join("skills")
             .join("topos")
     }
+}
+
+/// Every path under `root` (dirs and files), relative and sorted; empty for an absent root.
+fn tree(root: &std::path::Path) -> Vec<String> {
+    fn walk(base: &std::path::Path, d: &std::path::Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            out.push(p.strip_prefix(base).unwrap().to_string_lossy().into_owned());
+            if p.is_dir() {
+                walk(base, &p, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+fn sid() -> crate::id::SkillId {
+    crate::id::SkillId::parse("topos").unwrap()
 }
 
 /// A deterministic stand-in bundle (what a DIFFERENT binary would render).
@@ -176,10 +202,109 @@ fn detail_files() -> [(&'static str, &'static str); 4] {
     ]
 }
 
+/// THE BUILT-IN FOLLOWS THE PICK AT ITS SCOPE. A project pick places it into the picked agents'
+/// PROJECT skills dirs through the project's own store — every file, force-synced — and not a
+/// byte lands under the home. Its custody is the project store's, so the same `placement_dirs`
+/// the machine clean reads answers for the project copy.
+#[test]
+fn the_built_in_lands_in_the_picked_agents_project_dirs() {
+    let rig = Rig::new("project-pick");
+    rig.detect(".cline"); // installed and machine-picked; the project pick is what counts here
+    let proj = Scratch::new("project-pick-co");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    crate::agents_pick::write_pick(
+        &crate::agents_pick::project_path(&proj.0),
+        &["claude-code", "codex"],
+    );
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    let home_before = rig.agent_home_tree();
+
+    let sync = ops::ensure_builtin_in_project(&ctx, &proj.0).unwrap();
+    assert!(sync.changed, "first contact lands bytes");
+    let copies = [
+        proj.0.join(".claude/skills/topos"),
+        proj.0.join(".agents/skills/topos"),
+    ];
+    for dir in &copies {
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            include_str!("../../../../skills/topos/SKILL.md"),
+            "{}",
+            dir.display()
+        );
+        for (name, source) in detail_files() {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), source);
+        }
+        assert_eq!(
+            std::fs::read(dir.join(".gitignore")).unwrap(),
+            crate::scan::IGNORE_SENTINEL,
+            "a project copy self-ignores"
+        );
+    }
+    assert!(
+        !proj.0.join(".cursor").exists(),
+        "an unpicked agent gets no folder"
+    );
+    assert_eq!(
+        rig.agent_home_tree(),
+        home_before,
+        "nothing under the home moved"
+    );
+    assert!(
+        !rig.shared_copy().exists() && !rig.layout().skill_dir(&sid()).exists(),
+        "no machine copy, no machine record"
+    );
+    // The record — and the opt-out — are the PROJECT store's.
+    let store = crate::sidecar::existing_project_store(&rig.fs, &proj.0).expect("the store");
+    assert!(store.published(&sid()).map.exists());
+    let sctx = crate::ops::ctx_with_layout(&ctx, &store);
+    let mut placed = ops::builtin_placement_dirs(&sctx).unwrap();
+    placed.sort();
+    let mut expected: Vec<String> = copies
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(placed, expected);
+    // A second run is a byte-silent no-op.
+    assert!(
+        !ops::ensure_builtin_in_project(&ctx, &proj.0)
+            .unwrap()
+            .changed
+    );
+}
+
+/// With NO pick nothing is placed, machine or project: the record is minted, the plan is empty,
+/// and no agent folder is born.
+#[test]
+fn the_built_in_places_nothing_with_no_pick() {
+    let rig = Rig::new("no-pick");
+    rig.pick(&[]);
+    rig.detect(".cline");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    let home_before = rig.agent_home_tree();
+    let sync = ops::ensure_builtin(&ctx).unwrap();
+    assert!(!sync.changed);
+    assert_eq!(rig.agent_home_tree(), home_before);
+    assert!(
+        rig.layout().skill_dir(&sid()).exists(),
+        "the record stands, waiting for a pick"
+    );
+    let proj = Scratch::new("no-pick-co");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    let sync = ops::ensure_builtin_in_project(&ctx, &proj.0).unwrap();
+    assert!(!sync.changed);
+    assert!(!proj.0.join(".claude").exists() && !proj.0.join(".agents").exists());
+}
+
 #[test]
 fn ensure_places_the_bundle_and_lists_it_as_built_in() {
     let rig = Rig::new("place");
-    rig.detect(".cline"); // covered → rides the shared dir
+    rig.detect(".cline"); // picked through the machine's wildcard; its folder is `~/.agents/skills`
     let inert_f = InertFollow;
     let inert_p = InertPlane;
     let ctx = rig.ctx(&inert_f, &inert_p);

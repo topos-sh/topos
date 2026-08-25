@@ -16,6 +16,7 @@ mod forge;
 mod import;
 mod lock;
 mod migrate;
+mod pick;
 mod publish_scope;
 mod rig;
 mod scope;

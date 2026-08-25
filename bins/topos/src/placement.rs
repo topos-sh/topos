@@ -1,7 +1,6 @@
-//! The **placement engine** — WHERE a followed bundle's bytes land on this machine, computed from
-//! the machine alone: which agents are detected, and which of them read the shared
-//! `~/.agents/skills` convention dir. A row that names its own destinations bypasses detection
-//! entirely ([`dest_plan`]).
+//! The **placement engine** — WHERE a followed bundle's bytes land on this machine: one copy in
+//! each PICKED agent's own skills folder ([`crate::agents_pick`]), at the scope the plan is for. A
+//! row that names its own destinations bypasses the pick entirely ([`dest_plan`]).
 //!
 //! ## Two target shapes, one plan
 //!
@@ -13,27 +12,34 @@
 //! one writer; what the two shapes share is the plan, and what the plan means: **WHAT SHOULD
 //! STAND**. What topos actually put there is CUSTODY, and it lives in the bundle's own record.
 //!
-//! ## The policy: shared-dir-first
+//! ## The policy: one folder per picked agent
 //!
-//! A skill lands ONE copy in the shared cross-agent dir when at least one detected harness is
-//! covered by it ([`topos_harness::coverage`]), PLUS one native copy per detected harness the shared
-//! dir does NOT cover. With no harness detected at all (or no machine roots injected), the classic
-//! behavior holds: the active harness's single placement.
+//! topos never touches an agent the person did not pick. The dir planners ([`plan_targets`] for
+//! the machine, [`project_plan`] for a checkout) ask the effective pick for their scope and plan
+//! ONE native copy per picked agent: its skills folder at that scope, from its registry row
+//! ([`registry::skills_root`]). Two picked agents whose rows name one folder share one copy (one
+//! dir, one record). With machine roots present and NO pick, the plan is EMPTY: nothing lands in
+//! any agent's folder — only the person's own recorded folders (agent-less records, claims) stay
+//! managed. Detection plays no part here beyond the pick's own wildcard. Without machine roots at
+//! all (a test that does not exercise the engine) the classic single placement stands: the prior
+//! record as-is, else the active adapter's dir.
 //!
-//! **Every target dir comes from the harness's registry ROW**, resolved through the one resolver —
-//! the active harness's exactly like every other detected one ([`adapter_choice`]). Detection
-//! already follows a machine-local table that moved an agent's skills dir; a placement that asked
-//! the compiled adapter instead would keep writing where the agent no longer reads. The
+//! **Every target dir comes from the harness's registry ROW**, resolved through the one resolver.
+//! A machine-local table that moved an agent's skills dir moves the bytes with it; a placement
+//! that asked the compiled adapter instead would keep writing where the agent no longer reads. The
 //! [`topos_harness::HarnessAdapter`] answers for the rest of its own behavior, and for the dir only
-//! where no row can resolve (no machine roots at all).
+//! where no row can resolve (no machine roots at all, [`adapter_choice`]).
 //!
 //! ## Target-set reconciliation
 //!
-//! Targets are recomputed each sync. A NEW target (a newly detected harness, newly true coverage) is
-//! APPENDED to the map with no materialized bytes yet and lands on the next apply. A placement
-//! LEAVES the record only through an explicit verb (a `remove`, a `dest` edit), which cleans its dir
-//! snapshot-first; detection loss alone never deletes a byte — the recorded copy freezes in place,
-//! unmanaged (skipped by the apply, kept on disk).
+//! Targets are recomputed each sync. A NEW target (an agent newly picked) is APPENDED to the map
+//! with no materialized bytes yet and lands on the next apply. A placement LEAVES the record only
+//! through an explicit verb (a `remove`, a `dest` edit, an agent dropped from the pick), which
+//! cleans its dir snapshot-first; a pick that merely stops naming an agent never deletes a byte
+//! by itself — the recorded copy freezes in place, unmanaged (skipped by the apply, kept on disk).
+//! A record from before the pick model (a `Shared` copy in a folder several agents read) is
+//! adopted BY DIR: a picked agent whose folder it sits in plans that same dir, and the record
+//! keeps it ([`reconcile_map`], [`managed_indices`] both match by dir).
 //!
 //! ## Naming + never-clobber
 //!
@@ -49,7 +55,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use topos_harness::coverage;
 use topos_harness::mcp::{EntryState, McpDialect, plugin_dir};
 use topos_harness::{PlacementNaming, registry};
 use topos_types::persisted::{Lock, PlacementKind, PlacementMap, PlacementState, SwapCapability};
@@ -65,7 +70,8 @@ use crate::stat_cache;
 pub(crate) struct DirTarget {
     pub dir: PathBuf,
     pub kind: PlacementKind,
-    /// The registry slug a `Native` target serves (`None` for the shared dir).
+    /// The registry slug a `Native` target serves (`None` for a folder the person named: a dest
+    /// entry, an adopted source, a claim).
     pub agent: Option<String>,
 }
 
@@ -172,7 +178,6 @@ impl PlacementPlan {
                 self.withheld.push(w);
             }
         }
-        self.shared_covered |= other.shared_covered;
     }
 }
 
@@ -182,9 +187,6 @@ impl PlacementPlan {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PlacementPlan {
     pub targets: Vec<PlannedTarget>,
-    /// Whether a shared target is planned — i.e. at least one detected harness rides the one
-    /// shared copy (the rest take native copies of their own).
-    pub shared_covered: bool,
     /// PROJECT scope only: the candidate roots [`within_project`] refused — each already rendered
     /// as its typed disclosure ([`escape_line`]). The placement is skipped, never redirected; the
     /// caller surfaces the lines so a silent non-delivery is impossible.
@@ -194,14 +196,14 @@ pub(crate) struct PlacementPlan {
     pub withheld: Vec<WithheldSurface>,
 }
 
-/// Compute the placement plan for one skill. `naming` carries the untrusted display name + workspace
-/// slug (the collision namespace); `prior` is the durable record whose dirs are kept verbatim for
-/// already-recorded targets; `adopt` is the INCOMING version's bundle digest, arming adopt-in-place
-/// (a first receive passes it so a byte-identical occupant becomes the placement instead of a
-/// namespaced sibling — and a recorded adoption reservation is reusable only for THAT digest).
-/// With no roots (no `$HOME`, or a test that does not exercise detection) or no detected harness,
-/// the plan is the CLASSIC single placement — the prior record as-is, else the active adapter's
-/// placement.
+/// Compute the MACHINE-scope placement plan for one skill: one native copy per PICKED agent, in
+/// its user skills folder. `naming` carries the untrusted display name + workspace slug (the
+/// collision namespace); `prior` is the durable record whose dirs are kept verbatim for
+/// already-recorded targets; `adopt` is the INCOMING version's bundle digest, arming
+/// adopt-in-place (a first receive passes it so a byte-identical occupant becomes the placement
+/// instead of a namespaced sibling — and a recorded adoption reservation is reusable only for THAT
+/// digest). With no roots (no `$HOME`, or a test that does not exercise the engine) the plan is
+/// the CLASSIC single placement; with roots and no pick it is empty of agent folders.
 pub(crate) fn plan_targets(
     ctx: &Ctx<'_>,
     skill_id: &str,
@@ -209,19 +211,11 @@ pub(crate) fn plan_targets(
     prior: Option<&PlacementMap>,
     adopt: Option<[u8; 32]>,
 ) -> PlacementPlan {
-    let detected: Vec<&'static registry::KnownHarness> = match &ctx.roots {
-        Some(roots) => registry::detected_harnesses(&roots.home, roots.cwd.as_deref()),
-        None => Vec::new(),
-    };
-    if detected.is_empty() {
+    let Some(roots) = &ctx.roots else {
         return classic_plan(ctx, skill_id, naming, prior, adopt);
-    }
-    let home = &ctx
-        .roots
-        .as_ref()
-        .expect("detected harnesses imply roots")
-        .home;
-    let cwd = ctx.roots.as_ref().and_then(|r| r.cwd.as_deref());
+    };
+    let home = &roots.home;
+    let cwd = roots.cwd.as_deref();
 
     let owned = owned_predicate(prior);
     // The CLI's taken-probe: a path is unavailable when a filesystem entry holds it (lstat, so a
@@ -232,47 +226,11 @@ pub(crate) fn plan_targets(
         |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
     let mut plan = PlacementPlan::default();
 
-    // Shared-dir-first: the covered detected harnesses ride ONE copy in the convention dir, and
-    // every uncovered one takes a native copy of its own.
-    let mut native: Vec<&'static registry::KnownHarness> = Vec::new();
-    for h in detected {
-        let support = coverage::shared_dir_support(h.slug);
-        if support.covered() {
-            plan.shared_covered = true;
-        } else {
-            native.push(h);
-        }
-    }
-    if plan.shared_covered {
-        let dir = prior_dir(ctx, prior, PlacementKind::Shared, None, adopt).unwrap_or_else(|| {
-            adopt_override(
-                ctx,
-                topos_harness::choose_skill_dir(
-                    &coverage::shared_skills_dir(home),
-                    skill_id,
-                    naming,
-                    &taken,
-                    &owned,
-                ),
-                skill_id,
-                naming,
-                adopt,
-            )
-        });
-        plan.push_dir(dir, PlacementKind::Shared, None);
-    }
-
-    let active_slug = ctx.harness.id().slug();
-    for h in native {
+    // One native copy per picked agent — EVERY picked agent, the active one included, takes its
+    // user skills root from its registry row, through one resolver and the one naming discipline.
+    for h in crate::agents_pick::picked_harnesses(ctx, None) {
         let dir = match prior_dir(ctx, prior, PlacementKind::Native, Some(h.slug), adopt) {
             Some(dir) => dir,
-            // EVERY detected harness — the active one included — takes its user skills root from
-            // its registry row, through one resolver and the one naming discipline. The active
-            // slug keeps its own arm only for what the row cannot answer (see [`adapter_choice`]):
-            // a cwd-only harness still lands somewhere instead of silently placing nothing.
-            None if h.slug == active_slug => {
-                adapter_choice(ctx, skill_id, naming, &taken, &owned, adopt)
-            }
             None => {
                 let Some(root) =
                     registry::skills_root(h.slug, registry::SkillScope::User, home, cwd)
@@ -288,8 +246,9 @@ pub(crate) fn plan_targets(
                 )
             }
         };
-        // A native dir may coincide with an already-planned target (a harness whose native user dir
-        // IS the shared convention dir, placed under a scope) — one dir, one copy, one record.
+        // Two picked agents whose rows name one folder — or a folder an older record already
+        // holds for this skill (the ownership predicate hands it back by name) — is one dir, one
+        // copy, one record.
         if plan.holds_dir(&dir) {
             continue;
         }
@@ -298,7 +257,7 @@ pub(crate) fn plan_targets(
 
     // The AGENT-LESS recorded placements — an adopt-in-place source dir, a plain tracked dir with no
     // known harness — are ALWAYS managed: they are the user's own chosen location (often the author's
-    // working copy), and detection does not speak for them.
+    // working copy), and the pick does not speak for them.
     if let Some(map) = prior {
         for (dir, st) in map.placements.iter().zip(&map.placement_state) {
             if st.kind == PlacementKind::Native
@@ -310,13 +269,6 @@ pub(crate) fn plan_targets(
         }
     }
     keep_claimed(&mut plan, prior);
-
-    if plan.targets.is_empty() {
-        // Detection found harnesses but none of them resolves to a dir here (every uncovered one is
-        // cwd-only, with no user-scope skills root): the classic single placement stands in, so a
-        // followed skill is never left with nowhere to land.
-        return classic_plan(ctx, skill_id, naming, prior, adopt);
-    }
     plan
 }
 
@@ -350,14 +302,12 @@ enum PriorProjectDir {
 
 /// The PROJECT-scope placement plan — where a project manifest's bundles land INSIDE the checkout
 /// (a project-scope bundle materializes in the project itself, so every agent visiting the
-/// checkout reads the same bytes): its harness dirs, never committed (each landed dir carries the
-/// self-ignore sentinel — see [`crate::scan::IGNORE_SENTINEL`]). Mirrors the shared-dir-first
-/// policy ROOTED AT THE PROJECT: one `<project>/.agents/skills` copy for the covered detected
-/// agents, plus a native project dir per detected-but-uncovered harness that has one; with nothing
-/// detected, the active adapter's project dir (else `<project>/.claude/skills`). A row that pins
-/// its own destinations instead goes through [`dest_plan`]. Prior-dir stability considers ONLY
-/// placements under the project root, so a same-skill person-scope record never leaks into the
-/// project plan.
+/// checkout reads the same bytes): one copy per PICKED agent, in its project skills dir, never
+/// committed (each landed dir carries the self-ignore sentinel — see
+/// [`crate::scan::IGNORE_SENTINEL`]). The pick is the project's effective one (its own file, else
+/// the machine's); with none, nothing is planned. A row that pins its own destinations instead
+/// goes through [`dest_plan`]. Prior-dir stability considers ONLY placements under the project
+/// root, so a same-skill person-scope record never leaks into the project plan.
 pub(crate) fn project_plan(
     ctx: &Ctx<'_>,
     project_dir: &Path,
@@ -369,15 +319,15 @@ pub(crate) fn project_plan(
     let owned = owned_predicate(prior);
     let taken =
         |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
-    // Prior stability, PROJECT-LOCAL: the recorded dir for a (kind, agent) key is reused only when
-    // it sits under this project (a home-dir record for the same key belongs to the person scope).
+    // Prior stability, PROJECT-LOCAL: the recorded dir for an agent is reused only when it sits
+    // under this project (a home-dir record for the same agent belongs to the person scope).
     //
     // A record is not a permission. `starts_with` is LEXICAL — it proves the string, not the path —
     // and the checkout can turn any recorded ancestor into a symlink after the record was written.
     // So a reused prior path passes the SAME containment proof a fresh root does, and one that
     // fails is refused exactly like a fresh escape: a typed line, the placement skipped, the link
     // never followed.
-    let prior_in = |kind: PlacementKind, agent: Option<&str>| -> PriorProjectDir {
+    let prior_in = |agent: &str| -> PriorProjectDir {
         let Some(map) = prior else {
             return PriorProjectDir::None;
         };
@@ -387,8 +337,8 @@ pub(crate) fn project_plan(
             .zip(&map.placement_state)
             .find(|(dir, st)| {
                 Path::new(dir).starts_with(project_dir)
-                    && st.kind == kind
-                    && st.agent.as_deref() == agent
+                    && st.kind == PlacementKind::Native
+                    && st.agent.as_deref() == Some(agent)
                     && (st.materialized_sha.is_some()
                         || !topos_harness::dir_taken(Path::new(dir))
                         || adoption_reservation_holds(dir, st, adopt))
@@ -410,45 +360,9 @@ pub(crate) fn project_plan(
         )
     };
     let mut plan = PlacementPlan::default();
-
     let home = ctx.roots.as_ref().map(|r| r.home.clone());
-    let detected: Vec<&'static registry::KnownHarness> = match &ctx.roots {
-        Some(roots) => registry::detected_harnesses(&roots.home, Some(project_dir)),
-        None => Vec::new(),
-    };
 
-    let mut native: Vec<&'static registry::KnownHarness> = Vec::new();
-    for h in &detected {
-        let support = coverage::shared_dir_support(h.slug);
-        if support.covered() {
-            plan.shared_covered = true;
-        } else {
-            native.push(h);
-        }
-    }
-    if plan.shared_covered {
-        let shared_root = project_dir.join(".agents/skills");
-        match prior_in(PlacementKind::Shared, None) {
-            PriorProjectDir::Reuse(dir) => plan.push_dir(dir, PlacementKind::Shared, None),
-            // A recorded dir that no longer resolves inside the checkout is refused, never
-            // followed — the rail does not care whether a path is fresh or remembered.
-            PriorProjectDir::Escaped(dir) => {
-                plan.refused
-                    .push(escape_message("the recorded shared dir", &dir));
-            }
-            // THE CONTAINMENT RAIL, on the DEFAULT root — not just the override. A committed
-            // `.agents/skills` symlink aiming out of the checkout would otherwise place every
-            // covered agent's bytes wherever it points.
-            PriorProjectDir::None if !within_project(project_dir, &shared_root) => {
-                plan.refused
-                    .push(escape_message("the shared agents dir", &shared_root));
-            }
-            PriorProjectDir::None => {
-                plan.push_dir(choose(&shared_root), PlacementKind::Shared, None);
-            }
-        }
-    }
-    for h in native {
+    for h in crate::agents_pick::picked_harnesses(ctx, Some(project_dir)) {
         let Some(root) = home.as_deref().and_then(|home| {
             registry::skills_root(
                 h.slug,
@@ -459,58 +373,28 @@ pub(crate) fn project_plan(
         }) else {
             continue; // no project-scope dir for this harness — nothing to place in-project
         };
-        let dir = match prior_in(PlacementKind::Native, Some(h.slug)) {
+        let dir = match prior_in(h.slug) {
             PriorProjectDir::Reuse(dir) => dir,
+            // A recorded dir that no longer resolves inside the checkout is refused, never
+            // followed — the rail does not care whether a path is fresh or remembered.
             PriorProjectDir::Escaped(dir) => {
                 plan.refused.push(escape_message(h.slug, &dir));
                 continue;
             }
+            // THE CONTAINMENT RAIL, on the row's DEFAULT root — not just the override. A committed
+            // `.claude/skills` symlink aiming out of the checkout would otherwise place the
+            // agent's bytes wherever it points.
             PriorProjectDir::None if !within_project(project_dir, &root) => {
                 plan.refused.push(escape_message(h.slug, &root));
                 continue;
             }
             PriorProjectDir::None => choose(&root),
         };
+        // Two picked agents whose rows name one project folder share one copy.
         if plan.holds_dir(&dir) {
             continue;
         }
         plan.push_dir(dir, PlacementKind::Native, Some(h.slug.to_owned()));
-    }
-
-    if plan.targets.is_empty() {
-        // Nothing detected (or nothing with a project dir): the active adapter's project root,
-        // else the Claude-Code-shaped default — a project manifest must always have somewhere to
-        // land, and `.claude/skills` is the one convention every teammate's machine resolves.
-        let active = ctx.harness.id().slug();
-        let root = home
-            .as_deref()
-            .and_then(|home| {
-                registry::skills_root(
-                    active,
-                    registry::SkillScope::Project,
-                    home,
-                    Some(project_dir),
-                )
-            })
-            .unwrap_or_else(|| project_dir.join(".claude/skills"));
-        match prior_in(PlacementKind::Native, Some(active)) {
-            PriorProjectDir::Reuse(dir) => {
-                plan.push_dir(dir, PlacementKind::Native, Some(active.to_owned()));
-            }
-            PriorProjectDir::Escaped(dir) => plan.refused.push(escape_message(active, &dir)),
-            // The last root is the rail's last stand: refusing leaves this scope with NO target,
-            // which is the honest answer — nothing lands rather than landing outside the checkout.
-            PriorProjectDir::None if !within_project(project_dir, &root) => {
-                plan.refused.push(escape_message(active, &root));
-            }
-            PriorProjectDir::None => {
-                plan.push_dir(
-                    choose(&root),
-                    PlacementKind::Native,
-                    Some(active.to_owned()),
-                );
-            }
-        }
     }
     keep_claimed(&mut plan, prior);
     plan
@@ -722,10 +606,11 @@ pub(crate) fn surface_file(path: &Path, dialect: McpDialect) -> PathBuf {
 /// bundle already stands there. `None` = every MCP-capable harness. Narrowing resolves HERE, once:
 /// a harness outside it earns no target and no withheld line, because the row never asked for it.
 ///
-/// The three outcomes, in the order the surface decides them: no surface at this scope, or one the
-/// containment rail refuses ⇒ WITHHELD, disclosed; a surface the machine does not engage (the
-/// harness is neither detected nor does its config already exist) ⇒ nothing at all, because there
-/// is no agent here to reach; else an ENTRIES target.
+/// The three outcomes, in the order the surface decides them: an agent outside the PICK ⇒ nothing
+/// at all, not even a line (topos never touches an agent the person did not pick, and a receipt
+/// about one would be noise); no surface at this scope, or one the containment rail refuses ⇒
+/// WITHHELD, disclosed; else an ENTRIES target. An entry standing in an unpicked agent's config is
+/// custody, not demand: the converge's removal arm still reaches it (`crate::mcp_engine`).
 pub(crate) fn entries_plan(
     ctx: &Ctx<'_>,
     project_root: Option<&Path>,
@@ -734,36 +619,32 @@ pub(crate) fn entries_plan(
     let Some(roots) = &ctx.roots else {
         return PlacementPlan::default(); // no machine roots: no config surface is resolvable
     };
-    // A PROJECT scope detects against the checkout; the person scope against the machine's cwd.
-    let detected: BTreeSet<String> =
-        registry::detected_harnesses(&roots.home, project_root.or(roots.cwd.as_deref()))
-            .iter()
-            .map(|h| h.slug.to_owned())
-            .collect();
+    let picked = crate::agents_pick::picked_slugs(ctx, project_root);
     entries_plan_at(
-        ctx.fs,
         &topos_harness::mcp::descriptor::mcp_harnesses(),
         &roots.home,
-        &detected,
+        &picked,
         project_root,
         reach,
     )
 }
 
-/// [`entries_plan`] over the primitives — the machine home, the harness table, and the DETECTED
-/// set as arguments (the callers that already probed detection for their converge pass the same
-/// one, so a plan and the converge it feeds can never disagree about which agents are here).
+/// [`entries_plan`] over the primitives — the machine home, the harness table, and the PICKED
+/// set as arguments (the callers that already resolved the pick for their converge pass the same
+/// one, so a plan and the converge it feeds can never disagree about which agents are picked).
 pub(crate) fn entries_plan_at(
-    fs: &dyn crate::fs_seam::FsOps,
     descriptors: &[&'static registry::KnownHarness],
     home: &Path,
-    detected: &BTreeSet<String>,
+    picked: &BTreeSet<String>,
     project_root: Option<&Path>,
     reach: Option<&[String]>,
 ) -> PlacementPlan {
     let mut plan = PlacementPlan::default();
     for h in descriptors {
         if reach.is_some_and(|r| !r.iter().any(|s| s == h.slug)) {
+            continue;
+        }
+        if !picked.contains(h.slug) {
             continue;
         }
         match config_surface(h, home, project_root) {
@@ -777,17 +658,7 @@ pub(crate) fn entries_plan_at(
                 state: TargetOutcome::Unprovable,
                 note: "the config path does not resolve inside this checkout".to_owned(),
             }),
-            ConfigSurface::Ready {
-                root,
-                file,
-                dialect,
-            } => {
-                // Engagement: the harness is detected on this machine, OR its config surface
-                // already exists (entries were placed while it was detected — an update or a
-                // removal must still reach them).
-                if !(detected.contains(h.slug) || fs.exists(&root)) {
-                    continue;
-                }
+            ConfigSurface::Ready { file, dialect, .. } => {
                 plan.targets.push(PlannedTarget::Entries(EntriesTarget {
                     file,
                     agent: h.slug.to_owned(),
@@ -860,8 +731,8 @@ fn classic_plan(
 /// The ACTIVE harness's placement dir — **the root from its registry ROW, the name from the ONE
 /// naming discipline.**
 ///
-/// The row is the single source of the dir, exactly as it is for every other detected harness
-/// ([`plan_targets`]'s sibling branch resolves through the same [`registry::skills_root`]).
+/// The row is the single source of the dir, exactly as it is for every picked harness
+/// ([`plan_targets`] resolves through the same [`registry::skills_root`]).
 /// Detection already follows a machine-local table that moved an agent's skills dir; a plan that
 /// asked the COMPILED adapter instead would keep landing bytes at the spelling this build was
 /// born with, in a folder the agent no longer reads. What stays the adapter's is what is genuinely
@@ -950,6 +821,8 @@ fn adopt_override(
 }
 
 /// The dir the prior record holds for a (kind, agent) key — target stability comes from the record.
+/// An older record's `Shared` copy carries no agent and is never answered here; the planners reach
+/// it by dir instead (the ownership predicate hands a materialized recorded dir back by name).
 /// A record that was NEVER materialized and whose dir has since been occupied by someone else is not
 /// reusable (never clobber a foreign dir): the key re-chooses, and [`reconcile_map`] replaces the
 /// stale reservation. ONE occupied-but-reusable exception: an ADOPTION RESERVATION — a
@@ -1257,8 +1130,9 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
 }
 
 /// The indices of `map`'s placements the CURRENT plan manages — the apply set. A recorded placement
-/// outside the plan (a lost detection, an excluded agent whose clean has not run) is skipped: frozen
-/// in place, never written, never deleted.
+/// outside the plan (an agent no longer picked, whose clean has not run) is skipped: frozen in
+/// place, never written, never deleted. Matched BY DIR, so a record from before the pick model is
+/// managed by whichever picked agent plans its folder.
 pub(crate) fn managed_indices(map: &PlacementMap, plan: &PlacementPlan) -> Vec<usize> {
     map.placements
         .iter()
@@ -1953,40 +1827,49 @@ mod tests {
         }
     }
 
-    /// **The active harness's target dir is its registry ROW's, never the compiled adapter's.**
-    /// The row is what detection, attribution and every sibling harness's placement already read;
-    /// a machine carrying a table that moved this agent's skills dir must move the bytes with it,
-    /// and the only way that holds is for one source to name the dir.
-    ///
-    /// Rooted at a temp home with no agent detected, so the plan takes the classic single-target
-    /// path — the one branch that used to hand the question to the adapter outright.
+    /// A machine-rooted ctx over `home` (the store at `<home>/.topos`) whose ACTIVE adapter
+    /// answers with a dir NO registry row names — the stand-in for a compiled spelling that has
+    /// fallen behind the table.
+    fn rooted_ctx<'a>(
+        home: &Path,
+        harness: &'a crate::test_support::MockHarness,
+        fs: &'a crate::fs_seam::RealFs,
+        ids: &'a crate::ids::test_sources::SeqIds,
+        clock: &'a crate::ids::test_sources::FixedClock,
+    ) -> Ctx<'a> {
+        Ctx {
+            progress: crate::progress::silent(),
+            fs,
+            ids,
+            clock,
+            device_id: "d_test".to_owned(),
+            layout: crate::sidecar::Layout::new(&home.join(".topos")),
+            harness,
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
+            plane: &crate::plane::InertPlane,
+            follow: &crate::plane::InertFollow,
+            roots: Some(crate::ctx::AgentRoots::new(home.to_path_buf(), None)),
+        }
+    }
+
+    /// **A picked agent's target dir is its registry ROW's, never the compiled adapter's.** The
+    /// row is what attribution and every other agent's placement already read; a machine carrying
+    /// a table that moved this agent's skills dir must move the bytes with it, and the only way
+    /// that holds is for one source to name the dir. The active adapter is a picked agent like
+    /// any other.
     #[test]
     fn the_active_harnesss_target_dir_comes_from_its_registry_row() {
         let home = Scratch::new("row-home");
         let elsewhere = Scratch::new("row-adapter");
-        // An adapter whose placement answer is a dir NO registry row names — the stand-in for a
-        // compiled spelling that has fallen behind the table (a machine-local registry that moved
-        // this harness's skills dir leaves exactly this gap: detection follows the row, and a
-        // placement asking the adapter would not).
         let harness = crate::test_support::MockHarness::joining(elsewhere.0.clone());
         let fs = crate::fs_seam::RealFs;
         let ids = crate::ids::test_sources::SeqIds::new("p");
         let clock = crate::ids::test_sources::FixedClock(1);
-        let plane = crate::plane::InertPlane;
-        let follow = crate::plane::InertFollow;
-        let ctx = Ctx {
-            progress: crate::progress::silent(),
-            fs: &fs,
-            ids: &ids,
-            clock: &clock,
-            device_id: "d_test".to_owned(),
-            layout: crate::sidecar::Layout::new(&home.0),
-            harness: &harness,
-            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
-            plane: &plane,
-            follow: &follow,
-            roots: Some(crate::ctx::AgentRoots::new(home.0.clone(), None)),
-        };
+        let ctx = rooted_ctx(&home.0, &harness, &fs, &ids, &clock);
+        crate::agents_pick::write_pick(
+            &crate::agents_pick::machine_path(&ctx.layout),
+            &[HarnessId::ClaudeCode.slug()],
+        );
         let naming = PlacementNaming {
             name: Some("deploy"),
             workspace_slug: Some("acme"),
@@ -2009,6 +1892,116 @@ mod tests {
             !dirs.iter().any(|d| d.starts_with(&elsewhere.0)),
             "the adapter's compiled dir is not a placement: {dirs:?}"
         );
+    }
+
+    /// **With machine roots and NO pick, nothing is placed** — not the active adapter's dir, not
+    /// a detected agent's. An explicit EMPTY pick is the same answer. The classic single
+    /// placement is the no-roots seam alone; falling through to it here would put a bundle into
+    /// Claude Code on a machine whose person never picked it.
+    #[test]
+    fn with_roots_and_no_pick_nothing_is_placed() {
+        let home = Scratch::new("no-pick-home");
+        let elsewhere = Scratch::new("no-pick-adapter");
+        // Claude Code and Cursor both DETECTED: detection is not a pick.
+        std::fs::create_dir_all(home.0.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.0.join(".cursor")).unwrap();
+        let harness = crate::test_support::MockHarness::joining(elsewhere.0.clone());
+        let fs = crate::fs_seam::RealFs;
+        let ids = crate::ids::test_sources::SeqIds::new("p");
+        let clock = crate::ids::test_sources::FixedClock(1);
+        let ctx = rooted_ctx(&home.0, &harness, &fs, &ids, &clock);
+        let naming = PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some("acme"),
+        };
+
+        // No pick file at all.
+        let plan = plan_targets(&ctx, "topos_aabbccdd", naming, None, None);
+        assert!(plan.dirs().next().is_none(), "{:?}", plan.targets);
+        let project = Scratch::new("no-pick-project");
+        let plan = project_plan(&ctx, &project.0, "topos_aabbccdd", naming, None, None);
+        assert!(plan.dirs().next().is_none(), "{:?}", plan.targets);
+        assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+
+        // An explicit empty pick: the same nothing.
+        crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&ctx.layout), &[]);
+        let plan = plan_targets(&ctx, "topos_aabbccdd", naming, None, None);
+        assert!(plan.dirs().next().is_none(), "{:?}", plan.targets);
+
+        // The person's OWN folders still ride every plan: an agent-less record and a claim are
+        // managed whatever the pick says.
+        let own = home.0.join("mine/deploy");
+        let prior = PlacementMap {
+            schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+            placements: vec![own.to_string_lossy().into_owned()],
+            applied_commit: "0".repeat(64),
+            materialized_sha: "0".repeat(64),
+            placement_state: vec![PlacementState {
+                kind: PlacementKind::Native,
+                agent: None,
+                materialized_sha: Some("0".repeat(64)),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                adopted_source: true,
+                claim: None,
+            }],
+            harness: None,
+            harness_slug: None,
+        };
+        let plan = plan_targets(&ctx, "topos_aabbccdd", naming, Some(&prior), None);
+        let dirs: Vec<PathBuf> = plan.dirs().map(|d| d.dir.clone()).collect();
+        assert_eq!(dirs, vec![own]);
+    }
+
+    /// A record from BEFORE the pick model — one `Shared` copy in the folder several agents read,
+    /// carrying no agent — is adopted by dir: a picked agent whose row names that folder plans
+    /// the same dir, the record keeps it verbatim (no second copy, no stale reservation), and the
+    /// apply set includes it.
+    #[test]
+    fn an_old_shared_record_is_adopted_by_the_agent_that_now_owns_the_folder() {
+        let home = Scratch::new("shared-home");
+        let harness = crate::test_support::MockHarness::joining(home.0.join("elsewhere"));
+        let fs = crate::fs_seam::RealFs;
+        let ids = crate::ids::test_sources::SeqIds::new("p");
+        let clock = crate::ids::test_sources::FixedClock(1);
+        let ctx = rooted_ctx(&home.0, &harness, &fs, &ids, &clock);
+        // Cline's user skills root IS the folder the old shared copy sits in.
+        crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&ctx.layout), &["cline"]);
+        let shared = home.0.join(".agents/skills/deploy");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("SKILL.md"), b"# deploy\n").unwrap();
+        let prior = PlacementMap {
+            schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+            placements: vec![shared.to_string_lossy().into_owned()],
+            applied_commit: "0".repeat(64),
+            materialized_sha: "0".repeat(64),
+            placement_state: vec![PlacementState {
+                kind: PlacementKind::Shared,
+                agent: None,
+                materialized_sha: Some("0".repeat(64)),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                adopted_source: false,
+                claim: None,
+            }],
+            harness: None,
+            harness_slug: None,
+        };
+        let naming = PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some("acme"),
+        };
+
+        let plan = plan_targets(&ctx, "topos_aabbccdd", naming, Some(&prior), None);
+        let dirs: Vec<PathBuf> = plan.dirs().map(|d| d.dir.clone()).collect();
+        assert_eq!(dirs, vec![shared.clone()], "the same dir, not a sibling");
+        let next = reconcile_map(&prior, &plan);
+        assert_eq!(
+            next.placements, prior.placements,
+            "the record keeps its one row"
+        );
+        assert_eq!(next.placement_state[0].kind, PlacementKind::Shared);
+        assert_eq!(managed_indices(&next, &plan), vec![0], "and it is managed");
     }
 
     /// A one-entry never-materialized map (a reservation) whose slot carries a recorded adoption.

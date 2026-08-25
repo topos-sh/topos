@@ -30,16 +30,6 @@
 //! `seed_from_trigger_record`, writing through [`write`] at [`PickScope::Machine`]; nothing here
 //! reads the record yet.
 
-// The engine consumes this module in the next commit (the pick-driven planners); until then only
-// its own tests do, and the expectation below fails the gate the moment that stops being true.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the placement engine in the next commit"
-    )
-)]
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +69,7 @@ impl AgentsPick {
     }
 
     /// The wildcard pick: every agent installed on this machine.
+    #[cfg_attr(not(test), expect(dead_code, reason = "built by init -a '*'"))]
     pub(crate) fn everything() -> Self {
         Self::new(vec![WILDCARD.to_owned()])
     }
@@ -92,6 +83,10 @@ impl AgentsPick {
 
 /// Where a pick is written: the machine store, or one project checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "named by init -a and the agents verbs")
+)]
 pub(crate) enum PickScope {
     Machine,
     Project(PathBuf),
@@ -108,6 +103,7 @@ pub(crate) enum PickSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Effective {
     pub pick: AgentsPick,
+    /// Which file the pick came from — what `topos agents` and `status` name.
     pub source: PickSource,
 }
 
@@ -146,6 +142,10 @@ pub(crate) fn read(fs: &dyn FsOps, path: &Path) -> Result<Option<AgentsPick>, Cl
 /// # Errors
 /// The [`validate`] refusals; [`sidecar::ensure_project_store`]'s containment refusal; the
 /// filesystem failure.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "written by init -a and the agents verbs")
+)]
 pub(crate) fn write(
     fs: &dyn FsOps,
     layout: &Layout,

@@ -16,12 +16,15 @@
 //! adopts — snapshot-first, then force-synced and managed; without the marker the dir is
 //! someone else's and stays a frozen Foreign reservation.
 //!
-//! Device-local surface: `topos remove topos` opts this machine out durably
-//! (`state/builtin.json`), `topos add topos` re-places it, and the `--agent` include/exclude
-//! scoping works exactly as on a followed skill (the scope lives in the same state doc — the
-//! built-in has no `follows.json` row: it is not a subscription, and the plane never hears of it).
-//! The name `topos` is reserved end-to-end (the placement naming discipline client-side, the
-//! catalog name mint plane-side), so a workspace skill can never shadow it.
+//! Machine-local surface: `topos remove topos` opts this machine out durably
+//! (`state/builtin.json`), `topos add topos` re-places it. The built-in has no `follows.json`
+//! row: it is not a subscription, and the plane never hears of it. It lands for the PICKED agents
+//! like any bundle (`crate::agents_pick`), at the pick's own scope: the machine pick places it
+//! under the home through the machine store ([`ensure_builtin`]); a project pick places it in the
+//! picked agents' project skills dirs through the project's own store
+//! ([`ensure_builtin_in_project`]), each store carrying its own record and opt-out. The name
+//! `topos` is reserved end-to-end (the placement naming discipline client-side, the catalog name
+//! mint plane-side), so a workspace skill can never shadow it.
 
 use serde::{Deserialize, Serialize};
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
@@ -299,6 +302,27 @@ pub(crate) fn ensure_builtin(ctx: &Ctx<'_>) -> Result<BuiltinSync, ClientError> 
     ensure_inner(ctx, &rendered_bundle()?, ForeignPosture::Freeze)
 }
 
+/// [`ensure_builtin`] for ONE PROJECT: the built-in placed into the picked agents' project skills
+/// dirs (the checkout's effective pick), recorded in the project's own store
+/// (`<project>/.topos/state/<user>/`) exactly like a project manifest's bundles — so `remove`
+/// and `uninstall` clean it through the same custody, and nothing lands under the home. The
+/// store is minted on first contact ([`sidecar::ensure_project_store`]).
+///
+/// # Errors
+/// The store's containment refusal; otherwise as [`ensure_builtin`].
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "run by init -a and the agents verbs in a project")
+)]
+pub(crate) fn ensure_builtin_in_project(
+    ctx: &Ctx<'_>,
+    project_dir: &std::path::Path,
+) -> Result<BuiltinSync, ClientError> {
+    let layout = sidecar::ensure_project_store(ctx.fs, project_dir)?;
+    let sctx = super::pull::ctx_with_layout(ctx, &layout);
+    ensure_inner(&sctx, &rendered_bundle()?, ForeignPosture::Freeze)
+}
+
 /// [`ensure_builtin`] over an explicit bundle — the seam the tests drive a "binary changed" refresh
 /// through (production always renders from the binary and goes through [`ensure_builtin`] /
 /// the restore's adopting call, so this wrapper is test-only).
@@ -386,18 +410,16 @@ fn ensure_inner(
         };
     }
 
-    // Plan through the ONE engine (shared-dir-first), reconcile, and land the bytes on every
-    // managed target that is absent or divergent — force-sync.
-    let plan = placement::plan_targets(
-        ctx,
-        sid.as_str(),
-        topos_harness::PlacementNaming {
-            name: Some(BUILTIN_NAME),
-            workspace_slug: None,
-        },
-        Some(&map),
-        None,
-    );
+    // Plan through the ONE engine (one copy per picked agent, at the store's scope), reconcile,
+    // and land the bytes on every managed target that is absent or divergent — force-sync.
+    let naming = topos_harness::PlacementNaming {
+        name: Some(BUILTIN_NAME),
+        workspace_slug: None,
+    };
+    let plan = match ctx.layout.project_root() {
+        Some(root) => placement::project_plan(ctx, root, sid.as_str(), naming, Some(&map), None),
+        None => placement::plan_targets(ctx, sid.as_str(), naming, Some(&map), None),
+    };
     let next = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&next, &plan);
     let scans = placement::scan_placements(ctx, &next)?;

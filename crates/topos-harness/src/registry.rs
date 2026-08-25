@@ -1,8 +1,8 @@
 //! The **harness registry** — ONE row per agent harness, carrying everything this crate knows
 //! about it: the on-disk skill-directory conventions ported from `vercel-labs/skills` (so `topos` can
-//! discover *untracked* skills across the whole ecosystem), the MCP-server config surfaces, and the
-//! shared-dir coverage claim. Every consumer joins on this table; supporting a new capability for a
-//! harness is filling a column, not adding a table.
+//! discover *untracked* skills across the whole ecosystem) and the MCP-server config surfaces. Every
+//! consumer joins on this table; supporting a new capability for a harness is filling a column, not
+//! adding a table.
 //!
 //! **The table is DATA, not code.** The rows live in `crates/topos-harness/registry.toml`, which
 //! this crate compiles in and [`mod@format`] parses — and which a machine may carry a newer copy of
@@ -29,8 +29,8 @@
 //!
 //! A harness's richer behavior stays its adapter's (Hermes's `<category>/<name>` nesting composes the
 //! shared probe's two halves rather than restating them; Claude Code's config edit is its own). This
-//! table serves discovery, attribution, the MCP config surfaces, and the shared-dir coverage claim;
-//! which harnesses topos can PLACE into and ARM is decided per port elsewhere
+//! table serves discovery, attribution, and the MCP config surfaces; which harnesses topos can
+//! PLACE into and ARM is decided per port elsewhere
 //! ([`crate::HarnessAdapter`] impls and [`crate::triggers::adapter_for_slug`]), never by a column here.
 //!
 //! Per-harness home overrides (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`, `$VIBE_HOME`,
@@ -43,7 +43,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::coverage::SharedDirSupport;
 use crate::mcp::descriptor::{EnvRef, McpDialect};
 
 pub mod format;
@@ -102,10 +101,6 @@ pub struct KnownHarness {
     /// Where this harness reads MCP-server config, in which dialect, and how a change gets picked up —
     /// `None` for a harness with no MCP surface (the great majority).
     mcp: Option<McpSurfaces>,
-    /// Whether this harness reads the shared `~/.agents/skills` dir, WITH the claim's provenance.
-    /// [`SharedDirSupport::Unknown`] (the default) means the row carries no claim of its own, and
-    /// [`crate::coverage::shared_dir_support`] falls through to its derivation from the user dirs below.
-    shared_dir: SharedDirSupport,
 }
 
 /// One harness's MCP-server config surfaces — the column joining the placement engine's detection probe
@@ -363,7 +358,6 @@ const fn kh(
         project_dir,
         detect_dirs,
         mcp: None,
-        shared_dir: SharedDirSupport::Unknown,
     }
 }
 
@@ -590,13 +584,6 @@ impl KnownHarness {
                 Some((path, c.dialect, selector))
             })
             .collect()
-    }
-
-    /// This row's OWN shared-dir coverage claim ([`SharedDirSupport::Unknown`] = no claim; the query in
-    /// [`crate::coverage`] then derives one from the user dirs).
-    #[must_use]
-    pub fn shared_dir_claim(&self) -> SharedDirSupport {
-        self.shared_dir
     }
 
     /// Whether this harness looks INSTALLED under `home` — one of its detect dirs exists. THE

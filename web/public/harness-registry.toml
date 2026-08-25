@@ -31,7 +31,7 @@
 # `brace-env` = `{env:VAR}`, `dollar-brace-env` = `${env:VAR}`; `dollar-brace` unless stated).
 
 schema_version = 1
-version = "2026.8.14.1"
+version = "2026.8.24.1"
 min_engine_version = 3
 
 # The remote-to-stdio BRIDGE: the program topos runs so an agent that cannot dial an MCP address
@@ -57,7 +57,6 @@ display_name = "Amp"
 user_dirs = ["configHome/agents/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["configHome/amp"]
-shared_dir = { level = "docs", covered = true }
 
 [[harness]]
 slug = "antigravity"
@@ -149,7 +148,6 @@ display_name = "OpenClaw"
 user_dirs = ["home/.openclaw/skills"]
 project_dir = "skills"
 detect_dirs = ["home/.openclaw"]
-shared_dir = { level = "probed", covered = true }
 
 [harness.mcp]
 reload_note = "picked up automatically; sign in with `openclaw mcp login <name>`"
@@ -163,7 +161,6 @@ display_name = "Cline"
 user_dirs = ["home/.agents/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["home/.cline"]
-shared_dir = { level = "probed", covered = true }
 
 [harness.mcp]
 reload_note = "picked up automatically; Cline watches this file"
@@ -210,7 +207,6 @@ display_name = "Codex"
 user_dirs = ["codexHome/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["codexHome"]
-shared_dir = { level = "probed", covered = false }
 
 [harness.mcp]
 reload_note = "restart codex; sign in with `codex mcp login <name>`"
@@ -247,13 +243,12 @@ display_name = "Crush"
 user_dirs = ["home/.config/crush/skills"]
 project_dir = ".crush/skills"
 detect_dirs = ["home/.config/crush"]
-shared_dir = { level = "probed", covered = true }
 
 [[harness]]
 slug = "cursor"
 display_name = "Cursor"
 user_dirs = ["home/.cursor/skills"]
-project_dir = ".agents/skills"
+project_dir = ".cursor/skills"
 detect_dirs = ["home/.cursor"]
 
 [harness.mcp]
@@ -318,7 +313,6 @@ display_name = "Gemini CLI"
 user_dirs = ["home/.gemini/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["home/.gemini"]
-shared_dir = { level = "docs", covered = true }
 
 [harness.mcp]
 reload_note = "restart gemini; /mcp reload does not re-read this file"
@@ -334,7 +328,6 @@ display_name = "GitHub Copilot"
 user_dirs = ["home/.copilot/skills"]
 project_dir = ".agents/skills"
 detect_dirs = ["home/.copilot"]
-shared_dir = { level = "docs", covered = true }
 
 [harness.mcp]
 reload_note = "picked up on the next copilot run; /mcp lists them"
@@ -349,7 +342,6 @@ display_name = "Goose"
 user_dirs = ["configHome/goose/skills"]
 project_dir = ".goose/skills"
 detect_dirs = ["configHome/goose"]
-shared_dir = { level = "probed", covered = true }
 
 # BOTH shapes, both verified against goose 1.46.0 in a container: an address as a
 # `streamable_http` extension, and a program on the same tagged enum's `stdio` variant, written as
@@ -505,9 +497,8 @@ detect_dirs = ["home/.mux"]
 slug = "opencode"
 display_name = "OpenCode"
 user_dirs = ["configHome/opencode/skills"]
-project_dir = ".agents/skills"
+project_dir = ".opencode/skills"
 detect_dirs = ["configHome/opencode"]
-shared_dir = { level = "probed", covered = true }
 
 [harness.mcp]
 reload_note = "restart opencode"

@@ -284,16 +284,14 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
 /// - a harness with no surface AT THIS SCOPE is WITHHELD, carrying the phrase the receipt prints
 ///   (this is what keeps the per-agent `not-supported` lines alive now that the converge no longer
 ///   derives them);
-/// - a harness that is neither detected nor already configured earns neither a target nor a line:
-///   there is no agent here to reach, and nothing was withheld from anyone.
+/// - a harness outside the PICK earns neither a target nor a line: topos never touches an agent
+///   the person did not pick, and nothing was withheld from anyone.
 #[test]
 fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
     let home = Scratch::new("entries-plan");
-    let fs = RealFs;
-    let plan_at =
-        |detected: &BTreeSet<String>, project: Option<&Path>, reach: Option<&[String]>| {
-            crate::placement::entries_plan_at(&fs, &synthetic(), &home.0, detected, project, reach)
-        };
+    let plan_at = |picked: &BTreeSet<String>, project: Option<&Path>, reach: Option<&[String]>| {
+        crate::placement::entries_plan_at(&synthetic(), &home.0, picked, project, reach)
+    };
     let slugs = |p: &crate::placement::PlacementPlan| -> Vec<String> {
         p.entries().map(|e| e.agent.clone()).collect()
     };
@@ -337,10 +335,10 @@ fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
     }
     assert!(proj.entries_for("cursor").is_some());
 
-    // Nothing detected and no config on disk: no target, and nothing withheld from anyone.
+    // Nothing picked: no target, and nothing withheld from anyone.
     let cold = Scratch::new("entries-plan-cold");
     let cold_plan =
-        crate::placement::entries_plan_at(&fs, &synthetic(), &cold.0, &BTreeSet::new(), None, None);
+        crate::placement::entries_plan_at(&synthetic(), &cold.0, &BTreeSet::new(), None, None);
     assert!(slugs(&cold_plan).is_empty(), "{:?}", slugs(&cold_plan));
     assert!(
         withheld(&cold_plan).is_empty(),

@@ -794,7 +794,7 @@ fn a_reset_that_cannot_settle_every_copy_leaves_the_merge_live() {
     let copy = rig.conflict_copy(&id);
 
     // Two copies holding the same un-merged draft, each recorded for its own agent — and the machine
-    // detects only one of them. The plan names the detected agent's copy alone; the other is outside
+    // picks only one of them. The plan names the picked agent's copy alone; the other is outside
     // it (`placement::managed_indices`: frozen in place, never written, never deleted).
     let replica = rig.work.0.join("replica");
     add_replica(&rig, &id, &replica, mine);
@@ -802,15 +802,9 @@ fn a_reset_that_cannot_settle_every_copy_leaves_the_merge_live() {
         m.placement_state[0].agent = Some("claude-code".to_owned());
         m.placement_state[1].agent = Some("cursor".to_owned());
     });
-    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
-    let detected = topos_harness::registry::detected_harnesses(&rig.home.0, None);
-    assert!(
-        detected.iter().any(|h| h.slug == "claude-code"),
-        "the rig's home must detect the agent whose copy the plan names"
-    );
-    assert!(
-        !detected.iter().any(|h| h.slug == "cursor"),
-        "and must NOT detect the one holding the copy outside the plan"
+    crate::agents_pick::write_pick(
+        &crate::agents_pick::machine_path(&rig.layout()),
+        &["claude-code"],
     );
     let ctx = Ctx {
         roots: Some(crate::ctx::AgentRoots {

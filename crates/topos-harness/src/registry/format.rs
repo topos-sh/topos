@@ -51,7 +51,6 @@ use std::sync::OnceLock;
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use super::{DirSpec, KnownHarness, McpBridge, McpConflictPath, McpSurface, McpSurfaces, Root};
-use crate::coverage::SharedDirSupport;
 use crate::mcp::descriptor::{EnvRef, McpDialect};
 
 /// The GRAMMAR version this build reads. A file naming any other number is refused whole — the
@@ -310,7 +309,6 @@ pub struct HarnessRow {
     project_dir: String,
     detect_dirs: Vec<OwnedDir>,
     mcp: Option<OwnedMcp>,
-    shared_dir: SharedDirSupport,
 }
 
 /// A [`DirSpec`] before it is leaked: the resolution root + its `/`-separated suffix.
@@ -470,7 +468,6 @@ fn parse_row(
     }
     let user_dirs = dirs_at(table, "user_dirs", origin).map_err(|e| at(e.message()))?;
     let detect_dirs = dirs_at(table, "detect_dirs", origin).map_err(|e| at(e.message()))?;
-    let shared_dir = shared_dir_at(table).map_err(|e| at(e.message()))?;
     let mcp = mcp_at(table, origin).map_err(|e| at(e.message()))?;
     Ok(HarnessRow {
         slug,
@@ -479,7 +476,6 @@ fn parse_row(
         project_dir,
         detect_dirs,
         mcp,
-        shared_dir,
     })
 }
 
@@ -576,32 +572,6 @@ fn validate_suffix(suffix: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// A row's `shared_dir = { level = "probed"|"docs", covered = <bool> }` (absent ⇒ no claim of its
-/// own, which is what makes [`crate::coverage`] derive one from the user dirs).
-fn shared_dir_at(table: &dyn TableLike) -> Result<SharedDirSupport, RegistryError> {
-    let Some(found) = table.get("shared_dir") else {
-        return Ok(SharedDirSupport::Unknown);
-    };
-    let Some(claim) = found.as_table_like() else {
-        return refuse("shared_dir: expected { level = \"probed\"|\"docs\", covered = <bool> }");
-    };
-    let level = claim
-        .get("level")
-        .and_then(Item::as_str)
-        .ok_or_else(|| RegistryError("shared_dir.level: expected \"probed\" or \"docs\"".into()))?;
-    let covered = claim
-        .get("covered")
-        .and_then(Item::as_bool)
-        .ok_or_else(|| RegistryError("shared_dir.covered: expected true or false".into()))?;
-    match level {
-        "probed" => Ok(SharedDirSupport::Probed(covered)),
-        "docs" => Ok(SharedDirSupport::Docs(covered)),
-        other => refuse(format!(
-            "shared_dir.level {other:?}: expected \"probed\" or \"docs\""
-        )),
-    }
 }
 
 /// A row's `[harness.mcp]` block (absent ⇒ the harness has no MCP surface, which is the majority).
@@ -1136,7 +1106,6 @@ fn leak(rows: Vec<HarnessRow>) -> &'static [KnownHarness] {
                 stdio: mcp.stdio,
                 env_ref: mcp.env_ref,
             }),
-            shared_dir: row.shared_dir,
         })
         .collect();
     Vec::leak(table)
@@ -1196,21 +1165,6 @@ pub(super) fn render_row(row: &KnownHarness) -> String {
     let _ = writeln!(out, "user_dirs = {}", list(row.user_dirs));
     let _ = writeln!(out, "project_dir = {}", quote(row.project_dir));
     let _ = writeln!(out, "detect_dirs = {}", list(row.detect_dirs));
-    match row.shared_dir {
-        SharedDirSupport::Unknown => {}
-        SharedDirSupport::Probed(covered) => {
-            let _ = writeln!(
-                out,
-                "shared_dir = {{ level = \"probed\", covered = {covered} }}"
-            );
-        }
-        SharedDirSupport::Docs(covered) => {
-            let _ = writeln!(
-                out,
-                "shared_dir = {{ level = \"docs\", covered = {covered} }}"
-            );
-        }
-    }
     if let Some(mcp) = &row.mcp {
         out.push_str("\n[harness.mcp]\n");
         let _ = writeln!(out, "reload_note = {}", quote(mcp.reload_note));
@@ -1372,6 +1326,21 @@ mod tests {
                 .row_count(),
             2
         );
+    }
+
+    /// A served table from before the pick model still carries `shared_dir = {...}` on some
+    /// rows. The parser reads keys by name, so the key is simply not read: the row lands, no
+    /// warning, no refusal, and the machine keeps following the newest served table.
+    #[test]
+    fn a_served_table_carrying_shared_dir_still_parses() {
+        let text = format!(
+            "{}shared_dir = {{ level = \"probed\", covered = true }}\n",
+            one_row("cursor", "9.0.0")
+        );
+        let parsed = parse_registry(&text, Origin::Downloaded).expect("the row lands");
+        assert_eq!(parsed.row_count(), 1);
+        assert!(parsed.warnings().is_empty(), "{:?}", parsed.warnings());
+        assert_eq!(leak(parsed.rows)[0].slug, "cursor");
     }
 
     #[test]
@@ -1969,7 +1938,6 @@ mod tests {
                 "{}",
                 row.slug
             );
-            assert_eq!(back.shared_dir, row.shared_dir, "{}", row.slug);
             assert_eq!(back.mcp.is_some(), row.mcp.is_some(), "{}", row.slug);
             if let (Some(back), Some(mine)) = (&back.mcp, &row.mcp) {
                 assert_eq!(back.reload_note, mine.reload_note, "{}", row.slug);

@@ -104,12 +104,14 @@ fn a_dest_row_freezes_placement_and_grows_and_shrinks_on_the_next_update() {
 
 /// The `"*"` token in a `dest` array is the row's DEFAULT REACH, answered at plan time on every
 /// run: the named entry lands where it always did, the default half lands where a row with no
-/// `dest` would, and an agent installed AFTER the row was written is reached without the row
-/// changing. Dropping the token narrows to the named entry alone, which is what a dest row means.
+/// `dest` would (the picked agents' folders), and an agent picked AFTER the row was written is
+/// reached without the row changing. Dropping the token narrows to the named entry alone, which
+/// is what a dest row means.
 #[test]
-fn the_default_reach_token_places_beside_the_named_entry_and_keeps_answering_detection() {
+fn the_default_reach_token_places_beside_the_named_entry_and_follows_the_pick() {
     let rig = Rig::new("dest-token");
     rig.seed_session();
+    rig.pick(&["claude-code"]);
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
@@ -126,12 +128,12 @@ fn the_default_reach_token_places_beside_the_named_entry_and_keeps_answering_det
         "and so did the default reach — the token is not a narrowing"
     );
 
-    // A NEW agent appears. The row is untouched; the token answers detection again.
-    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
+    // A NEW agent is picked. The row is untouched; the token answers the pick again.
+    rig.pick(&["claude-code", "codex"]);
     let out = sweep(&ctx, &plane, &dir);
     assert!(
         rig.home.0.join(".codex/skills/deploy/SKILL.md").exists(),
-        "the newly detected agent is reached: {:?}",
+        "the newly picked agent is reached: {:?}",
         out.data.skills
     );
     assert!(named.join("SKILL.md").exists(), "the named entry stands");
@@ -1287,14 +1289,12 @@ fn an_add_whose_converge_placed_folders_says_installed_and_never_nothing_changed
     );
 }
 
-/// A rig whose CHANNEL line delivers `deploy`, swept once so the scope holds the record a
-/// set-delivered add needs. Returns the rig, the plane, the directory, and the version.
-fn channel_delivered_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory, Version) {
+/// A rig whose CHANNEL line delivers `deploy`, swept once under `pick` so the scope holds the
+/// record a set-delivered add needs. Returns the rig, the plane, the directory, and the version.
+fn channel_delivered_rig(tag: &str, pick: &[&str]) -> (Rig, FakePlane, FakeDirectory, Version) {
     let rig = Rig::new(tag);
     rig.seed_session();
-    // `cline` DETECTED — a harness the shared `~/.agents/skills` folder covers, so the plan holds
-    // that shared root beside claude-code's own native one.
-    std::fs::create_dir_all(rig.home.0.join(".cline")).unwrap();
+    rig.pick(pick);
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
@@ -1319,48 +1319,119 @@ fn channel_delivered_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory, Version) 
     (rig, plane, dir, v)
 }
 
-/// A SHARED skills folder names no single agent, so the converge's own surface carries no slug —
-/// and matching the asked agent BY SLUG found nothing and reported a copy sitting right there as
-/// `not placed — it is not set up here`, under a header about placing copies. The asked agent's
-/// own folder is what the answer is about: the line names the agent and the shared root it reads.
+/// TWO PICKED AGENTS WHOSE ROWS NAME ONE FOLDER get one copy and one record row — never a second
+/// copy or a namespaced sibling — and an `-a` ask for either of them is answered against that
+/// folder: the asked agent's own root IS the folder, so the surface inside it is its copy.
 #[test]
-fn an_asked_agent_that_reads_the_shared_folder_is_not_reported_missing() {
-    let (rig, plane, dir, _v) = channel_delivered_rig("set-shared-dir");
+fn two_picked_agents_sharing_a_folder_get_one_copy() {
+    // cline and zed both read `~/.agents/skills`; nothing else is picked.
+    let (rig, plane, dir, _v) = channel_delivered_rig("shared-folder", &["cline", "zed"]);
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    // THE PREMISE: the copy stands in the folder several agents share, `cline` among them, and no
-    // single slug spells it.
-    let shared = rig.home.0.join(".agents/skills");
-    assert!(shared.join("deploy/SKILL.md").exists());
-    assert_eq!(
-        crate::manifest::dest::skills_dest_spelling(
-            "cline",
-            crate::manifest::document::ManifestScope::Global
-        )
-        .as_deref(),
-        Some("~/.agents/skills")
+    let shared = rig.home.0.join(".agents/skills/deploy");
+    assert!(
+        shared.join("SKILL.md").exists(),
+        "the one copy stands where both read"
     );
+    assert_eq!(
+        dirs_named(&rig.home.0, "deploy"),
+        vec![shared.clone()],
+        "one folder under the home, no sibling, no second agent dir"
+    );
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(map.placements, vec![shared.to_string_lossy().into_owned()]);
 
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     let before = std::fs::read_to_string(&manifest).unwrap();
-    let data = applied_selected_add(
+    for slug in ["cline", "zed"] {
+        let data = applied_selected_add(
+            &ctx,
+            &plane,
+            &dir,
+            &format!("{HOST}/{WS_NAME}/deploy"),
+            &[slug],
+            &[],
+        );
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            before,
+            "no row is written — the channel already demands it"
+        );
+        assert_eq!(
+            crate::render::add_tty(&data),
+            format!(
+                "deploy already reaches {slug} through channels/everyone (~/.agents/skills — \
+                 current).\nnothing changed"
+            ),
+            "{data:?}"
+        );
+    }
+}
+
+/// AN AGENT DROPPED FROM THE PICK does not take a folder another picked agent still reads: the
+/// planner re-plans the folder for the agent that stays, the record keeps its one row (adopted
+/// by dir, whichever agent it was first recorded for), and the copy is neither retired nor
+/// doubled.
+#[test]
+fn removing_one_agents_copy_leaves_a_folder_another_picked_agent_reads() {
+    let (rig, plane, dir, _v) = channel_delivered_rig("shared-folder-narrow", &["cline", "zed"]);
+    let shared = rig.home.0.join(".agents/skills/deploy");
+    assert!(shared.join("SKILL.md").exists());
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let sp = rig.layout().published(&sid);
+    let before = crate::doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    assert_eq!(
+        before.placement_state[0].agent.as_deref(),
+        Some("cline"),
+        "recorded for the first picked reader"
+    );
+
+    rig.pick(&["zed"]);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+
+    assert!(shared.join("SKILL.md").exists(), "zed still reads it");
+    let after = crate::doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    assert_eq!(after.placements, before.placements, "one row, the same dir");
+    assert_eq!(dirs_named(&rig.home.0, "deploy"), vec![shared.clone()]);
+    // The plan itself names the folder for the agent that stays.
+    let plan = crate::placement::plan_targets(
         &ctx,
-        &plane,
-        &dir,
-        &format!("{HOST}/{WS_NAME}/deploy"),
-        &["cline"],
-        &[],
+        "s_deploy",
+        topos_harness::PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some(WS_NAME),
+        },
+        Some(&after),
+        None,
     );
-    assert_eq!(
-        std::fs::read_to_string(&manifest).unwrap(),
-        before,
-        "no row is written — the channel already demands it"
-    );
-    assert_eq!(
-        crate::render::add_tty(&data),
-        "deploy already reaches cline through channels/everyone (~/.agents/skills — \
-         current).\nnothing changed",
-        "{data:?}"
-    );
+    let dirs: Vec<_> = plan.dirs().collect();
+    assert_eq!(dirs.len(), 1, "{:?}", plan.targets);
+    assert_eq!(dirs[0].dir, shared);
+    assert_eq!(dirs[0].agent.as_deref(), Some("zed"));
+}
+
+/// Every directory named `name` under `root`, the machine store excluded — the "how many copies
+/// stand" witness.
+fn dirs_named(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+    fn walk(d: &std::path::Path, name: &str, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if !p.is_dir() || p.file_name().is_some_and(|n| n == ".topos") {
+                continue;
+            }
+            if p.file_name().is_some_and(|n| n == name) {
+                out.push(p.clone());
+            }
+            walk(&p, name, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, name, &mut out);
+    out.sort();
+    out
 }
 
 /// A DESTINATION NO AGENT OWNS is reached by nothing but a row: a set line delivers to agents, and
@@ -1370,7 +1441,8 @@ fn an_asked_agent_that_reads_the_shared_folder_is_not_reported_missing() {
 /// receipt closes on the hand edit that puts the file back.
 #[test]
 fn a_set_delivered_add_naming_a_folder_no_agent_owns_births_the_row_carrying_the_token() {
-    let (rig, plane, dir, _v) = channel_delivered_rig("set-out-of-reach");
+    let (rig, plane, dir, _v) =
+        channel_delivered_rig("set-out-of-reach", &["claude-code", "cline"]);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
     let channel_only = std::fs::read_to_string(&manifest).unwrap();
@@ -1438,58 +1510,13 @@ fn a_set_delivered_add_naming_a_folder_no_agent_owns_births_the_row_carrying_the
     );
 }
 
-/// AN ASKED AGENT THE SHARED FOLDER COVERS is reported against THAT folder, whatever its own
-/// skills root is spelled as. Matching the ask only against the agent's own root reported a copy
-/// sitting in the folder that agent reads as `not placed — it is not set up here` — the detection
-/// answer, over an agent that is set up. Placement is shared-dir-first, so for a covered agent the
-/// shared folder is the only folder there is.
-#[test]
-fn an_asked_agent_covered_by_the_shared_folder_is_reported_against_it() {
-    let (rig, plane, dir, _v) = channel_delivered_rig("set-shared-covered");
-    // opencode DETECTED — a covered harness whose OWN skills root is not the shared folder.
-    std::fs::create_dir_all(rig.home.0.join(".config/opencode")).unwrap();
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    assert!(topos_harness::coverage::shared_dir_support("opencode").covered());
-    assert_ne!(
-        crate::manifest::dest::skills_dest_spelling(
-            "opencode",
-            crate::manifest::document::ManifestScope::Global
-        )
-        .as_deref(),
-        Some("~/.agents/skills"),
-        "the premise: opencode's own root is not the shared folder"
-    );
-    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
-    let before = std::fs::read_to_string(&manifest).unwrap();
-
-    let data = applied_selected_add(
-        &ctx,
-        &plane,
-        &dir,
-        &format!("{HOST}/{WS_NAME}/deploy"),
-        &["opencode"],
-        &[],
-    );
-    assert_eq!(
-        std::fs::read_to_string(&manifest).unwrap(),
-        before,
-        "no row — the channel already demands it"
-    );
-    assert_eq!(
-        crate::render::add_tty(&data),
-        "deploy already reaches opencode through channels/everyone (~/.agents/skills — \
-         current).\nnothing changed",
-        "{data:?}"
-    );
-}
-
 /// A CONVERGE THAT FAILED is the answer. Swallowing its outcome rendered the asked agent as
 /// `not placed — it is not set up here` — a cause the run never established — and closed on
 /// `nothing changed`, which it had no way to know. The failure names itself on the agent's line,
 /// rides the envelope's warnings, and the receipt closes on the bundle instead.
 #[test]
 fn a_set_delivered_add_whose_converge_fails_says_the_failure_and_never_nothing_changed() {
-    let (rig, plane, _dir, _v) = channel_delivered_rig("set-converge-fails");
+    let (rig, plane, _dir, _v) = channel_delivered_rig("set-converge-fails", &["claude-code"]);
     let ctx = rig.ctx_at(Some(&rig.work.0));
     // The workspace moves to a version whose bytes this plane cannot serve: the converge the add
     // runs fails THIS bundle, in the sweep's own words.
@@ -1727,74 +1754,6 @@ fn a_feed_add_states_what_this_machine_now_takes_exactly_once() {
     assert!(note.contains("nothing changed"), "{note}");
     let tty = crate::render::add_tty(&data);
     assert_eq!(tty.matches("takes whatever").count(), 1, "{tty}");
-}
-
-/// The shared-copy refusal, byte for byte: subtraction cannot narrow one shared folder, and the
-/// two ways out print as aligned command lines (the `-a` list = the covered agents that read the
-/// shared copy, minus the one being removed).
-#[test]
-fn a_shared_only_copy_refuses_per_agent_removal_with_both_ways_out() {
-    let (rig, plane, _dir, v) = add_rig("dest-shared");
-    let v2 = one_file(b"# coolify\n");
-    let plane = plane.with_version("s_cool", &v2);
-    plane.serves(vec![
-        delivered("s_deploy", "deploy", &v),
-        delivered("s_cool", "coolify-deploy", &v2),
-    ]);
-    let dir = FakeDirectory::new(
-        vec![
-            catalog_entry("s_deploy", "deploy", &v),
-            catalog_entry("s_cool", "coolify-deploy", &v2),
-        ],
-        Vec::new(),
-    );
-    // amp + cline DETECTED — both read the shared `~/.agents/skills` dir per the coverage table,
-    // so the machine plan places ONE shared copy.
-    std::fs::create_dir_all(rig.home.0.join(".config/amp")).unwrap();
-    std::fs::create_dir_all(rig.home.0.join(".cline")).unwrap();
-    rig.write_global(&format!(
-        "[skills]\n\"{HOST}/{WS_NAME}/coolify-deploy\" = \"latest\"\n"
-    ));
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    assert!(
-        rig.home
-            .0
-            .join(".agents/skills/coolify-deploy/SKILL.md")
-            .exists(),
-        "the covered agents share one copy"
-    );
-    let err = ops::remove_global(
-        &ctx,
-        &connect(&plane, &dir),
-        &["coolify-deploy".into()],
-        None,
-        false,
-        &sel(&["amp"], &[]),
-    )
-    .unwrap_err();
-    assert_eq!(err.code(), "SHARED_COPY_ONLY");
-    // The FINAL copy shape, byte for byte: the statement, then the two aligned ways out.
-    assert_eq!(
-        crate::render::err_tty(&err),
-        "coolify-deploy has no amp-only copy — its one copy is \
-         ~/.agents/skills/coolify-deploy, which several agents read\n  topos remove -g \
-         coolify-deploy              remove it for every agent\n  topos add -g \
-         @eng/coolify-deploy -a cline   keep it per-agent instead, then re-run"
-    );
-    // No hint block repeats the two commands (they are the copy) — but the agent surface gets
-    // BOTH ways out as structured next actions, byte-identical argvs.
-    assert!(crate::render::err_hint_tty("remove", &[], &err).is_none());
-    let actions = crate::render::next_actions("remove", &[], &err);
-    assert_eq!(actions.len(), 2, "{actions:?}");
-    assert_eq!(
-        actions[0].argv,
-        vec!["topos", "remove", "-g", "coolify-deploy"]
-    );
-    assert_eq!(
-        actions[1].argv,
-        vec!["topos", "add", "-g", "@eng/coolify-deploy", "-a", "cline"]
-    );
 }
 
 /// A forge import unions `-a` and `--dest`: the row records BOTH destinations, and the member
