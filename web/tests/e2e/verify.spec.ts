@@ -103,6 +103,22 @@ test("an unknown code is an honest in-page state, never a 404", async ({ page })
   await expect(page.getByText("No pending request for that code")).toBeVisible();
 });
 
+test("an empty submit says what to do, and the field takes no more than a code", async ({
+  page,
+}) => {
+  await page.goto("/verify");
+  // Clicking Look up with nothing typed used to do nothing a person could see.
+  await page.getByRole("button", { name: "Look up" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Enter the code your terminal shows");
+
+  // The field stops at the code's own shape, so a stray paste cannot ride into the lookup.
+  const field = page.getByLabel("Code");
+  await expect(field).toHaveAttribute("maxlength", "9");
+  // Typed, not set: maxlength is a browser rule about typing, and typing is what a paste is.
+  await field.pressSequentially("AB29-CD34EXTRA");
+  expect(await field.inputValue()).toBe("AB29-CD34");
+});
+
 test("the ONE-SEAT one-click: approve records the choice and THE POLL mints the credential", async ({
   page,
 }) => {

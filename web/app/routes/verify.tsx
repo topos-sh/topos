@@ -146,6 +146,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
  * arrive here. */
 const TOO_MANY_LOOKUPS = "Too many attempts — wait a few seconds and try again";
 
+/**
+ * THE CODE'S OWN SHAPE — `XXXX-XXXX`: eight characters from the unambiguous alphabet plus the
+ * hyphen that groups them for reading aloud. It is the field's maxlength AND the server's cap:
+ * the input used to take any amount of text, so a stray paste (a whole command line, a URL) went
+ * to the lookup as if it might be a code.
+ */
+const USER_CODE_LENGTH = 9;
+
+/** The empty submit's answer. A form that does nothing and says nothing on a click is the one
+ *  outcome a person cannot learn anything from — this is the same sentence the page opens with,
+ *  said again where the click happened. */
+const CODE_REQUIRED = "Enter the code your terminal shows";
+
 const REQUEST_GONE =
   "That request expired or was already handled — nothing was approved. Ask the device to start again.";
 
@@ -227,7 +240,15 @@ export async function action({ request }: ActionFunctionArgs) {
       .trim()
       .toUpperCase();
     if (userCode === "") {
-      throw data(null, { status: 400 });
+      // In the page, not the house fault screen: an empty submit is the commonest thing a person
+      // does by accident, and it has an answer they can act on.
+      return data({ kind: "refused" as const, error: CODE_REQUIRED }, { status: 400 });
+    }
+    // Longer than a code can be: answered like any other code that names nothing, and for free —
+    // a string that cannot be a code is not a guess of the code space, so it never spends the belt
+    // and never reaches the database.
+    if (userCode.length > USER_CODE_LENGTH) {
+      return { kind: "miss" as const };
     }
     // THE GUESSING BELT, keyed per acting person and spent HERE — on the one arm that turns a
     // typed code into a request. A code space of ~2^40 has to meet a wall long before it matters,
@@ -490,10 +511,13 @@ function CodeLookup() {
       <BusyFields busy={busy} className="flex items-end gap-2">
         <label className="block flex-1">
           <span className="mb-1 block font-medium text-dim text-sm">Code</span>
+          {/* No `required`: the browser's own bubble is not this form's voice, and an empty
+              submit has one answer — the action's line, in the app's words, in the same place
+              every other refusal on this page appears. */}
           <input
             type="text"
             name="code"
-            required
+            maxLength={USER_CODE_LENGTH}
             autoComplete="off"
             spellCheck={false}
             className={`${INPUT} font-mono uppercase`}
