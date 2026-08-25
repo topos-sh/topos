@@ -134,7 +134,8 @@ pub struct PullSkill {
     pub workspace_id: Option<String>,
     /// The generation the plane most recently served — the sync target.
     pub observed: u64,
-    /// Highest generation actually materialized to disk.
+    /// Highest generation actually materialized to disk. `0` on a `fetched` row: the bytes are in
+    /// the store and in no folder, so nothing of this bundle has been placed here.
     pub applied: u64,
     pub action: PullAction,
     /// Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.
@@ -389,6 +390,12 @@ pub enum PullAction {
     /// first bytes and they landed (skill folders, or — for a config-placed bundle — config
     /// entries). `destinations` names where. **Additive.**
     Installed,
+    /// The bytes are in this scope's store, verified, and stand in NO folder: nothing was placed,
+    /// because there was nowhere to place them (the scope picked no agent). Neither `installed`
+    /// — no folder appeared — nor `up_to_date`, which would claim a copy that is not there.
+    /// `destinations` is empty and `applied` reads `0`: `applied` counts what was PLACED, and a
+    /// run that placed nothing has applied nothing here. **Additive.**
+    Fetched,
     /// A managed copy that stood BEHIND the version this machine already holds was rewritten to it
     /// — no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a
     /// crash-window residue, a copy left at an older version, a config-placed bundle's entry

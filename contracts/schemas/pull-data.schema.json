@@ -395,6 +395,11 @@
           "const": "installed"
         },
         {
+          "description": "The bytes are in this scope's store, verified, and stand in NO folder: nothing was placed,\nbecause there was nowhere to place them (the scope picked no agent). Neither `installed`\n— no folder appeared — nor `up_to_date`, which would claim a copy that is not there.\n`destinations` is empty and `applied` reads `0`: `applied` counts what was PLACED, and a\nrun that placed nothing has applied nothing here. **Additive.**",
+          "type": "string",
+          "const": "fetched"
+        },
+        {
           "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version, a config-placed bundle's entry\ndeleted or edited by hand and put back). `destinations` names the folders (config files,\nfor a config-placed bundle). A catch-up is not a first materialization, so it never reads\n`installed`. **Additive.**\n\nSerialized as `updated` — the word every human surface prints for it. A wire token and a\nterminal line naming one outcome two ways is one vocabulary too many.",
           "type": "string",
           "const": "updated"
@@ -444,7 +449,7 @@
           "$ref": "#/$defs/PullAction"
         },
         "applied": {
-          "description": "Highest generation actually materialized to disk.",
+          "description": "Highest generation actually materialized to disk. `0` on a `fetched` row: the bytes are in\nthe store and in no folder, so nothing of this bundle has been placed here.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0

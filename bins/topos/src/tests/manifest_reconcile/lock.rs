@@ -240,6 +240,86 @@ fn frozen_refuses_an_uncovered_row_and_writes_nothing() {
     assert!(!proj.0.join(".claude/skills/deploy").exists());
 }
 
+/// **A bundle fetched into the store and placed in no folder reads `fetched`.** A CI runner
+/// clones a project and holds no agents pick — the pick is personal and git-ignored, so no clone
+/// can carry one — and `install --frozen` fetches and verifies exactly what the lock records.
+/// Nothing is placed, because there is nowhere to place it. A row reading `installed` told that
+/// pipeline a folder exists that does not; a row reading `up to date` on the next run said the
+/// same thing more quietly. `applied` reads 0 on both runs, because `applied` counts what landed.
+#[test]
+fn a_frozen_install_with_no_pick_reads_fetched_and_places_nothing() {
+    let rig = Rig::new("lock-frozen-nopick");
+    rig.seed_session();
+    // The runner picked nobody: an empty pick is what a clone with no `.topos/agents.json` and no
+    // machine pick converges to, and it plans no placement anywhere.
+    rig.pick(&[]);
+    let proj = project(
+        "lock-frozen-nopick-proj",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# v1\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v1);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    std::fs::write(
+        proj.0.join("topos.lock"),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[skills.deploy]\nversion = \"{}\"\n",
+            hex(&v1)
+        ),
+    )
+    .unwrap();
+
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Frozen).expect("frozen goes through");
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .expect("the bundle is reported");
+    assert_eq!(row.action, PullAction::Fetched, "{row:?}");
+    assert_eq!(row.applied, 0, "nothing was placed: {row:?}");
+    assert!(row.destinations.is_empty(), "{row:?}");
+    assert!(!proj.0.join(".claude").exists(), "no agent folder was made");
+    // The bytes ARE here: a frozen run's whole job is to fetch and verify what the lock names.
+    assert!(
+        crate::sidecar::project_store_layout(&proj.0)
+            .published(&crate::id::SkillId::parse("s_deploy").unwrap())
+            .lock
+            .exists(),
+        "the project store holds the bundle"
+    );
+
+    // The SECOND run is the half that used to read `up to date` — a word that claims a copy.
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Frozen).expect("frozen goes through");
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .expect("the bundle is reported");
+    assert_eq!(row.action, PullAction::Fetched, "{row:?}");
+    assert_eq!(row.applied, 0, "{row:?}");
+    assert!(!proj.0.join(".claude").exists());
+
+    // And a run that DOES place keeps its ordinary word: the reading is about the disk, never
+    // about the mode the run was started in.
+    rig.project_pick(&proj.0, &["claude-code"]);
+    let out = install(&ctx, &plane, &dir, ops::LockMode::Frozen).expect("frozen goes through");
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .expect("the bundle is reported");
+    assert_eq!(row.action, PullAction::Installed, "{row:?}");
+    assert_eq!(
+        std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        "# v1\n"
+    );
+}
+
 /// A `version` in the lock that is not a version id names nothing any server could ever answer
 /// for, so the SAME command meets the SAME wall forever. The preflight used to fold it into the
 /// one retryable `IO_ERROR` every frozen gap wore, whose prose promised "running it again is

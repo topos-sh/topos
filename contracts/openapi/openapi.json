@@ -3392,6 +3392,7 @@
           "up_to_date",
           "fast_forwarded",
           "installed",
+          "fetched",
           "updated",
           "removed",
           "merged",
@@ -3418,7 +3419,7 @@
           "applied": {
             "type": "integer",
             "format": "int64",
-            "description": "Highest generation actually materialized to disk.",
+            "description": "Highest generation actually materialized to disk. `0` on a `fetched` row: the bytes are in\nthe store and in no folder, so nothing of this bundle has been placed here.",
             "minimum": 0
           },
           "destinations": {

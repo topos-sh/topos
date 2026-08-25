@@ -7807,7 +7807,9 @@ pub(crate) struct ForgeImport {
 /// action that agrees. Every other reported state either wrote a folder or reports a standing
 /// condition the person needs told.
 pub(crate) fn moved_bytes(action: PullAction) -> bool {
-    !matches!(action, PullAction::UpToDate)
+    // `fetched` is the other action that moved no folder: the bytes reached the store and stopped
+    // there, which is exactly the state an `add` receipt must not call an arrival.
+    !matches!(action, PullAction::UpToDate | PullAction::Fetched)
 }
 
 /// Every forge-imported skill a store tracks (an `origin.json` beside its docs), whatever the
