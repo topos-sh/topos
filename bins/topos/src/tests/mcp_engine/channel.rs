@@ -934,9 +934,7 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
     let rig = Rig::new("orphan-proj");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    let proj = Scratch::new("orphan-proj-checkout");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "schema = 1\n").unwrap();
+    let proj = project_with(&rig, "orphan-proj-checkout", "schema = 1\n");
     let ctx = rig.ctx_at(Some(&proj.0));
     let plane = FakePlane::new();
     let fdir = take_server(&rig, "s_wx", "wx");
@@ -1080,8 +1078,7 @@ fn a_github_sourced_mcp_row_refuses_when_the_manifest_loads() {
 fn a_folder_named_in_both_scopes_keeps_each_scopes_config_key_stable() {
     let rig = Rig::new("dual");
     seed_harness_dirs(&rig.home.0);
-    let proj = Scratch::new("dual-proj");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    let proj = project_with(&rig, "dual-proj", "schema = 1\n");
     let dir = proj.0.join("weather");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(

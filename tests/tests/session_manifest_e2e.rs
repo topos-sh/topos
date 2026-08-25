@@ -140,6 +140,7 @@ fn the_session_manifest_hero_loop() {
 
     let proj = dev.root().join("proj");
     std::fs::create_dir_all(proj.join(".git")).expect("a git checkout");
+    dev.pick_in_project(&proj);
     let added = dev
         .add_reference("@acme/deploy", false, Some(&proj))
         .expect("add the workspace reference");

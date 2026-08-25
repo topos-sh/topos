@@ -11,13 +11,14 @@
 //!
 //! The PICK half ([`crate::ops::agents`]): `-a <agent>` (repeatable) names the agents to use at
 //! this scope and lands everything for them (skills, MCP entries, the built-in bundle, the
-//! auto-update hooks) — on a fresh scope the named agents ARE the pick, on one with a file of its
-//! own they join it, so `init -a` on a teammate's clone is pick + install, never an error. With
-//! no `-a`: a pick already in force is used as it stands (an existing manifest then prints the
-//! plain no-op receipt); with none, the ask decides (one agent installed → it, and the receipt
-//! says so; several → [`crate::ops::agents_ask`]), and the chosen pick is recorded at this scope
-//! BEFORE anything is placed, then read back. `--gitignore` appends the picked agents' folders
-//! to the project's `.gitignore` (refused with `-g`).
+//! auto-update hooks) — on a scope with no pick file the named agents ARE the pick, on one with a
+//! file of its own they join it, so `init -a` on a teammate's clone is pick + install, never an
+//! error. With no `-a`: the pick THIS scope holds is used as it stands (an existing manifest then
+//! prints the plain no-op receipt); with none, the rule decides (one agent installed → it, and
+//! the receipt says so; several → [`crate::ops::agents_ask`]), and the chosen pick is recorded at
+//! this scope BEFORE anything is placed, then read back. A project reads its own file only: a
+//! machine-wide pick never decides what a checkout gets. `--gitignore` appends the picked agents'
+//! folders to the project's `.gitignore` (refused with `-g`).
 
 use std::path::Path;
 
@@ -58,7 +59,7 @@ pub(crate) struct InitRequest<'a> {
     pub agents: &'a [String],
     /// `--gitignore`.
     pub gitignore: bool,
-    /// What the ask decides on when no pick stands and none was named.
+    /// What the pick rule decides on when no pick stands here and none was named.
     pub ask: AskInputs,
 }
 
@@ -68,7 +69,7 @@ pub(crate) struct InitRequest<'a> {
 /// # Errors
 /// [`ClientError::InvalidArgument`] when a project `init` has no working directory;
 /// [`ClientError::GitignoreNeedsProject`]; the slug refusals; [`ClientError::PickRequired`] from
-/// the ask; an io failure; everything [`agents::apply_pick`] can fail with.
+/// the pick rule; an io failure; everything [`agents::apply_pick`] can fail with.
 pub(crate) fn init(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -91,18 +92,18 @@ pub(crate) fn init(
         PickScope::Project(dir) => Some(dir.as_path()),
     };
     // WHICH pick this run applies, decided (and recorded) before the file is born: nothing is
-    // placed on a run the ask refuses, and the reconcile below reads the file, never a memory.
+    // placed on a run the rule refuses, and the reconcile below reads the file, never a memory.
     let apply = if !req.agents.is_empty() {
         agents::set_for_init(ctx, &scope, req.agents)?;
         true
     } else if agents_pick::effective(ctx.fs, &ctx.layout, project_dir)?.is_some() {
-        // A standing pick over an existing file: the plain no-op receipt, as ever — unless
-        // `--gitignore` asked for the lines, which the receipt's own hint offers exactly here
-        // (`init -a`, then `init --gitignore`): the pick is applied again, idempotently, and
+        // A pick standing at THIS scope over an existing file: the plain no-op receipt, as ever
+        // — unless `--gitignore` asked for the lines, which the receipt's own hint offers exactly
+        // here (`init -a`, then `init --gitignore`): the pick is applied again, idempotently, and
         // the folders are appended.
         !existing || req.gitignore
     } else {
-        // No pick anywhere, and none named: the rule decides. A machine with no agent topos
+        // No pick at this scope, and none named: the rule decides. A machine with no agent topos
         // knows records nothing and still gets its manifest — the receipt says what it did
         // instead of what it placed.
         agents::derive_pick_if_missing(ctx, &scope, &req.ask)?;
@@ -306,10 +307,7 @@ mod tests {
                 agents: &[],
                 gitignore: false,
                 ask: AskInputs {
-                    stdin_tty: false,
                     in_claude_code: false,
-                    json: false,
-                    global,
                     frozen: false,
                 },
             },
@@ -323,12 +321,16 @@ mod tests {
         let plane = InertPlane;
         let follow = InertFollow;
         let harness = ClaudeCode::new(scratch("adapter"));
-        // The machine pick stands (every installed agent — none, in a scratch home), so a bare
-        // `init` exercises the file half without the ask.
+        // A pick stands at BOTH scopes (every installed agent — none, in a scratch home), so a
+        // bare `init` exercises the file half without the pick rule. The two are independent, so
+        // the project needs its own.
         crate::agents_pick::write_pick(
             &crate::agents_pick::machine_path(&Layout::new(&home.join(".topos"))),
             &["*"],
         );
+        if let Some(dir) = cwd {
+            crate::agents_pick::write_pick(&crate::agents_pick::project_path(dir), &["*"]);
+        }
         let ctx = Ctx {
             progress: crate::progress::silent(),
             fs: &fs,
@@ -442,6 +444,7 @@ mod tests {
             &crate::agents_pick::machine_path(&Layout::new(&home.join(".topos"))),
             &["*"],
         );
+        crate::agents_pick::write_pick(&crate::agents_pick::project_path(&repo), &["*"]);
         let ctx = Ctx {
             progress: crate::progress::silent(),
             fs: &hook_fs,

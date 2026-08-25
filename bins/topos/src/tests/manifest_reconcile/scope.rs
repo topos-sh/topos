@@ -485,6 +485,8 @@ fn the_nearest_project_file_governs_whole() {
         format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\napi-only = \"latest\"\n"),
     )
     .unwrap();
+    // The nearest file IS the scope, so the pick that governs it is its own.
+    rig.project_pick(&nested, &["*"]);
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let wide = one_file(b"# repo-wide\n");
     let api = one_file(b"# api-only\n");

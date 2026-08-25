@@ -257,6 +257,19 @@ impl SessionInstall {
         &self.root.0
     }
 
+    /// A CHECKOUT's own agents pick — every agent installed under the fake home, the project-scope
+    /// twin of the machine pick above. The two scopes are independent, so a suite that means a
+    /// checkout to receive anything mints this beside its `.git`.
+    pub fn pick_in_project(&self, project_dir: &Path) {
+        crate::agents_pick::write(
+            &RealFs,
+            &self.layout(),
+            &crate::agents_pick::PickScope::Project(project_dir.to_path_buf()),
+            &crate::agents_pick::AgentsPick::new(vec![crate::agents_pick::WILDCARD.to_owned()]),
+        )
+        .unwrap();
+    }
+
     /// The person-scope placement dir for a skill NAME — the active harness's registry row
     /// resolved under the install's own home, exactly as the planner resolves it (the row, not
     /// the adapter, names the dir now that the table is data; the `WorkHarness` answer is the

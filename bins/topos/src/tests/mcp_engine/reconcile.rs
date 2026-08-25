@@ -907,6 +907,7 @@ fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
     let outside = Scratch::new("escape-outside");
     let proj = Scratch::new("escape-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    rig.project_pick(&proj.0, &["cursor"]);
     // `.cursor` is a committed symlink aiming OUT of the checkout.
     std::os::unix::fs::symlink(&outside.0, proj.0.join(".cursor")).unwrap();
     std::fs::write(

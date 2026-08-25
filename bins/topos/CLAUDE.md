@@ -61,7 +61,8 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   agent's auto-update trigger: hooks follow the agents pick (`ops::agent_hooks`), and nothing
   else writes one. The built-in `topos` skill rides the bare sweep BESIDE the reconcile, at the
   pick's own scope (`ops::builtin`): the machine pick's copies under `~`, and a checkout holding
-  a pick of its own re-converges its copies through the project store; no manifest row names it,
+  a pick of its own re-converges its copies through the project store (a checkout with no pick of
+  its own places nothing there); no manifest row names it,
   so the undemanded clean skips its record. `update --quiet` is the harness-hook sweep:
   self-throttled,
   schema-conservative stdout (`--hook claude-code` opts that harness into `reloadSkills`).
@@ -196,25 +197,28 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `revert`, `protect`, `invite`, `login`/`loopback`, `status`, `auth`, `list`, `diff`, `log`,
   `init` (the manifest's birth AND the pick half: `-a` names the agents at that scope and
   `agents::apply_pick` lands everything for them — the scope's reconcile, the built-in bundle at
-  that scope, the hooks, the optional `.gitignore` lines; no `-a` and no pick is `agents_ask`),
+  that scope, the hooks, the optional `.gitignore` lines; no `-a` and no pick at THIS scope is
+  `agents_ask`),
   `agents` (`topos agents [add|remove]`: the pick where you stand, what is installed — the ONE
-  reader of detection beside the ask — and each picked agent's hook state; `add` = write the
+  reader of detection beside the pick rule — and each picked agent's hook state; `add` = write the
   pick then `apply_pick`; `remove` = compute the loss while the old pick is authoritative,
   describe unless `--yes`, clean through `reconcile::clean_dest_roots` + `mcp_engine::
   remove_bundle` narrowed to the leaving agents + `agent_hooks::remove_for`, verify, and write
-  the reduced pick LAST; a project without a file of its own is materialized from the effective
-  set first; `derive_pick_if_missing` is what `install`/`update` and every `add` arm run before
+  the reduced pick LAST; a `"*"` file is materialized into the installed agents first, and a scope
+  with no file of its own starts from nobody (an agent it never picked is not one it can remove);
+  `derive_pick_if_missing` is what `install`/`update` and every `add` arm run before
   landing anything at a scope with no pick — one installed agent is recorded and said, several
-  are asked for, NONE installed records nothing and answers `NoneInstalled`, which the verb says
-  once (`NO_AGENT_INSTALLED`) and goes on: it places nothing and still writes the manifest, so a
-  box with no agent runs `install --frozen` and records rows. `add` asks its SOURCE first — a
+  are `PickRequired`, NONE installed records nothing and answers `NoneInstalled`, which the verb
+  says once (`NO_AGENT_INSTALLED`) and goes on: it places nothing and still writes the manifest,
+  so a box with no agent runs `install --frozen` and records rows. `add` asks its SOURCE first — a
   path that is not here is refused with its own code, because the pick rule records a decision
   and a refusal lands nothing. The quiet sweep never calls it, and derives nothing at either
   scope; what the reconcile could not do rides `PickReceipt` (its lines, the failed count, the
-  removed rows) and decides the exit status like `update`'s), `agents_ask` (the ask: one
-  installed → it; `CLAUDECODE` → claude-code; piped or `--json` → `PickRequired`, exit 2, with
-  the installed list on the envelope; a terminal → one numbered prompt on stdin; nothing
-  installed → the empty pick, never a question), `fmt`, `uninstall`, `builtin` (the embedded
+  removed rows) and decides the exit status like `update`'s), `agents_ask` (the pick rule, which
+  never prompts: one installed → it; `CLAUDECODE` → claude-code; several → `PickRequired`, exit 2,
+  two lines naming the installed agents and the `topos init [-g] -a` that records the choice, with
+  the list and the command on the `--json` envelope; nothing installed → the empty pick, never a
+  question), `fmt`, `uninstall`, `builtin` (the embedded
   meta-skill from `skills/topos/`),
   `self_update` (minisign-gated via `release`), `version_check`, `arm` (the TRIGGER half of the
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
@@ -240,12 +244,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   destroyed unless a snapshot taken after the last revalidation holds it.**
 - `agents_pick` — WHICH agents topos touches: `<project>/.topos/agents.json` (per clone, never
   committed) and `<machine store>/agents.json`, `{"schema_version": 1, "agents": [...]}` with a
-  lone `"*"` for every agent installed here, resolved when read. The effective pick in a project is
-  its own file, else the machine's, else NONE — and no pick places nothing. Every writer asks one
-  of two shapes (`picked_harnesses` for the dir planners, `picked_slugs` for the entries planner),
-  both read from the ctx's MACHINE store (`Layout::machine_home`, stamped when a ctx is re-rooted
-  at a project store). Detection feeds only the wildcard and the questions that name what is
-  installed; teardown never reads the pick.
+  lone `"*"` for every agent installed here, resolved when read. THE TWO SCOPES ARE INDEPENDENT: a
+  project's pick is its own file and nothing else, the machine's is the machine file and nothing
+  else, and neither falls back to the other — no pick at the scope being acted on places nothing
+  there. Every writer asks one of two shapes (`picked_harnesses` for the dir planners,
+  `picked_slugs` for the entries planner), each naming ONE scope, both read from the ctx's MACHINE
+  store (`Layout::machine_home`, stamped when a ctx is re-rooted at a project store). Detection
+  feeds only the wildcard and the sentences that name what is installed; teardown never reads the
+  pick.
 - `placement` — where a bundle's bytes land per scope. **One native copy per PICKED agent, in the
   folder its registry ROW names at that scope, through the one resolver**, so a machine-local
   table that moved an agent's skills dir moves the bytes with it; two picked agents whose rows

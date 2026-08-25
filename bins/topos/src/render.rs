@@ -957,12 +957,9 @@ pub(crate) fn agents_tty(d: &topos_types::results::AgentsData) -> String {
         "This project"
     };
     let mut s = match (&d.pick_path, &d.source) {
-        (Some(path), Some(source)) => {
-            let from = if d.scope == "project" && source == "machine" {
-                format!("from {path}")
-            } else {
-                path.clone()
-            };
+        // The pick is the scope's own file or there is none: the two scopes are independent, so
+        // the line never names another scope's list.
+        (Some(path), Some(_)) => {
             // A slug this binary's table does not know is shown as written, marked: it picks
             // nothing until a table knows it again, and `agents remove` takes it out.
             let agents: Vec<String> = d
@@ -976,7 +973,7 @@ pub(crate) fn agents_tty(d: &topos_types::results::AgentsData) -> String {
                     }
                 })
                 .collect();
-            format!("{this} ({from}): {}", agents.join(", "))
+            format!("{this} ({path}): {}", agents.join(", "))
         }
         _ => format!("{this}: no agents picked yet: topos init{flag} -a <agent>"),
     };
@@ -2949,14 +2946,9 @@ fn agents_lead(d: &topos_types::results::StatusData) -> String {
             "Agents ({this}): {} (from registered hooks; the next update records this)",
             d.agents.join(", ")
         ),
-        (Some(source), Some(path)) => {
-            let from = if in_project && source == "machine" {
-                format!("from {path}")
-            } else {
-                path.to_owned()
-            };
-            format!("Agents ({this}, {from}): {}", d.agents.join(", "))
-        }
+        // The pick is the scope's own file or there is none: the two scopes are independent, so
+        // the line never names another scope's list.
+        (Some(_), Some(path)) => format!("Agents ({this}, {path}): {}", d.agents.join(", ")),
         _ => format!(
             "Agents ({this}): no agents picked yet: topos init{} -a <agent>",
             crate::error::scope_flag(!in_project)
@@ -5499,22 +5491,14 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
     //
     // The name this scope already records is the same case — the add receipt's own two lines, in
     // the past tense, with nothing prefixed as though something had failed.
-    if let ClientError::AmbiguousSource { .. } | ClientError::AlreadyAdded { .. } = err {
+    // The pick nothing could derive is the same case: the installed list IS the answer, and the
+    // command under it records the choice. Two lines a person reads top to bottom, and the same
+    // two an agent driving the CLI gets.
+    if let ClientError::AmbiguousSource { .. }
+    | ClientError::AlreadyAdded { .. }
+    | ClientError::PickRequired { .. } = err
+    {
         return safe_message(err);
-    }
-    // The pick that could not be asked for is the same case: the list IS the answer, and the
-    // command under it records the choice. Three lines a person reads top to bottom.
-    if let ClientError::PickRequired { installed, global } = err {
-        let list = format!("Installed on this machine: {}", installed.join(", "));
-        return format!(
-            "No agents picked yet {}.\n{list}\nPick with: {}",
-            if *global {
-                "on this machine"
-            } else {
-                "in this project"
-            },
-            crate::error::pick_command(*global)
-        );
     }
     // A manifest refusal (any grammar fault in a user-authored file) closes with the one line
     // that says the load stopped BEFORE anything moved — the file was only read (the `--json`
@@ -10448,13 +10432,12 @@ mod tests {
         );
         agents.agents.pop();
         agents.not_in_table = Vec::new();
-        // A hook that is not registered earns its line; an inherited pick names its file.
+        // A hook that is not registered earns its line. The pick named is always this scope's own
+        // file: the machine's list does not govern a project.
         agents.hooks[1].armed = Some(false);
-        agents.source = Some("machine".to_owned());
-        agents.pick_path = Some("~/.topos/agents.json".to_owned());
         assert_eq!(
             agents_tty(&agents),
-            "This project (from ~/.topos/agents.json): claude-code, codex\n\
+            "This project (.topos/agents.json): claude-code, codex\n\
              Installed on this machine: claude-code, codex, cursor, gemini-cli\n\
              Change: topos agents add <agent> · topos agents remove <agent>\n\
              codex: auto-update hook not registered: topos agents add codex"

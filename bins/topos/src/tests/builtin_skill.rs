@@ -277,9 +277,9 @@ fn the_built_in_lands_in_the_picked_agents_project_dirs() {
 }
 
 /// THE PROJECT SWEEP'S SEAM follows the pick AT ITS SCOPE. A checkout holding a pick of its own
-/// places (and re-places) its copies; one inheriting the machine pick gets nothing in the
-/// checkout and no store minted for it (the copy under the home serves it); and a checkout whose
-/// pick is gone keeps the copy it already holds exactly as it is.
+/// places (and re-places) its copies; one with no pick of its own gets nothing in the checkout
+/// and no store minted for it, whatever the machine picked; and a checkout whose pick is gone
+/// keeps the copy it already holds exactly as it is.
 #[test]
 fn the_project_sweep_places_the_built_in_only_for_the_checkouts_own_pick() {
     let rig = Rig::new("sweep-seam");
@@ -288,19 +288,19 @@ fn the_project_sweep_places_the_built_in_only_for_the_checkouts_own_pick() {
     let inert_p = InertPlane;
     let ctx = rig.ctx(&inert_f, &inert_p);
 
-    let inherited = Scratch::new("sweep-seam-inherited");
-    std::fs::create_dir_all(inherited.0.join(".git")).unwrap();
+    let no_pick = Scratch::new("sweep-seam-no-pick");
+    std::fs::create_dir_all(no_pick.0.join(".git")).unwrap();
     assert!(
-        !ops::ensure_builtin_for_project_pick(&ctx, &inherited.0)
+        !ops::ensure_builtin_for_project_pick(&ctx, &no_pick.0)
             .unwrap()
             .changed
     );
     assert!(
-        !inherited.0.join(".claude").exists(),
-        "an inherited machine pick places nothing in the checkout"
+        !no_pick.0.join(".claude").exists(),
+        "a checkout with no pick of its own places nothing"
     );
     assert!(
-        crate::sidecar::existing_project_store(&rig.fs, &inherited.0).is_none(),
+        crate::sidecar::existing_project_store(&rig.fs, &no_pick.0).is_none(),
         "and mints no store for it"
     );
 

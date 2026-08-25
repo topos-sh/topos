@@ -220,6 +220,10 @@ pub(super) fn project(tag: &str, body: &str) -> Scratch {
     let proj = Scratch::new(tag);
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
     std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), body).unwrap();
+    // The checkout's OWN pick: every agent installed here. A project never reads the machine's
+    // list, so a checkout that means to place anything has to hold one. A test about the pick
+    // itself narrows it with `Rig::project_pick`.
+    crate::agents_pick::write_pick(&crate::agents_pick::project_path(&proj.0), &["*"]);
     proj
 }
 

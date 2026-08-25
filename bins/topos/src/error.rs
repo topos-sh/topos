@@ -1240,13 +1240,13 @@ pub(crate) enum ClientError {
     /// closes with `nothing changed`, because nothing was read past the argv.
     #[error("{0}")]
     SelectionRefused(String),
-    /// No agents are picked at the scope a verb would place into, and the pick cannot be asked
-    /// for (several agents are installed, and stdin is not a terminal or `--json` was asked).
-    /// `installed` is what the machine holds, so the list a person or an agent chooses from
-    /// rides the answer — never empty, because a machine with no agent installed is not asked
-    /// anything; `global` spells the way out for the machine scope. Exit status 2: a
-    /// usage-shaped answer, not a failure — nothing was read past the pick.
-    #[error("{}", pick_required_message(installed, *global))]
+    /// No agents are picked at the scope a verb would place into, and several agents are
+    /// installed, so there is nothing to derive one from. topos never prompts: it names them and
+    /// the command that records the choice. `installed` is what the machine holds, so the list a
+    /// person or an agent chooses from rides the answer — never empty, and never a single agent
+    /// (one installed agent IS the pick); `global` spells the way out for the machine scope.
+    /// Exit status 2: a usage-shaped answer, not a failure — nothing was read past the pick.
+    #[error("{}", pick_required_lines(installed, *global))]
     PickRequired {
         installed: Vec<String>,
         global: bool,
@@ -1281,18 +1281,20 @@ pub(crate) enum ClientError {
     },
 }
 
-/// The [`ClientError::PickRequired`] sentence: the fact, the installed list, and the one command
-/// that answers it.
-fn pick_required_message(installed: &[String], global: bool) -> String {
-    let where_ = if global {
-        "on this machine"
-    } else {
-        "in this project"
-    };
+/// The [`ClientError::PickRequired`] answer, both lines: what is installed here, then the command
+/// that records the choice. The command is spelled with the first two installed agents, so the
+/// example runs as it stands and the shape of a second `-a` is shown rather than described. ONE
+/// string for every surface — the terminal prints it as the two lines it is.
+pub(crate) fn pick_required_lines(installed: &[String], global: bool) -> String {
+    let first = installed.first().map_or("<agent>", String::as_str);
+    let more = installed
+        .get(1)
+        .map(|slug| format!(" [-a {slug}]"))
+        .unwrap_or_default();
     format!(
-        "no agents picked yet {where_}. Installed on this machine: {}. Pick with: {}",
+        "Several agents are installed here: {}.\nPick with: topos init{} -a {first}{more}",
         installed.join(", "),
-        pick_command(global)
+        scope_flag(global)
     )
 }
 
