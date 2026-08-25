@@ -39,6 +39,13 @@ posture: install exactly what the project's committed files name, verify every b
 the recorded hashes, and fail loudly on any disagreement or anything unreachable — nothing is
 written or resolved on the fly.
 
+A CI box normally has no agent picked. The pick is personal and lives in `.topos/agents.json`,
+which topos keeps out of git, so no clone brings one along. `install --frozen` therefore fetches
+and verifies every bundle the lock records and places none of them into agent folders. It says so
+in one line and exits 0, so the step stays green and the verification still happens. If a runner
+should end up with files on disk for a particular agent, pick that agent on the runner first with
+`topos init -a <agent>`, then install.
+
 ## What a run can see
 
 - The workspace catalog and the exact bundle versions a project pins — enough to converge a
