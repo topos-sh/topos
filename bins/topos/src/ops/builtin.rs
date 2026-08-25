@@ -276,10 +276,13 @@ mod tests {
 /// What a sync did. The quiet hook ORs `changed` into its changed-bytes decision, which gates two
 /// things: whether a hook-output document is emitted at all when there is nothing else to say, and
 /// whether Claude Code is asked to reload its skills. Which dialect that document speaks is the
-/// calling trigger's business, not this flag's.
+/// calling trigger's business, not this flag's. `refused` carries the project roots the
+/// containment rail refused (a picked agent's skills folder that is a symlink out of the checkout):
+/// the placement was skipped, and the caller owes the reader the line.
 #[derive(Debug, Default)]
 pub(crate) struct BuiltinSync {
     pub changed: bool,
+    pub refused: Vec<topos_types::Message>,
 }
 
 /// What the converge may do to a Foreign-scanned placement dir (one the record says the built-in
@@ -467,6 +470,7 @@ fn ensure_inner(
         Some(root) => placement::project_plan(ctx, root, sid.as_str(), naming, Some(&map), None),
         None => placement::plan_targets(ctx, sid.as_str(), naming, Some(&map), None),
     };
+    let refused = plan.refused.clone();
     let next = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&next, &plan);
     let scans = placement::scan_placements(ctx, &next)?;
@@ -503,7 +507,10 @@ fn ensure_inner(
             };
             materialize::commit_docs(ctx.fs, &sp, &next_map, &lock, &sync)?;
         }
-        return Ok(BuiltinSync::default());
+        return Ok(BuiltinSync {
+            changed: false,
+            refused,
+        });
     }
 
     let base = super::parse_hex32(&lock.base_commit)?;
@@ -543,7 +550,10 @@ fn ensure_inner(
             project_root: ctx.layout.project_root(),
         },
     )?;
-    Ok(BuiltinSync { changed: true })
+    Ok(BuiltinSync {
+        changed: true,
+        refused,
+    })
 }
 
 /// First contact: stage the whole sidecar entry (store + docs, EMPTY placements — the converge in

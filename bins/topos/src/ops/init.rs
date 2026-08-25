@@ -96,10 +96,13 @@ pub(crate) fn init(
         agents::set_for_init(ctx, &scope, req.agents)?;
         true
     } else if agents_pick::effective(ctx.fs, &ctx.layout, project_dir)?.is_some() {
-        // A standing pick over an existing file: the plain no-op receipt, as ever.
-        !existing
+        // A standing pick over an existing file: the plain no-op receipt, as ever — unless
+        // `--gitignore` asked for the lines, which the receipt's own hint offers exactly here
+        // (`init -a`, then `init --gitignore`): the pick is applied again, idempotently, and
+        // the folders are appended.
+        !existing || req.gitignore
     } else {
-        agents::derive_pick_if_missing(ctx, &scope, &req.ask, false)?;
+        agents::derive_pick_if_missing(ctx, &scope, &req.ask)?;
         true
     };
     let mut data = create_manifest(ctx, req.global, req.workspace)?;

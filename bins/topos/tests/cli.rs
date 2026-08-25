@@ -1147,8 +1147,8 @@ fn the_quiet_sweep_never_registers_an_agent_and_the_seed_moves_the_record_into_t
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         stderr.contains(
-            "Using cursor on this machine (from the auto-update hooks already registered). \
-             Change: topos agents add|remove -g"
+            "Using Cursor on this machine (from what an earlier topos set up here). Change: \
+             topos agents add|remove -g"
         ),
         "{stderr:?}"
     );
@@ -2960,5 +2960,361 @@ fn add_dash_a_outside_the_pick_refuses_naming_agents_add() {
     let (status, v) = rig.json(&["--json", "add", "./src/writer", "-a", "claude-code"]);
     assert!(status.success(), "{v}");
     assert!(rig.project.join(".claude/skills/writer/SKILL.md").is_file());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+// =================================================================================================
+// What a pick run says about what it could not do, and what never derives one.
+// =================================================================================================
+
+/// The quiet hook sweep NEVER derives a pick, at either scope — not even with exactly one agent
+/// installed: a project pick registered the hook that fired it, and nobody picked anything for
+/// the machine. Nothing is minted under `~/.topos`, nothing lands under any agent dir, and the
+/// sweep stays byte-silent, exit 0.
+#[test]
+fn the_quiet_sweep_never_derives_a_machine_pick_from_a_project_pick() {
+    let rig = pick_rig("quiet-one-agent", &["claude-code"]);
+    rig.stdout(&["init", "-a", "claude-code"]);
+    assert!(rig.project_pick().is_some() && rig.machine_pick().is_none());
+    let home_before = PickRig::files_under(&rig.home, &[".topos"]);
+    let out = rig.run(&["install", "--quiet", "--ttl", "0", "--hook", "claude-code"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    assert!(rig.machine_pick().is_none(), "no machine pick was minted");
+    assert_eq!(PickRig::files_under(&rig.home, &[".topos"]), home_before);
+    assert!(!rig.topos_home().join("agents.json").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// `init -a` carries the reconcile's outcome: a row pointing at a folder that is gone prints its
+/// failure line under what landed, exits non-zero, and says `ok: false` under `--json`, exactly
+/// as `update` does on the same tree — the pick, the copy and the hook still landed.
+#[test]
+fn init_with_agents_says_what_the_reconcile_could_not_do() {
+    let rig = pick_rig("init-outcome", &["claude-code"]);
+    rig.write_manifest("schema = 1\n\n[skills]\nnope = { path = \"./nope\" }\n");
+    let out = rig.run(&["init", "-a", "claude-code"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "Installed 1 skill to .claude/skills.\n\
+             warning: \"./nope\": your topos.toml asks for this folder by this project, and the \
+             folder is gone. Run 'topos remove ./nope --yes' to drop the line.\n\
+             Auto-update hooks: .claude/settings.local.json."
+        ),
+        "{stdout}"
+    );
+    assert!(rig.project.join(".claude/skills/topos/SKILL.md").exists());
+    let (status, v) = rig.json(&["--json", "init", "-a", "claude-code"]);
+    assert_eq!(status.code(), Some(1));
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["data"]["pick"]["failed_bundles"], 1, "{v}");
+    assert_eq!(
+        v["data"]["pick"]["warnings"][0]["code"], "PATH_MISSING",
+        "{v}"
+    );
+    assert_eq!(v["messages"][0]["kind"], "failure", "{v}");
+    assert!(
+        v["warnings"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("PATH_MISSING \"./nope\": your topos.toml asks for this folder"),
+        "{v}"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// The receipt's own hint works: `init -a`, then `init --gitignore` on the existing manifest with
+/// the standing pick appends the picked agents' folders (and prints the pick receipt again, with
+/// the appended lines instead of the hint).
+#[test]
+fn init_gitignore_appends_over_a_standing_pick() {
+    let rig = pick_rig("init-gitignore-later", &["claude-code", "codex"]);
+    let first = rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    assert!(
+        first
+            .contains("New files are not ignored by git. To keep them out: topos init --gitignore"),
+        "{first}"
+    );
+    assert!(!rig.project.join(".gitignore").exists());
+    let again = rig.stdout(&["init", "--gitignore"]);
+    assert!(
+        again.contains("Added to .gitignore: .claude/, .mcp.json, .codex/, .agents/.\n"),
+        "{again}"
+    );
+    assert!(!again.contains("not ignored by git"), "{again}");
+    assert!(!again.contains("already exists"), "{again}");
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
+        ".claude/\n.mcp.json\n.codex/\n.agents/\n"
+    );
+    // A plain `init` on the same tree is still the no-op receipt.
+    let plain = rig.stdout(&["init"]);
+    assert!(plain.contains("already exists"), "{plain}");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// Every `add` runs the pick rule before it records a row or lands a byte, at the scope the row
+/// would land in: several agents installed and no pick, piped, is exit 2 naming `topos init -a`
+/// with NOTHING half-done — no row, no pick, no folder; one installed is used and said, and then
+/// the add proceeds.
+#[test]
+fn add_runs_the_pick_rule_before_anything_lands() {
+    let rig = pick_rig("add-no-pick", &["claude-code", "codex"]);
+    rig.write_manifest("schema = 1\n");
+    let hello = rig.root.join("hello");
+    std::fs::create_dir_all(&hello).unwrap();
+    std::fs::write(
+        hello.join("SKILL.md"),
+        "---\nname: hello\ndescription: says hello\n---\nHello.\n",
+    )
+    .unwrap();
+    let out = rig.run(&["add", hello.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr,
+        "No agents picked yet in this project.\n\
+         Installed on this machine: claude-code, codex\n\
+         Pick with: topos init -a <agent>\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join("topos.toml")).unwrap(),
+        "schema = 1\n",
+        "the row is not recorded"
+    );
+    assert!(rig.project_pick().is_none() && rig.machine_pick().is_none());
+    assert!(!rig.project.join(".claude").exists() && !rig.project.join(".codex").exists());
+    assert!(
+        !rig.project.join(".topos").exists(),
+        "no store minted either"
+    );
+    // The same answer for a bare name and under `--json`.
+    let (status, v) = rig.json(&["--json", "add", "hello"]);
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(v["error"]["code"], "PICK_REQUIRED", "{v}");
+    assert_eq!(v["data"]["next"], "topos init -a <agent>", "{v}");
+    // The machine scope, with `-g`: the same rule, spelled for the machine.
+    let out = rig.run(&["add", "-g", hello.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Pick with: topos init -g -a <agent>"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !rig.topos_home().join("topos.toml").exists() || {
+            !std::fs::read_to_string(rig.topos_home().join("topos.toml"))
+                .unwrap()
+                .contains("hello")
+        }
+    );
+
+    // One agent installed: used, said on stderr, recorded — and the add goes through.
+    let one = pick_rig("add-one-agent", &["codex"]);
+    one.write_manifest("schema = 1\n");
+    let out = one.run(&["add", hello.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Using Codex in this project.\n"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("added hello to this project"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(agents_of(&one.project_pick().unwrap()), ["codex"]);
+    assert!(
+        std::fs::read_to_string(one.project.join("topos.toml"))
+            .unwrap()
+            .contains("hello"),
+        "the row is recorded"
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+    let _ = std::fs::remove_dir_all(&one.root);
+}
+
+/// An MCP row whose own `dest` names an UNPICKED agent's file gets no entry (topos never touches
+/// an agent the person did not pick) and is never silent about it: the pick receipt and every
+/// sweep carry the line with the command that picks the agent, the row counts `not placed`,
+/// and the `--json` row carries the withheld state.
+#[test]
+fn an_mcp_dest_naming_an_unpicked_agent_is_withheld_and_said() {
+    let rig = pick_rig("mcp-dest-unpicked", &["claude-code", "codex", "cursor"]);
+    std::fs::create_dir_all(rig.project.join("weather")).unwrap();
+    std::fs::write(
+        rig.project.join("weather/server.json"),
+        r#"{"name":"io.github.acme/weather","description":"Conditions.","version":"1.4.0","remotes":[{"type":"streamable-http","url":"https://weather.acme.example/mcp"}]}"#,
+    )
+    .unwrap();
+    rig.write_manifest(
+        "schema = 1\n\n[mcp]\nweather = { path = \"./weather\", kind = \"mcp\", dest = [\".cursor/mcp.json\"] }\n",
+    );
+    let line = "warning: not placed in cursor: cursor is not one of this project's agents. Add \
+                it: topos agents add cursor";
+    let receipt = rig.stdout(&["init", "-a", "claude-code"]);
+    assert!(receipt.contains(line), "{receipt}");
+    assert!(!rig.project.join(".cursor").exists(), "no entry, no folder");
+    let sweep = rig.stdout(&["update"]);
+    assert!(sweep.contains(line), "{sweep}");
+    assert!(sweep.contains("1 not placed"), "{sweep}");
+    let (status, v) = rig.json(&["--json", "update"]);
+    assert!(status.success(), "an advisory fails nothing: {v}");
+    // A bundle nothing holds anywhere has no `up to date` row to hide behind: the row stands
+    // down and the message carries the whole answer.
+    assert_eq!(v["data"]["skills"], serde_json::json!([]), "{v}");
+    assert_eq!(
+        v["messages"][0],
+        serde_json::json!({
+            "code": "MCP_AGENT_NOT_PICKED",
+            "kind": "advisory",
+            "text": "not placed in cursor: cursor is not one of this project's agents. Add it: \
+                     topos agents add cursor"
+        }),
+        "{v}"
+    );
+    // Picking cursor is the whole fix: the entry lands and the line goes.
+    let picked = rig.stdout(&["agents", "add", "cursor"]);
+    assert!(!picked.contains("not placed"), "{picked}");
+    assert!(rig.project.join(".cursor/mcp.json").exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// A picked agent's skills folder that is a symlink out of the checkout: the built-in's
+/// placement is refused by the containment rail, and the pick receipt says so beside the hook
+/// refusal — nothing is written through the link, and the run exits non-zero like `update`.
+#[test]
+fn a_symlinked_skills_folder_is_said_on_the_pick_receipt() {
+    let rig = pick_rig("pick-symlink-claude", &["claude-code"]);
+    let outside = rig.root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, rig.project.join(".claude")).unwrap();
+    let out = rig.run(&["init", "-a", "claude-code"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Using Claude Code in this project.\nwarning: ")
+            && stdout.contains(
+                ".claude/skills does not resolve inside this checkout (claude-code) — a symlink"
+            ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("claude-code: auto-update hook not registered"),
+        "{stdout}"
+    );
+    assert!(PickRig::files_under(&outside, &[]).is_empty());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// A pick file topos cannot parse names ITSELF and its scope, and the run fails closed before
+/// any converge (copies and hooks stay as they are).
+#[test]
+fn an_unreadable_pick_file_names_itself() {
+    let rig = pick_rig("pick-corrupt", &["claude-code", "codex"]);
+    rig.stdout(&["init", "-a", "claude-code"]);
+    std::fs::write(rig.project.join(".topos/agents.json"), "{not json").unwrap();
+    let out = rig.run(&["update"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(
+            "error: this project's .topos/agents.json is unreadable: missing/invalid \
+             schema_version"
+        ) && stderr.contains(". Fix the file or delete it\n"),
+        "{stderr}"
+    );
+    assert!(rig.project.join(".claude/skills/topos/SKILL.md").exists());
+    let (status, v) = rig.json(&["--json", "agents"]);
+    assert_eq!(status.code(), Some(1));
+    assert_eq!(v["error"]["code"], "CORRUPT_STATE", "{v}");
+    // The machine file, the same way.
+    std::fs::remove_file(rig.project.join(".topos/agents.json")).unwrap();
+    std::fs::write(
+        rig.topos_home().join("agents.json"),
+        "{\"schema_version\": 1, \"agents\": 5}",
+    )
+    .unwrap();
+    let out = rig.run(&["agents", "-g"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .starts_with("error: ~/.topos/agents.json is unreadable: document parse:"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// A `.gitignore` that is a symlink out of the checkout is never written through, and never an
+/// abort either: the pick, the copies and the hooks land, the receipt closes with the one line,
+/// exit 0. `topos agents --gitignore` says the same over the list.
+#[test]
+fn a_gitignore_symlink_is_a_line_not_an_abort() {
+    let rig = pick_rig("gitignore-symlink", &["claude-code"]);
+    let target = rig.root.join("outside-gitignore");
+    std::fs::write(&target, b"").unwrap();
+    std::os::unix::fs::symlink(&target, rig.project.join(".gitignore")).unwrap();
+    let receipt = rig.stdout(&["init", "-a", "claude-code", "--gitignore"]);
+    assert!(
+        receipt.contains(
+            "Installed 1 skill to .claude/skills.\n\
+             warning: `.gitignore` is a symlink out of this checkout; not edited\n\
+             Auto-update hooks: .claude/settings.local.json."
+        ),
+        "{receipt}"
+    );
+    assert!(!receipt.contains("Added to .gitignore"), "{receipt}");
+    assert_eq!(std::fs::read(&target).unwrap(), b"", "byte-identical");
+    assert_eq!(agents_of(&rig.project_pick().unwrap()), ["claude-code"]);
+    assert!(rig.project.join(".claude/skills/topos/SKILL.md").exists());
+    let listed = rig.stdout(&["agents", "--gitignore"]);
+    assert!(
+        listed.ends_with("warning: `.gitignore` is a symlink out of this checkout; not edited\n"),
+        "{listed}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"");
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
+/// The migration seed's one line spells display names and says where the pick came from in
+/// words that hold for every source it unions (hooks, config entries, placed copies).
+#[test]
+fn the_seed_line_spells_display_names() {
+    let rig = pick_rig("seed-line", &["claude-code", "cursor"]);
+    let state = rig.topos_home().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("trigger_registration.json"),
+        r#"{"schema_version":1,"agents":{"cursor":{"at_ms":1,"registered":true,"retry_at_ms":0}}}"#,
+    )
+    .unwrap();
+    let out = rig.run(&["list", "-g"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Using Cursor on this machine (from what an earlier topos set up here). Change: topos \
+         agents add|remove -g\n"
+    );
+    assert_eq!(agents_of(&rig.machine_pick().unwrap()), ["cursor"]);
     let _ = std::fs::remove_dir_all(&rig.root);
 }

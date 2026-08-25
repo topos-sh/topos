@@ -25,9 +25,11 @@ use topos_harness::registry::{self, KnownHarness};
 use crate::manifest::document::ManifestScope;
 
 /// The one `dest` entry that is not a path: the row's DEFAULT REACH — every destination the row
-/// would resolve to carrying no `dest` at all (a skill row: the shared dir plus each detected
-/// agent's own, decided at plan time on every run; an MCP row: every MCP-capable agent this scope
-/// engages). Named entries beside it are ADDITIONS, placed whether or not their agent is detected.
+/// would resolve to carrying no `dest` at all (a skill row: each PICKED agent's own folder at
+/// that scope, decided at plan time on every run; an MCP row: every picked agent with a config
+/// surface at that scope). Named entries beside it are ADDITIONS: a skill folder is placed as
+/// typed whether or not its agent is picked; an MCP file of an unpicked agent gets no entry and
+/// the receipt says so.
 pub(crate) const DEFAULT_REACH: &str = "*";
 
 /// Whether a `dest` array stands for the row's default reach as well as what it names.

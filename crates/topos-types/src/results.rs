@@ -1722,6 +1722,35 @@ pub struct PickReceipt {
     /// The `.gitignore` entries `--gitignore` appended this run (empty when nothing was missing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gitignored: Vec<String>,
+    /// The bundle rows the scope's reconcile removed this run (a row the manifest no longer
+    /// carries), with the folders or config files that left. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<PickRemoved>,
+    /// The lines the reconcile and the built-in placement raised: a bundle that could not be
+    /// carried forward, a project root the containment rail refused, a `.gitignore` that could
+    /// not be edited. The same channel `update` prints; a `failure` line makes the run exit
+    /// non-zero exactly as `update` does. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::Message>,
+    /// How many bundles the reconcile could not carry forward this run. **Additive.**
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failed_bundles: u64,
+}
+
+/// One bundle row a pick run's reconcile removed, and where its copies or entries left.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct PickRemoved {
+    /// The bundle, as a person reads it (workspace-qualified where it came from one).
+    pub bundle: String,
+    /// The folders or config files that left.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// `topos agents` — the pick where you stand and what is installed on this machine.
@@ -1755,6 +1784,10 @@ pub struct AgentsData {
     /// The `.gitignore` entries `--gitignore` appended this run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gitignored: Vec<String>,
+    /// The lines `--gitignore` raised (a `.gitignore` that is a symlink out of the checkout is
+    /// not edited, and says so here). **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::Message>,
 }
 
 /// `topos agents remove` — the describe (`applied: false`) and the applied receipt.

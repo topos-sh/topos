@@ -56,12 +56,53 @@
         "string",
         "null"
       ]
+    },
+    "warnings": {
+      "description": "The lines `--gitignore` raised (a `.gitignore` that is a symlink out of the checkout is\nnot edited, and says so here). **Additive.**",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Message"
+      }
     }
   },
   "required": [
     "scope"
   ],
   "$defs": {
+    "Message": {
+      "description": "One message: the machine-readable code (when the producer has one), what kind of thing it is,\nand the ONE sentence a person reads. `text` never carries the code — a code is a lookup key,\nnot prose, and the TTY prints `text` alone.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The stable SCREAMING_SNAKE code an agent branches on. Absent where the producer has no\ncode (a decision, a paging fact) — an open vocabulary, exactly like `WireError.code`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "text": {
+          "description": "The line a person reads. Complete on its own; no code, no Rust type name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ]
+    },
+    "MessageKind": {
+      "description": "What a [`Message`] IS, so a consumer never has to infer it from wording. `failure` is the only\nkind that says something did not happen; `decision` is a bundle waiting on a person; `advisory`\nannotates something that still worked; `disclosure` states a fact about work that succeeded.",
+      "type": "string",
+      "enum": [
+        "failure",
+        "decision",
+        "advisory",
+        "disclosure"
+      ]
+    },
     "StatusTrigger": {
       "description": "One picked agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of\nthe same artifact the arming sweep manages. **INFERRED** (additive-only).",
       "type": "object",

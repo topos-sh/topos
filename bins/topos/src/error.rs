@@ -1225,6 +1225,12 @@ pub(crate) enum ClientError {
          two"
     )]
     GitignoreNeedsProject,
+    /// The agents pick file at a scope could not be parsed (a hand edit, a torn write). The
+    /// [`ClientError::Corrupt`] family (same `CORRUPT_STATE` code, fail-closed: nothing is
+    /// placed or removed over a pick topos cannot read), but the surface names the FILE and the
+    /// scope, because the fix is a person's edit of that file, not topos's own state.
+    #[error("{}", pick_unreadable_message(*global, reason))]
+    PickUnreadable { global: bool, reason: String },
     /// `agents remove` could not clean everything topos wrote for an agent, so the agent STAYS
     /// in the pick (the pick is written last, only after the cleanup is verified). `left` names
     /// what still stands.
@@ -1259,6 +1265,17 @@ fn pick_required_message(installed: &[String], global: bool) -> String {
         "no agents picked yet {where_}. {list} Pick with: {}",
         pick_command(global)
     )
+}
+
+/// The [`ClientError::PickUnreadable`] sentence: which pick file, what is wrong with it, and
+/// the way out.
+fn pick_unreadable_message(global: bool, reason: &str) -> String {
+    let file = if global {
+        "~/.topos/agents.json"
+    } else {
+        "this project's .topos/agents.json"
+    };
+    format!("{file} is unreadable: {reason}. Fix the file or delete it")
 }
 
 /// The way out of [`ClientError::PickRequired`], spelled for the scope.
@@ -1474,6 +1491,8 @@ impl ClientError {
             // No pick where one is needed: the agent reads `data.installed` and picks.
             ClientError::PickRequired { .. } => "PICK_REQUIRED",
             ClientError::GitignoreNeedsProject => "GITIGNORE_NEEDS_PROJECT",
+            // The sidecar family's code; only the message names the file.
+            ClientError::PickUnreadable { .. } => "CORRUPT_STATE",
             // A cleanup that left something standing: the pick is unchanged, the message names it.
             ClientError::AgentRemoveIncomplete { .. } => "AGENT_REMOVE_INCOMPLETE",
             // A `-a` slug outside the pick: the fix is picking it, and the message spells it.

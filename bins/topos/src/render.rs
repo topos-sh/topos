@@ -8,7 +8,7 @@ use topos_types::results::{
     ReviewDecision, SkillEntry, UntrackedEntry,
 };
 use topos_types::{
-    ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
+    ActionCode, Affected, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
     WIRE_SCHEMA_VERSION, WireError,
 };
 
@@ -855,6 +855,18 @@ pub(crate) fn pick_receipt_tty(p: &topos_types::results::PickReceipt) -> String 
         (Some(a), None) | (None, Some(a)) => s.push_str(&format!("\nInstalled {a}.")),
         (None, None) => {}
     }
+    // What the reconcile took away and what it could not do, right under what it placed: the
+    // rows it removed, then its lines (the TTY prints the text alone, as `update` does).
+    for r in &p.removed {
+        s.push_str(&format!(
+            "\nRemoved {} from {}.",
+            r.bundle,
+            and_list(&r.destinations)
+        ));
+    }
+    for w in &p.warnings {
+        s.push_str(&format!("\nwarning: {}", w.text));
+    }
     if !p.hook_files.is_empty() {
         let hooks: Vec<String> = p
             .hook_files
@@ -938,6 +950,9 @@ pub(crate) fn agents_tty(d: &topos_types::results::AgentsData) -> String {
             "\nAdded to .gitignore: {}.",
             d.gitignored.join(", ")
         ));
+    }
+    for w in &d.warnings {
+        s.push_str(&format!("\nwarning: {}", w.text));
     }
     for h in &d.hooks {
         match h.armed {
@@ -1284,32 +1299,6 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             }
             None => out.push_str(" · no license found"),
         }
-    }
-    // Disclose the one write `add` makes outside ~/.topos/ — the auto-update trigger — honestly (it is
-    // plumbing: it runs a no-op `update` until something is followed; never "it auto-updates"). The copy
-    // branches on the report's `currency_kind` so a harness's honest update moment is never overstated
-    // (a session-start hook fires at session boundaries; a scheduled job only while its scheduler runs).
-    if let Some(report) = &data.currency {
-        out.push_str(match (report.state, report.currency_kind) {
-            (TriggerState::Active, CurrencyKind::SessionStart) => {
-                "\nInstalled the session-start auto-update hook (runs `topos update` at session start)."
-            }
-            (TriggerState::Active, CurrencyKind::Scheduled) => {
-                "\nRegistered the auto-update job (updates land within about a minute while the harness's scheduler runs)."
-            }
-            (TriggerState::Active, CurrencyKind::ExplicitPullOnly) => {
-                "\nNo automatic auto-update trigger — run `topos update` to check for updates."
-            }
-            // Every non-`Active` state carries the explicit-pull floor (the one report constructor
-            // applies it), so the copy below names no update moment it cannot back.
-            (TriggerState::AlreadyPresentUnmanaged, _) => {
-                "\nLeft your existing auto-update trigger untouched."
-            }
-            (TriggerState::Degraded, _) => {
-                "\nCouldn't update the harness config for the auto-update trigger — left it untouched; run `topos update` to check for updates."
-            }
-            (TriggerState::Inactive, _) => "",
-        });
     }
     // The same courtesy for a NAME: the local dir was adopted as asked, and a connected workspace
     // publishes that name too — so the team-managed spelling is named beside it. Proven-identical
@@ -10213,6 +10202,9 @@ mod tests {
             untouched: vec!["cursor".to_owned()],
             gitignore_hint: Some("topos init --gitignore".to_owned()),
             gitignored: Vec::new(),
+            removed: Vec::new(),
+            warnings: Vec::new(),
+            failed_bundles: 0,
         };
         assert_eq!(
             pick_receipt_tty(&receipt),
@@ -10251,6 +10243,9 @@ mod tests {
             untouched: Vec::new(),
             gitignore_hint: None,
             gitignored: vec![".gemini/".to_owned()],
+            removed: Vec::new(),
+            warnings: Vec::new(),
+            failed_bundles: 0,
         };
         assert_eq!(
             pick_receipt_tty(&bare),
@@ -10258,6 +10253,40 @@ mod tests {
              no per-project auto-update for gemini-cli; `topos update`, or pick gemini-cli \
              with -g\n\
              Added to .gitignore: .gemini/."
+        );
+        // What the reconcile took away and could not do prints right under what it placed:
+        // the removed rows, then its lines, text alone (the code rides `--json`).
+        let mut outcome = receipt.clone();
+        outcome.removed = vec![topos_types::results::PickRemoved {
+            bundle: "@eng/deploy".to_owned(),
+            destinations: vec![".claude/skills/deploy".to_owned()],
+        }];
+        outcome.warnings = vec![
+            crate::message::failure(
+                "PATH_MISSING",
+                "\"./nope\": your topos.toml asks for this folder by this project, and the \
+                 folder is gone. Run 'topos remove ./nope --yes' to drop the line."
+                    .to_owned(),
+            ),
+            crate::message::advisory(
+                "GITIGNORE_NOT_EDITED",
+                "`.gitignore` is a symlink out of this checkout; not edited".to_owned(),
+            ),
+        ];
+        outcome.failed_bundles = 1;
+        assert_eq!(
+            pick_receipt_tty(&outcome),
+            "Using Claude Code and Codex in this project.\n\
+             Installed 4 skills to .claude/skills and .agents/skills, 1 MCP server to .mcp.json \
+             and .codex/config.toml.\n\
+             Removed @eng/deploy from .claude/skills/deploy.\n\
+             warning: \"./nope\": your topos.toml asks for this folder by this project, and the \
+             folder is gone. Run 'topos remove ./nope --yes' to drop the line.\n\
+             warning: `.gitignore` is a symlink out of this checkout; not edited\n\
+             Auto-update hooks: .claude/settings.local.json, .codex/hooks.json (Codex runs it \
+             once you trust this repo).\n\
+             New files are not ignored by git. To keep them out: topos init --gitignore\n\
+             Other agents on this machine, untouched: cursor."
         );
 
         let registered = |agent: &str| StatusTrigger {
@@ -10280,6 +10309,7 @@ mod tests {
             ],
             hooks: vec![registered("claude-code"), registered("codex")],
             gitignored: Vec::new(),
+            warnings: Vec::new(),
         };
         assert_eq!(
             agents_tty(&agents),
@@ -10320,11 +10350,27 @@ mod tests {
             installed: vec!["cursor".to_owned()],
             hooks: Vec::new(),
             gitignored: Vec::new(),
+            warnings: Vec::new(),
         };
         assert_eq!(
             agents_tty(&none),
             "This machine: no agents picked yet: topos init -g -a <agent>\n\
              Installed on this machine: cursor"
+        );
+        // `--gitignore` over a `.gitignore` that is a symlink out of the checkout: the list stands,
+        // and the one line says the file was left alone.
+        let mut unedited = agents.clone();
+        unedited.warnings = vec![crate::message::advisory(
+            "GITIGNORE_NOT_EDITED",
+            "`.gitignore` is a symlink out of this checkout; not edited".to_owned(),
+        )];
+        assert!(
+            agents_tty(&unedited).contains(
+                "\nChange: topos agents add <agent> · topos agents remove <agent>\n\
+                 warning: `.gitignore` is a symlink out of this checkout; not edited"
+            ),
+            "{}",
+            agents_tty(&unedited)
         );
     }
 
