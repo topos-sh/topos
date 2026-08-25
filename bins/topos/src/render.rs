@@ -3073,10 +3073,10 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
             .unwrap_or_else(|| "never reported".to_owned());
         // The ADDRESS, not the opaque id: this line is read by a person, and `w_6525a2e9…` names
         // nothing they can act on. The id stays on the wire, where a caller joins by it.
-        let label = r
-            .workspace
-            .as_ref()
-            .map_or_else(|| r.workspace_id.clone(), topos_types::results::WorkspaceRef::address);
+        let label = r.workspace.as_ref().map_or_else(
+            || r.workspace_id.clone(),
+            topos_types::results::WorkspaceRef::address,
+        );
         s.push_str(&format!(
             "\n  reporting {label}: {last}{}",
             if r.stale { " — STALE" } else { "" }
@@ -10600,7 +10600,10 @@ mod tests {
             text.contains("reporting topos.sh/northwind: last report 2023-11-15 22:13"),
             "{text}"
         );
-        assert!(!text.contains("w_6525a2e9"), "the opaque id is not copy: {text}");
+        assert!(
+            !text.contains("w_6525a2e9"),
+            "the opaque id is not copy: {text}"
+        );
     }
 
     #[test]

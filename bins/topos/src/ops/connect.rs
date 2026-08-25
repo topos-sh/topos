@@ -93,9 +93,11 @@ pub(crate) fn acting_universe(
         return Ok(None);
     }
     let session = all.resolve_target(explicit)?.clone();
-    Ok(Some(universe_over(ctx, connect, std::slice::from_ref(
-        &session,
-    ))?))
+    Ok(Some(universe_over(
+        ctx,
+        connect,
+        std::slice::from_ref(&session),
+    )?))
 }
 
 /// The transports for ONE workspace this machine holds a live session for, under that session's

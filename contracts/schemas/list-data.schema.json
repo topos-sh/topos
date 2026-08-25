@@ -15,6 +15,13 @@
         }
       ]
     },
+    "also_signed_in": {
+      "description": "The OTHER workspaces this machine is signed into, present only under `--remote`. The\ncatalog view acts on one workspace; this names the rest so none of them is invisible, and\nthe TTY closes the view with the spelling that shows theirs.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WorkspaceRef"
+      }
+    },
     "detail": {
       "description": "The one-skill deep dive (`list <name>`).",
       "anyOf": [
@@ -55,7 +62,7 @@
       ]
     },
     "remote": {
-      "description": "Per-workspace catalog view (only under `--remote`).",
+      "description": "Per-workspace catalog view (only under `--remote`). ONE workspace — the one the\ninvocation acts on.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/RemoteWorkspace"

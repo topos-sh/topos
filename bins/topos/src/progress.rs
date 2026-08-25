@@ -372,7 +372,6 @@ mod tests {
         assert_eq!(sink_kind(false, false), SinkKind::Plain);
     }
 
-
     fn text(p: &Plain<Vec<u8>>) -> String {
         String::from_utf8(p.out.borrow().clone()).expect("progress lines are UTF-8")
     }
