@@ -3406,7 +3406,10 @@ fn primary_rank(s: &PullSkill) -> u8 {
         A::Removed => 4,
         A::Withdrawn | A::Released => 3,
         A::Held => 2,
-        A::UpToDate => 1,
+        // Nothing landed either way. `fetched` outranks `up to date` because it is the one of the
+        // two a reader has to be told: a copy they expect to find is not there.
+        A::Fetched => 1,
+        A::UpToDate => 0,
     }
 }
 
@@ -4551,7 +4554,9 @@ impl PullReceiptScope {
     fn moved_anything(skills: &[PullSkill]) -> bool {
         use topos_types::results::PullAction as A;
         skills.iter().any(|s| match s.action {
-            A::UpToDate | A::Conflicted | A::Held => false,
+            // `fetched` moved bytes into the STORE and onto no folder — the lead line names the
+            // scope a run touched, and this run touched nothing in it.
+            A::UpToDate | A::Conflicted | A::Held | A::Fetched => false,
             A::FastForwarded
             | A::Installed
             | A::Refreshed
@@ -4717,6 +4722,11 @@ pub(crate) fn pull_tty(
             let lead = match s.action {
                 PullAction::Installed => format!("+ {shown}"),
                 PullAction::Removed => format!("- {shown}"),
+                // `+` is this receipt's mark for bytes that ARRIVED somewhere a person can open.
+                // A fetched bundle arrived in the store and nowhere else, so it leads with the
+                // name alone — workspace-qualified, because which workspace it came from is
+                // still the first thing a reader wants.
+                PullAction::Fetched => shown.to_owned(),
                 // `-` is this receipt's mark for bytes that LEFT this machine. A released record
                 // deletes nothing — its own line says the files stay — so it leads with the name
                 // alone, still workspace-qualified: which workspace stopped sharing is the point.
@@ -4826,6 +4836,12 @@ pub(crate) fn pull_tty(
         if !parts.is_empty() {
             out.push_str(&format!(": {}", parts.join(", ")));
         }
+        // A run whose bundles ALL went to the store and to no folder closes on the fact that
+        // matters more than any count: nothing was placed. It is a clause, never a bucket — the
+        // parts still sum to the total the line opened with.
+        if tally.placed_nothing() {
+            out.push_str(", nothing placed");
+        }
         out.push('.');
     }
     for line in behind_trailer(&data.behind_elsewhere) {
@@ -4859,6 +4875,10 @@ struct PullTally {
     /// attempted, so none failed) and not `already up to date` (nothing of them stands anywhere) —
     /// the word is the one the per-agent lines already use for the same fact.
     not_placed: usize,
+    /// Bundles whose bytes were fetched and verified into the store and placed in no folder,
+    /// because this scope picked no agent. Its own bucket for the same reason `not placed` is
+    /// one: they neither arrived anywhere nor were already anywhere.
+    fetched: usize,
     /// Bundles carrying local edits that are not shared — the same fact `list` prints as
     /// `(draft)` and `status` counts as `drafts ahead`.
     drafts_ahead: usize,
@@ -4884,6 +4904,7 @@ impl PullTally {
         }
         match s.action {
             A::Installed => self.installed += 1,
+            A::Fetched => self.fetched += 1,
             // Four ways bytes caught up: a served version landed, a copy behind the version this
             // machine holds was rewritten, a draft was rebased onto the new current, a settled
             // draft was fanned out to this scope's other folders.
@@ -4903,6 +4924,7 @@ impl PullTally {
     fn parts(&self) -> Vec<String> {
         [
             (self.installed, "installed"),
+            (self.fetched, "fetched"),
             (self.updated, "updated"),
             (self.removed, "removed"),
             (self.narrowed, "narrowed"),
@@ -4924,10 +4946,22 @@ impl PullTally {
         .collect()
     }
 
+    /// Whether this run FETCHED bundles and placed none of them anywhere. The summary says so in
+    /// as many words: a reader who is told "1 fetched" and nothing else has to know what the word
+    /// leaves out, and the whole point of the row is that a folder they expected is not there.
+    fn placed_nothing(&self) -> bool {
+        self.fetched > 0
+            && self.installed == 0
+            && self.updated == 0
+            && self.removed == 0
+            && self.narrowed == 0
+    }
+
     /// Every counted row, however it was counted — the sum the summary's total must equal.
     #[cfg(test)]
     fn total(&self) -> usize {
         self.installed
+            + self.fetched
             + self.updated
             + self.removed
             + self.narrowed
@@ -5122,6 +5156,10 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
         ),
         PullAction::UpToDate => (String::from("up to date"), Vec::new()),
         PullAction::FastForwarded => (String::from("fast-forwarded"), Vec::new()),
+        // The bytes are here and in no folder. The row says both halves, because either one
+        // alone reads as the other thing: "fetched" sounds like an arrival, "not placed" sounds
+        // like a failure, and this is neither.
+        PullAction::Fetched => (String::from("fetched, not placed"), Vec::new()),
         // The destination column: exactly one destination prints its path; several print a
         // count in the bundle's own noun (folders for a skill, config files for an MCP server),
         // and then spell them out beneath — a bare `(2 folders)` is a number a person cannot act
@@ -7948,6 +7986,43 @@ mod tests {
         assert!(!out.contains("not-supported"), "{out}");
     }
 
+    /// **A bundle in the store and in no folder says both halves, twice over.** A CI runner that
+    /// holds no agents pick fetches and verifies everything the lock names and places none of it.
+    /// The row does not lead with `+` — nothing arrived anywhere a person can open — and the
+    /// summary closes on the one fact that log is read for. A run that also placed something
+    /// keeps that closing clause off, because there it would be false.
+    #[test]
+    fn a_fetched_bundle_says_it_was_not_placed_on_the_row_and_in_the_summary() {
+        let only_fetched = PullData {
+            skills: vec![row("deploy", PullAction::Fetched)],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            triggers: Vec::new(),
+            scope: None,
+        };
+        let out = pull_tty(&only_fetched, &[], &[], &[], &[], 0, 0);
+        assert!(out.contains("deploy   fetched, not placed\n"), "{out}");
+        assert!(!out.contains("+ deploy"), "nothing arrived: {out}");
+        assert!(
+            out.ends_with("Checked 1 bundle: 1 fetched, nothing placed."),
+            "{out}"
+        );
+
+        let mut landed = row("notes", PullAction::Installed);
+        landed.destinations = vec!["~/.claude/skills/notes".to_owned()];
+        let mixed = PullData {
+            skills: vec![row("deploy", PullAction::Fetched), landed],
+            ..only_fetched
+        };
+        let out = pull_tty(&mixed, &[], &[], &[], &[], 0, 0);
+        assert!(
+            out.ends_with("Checked 2 bundles: 1 installed, 1 fetched."),
+            "a run that placed something never claims it placed nothing: {out}"
+        );
+    }
+
     #[test]
     fn pull_tty_compact_when_everything_is_current_and_loud_on_warnings() {
         // All current → one summary line, no per-skill rows.
@@ -8331,13 +8406,15 @@ mod tests {
                 | PullAction::DraftSynced => "updated",
                 PullAction::Removed => "removed",
                 PullAction::UpToDate => "already up to date",
+                PullAction::Fetched => "fetched",
                 PullAction::Conflicted => "waiting on you",
                 PullAction::Withdrawn | PullAction::Released => "no longer shared",
                 PullAction::Held => "held",
             }
         }
-        const EVERY: [PullAction; 11] = [
+        const EVERY: [PullAction; 12] = [
             PullAction::UpToDate,
+            PullAction::Fetched,
             PullAction::FastForwarded,
             PullAction::Installed,
             PullAction::Refreshed,

@@ -196,6 +196,68 @@ pub(crate) fn sync_one_planned(
     target: Option<&topos_types::WireCurrentRecord>,
     plan_fn: Option<&PlanFn<'_>>,
 ) -> Result<PullSkill, ClientError> {
+    let mut row = sync_one_placed(ctx, skill_id, follow, inv, target, plan_fn)?;
+    mark_fetched_if_placed_nowhere(ctx, skill_id, &mut row);
+    Ok(row)
+}
+
+/// **Bytes in the store, and in no folder.** A scope that picked no agent plans no placement, so
+/// the sync fetches the bundle, verifies it and records it — and it lands nowhere a person or an
+/// agent ever looks. That is neither `installed` (no folder appeared) nor `up to date` (nothing
+/// of it stands anywhere to be up to date), and a receipt saying either of those over an empty
+/// checkout is the one thing a CI run must not be told. The row reads `fetched`.
+///
+/// Asked of the placement MAP after the sync wrote it, so the answer is what the disk holds
+/// rather than what this run happened to do — a bundle placed by an earlier run keeps its
+/// ordinary word even on a sweep that moved nothing. Config-placed bundles are left alone: their
+/// targets are entries in files, which this map does not speak for.
+fn mark_fetched_if_placed_nowhere(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+    row: &mut PullSkill,
+) {
+    if !matches!(
+        row.action,
+        PullAction::UpToDate
+            | PullAction::Installed
+            | PullAction::Refreshed
+            | PullAction::FastForwarded
+    ) {
+        return;
+    }
+    let sp = ctx.layout.published(skill_id);
+    let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
+        return;
+    };
+    if map
+        .placement_state
+        .iter()
+        .any(|st| st.materialized_sha.is_some())
+    {
+        return;
+    }
+    if matches!(
+        crate::bundle_kind::classify(ctx, skill_id.as_str(), &map.placements),
+        RecordKind::Known(BundleKind::Mcp)
+    ) {
+        return;
+    }
+    row.action = PullAction::Fetched;
+    // `applied` counts what was PLACED. Nothing was, so it reads 0 — the store's own record of
+    // the version it holds is untouched by the way this row reports.
+    row.applied = 0;
+    row.destinations.clear();
+}
+
+/// [`sync_one_planned`] before the placed-nowhere reading is applied to its row.
+fn sync_one_placed(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+    follow: &FollowContext,
+    inv: Invocation,
+    target: Option<&topos_types::WireCurrentRecord>,
+    plan_fn: Option<&PlanFn<'_>>,
+) -> Result<PullSkill, ClientError> {
     let explicit = inv.is_explicit();
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);

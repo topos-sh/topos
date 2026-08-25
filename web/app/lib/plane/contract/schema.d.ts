@@ -1159,7 +1159,7 @@ export interface components {
          *     semantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.
          * @enum {string}
          */
-        PullAction: "up_to_date" | "fast_forwarded" | "installed" | "updated" | "removed" | "merged" | "conflicted" | "draft_synced" | "held" | "withdrawn" | "released";
+        PullAction: "up_to_date" | "fast_forwarded" | "installed" | "fetched" | "updated" | "removed" | "merged" | "conflicted" | "draft_synced" | "held" | "withdrawn" | "released";
         /**
          * @description One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value
          *     enum* (`PullAction`) is INFERRED.
@@ -1168,7 +1168,8 @@ export interface components {
             action: components["schemas"]["PullAction"];
             /**
              * Format: int64
-             * @description Highest generation actually materialized to disk.
+             * @description Highest generation actually materialized to disk. `0` on a `fetched` row: the bytes are in
+             *     the store and in no folder, so nothing of this bundle has been placed here.
              */
             applied: number;
             /**
