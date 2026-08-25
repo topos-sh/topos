@@ -22,8 +22,13 @@ import {
  * to be thrown out to the house fault screen ("Something went wrong"), which names neither the
  * cause nor the wait.
  *
+ * The two DECISION arms share that bucket, but only when they MISS: deciding a request already
+ * resolved on screen is not a guess and costs nothing, while a loop of guessed codes pays for
+ * every miss and meets the same wall.
+ *
  * Driven through the REAL action against a scratch Postgres, with its own module graph so the
- * page's per-user lookup belt is this file's alone.
+ * page's per-user belt is this file's alone; each belt case runs as its own seeded person, which
+ * is what the bucket is keyed on, so one case never spends another's tokens.
  */
 
 let session: { user: { id: string; name: string; email: string } } | null = null;
@@ -144,6 +149,43 @@ describe("the guessing belt is spent by lookups alone, and says so on the form",
     expect(
       await postVerify({ intent: "approve", code: flow.userCode, pick: "seat:" }),
     ).toMatchObject({ kind: "approved", name: "belted-box" });
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
+  });
+});
+
+describe("a guessed DECISION pays per miss; a decision on a resolved code never does", () => {
+  it("the eleventh missed approve renders the refusal, and a real approve after it still lands", async () => {
+    await seedUser(db, "u_guess", "Guesser", "guesser@example.com");
+    await seatUser(db, wsId, "u_guess", "member");
+    session = { user: { id: "u_guess", name: "Guesser", email: "guesser@example.com" } };
+
+    const identity = await import("@/lib/db/identity.server");
+    const flow = await identity.startLoginFlow("guessed-box", null);
+
+    // Ten approves of codes that resolve NOTHING. Each is the honest gone line — and each pays a
+    // token, because a decision that resolves nothing is a guess whatever it calls itself.
+    for (let i = 0; i < 10; i++) {
+      const missed = await postVerify({
+        intent: "approve",
+        code: `ZZZZ-00${String(i).padStart(2, "0")}`,
+        pick: "seat:",
+      });
+      expect(statusOf(missed)).toBe(400);
+      expect(bodyOf(missed)).toMatchObject({ kind: "refused" });
+    }
+
+    // The eleventh meets the wall the lookup meets, in the same words and on the same page.
+    const walled = await postVerify({ intent: "approve", code: "ZZZZ-0099", pick: "seat:" });
+    expect(statusOf(walled)).toBe(429);
+    expect(bodyOf(walled)).toEqual({
+      kind: "refused",
+      error: "Too many attempts — wait a few seconds and try again",
+    });
+
+    // A REAL approve still lands with the bucket empty: a code that resolves never asks the belt.
+    expect(
+      await postVerify({ intent: "approve", code: flow.userCode, pick: "seat:" }),
+    ).toMatchObject({ kind: "approved", name: "guessed-box" });
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
   });
 });
