@@ -371,7 +371,7 @@ mod tests {
         );
         assert_eq!(
             skills_dest_spelling("codex", ManifestScope::Project).as_deref(),
-            Some(".agents/skills")
+            Some(".codex/skills")
         );
         assert_eq!(
             skills_dest_spelling("claude-code", ManifestScope::Project).as_deref(),

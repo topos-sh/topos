@@ -580,7 +580,7 @@ mod tests {
         let entries = sel(&["codex"], &[])
             .skill_entries(ManifestScope::Project)
             .unwrap();
-        assert_eq!(entries, vec![".agents/skills".to_owned()]);
+        assert_eq!(entries, vec![".codex/skills".to_owned()]);
         // The union with a literal, deduped in selection order.
         let entries = sel(&["codex"], &["~/.claude/skills", "~/.codex/skills"])
             .skill_entries(ManifestScope::Global)
@@ -768,14 +768,14 @@ mod tests {
     }
 
     /// A folder SEVERAL slugs share is reconstructed as the folder, never as one of them: the
-    /// project default `.agents/skills` is where most of the registry lands, so `-a codex` in a
+    /// cross-agent `.agents/skills` is where most of the registry lands, so `-a gemini-cli` in a
     /// project undoes as `--dest .agents/skills` — the fact the row recorded, and the one the
     /// person can check. Its machine-scope twin `~/.agents/skills` is shared too and behaves the
     /// same, while the single-claimant folders keep their slug.
     #[test]
     fn a_shared_folder_undoes_as_the_folder_not_one_of_its_slugs() {
-        // The premise: `-a codex` in a project resolves to the folder most of the registry shares.
-        let entries = sel(&["codex"], &[])
+        // The premise: `-a gemini-cli` in a project resolves to the shared folder.
+        let entries = sel(&["gemini-cli"], &[])
             .skill_entries(ManifestScope::Project)
             .unwrap();
         assert_eq!(entries, vec![".agents/skills".to_owned()]);
@@ -797,7 +797,8 @@ mod tests {
             ),
             vec!["--dest", "~/.agents/skills"]
         );
-        // A folder exactly one slug spells still reconstructs as the slug.
+        // A folder exactly one slug spells still reconstructs as the slug — Codex's own now
+        // among them.
         assert_eq!(
             undo_tail(
                 &[".claude/skills".to_owned()],
@@ -805,6 +806,14 @@ mod tests {
                 BundleKind::Skill
             ),
             vec!["-a", "claude-code"]
+        );
+        assert_eq!(
+            undo_tail(
+                &[".codex/skills".to_owned()],
+                ManifestScope::Project,
+                BundleKind::Skill
+            ),
+            vec!["-a", "codex"]
         );
     }
 }

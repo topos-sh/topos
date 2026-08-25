@@ -465,6 +465,9 @@ fn ensure_inner(
         None => placement::plan_targets(ctx, sid.as_str(), naming, Some(&map), None),
     };
     let refused = plan.refused.clone();
+    // The built-in follows a moved agent folder like every other bundle: the copy left behind
+    // retires in this same run (see `reconcile::retire_moved_copies`).
+    let map = super::reconcile::retire_moved_copies(ctx, &sid, &lock, &map, &plan)?.unwrap_or(map);
     let next = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&next, &plan);
     let scans = placement::scan_placements(ctx, &next)?;

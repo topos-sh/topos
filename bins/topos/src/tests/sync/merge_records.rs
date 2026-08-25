@@ -793,13 +793,13 @@ fn a_reset_that_cannot_settle_every_copy_leaves_the_merge_live() {
     );
     let copy = rig.conflict_copy(&id);
 
-    // Two copies holding the same un-merged draft, each recorded for its own agent — and the machine
-    // picks only one of them. The plan names the picked agent's copy alone; the other is outside
-    // it (`placement::managed_indices`: frozen in place, never written, never deleted).
+    // Two copies holding the same un-merged draft: the adopted folder, which every plan manages,
+    // and a replica recorded for an agent this machine does not pick. The plan names the first;
+    // the second is outside it (`placement::managed_indices`: frozen in place, never written,
+    // never deleted).
     let replica = rig.work.0.join("replica");
     add_replica(&rig, &id, &replica, mine);
     rig.patch_map(&id, |m| {
-        m.placement_state[0].agent = Some("claude-code".to_owned());
         m.placement_state[1].agent = Some("cursor".to_owned());
     });
     crate::agents_pick::write_pick(

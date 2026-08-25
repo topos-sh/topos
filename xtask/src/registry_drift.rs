@@ -43,6 +43,16 @@ use topos_harness::registry::KnownHarness;
 const UPSTREAM_URL: &str =
     "https://raw.githubusercontent.com/vercel-labs/skills/main/src/agents.ts";
 
+/// Rows whose project dir DELIBERATELY differs from upstream, each paired with the upstream value
+/// the decision was made against and why. Recorded here so the report STATES the difference instead
+/// of re-raising it as drift every week — and so an upstream that moves that value drifts again,
+/// which is exactly when a settled decision deserves another look.
+const DELIBERATE_PROJECT_DIRS: [(&str, &str, &str); 1] = [(
+    "codex",
+    ".agents/skills",
+    "Codex reads `<repo>/.codex/skills` as well, and lists a skill sitting in both folders twice",
+)];
+
 /// The dir fields parsed out of one upstream `agents` entry.
 struct UpstreamAgent {
     slug: String,
@@ -211,6 +221,7 @@ pub(crate) fn run() -> Result<()> {
 
     // Per-row dir mismatches (only for slugs present in BOTH tables).
     let mut mismatches: Vec<String> = Vec::new();
+    let mut deliberate: Vec<String> = Vec::new();
     for up in &upstream {
         let Some(loc) = local_by.get(up.slug.as_str()) else {
             continue;
@@ -219,10 +230,17 @@ pub(crate) fn run() -> Result<()> {
         if let Some(up_proj) = &up.project_dir
             && up_proj != loc.project_dir()
         {
-            mismatches.push(format!(
+            let line = format!(
                 "{slug}: project dir — upstream `{up_proj}`, local `{}`",
                 loc.project_dir()
-            ));
+            );
+            match DELIBERATE_PROJECT_DIRS
+                .iter()
+                .find(|(s, dir, _)| s == slug && dir == up_proj)
+            {
+                Some((_, _, why)) => deliberate.push(format!("{line} — deliberate: {why}")),
+                None => mismatches.push(line),
+            }
         }
         match &up.global_dir {
             GlobalDir::Opaque => {} // an un-reducible upstream expression — not comparable
@@ -252,6 +270,13 @@ pub(crate) fn run() -> Result<()> {
         upstream.len(),
         local.len()
     );
+
+    if !deliberate.is_empty() {
+        println!("\ndeliberate differences (recorded, not drift):");
+        for d in &deliberate {
+            println!("    = {d}");
+        }
+    }
 
     if missing_local.is_empty() && missing_upstream.is_empty() && mismatches.is_empty() {
         println!(
@@ -381,10 +406,18 @@ export async function detectInstalledAgents() { return []; }
                 Some(up.as_str()),
                 "{slug}: parsed global dir must equal the registry accessor's first user dir",
             );
-            assert_eq!(
-                by[slug].project_dir.as_deref(),
-                Some(local[slug].project_dir())
-            );
+            match DELIBERATE_PROJECT_DIRS.iter().find(|(s, _, _)| *s == slug) {
+                // A deliberate deviation: the parse must still reproduce the UPSTREAM value the
+                // decision was made against, or the report would stop stating the difference.
+                Some((_, upstream_dir, _)) => {
+                    assert_eq!(by[slug].project_dir.as_deref(), Some(*upstream_dir));
+                    assert_ne!(local[slug].project_dir(), *upstream_dir);
+                }
+                None => assert_eq!(
+                    by[slug].project_dir.as_deref(),
+                    Some(local[slug].project_dir())
+                ),
+            }
         }
     }
 }

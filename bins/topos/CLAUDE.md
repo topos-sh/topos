@@ -253,9 +253,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   feeds only the wildcard and the sentences that name what is installed; teardown never reads the
   pick.
 - `placement` — where a bundle's bytes land per scope. **One native copy per PICKED agent, in the
-  folder its registry ROW names at that scope, through the one resolver**, so a machine-local
-  table that moved an agent's skills dir moves the bytes with it; two picked agents whose rows
-  name one folder share one copy; the `HarnessAdapter` answers for the dir only where no row can
+  folder its registry ROW names at that scope, through the one resolver**, so a table that moved
+  an agent's skills dir moves the bytes with it: a recorded copy is reused only while it still
+  sits in the folder that agent reads today, and the copy left behind retires in the same run that
+  lands the new one (`reconcile::retire_moved_copies` over `placement::moved_out`) — unless
+  another picked agent still reads that folder, in which case it stays for them. Two picked agents
+  whose rows name one folder share one copy; the `HarnessAdapter` answers for the dir only where no row can
   (no machine roots at all). Two target shapes ride one plan:
   a DIRECTORY the bundle owns (the picked agents' folders; project-rooted with containment
   proven at the write boundary), or ENTRIES it owns inside a config file shared with the whole

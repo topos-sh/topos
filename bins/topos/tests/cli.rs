@@ -1912,7 +1912,7 @@ fn init_with_agents_writes_exactly_the_spec_file_set() {
     assert_eq!(
         receipt,
         "Using Claude Code and Codex in this project.\n\
-         Installed 1 skill to .claude/skills and .agents/skills.\n\
+         Installed 1 skill to .claude/skills and .codex/skills.\n\
          Auto-update hooks: .claude/settings.local.json, .codex/hooks.json (Codex runs it once \
          you trust this repo).\n\
          New files are not ignored by git. To keep them out: topos init --gitignore\n\
@@ -1928,8 +1928,8 @@ fn init_with_agents_writes_exactly_the_spec_file_set() {
         .collect();
     let codex_copy: Vec<String> = files
         .iter()
-        .filter(|f| f.starts_with(".agents/skills/topos/"))
-        .map(|f| f.trim_start_matches(".agents/skills/topos/").to_owned())
+        .filter(|f| f.starts_with(".codex/skills/topos/"))
+        .map(|f| f.trim_start_matches(".codex/skills/topos/").to_owned())
         .collect();
     assert!(
         claude_copy.contains(&"SKILL.md".to_owned()),
@@ -1939,7 +1939,7 @@ fn init_with_agents_writes_exactly_the_spec_file_set() {
     let rest: Vec<&String> = files
         .iter()
         .filter(|f| {
-            !f.starts_with(".claude/skills/topos/") && !f.starts_with(".agents/skills/topos/")
+            !f.starts_with(".claude/skills/topos/") && !f.starts_with(".codex/skills/topos/")
         })
         .collect();
     assert_eq!(
@@ -2140,7 +2140,7 @@ fn agents_remove_without_yes_describes_the_loss() {
     let describe = rig.stdout(&["agents", "remove", "codex"]);
     assert!(
         describe.starts_with(
-            "This removes codex from this project. It deletes:\n  .agents/skills/topos\n"
+            "This removes codex from this project. It deletes:\n  .codex/skills/topos\n"
         ),
         "{describe}"
     );
@@ -2174,7 +2174,7 @@ fn agents_remove_without_yes_describes_the_loss() {
     );
     assert_eq!(
         v["data"]["describe"]["removed_dirs"],
-        serde_json::json!([".agents/skills/topos"])
+        serde_json::json!([".codex/skills/topos"])
     );
     assert_eq!(
         v["data"]["describe"]["hooks"],
@@ -2202,7 +2202,7 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
 
     let receipt = rig.stdout(&["agents", "remove", "codex", "--yes"]);
     assert!(
-        receipt.starts_with("Removed codex from this project. Deleted:\n  .agents/skills/topos\n"),
+        receipt.starts_with("Removed codex from this project. Deleted:\n  .codex/skills/topos\n"),
         "{receipt}"
     );
     assert!(
@@ -2226,17 +2226,13 @@ fn agents_remove_deletes_the_hook_the_entries_and_the_copies() {
         );
     }
     assert!(
-        !rig.project.join(".agents/skills/topos").exists(),
+        !rig.project.join(".codex/skills/topos").exists(),
         "the copy is gone"
     );
     // The hook entry leaves — and with it the file and the folder, because everything in them
     // was topos's own.
     assert!(!rig.project.join(".codex/hooks.json").exists());
     assert!(!rig.project.join(".codex").exists(), "no empty folder left");
-    assert!(
-        !rig.project.join(".agents").exists(),
-        "no empty folder left"
-    );
     assert!(
         rig.project.join(".claude/skills/topos/SKILL.md").exists(),
         "claude-code keeps its copy"
@@ -2403,7 +2399,7 @@ fn agents_remove_leaves_the_pick_when_cleanup_fails() {
     let rig = pick_rig("agents-remove-fails", &["claude-code", "codex"]);
     rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
     // The copy's parent is made read-only, so deleting the copy fails.
-    let agents_dir = rig.project.join(".agents/skills");
+    let agents_dir = rig.project.join(".codex/skills");
     let copy = agents_dir.join("topos");
     assert!(copy.exists());
     std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -2541,11 +2537,11 @@ fn gitignore_append_is_idempotent() {
     std::fs::write(rig.project.join(".gitignore"), "node_modules\n").unwrap();
     let receipt = rig.stdout(&["init", "-a", "claude-code", "-a", "codex", "--gitignore"]);
     assert!(
-        receipt.contains("Added to .gitignore: .claude/, .codex/, .agents/.\n"),
+        receipt.contains("Added to .gitignore: .claude/, .codex/.\n"),
         "{receipt}"
     );
     assert!(!receipt.contains("not ignored by git"), "{receipt}");
-    let expected = "node_modules\n.claude/\n.codex/\n.agents/\n";
+    let expected = "node_modules\n.claude/\n.codex/\n";
     assert_eq!(
         std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
         expected
@@ -2841,7 +2837,7 @@ fn a_project_sweep_keeps_the_built_in_for_the_pick() {
     let rig = pick_rig("sweep-keeps-builtin", &["claude-code", "codex"]);
     rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
     let claude_copy = rig.project.join(".claude/skills/topos/SKILL.md");
-    let codex_copy = rig.project.join(".agents/skills/topos/SKILL.md");
+    let codex_copy = rig.project.join(".codex/skills/topos/SKILL.md");
     assert!(claude_copy.is_file() && codex_copy.is_file());
 
     // No remove yet: the sweep after an init is already the shape that must keep the copies.
@@ -3189,7 +3185,7 @@ fn add_dash_a_outside_the_pick_refuses_naming_agents_add() {
         "{v}"
     );
     assert!(
-        !rig.project.join(".agents/skills/writer").exists(),
+        !rig.project.join(".codex/skills/writer").exists(),
         "the unpicked agent's folder was never written into"
     );
 
@@ -3292,14 +3288,14 @@ fn init_gitignore_appends_over_a_standing_pick() {
     assert!(!rig.project.join(".gitignore").exists());
     let again = rig.stdout(&["init", "--gitignore"]);
     assert!(
-        again.contains("Added to .gitignore: .claude/, .codex/, .agents/.\n"),
+        again.contains("Added to .gitignore: .claude/, .codex/.\n"),
         "{again}"
     );
     assert!(!again.contains("not ignored by git"), "{again}");
     assert!(!again.contains("already exists"), "{again}");
     assert_eq!(
         std::fs::read_to_string(rig.project.join(".gitignore")).unwrap(),
-        ".claude/\n.codex/\n.agents/\n"
+        ".claude/\n.codex/\n"
     );
     // A plain `init` on the same tree is still the no-op receipt.
     let plain = rig.stdout(&["init"]);
