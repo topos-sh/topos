@@ -93,7 +93,7 @@ pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
     remove_builtin as builtin_remove,
 };
-pub(crate) use diff::{DiffBudget, diff, diff_resolved};
+pub(crate) use diff::{DiffBudget, diff, reset_preview_diff};
 pub(crate) use fmt::fmt_manifest;
 pub(crate) use init::init;
 pub(crate) use inventory::ScopeView;
