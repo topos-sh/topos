@@ -58,17 +58,23 @@ impl Rig {
     fn new(tag: &str) -> Self {
         let agent_home = Scratch::new(&format!("{tag}-agents"));
         let harness = stub_claude(&agent_home.0);
-        Self {
+        let rig = Self {
             home: Scratch::new(&format!("{tag}-home")),
             agent_home,
             fs: RealFs,
             ids: SeqIds::new("s"),
             clock: FixedClock(1),
             harness,
-        }
+        };
+        rig.pick(&["*"]);
+        rig
     }
     fn layout(&self) -> Layout {
         Layout::new(&self.home.0)
+    }
+    /// Replace this machine's agents pick.
+    fn pick(&self, agents: &[&str]) {
+        crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&self.layout()), agents);
     }
     fn detect(&self, dot_dir: &str) {
         std::fs::create_dir_all(self.agent_home.0.join(dot_dir)).unwrap();

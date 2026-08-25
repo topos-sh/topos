@@ -84,14 +84,23 @@ impl Rig {
         // directory would not move a byte; it would only make this rig disagree with the engine
         // about where to look.)
         let harness = tmp_harness(native_skills_root(&home.0));
-        Self {
+        let rig = Self {
             home,
             work,
             fs: RealFs,
             ids: SeqIds::new("s"),
             clock: FixedClock(1_700_000_000_000),
             harness,
-        }
+        };
+        // The machine pick: every agent installed here — so the rig's detection seeds keep
+        // answering which agents are reached. A test about the pick itself narrows it.
+        rig.pick(&["*"]);
+        rig
+    }
+
+    /// Replace this machine's agents pick (`<home>/.topos/agents.json`).
+    pub(super) fn pick(&self, agents: &[&str]) {
+        crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&self.layout()), agents);
     }
 
     /// Where this rig's ACTIVE-harness (native, machine-scope) copies land.

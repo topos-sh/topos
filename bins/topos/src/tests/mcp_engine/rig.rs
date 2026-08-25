@@ -77,17 +77,24 @@ impl Rig {
         let home = Scratch::new(&format!("{tag}-home"));
         let work = Scratch::new(&format!("{tag}-work"));
         let harness = tmp_harness(work.0.join("skills"));
-        Self {
+        let rig = Self {
             home,
             work,
             fs: RealFs,
             ids: SeqIds::new("s"),
             clock: FixedClock(1_700_000_000_000),
             harness,
-        }
+        };
+        // The machine pick: every agent installed here, so the seeded detect dirs decide reach.
+        rig.pick(&["*"]);
+        rig
     }
     pub(super) fn layout(&self) -> Layout {
         Layout::new(&self.home.0.join(".topos"))
+    }
+    /// Replace this machine's agents pick (`<home>/.topos/agents.json`).
+    pub(super) fn pick(&self, agents: &[&str]) {
+        crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&self.layout()), agents);
     }
     pub(super) fn ctx_at<'a>(&'a self, cwd: Option<&Path>) -> Ctx<'a> {
         Ctx {

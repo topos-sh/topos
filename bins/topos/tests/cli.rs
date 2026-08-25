@@ -50,6 +50,22 @@ fn work_dir(home: &Path) -> PathBuf {
     dir
 }
 
+/// The machine's agents pick, seeded ONCE per `$TOPOS_HOME` as every agent installed here (the
+/// hermetic homes decide what is installed) — a run that never picked would place nothing. A test
+/// about the pick itself writes the file first; the seed never overwrites one.
+fn seed_pick(topos_home: &Path) {
+    let path = topos_home.join("agents.json");
+    if path.exists() {
+        return;
+    }
+    std::fs::create_dir_all(topos_home).expect("the sidecar home");
+    std::fs::write(
+        &path,
+        b"{\n  \"schema_version\": 1,\n  \"agents\": [\n    \"*\"\n  ]\n}\n",
+    )
+    .expect("the agents pick");
+}
+
 fn run(home: &Path, args: &[&str]) -> (bool, serde_json::Value) {
     // Hermetic: point the Claude config home at an isolated (empty) dir so a test never reads or writes
     // the real `~/.claude`.
@@ -57,6 +73,7 @@ fn run(home: &Path, args: &[&str]) -> (bool, serde_json::Value) {
 }
 
 fn run_in(home: &Path, claude: &Path, args: &[&str]) -> (bool, serde_json::Value) {
+    seed_pick(home);
     let out = Command::new(bin())
         .env("TOPOS_HOME", home)
         .env("CLAUDE_CONFIG_DIR", claude)
@@ -72,6 +89,7 @@ fn run_in(home: &Path, claude: &Path, args: &[&str]) -> (bool, serde_json::Value
 /// The raw process runner (exit code + both streams), for the surface tests below. `debug` sets
 /// `TOPOS_DEBUG=1`; it is scrubbed otherwise so an ambient value can't skew an assertion.
 fn run_raw(home: &Path, args: &[&str], debug: bool) -> std::process::Output {
+    seed_pick(home);
     let mut cmd = Command::new(bin());
     cmd.env("TOPOS_HOME", home)
         .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
@@ -467,6 +485,7 @@ fn run_disc_at(
     cwd: &Path,
     args: &[&str],
 ) -> serde_json::Value {
+    seed_pick(topos_home);
     let out = Command::new(bin())
         .env("TOPOS_HOME", topos_home)
         .env("HOME", disc_home)
@@ -935,6 +954,7 @@ fn sweep_raw(
     claude: &Path,
     args: &[&str],
 ) -> std::process::Output {
+    seed_pick(topos_home);
     Command::new(bin())
         .env("TOPOS_HOME", topos_home)
         .env("HOME", disc_home)
