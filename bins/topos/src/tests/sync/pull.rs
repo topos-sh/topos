@@ -117,6 +117,88 @@ fn a_bare_diff_reads_against_the_live_current_not_the_cached_base() {
     );
 }
 
+/// **A RESET PREVIEW IS MEASURED AGAINST THE VERSION IT RESTORES.** `--reset` re-materializes the
+/// version this copy applied (`lock.base_commit`), and the describe's header names it. The body
+/// under that header used to be the bare `diff` read — the copy against the workspace's LIVE
+/// current — so the moment the two came apart (a revert landed on the server, a lock pins an
+/// older version) the preview listed changes `--yes` would never make, directly beneath a header
+/// naming the version it does land. `topos diff` is untouched: measuring YOUR change against what
+/// the team runs now is exactly what that verb is for.
+#[test]
+fn a_reset_preview_reads_against_the_version_it_restores_not_the_live_current() {
+    let rig = Rig::new("reset-preview-base");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::FastForwarded
+    );
+
+    // A revert run elsewhere puts the genesis bytes back as `current`. No sweep has run here
+    // since, so this copy still HOLDS v1 — and a reset here restores v1, not the revert.
+    let restored = mk_version(&[v1.id], BASE, "d_rev", "topos: revert");
+    plane.add_version(&id, &restored);
+    plane.set_current(&id, served(WS, &id, restored.id, 2));
+
+    // …and the copy is edited: one file rewritten over v1, the rest of v1 left alone.
+    write_tree(
+        &rig.placement(),
+        &[
+            ("SKILL.md", FileMode::Regular, b"# mine\n"),
+            ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+            ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+        ],
+    );
+
+    let ctx = rig.ctx(&plane, &foll);
+    let ops::ResetOutcome::Described { items, .. } = ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        false,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap() else {
+        panic!("without `--yes` the reset describes");
+    };
+    assert_eq!(items[0].to_version, to_hex(&v1.id), "v1 is what lands");
+    let body = &items[0].drop_diff;
+    assert!(
+        body.contains("-# mine") && body.contains("+# v1"),
+        "the edit goes away and v1's line comes back: {body}"
+    );
+    assert!(
+        !body.contains("ref/notes.md") && !body.contains("echo v0"),
+        "the live current's bytes are not what `--yes` puts back: {body}"
+    );
+
+    // `topos diff` over the very same state still reads against the live current.
+    let d = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+        ops::StoreScope::Here,
+    )
+    .unwrap();
+    assert_eq!(
+        d.version_id,
+        to_hex(&restored.id),
+        "the server's current is the truth for `diff`"
+    );
+    assert!(
+        d.diff.contains("ref/notes.md"),
+        "the real difference against what the team runs: {}",
+        d.diff
+    );
+}
+
 /// By the merge model an unmodified copy fast-forwards, and it does so even when the served
 /// current UNDOES the version it holds (a revert restored older bytes). What the receipt then owes
 /// is the disclosure: which version it replaced, and the one command that brings it back. An

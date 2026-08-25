@@ -107,19 +107,23 @@ pub(crate) fn diff(
     diff_resolved(ctx, &layout, &id, &lock, r#ref, budget, sel)
 }
 
-/// WHICH WAY a bare draft ↔ current diff reads — the two verbs that print one want opposite
-/// orders, and a unified diff only means something when `a` is the state that goes away.
+/// WHICH READ a bare draft diff makes: the DIRECTION it prints, and the VERSION it measures
+/// against. Two verbs print one, and they want opposite orders over different rulers — a unified
+/// diff only means something when `a` is the state that goes away, and a preview only means
+/// something when the other side is the state that arrives. One enum carries both because the two
+/// choices are not independent: read in the reset's direction against a version the reset does not
+/// land, the body describes changes `--yes` will never make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DiffSides {
-    /// `topos diff`: `a` is the team's current, `b` is your copy — so the `+` lines are YOUR
-    /// edits, which is what "show me my change" means.
-    CurrentToDraft,
-    /// The `--reset` preview: `a` is your copy (what goes away), `b` is the team's version (what
-    /// lands). A reset REPLACES your copy with the team's, so the preview has to read the way the
-    /// apply runs. Printed in the other order it said the opposite of what `--yes` does: the
-    /// team's incoming lines rendered as deletions and the edits about to be destroyed as
-    /// additions.
-    DraftToCurrent,
+pub(crate) enum BareDiff {
+    /// `topos diff`: `a` is the team's LIVE current, `b` is your copy — so the `+` lines are YOUR
+    /// edits, which is what "show me my change" means, measured against what the team runs now.
+    Diff,
+    /// The `--reset` preview: `a` is your copy (what goes away), `b` is the version that LANDS —
+    /// the applied base this copy records, which is exactly what the reset re-materializes.
+    /// Printed in the other order it said the opposite of what `--yes` does: the incoming lines
+    /// rendered as deletions and the edits about to be destroyed as additions. Measured against
+    /// the live current instead, it listed changes the reset never makes.
+    ResetPreview,
 }
 
 /// [`diff`] over an ALREADY-RESOLVED copy — the shape [`reset_preview_diff`] shares, so a loss
@@ -144,7 +148,7 @@ fn diff_resolved(
     let sp = layout.published(id);
 
     let Some(reference) = r#ref else {
-        return diff_draft_vs_current(&sctx, &sp, lock, budget, sel, DiffSides::CurrentToDraft);
+        return diff_draft_vs_current(&sctx, &sp, lock, budget, sel, BareDiff::Diff);
     };
 
     // Parse the ref: `<a>..<b>` is a range; otherwise a single endpoint compared against `current` (so a
@@ -174,13 +178,19 @@ fn diff_resolved(
     })
 }
 
-/// The `--reset` preview's LOSS diff over an already-resolved copy: the same bare draft ↔ current
-/// read `diff` makes, in the direction a reset runs ([`DiffSides::DraftToCurrent`]) — `a` is the
-/// copy about to be discarded, `b` is the version about to land.
+/// The `--reset` preview's LOSS diff over an already-resolved copy, read the way a reset runs
+/// ([`BareDiff::ResetPreview`]): `a` is the copy about to be discarded, `b` is the version about
+/// to land — the applied base this copy records, rendered from its own store.
+///
+/// It is the APPLIED BASE and not the workspace's live current on purpose: a reset re-materializes
+/// `lock.base_commit` (see `sync_engine::reset_to_base`), so that is the only version whose delta
+/// describes what `--yes` will do. Wherever the two differ — a project lock pinning an older
+/// version, a revert that moved the current out from under this copy — a preview measured against
+/// the live current printed a body of changes the reset would never make, directly under a header
+/// naming the version it does land.
 ///
 /// # Errors
-/// As [`diff_resolved`]: a scan/store failure, a placement freeze, or a transport fault reading
-/// the workspace's live current.
+/// As [`diff_resolved`]: a scan/store failure, a placement freeze, or an unreadable applied base.
 pub(crate) fn reset_preview_diff(
     ctx: &Ctx<'_>,
     layout: &sidecar::Layout,
@@ -191,7 +201,7 @@ pub(crate) fn reset_preview_diff(
 ) -> Result<DiffData, ClientError> {
     let sctx = super::pull::ctx_with_layout(ctx, layout);
     let sp = layout.published(id);
-    diff_draft_vs_current(&sctx, &sp, lock, budget, sel, DiffSides::DraftToCurrent)
+    diff_draft_vs_current(&sctx, &sp, lock, budget, sel, BareDiff::ResetPreview)
 }
 
 /// Apply a byte budget to per-file diff sections: emit LEADING whole sections while the running
@@ -234,7 +244,7 @@ fn apply_budget(
     }
 }
 
-/// The bare draft ↔ current diff (current = the on-machine base commit). `ctx` is the OWNING
+/// The bare draft diff, in the direction and against the base `read` names. `ctx` is the OWNING
 /// store's (see [`diff`]): the store, the placement map, and the drift scan all belong to whichever
 /// scope holds this bundle's custody.
 fn diff_draft_vs_current(
@@ -243,7 +253,7 @@ fn diff_draft_vs_current(
     lock: &Lock,
     budget: DiffBudget,
     sel: &super::Selection,
-    sides: DiffSides,
+    read: BareDiff,
 ) -> Result<DiffData, ClientError> {
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
@@ -264,19 +274,24 @@ fn diff_draft_vs_current(
         return Err(refusal);
     }
     let store = Store::open(&sp.store)?;
-    // THE SERVER'S CURRENT IS THE TRUTH: the left side is the workspace's LIVE current, read
-    // here, never the sidecar's cached base. A revert run elsewhere moves `current` without
-    // touching this store, and a diff against the cached base then answered "no changes" over
-    // a copy that differs from what the team runs. The cached base stands only where there is
-    // no live current to read (a bundle no workspace delivers here) or where it IS the current.
-    let (version_id, base_files) = match live_current(ctx, lock, &store)? {
-        Some(live) => live,
-        None => {
-            let version_id = parse_hex32(&lock.base_commit)?;
-            let bundle_digest = parse_hex32(&lock.bundle_digest)?;
-            let base = store.render_verified(version_id, bundle_digest)?;
-            (lock.base_commit.clone(), rendered_files(base))
-        }
+    // WHICH VERSION the copy is measured against — and the two reads answer differently.
+    //
+    // For `diff`, THE SERVER'S CURRENT IS THE TRUTH: the other side is the workspace's LIVE
+    // current, read here, never the sidecar's cached base. A revert run elsewhere moves `current`
+    // without touching this store, and a diff against the cached base then answered "no changes"
+    // over a copy that differs from what the team runs. The applied base stands only where there
+    // is no live current to read (a bundle no workspace delivers here) or where it IS the current.
+    //
+    // For the RESET PREVIEW it is the APPLIED BASE, always: the reset puts that version back, so
+    // it is the only ruler whose delta is the loss the preview promises (see
+    // [`reset_preview_diff`]). The live current is not read at all — a version this reset does not
+    // land has nothing to say about what it discards.
+    let (version_id, base_files) = match read {
+        BareDiff::ResetPreview => applied_base(&store, lock)?,
+        BareDiff::Diff => match live_current(ctx, lock, &store)? {
+            Some(live) => live,
+            None => applied_base(&store, lock)?,
+        },
     };
     // The draft side is the WORK TREE — the single edited copy when one exists (draft-anywhere),
     // else the first placement; several divergent copies freeze typed. A `-a`/`--dest` selection
@@ -314,9 +329,9 @@ fn diff_draft_vs_current(
     // `a` is always the side that GOES AWAY: for `diff` that is the team's current (your edits
     // read as `+`), for the reset preview it is your copy (your edits read as `-`, and the
     // version that lands reads as `+`).
-    let sections = match sides {
-        DiffSides::CurrentToDraft => unified_diff_sections(&base_files, &draft_files),
-        DiffSides::DraftToCurrent => unified_diff_sections(&draft_files, &base_files),
+    let sections = match read {
+        BareDiff::Diff => unified_diff_sections(&base_files, &draft_files),
+        BareDiff::ResetPreview => unified_diff_sections(&draft_files, &base_files),
     };
     let (diff, truncated, files) = apply_budget(sections, budget);
 
@@ -334,6 +349,18 @@ fn diff_draft_vs_current(
         skill: dest.as_ref().map(|_| lock.name.clone()),
         dest,
     })
+}
+
+/// The version this store APPLIED — `lock.base_commit` rendered from the local store and
+/// re-verified against the digest the lock records: `(version id, its files)`.
+///
+/// # Errors
+/// A malformed id/digest in the lock, or a store read that fails verify-on-read.
+fn applied_base(store: &Store, lock: &Lock) -> Result<(String, Vec<DiffFileOwned>), ClientError> {
+    let version_id = parse_hex32(&lock.base_commit)?;
+    let bundle_digest = parse_hex32(&lock.bundle_digest)?;
+    let base = store.render_verified(version_id, bundle_digest)?;
+    Ok((lock.base_commit.clone(), rendered_files(base)))
 }
 
 /// The workspace's LIVE `current` for a followed bundle, when it is NOT the version this store

@@ -1177,3 +1177,141 @@ fn a_target_from_the_other_scope_refuses_naming_the_scope_it_searched() {
     );
     assert!(msg.contains("`topos add -g api`"), "{msg}");
 }
+
+// =================================================================================================
+// WHICH VERSION A COPY REPLACED — said at both scopes, once.
+// =================================================================================================
+
+/// The 12 chars every receipt spells a version id with.
+fn short12(v: &Version) -> String {
+    crate::render::short(&topos_core::digest::to_hex(&v.id)).to_owned()
+}
+
+/// The disclosure lines of one code, in order.
+fn coded<'a>(out: &'a ops::PullOutcome, code: &str) -> Vec<&'a str> {
+    out.disclosures
+        .iter()
+        .filter(|m| m.code.as_deref() == Some(code))
+        .map(|m| m.text.as_str())
+        .collect()
+}
+
+/// **A MACHINE-WIDE UPDATE NAMES THE VERSION IT REPLACED.** A project update says it from
+/// `topos.lock` (the old document against the new one); the machine has no lock, so `-g` printed
+/// `fast-forwarded` and named neither end of the move — leaving out the one id a person needs to
+/// type to put the old bytes back. The lock did not move here; the COPY did, and the copy is what
+/// the line is about: same wording, same channel, same `note:` place in the receipt. A FIRST
+/// receive replaced nothing and says nothing.
+#[test]
+fn a_machine_scope_update_discloses_the_version_it_replaced() {
+    let rig = Rig::new("g-replaced");
+    rig.seed_session();
+    let v1 = one_file(b"# v1\n");
+    let v2 = one_file(b"# v2\n");
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())))
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // The first receive: bytes land, and nothing was replaced.
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let first = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert_eq!(first.data.skills[0].action, PullAction::Installed);
+    assert!(
+        coded(&first, "COPY_MOVED").is_empty(),
+        "{:?}",
+        first.disclosures
+    );
+
+    // The team publishes; the machine's copy fast-forwards — and says off what.
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v2)], Vec::new());
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert_eq!(out.data.skills[0].action, PullAction::FastForwarded);
+    assert_eq!(
+        coded(&out, "COPY_MOVED"),
+        vec![format!("deploy: {} → {}", short12(&v1), short12(&v2))],
+        "exactly one line, naming both ends: {:?}",
+        out.disclosures
+    );
+    let receipt = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
+    );
+    assert_eq!(
+        receipt
+            .lines()
+            .filter(|l| l.starts_with("note: deploy: "))
+            .count(),
+        1,
+        "{receipt}"
+    );
+
+    // A sweep with nothing to move says nothing again.
+    let quiet = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        coded(&quiet, "COPY_MOVED").is_empty(),
+        "old == new is not a move: {:?}",
+        quiet.disclosures
+    );
+}
+
+/// …and the project scope keeps saying it ONCE, through the lock it moves. The copy-level line is
+/// the machine's answer to having no lock — a project run that emitted both would print the same
+/// fact twice under two codes.
+#[test]
+fn a_project_scope_update_discloses_the_replaced_version_only_once() {
+    let rig = Rig::new("proj-replaced");
+    rig.seed_session();
+    let v1 = one_file(b"# v1\n");
+    let v2 = one_file(b"# v2\n");
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())))
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let proj = project(
+        "proj-replaced-checkout",
+        &format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[skills]\ndeploy = \"latest\"\n"),
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    sweep(&ctx, &plane, &dir);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v2)], Vec::new());
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert_eq!(
+        coded(&out, "LOCK_MOVED"),
+        vec![format!("deploy: {} → {}", short12(&v1), short12(&v2))],
+        "{:?}",
+        out.disclosures
+    );
+    assert!(
+        coded(&out, "COPY_MOVED").is_empty(),
+        "the lock already said it: {:?}",
+        out.disclosures
+    );
+    let receipt = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+        out.unplaced_bundles.len(),
+    );
+    assert_eq!(
+        receipt
+            .lines()
+            .filter(|l| l.starts_with("note: deploy: "))
+            .count(),
+        1,
+        "{receipt}"
+    );
+}

@@ -617,7 +617,10 @@ pub(crate) fn reset(
         // above (never re-resolved: a second pass could answer with the other scope's copy and
         // describe a loss nobody is about to take). Read in the direction the RESET runs: `a` is
         // this copy (what goes away), `b` is the version that lands — a preview that read the
-        // other way told a person the opposite of what `--yes` was about to do. DIVERGENT copies
+        // other way told a person the opposite of what `--yes` was about to do. And measured
+        // against exactly the version `to_version` names below — `lock.base_commit`, what
+        // `reset_to_base` puts back — never the workspace's live current: where a pin or a revert
+        // left the two apart, the body listed changes `--yes` would never make. DIVERGENT copies
         // cannot render one diff (that freeze is exactly what `--reset` is the named way out of),
         // so the loss is disclosed as the frozen set instead of failing the reset. UNCAPPED
         // deliberately: a loss disclosure must never truncate what would be discarded.
