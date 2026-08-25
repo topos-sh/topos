@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
 use topos_types::requests::{
-    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
-    WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
+    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireLogVersion, WireMe,
+    WireProposalIndex, WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::results::ExchangeFault;
 
@@ -459,6 +459,14 @@ pub(in crate::tests) struct FakeDirectory {
     /// Empty is a workspace that serves none — which is also every server older than the lane.
     pub(super) mcp_revisions: Vec<topos_types::requests::WireMcpIndexEntry>,
     pub(super) channels: Vec<WireChannelEntry>,
+    /// The workspace's ADDRESS name, when this fake answers `me` at all. `None` keeps the
+    /// original refusal (the publish path's best-effort read just omits its invite line); `Some`
+    /// makes the fake resolvable, which is what a NAME LOOKUP needs — the resolver universe is
+    /// built from `me` + the two indexes.
+    pub(super) me_name: Option<String>,
+    /// The PLANE history this workspace serves per skill id (`skill_id → versions`). Empty for a
+    /// bundle nothing published — the fake's default, which leaves a local log exactly as it was.
+    pub(super) logs: std::collections::BTreeMap<String, Vec<WireLogVersion>>,
     /// When set, the index reads fail (a transport fault) — the freeze suites flip it.
     pub(super) unavailable: Arc<Mutex<bool>>,
 }
@@ -473,8 +481,27 @@ impl FakeDirectory {
             mcp_servers: Vec::new(),
             mcp_revisions: Vec::new(),
             channels,
+            me_name: None,
+            logs: std::collections::BTreeMap::new(),
             unavailable: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// The same fake, ANSWERING `me` under `WS_NAME` — what a by-name LOOKUP needs, because the
+    /// resolver universe is built from `me` plus the two indexes.
+    pub(in crate::tests) fn resolvable(mut self) -> Self {
+        self.me_name = Some(WS_NAME.to_owned());
+        self
+    }
+
+    /// The same fake, serving `skill_id`'s PLANE history — the versions a `log` read prints.
+    pub(in crate::tests) fn with_log(
+        mut self,
+        skill_id: &str,
+        versions: Vec<WireLogVersion>,
+    ) -> Self {
+        self.logs.insert(skill_id.to_owned(), versions);
+        self
     }
 
     /// The same fake, serving one connected SERVER beside whatever file bundles it already has.
@@ -536,9 +563,23 @@ pub(in crate::tests) fn catalog_entry(
     }
 }
 impl DirectorySource for FakeDirectory {
-    fn me(&self, _ws: &str) -> Result<WireMe, ClientError> {
-        // A publish's best-effort post-landing read: absent here (the invite line just omits).
-        Err(ClientError::Plane("no me in this fake".into()))
+    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
+        // A publish's best-effort post-landing read: absent by default (the invite line just
+        // omits). `resolvable()` turns this fake into one a NAME LOOKUP can build a universe over.
+        let Some(name) = self.me_name.clone() else {
+            return Err(ClientError::Plane("no me in this fake".into()));
+        };
+        self.check_reachable()?;
+        Ok(WireMe {
+            workspace_id: ws.to_owned(),
+            display_name: name.clone(),
+            address: format!("{HOST}/{name}"),
+            name,
+            principal: "someone@acme.test".to_owned(),
+            role: "member".to_owned(),
+            invited_by: None,
+            session_status: Some("active".to_owned()),
+        })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
         self.check_reachable()?;
@@ -570,17 +611,23 @@ impl DirectorySource for FakeDirectory {
         unreachable!()
     }
     fn skill_log(&self, _ws: &str, skill_id: &str) -> Result<WireSkillLog, ClientError> {
-        // A catalog with no PLANE history: `log`'s plane half reaches this fake now that it takes
-        // the bundle's own workspace lane instead of building the whole session universe (whose
-        // `me` read this fake refuses). An empty history leaves the local log exactly as it was.
+        // A catalog with no PLANE history by default: `log`'s plane half reaches this fake now
+        // that it takes the bundle's own workspace lane instead of building the whole session
+        // universe (whose `me` read this fake refuses). An empty history leaves the local log
+        // exactly as it was; `with_log` serves one.
         self.check_reachable()?;
         Ok(WireSkillLog {
             skill_id: skill_id.to_owned(),
-            name: String::new(),
+            name: self
+                .skills
+                .iter()
+                .find(|e| e.skill_id == skill_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_default(),
             kind: "skill".to_owned(),
             status: "active".to_owned(),
             base_name: None,
-            versions: Vec::new(),
+            versions: self.logs.get(skill_id).cloned().unwrap_or_default(),
             proposals: Vec::new(),
         })
     }

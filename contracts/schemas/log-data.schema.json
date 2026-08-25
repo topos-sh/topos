@@ -16,6 +16,17 @@
       "type": "array",
       "items": true
     },
+    "not_applied": {
+      "description": "Present when this history came from the WORKSPACE because no copy is applied in the scope\nthe command ran in: a recipe row here demands the bundle and no update has landed it yet.\nA history is a LOOKUP — the versions live in the workspace — so the read still answers,\nand this says which state it answered from. Absent for every applied copy. **INFERRED**\n(additive).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NotApplied"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "sync_fault": {
       "description": "The delivering workspace's LAST exchange with this machine, when it did not land — this\nhistory was read from state nothing has refreshed since. Absent when that exchange landed,\nand for a copy no workspace delivers. **INFERRED** (additive).",
       "anyOf": [
@@ -71,6 +82,24 @@
           "type": "string",
           "const": "malformed"
         }
+      ]
+    },
+    "NotApplied": {
+      "description": "A bundle a recipe row in this scope DEMANDS with no applied copy behind it. **INFERRED**\n(additive).",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "description": "The bundle, as the workspace catalogs it.",
+          "type": "string"
+        },
+        "global": {
+          "description": "`true` when the row lives in the MACHINE recipe — the update that lands it is spelled\n`-g`. The refusal-side twin of this fact carries the `NOT_APPLIED` code.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bundle",
+        "global"
       ]
     },
     "SyncFault": {

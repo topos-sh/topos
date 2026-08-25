@@ -6,6 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use topos_types::requests::WireLogVersion;
 use topos_types::results::{ExchangeFault, PullAction};
 
 use crate::ctx::Ctx;
@@ -1496,7 +1497,7 @@ fn two_same_named_mcp_bundles_in_one_scope_each_keep_their_own_states() {
 }
 
 /// A machine whose `list -g` prints `r2-smoke  (not applied here yet — `topos update -g` applies
-/// it)` answered `revert` with `no tracked skill named 'r2-smoke'` — the same machine
+/// it)` answered `revert` with `no tracked bundle named 'r2-smoke'` — the same machine
 /// contradicting its own listing, and no next step for a state that is ONE command from being
 /// real. The row is asked about before a miss is claimed, and each of the two states says what it
 /// is: the demanded row names the update that would apply it (as prose AND as a runnable
@@ -1568,8 +1569,10 @@ fn revert_tells_a_demanded_unapplied_row_apart_from_a_name_it_never_heard_of() {
          machine tracks",
         "{unknown:?}"
     );
-    // Both still branch as the one refusal an agent already knows.
-    assert_eq!(demanded.code(), "NO_SUCH_SKILL");
+    // And they branch APART: one code says "run the update", the other says "this name is
+    // nowhere". Sharing `NO_SUCH_SKILL` made an agent parse prose to tell a one-command state
+    // from a dead end.
+    assert_eq!(demanded.code(), "NOT_APPLIED");
     assert_eq!(unknown.code(), "NO_SUCH_SKILL");
 }
 
@@ -1660,6 +1663,128 @@ fn an_untracked_name_refuses_with_the_pick_and_dials_nothing() {
     );
 }
 
+/// A bundle this machine's FEED row demands and no update has applied yet. `topos log` answered
+/// `no tracked skill named 'r2-smoke'` — the retired noun, no next step, and a claim the machine
+/// had no way to make: `revert` about the very same state names the update that lands it. A
+/// history is a LOOKUP, not a local verb — the versions live in the workspace — so the read
+/// answers with the workspace's history and says which state it answered from.
+#[test]
+fn log_reads_the_workspace_history_for_a_demanded_unapplied_bundle() {
+    let rig = Rig::new("zq-log-unapplied");
+    rig.seed_session();
+    // The ordinary machine recipe after a login: the feed row, and nothing applied behind it.
+    rig.seed_feed();
+    let ctx = rig.ctx_at(None);
+    let v = one_file(b"# deploy\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let version = |id: &str, message: &str, current: bool| WireLogVersion {
+        version_id: id.repeat(64 / id.len()),
+        author: Some("robert@topos.sh".to_owned()),
+        message: Some(message.to_owned()),
+        at: Some(1_700_000_000_000),
+        current,
+        purged_at: None,
+        purged_by: None,
+    };
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new())
+        .resolvable()
+        .with_log(
+            "s_deploy",
+            vec![
+                version("ab", "deploy v2", true),
+                version("cd", "deploy v1", false),
+            ],
+        );
+    let sessions = connect(&plane, &dir);
+    let connectors = ops::LogConnectors { session: &sessions };
+
+    let data = ops::log(&ctx, &connectors, "deploy", None, ops::RowPage::unlimited())
+        .expect("the workspace's history is readable with no local copy");
+    let messages: Vec<&str> = data
+        .events
+        .iter()
+        .filter_map(|e| e.get("message").and_then(serde_json::Value::as_str))
+        .collect();
+    assert_eq!(messages, ["deploy v2", "deploy v1"], "{data:?}");
+    // The state the read answered from, as data AND as the line a person sees — with the one
+    // command that turns the row into a copy, spelled for the scope the row lives in.
+    let not_applied = data
+        .not_applied
+        .clone()
+        .expect("the read says it answered from the workspace");
+    assert_eq!(not_applied.bundle, "deploy");
+    assert!(not_applied.global, "the row lives in the machine recipe");
+    let tty = crate::render::log_tty(&data);
+    assert!(
+        tty.starts_with(
+            "note: deploy is not applied on this machine yet — `topos update -g` applies it — \
+             the history below is the workspace's\n"
+        ),
+        "{tty}"
+    );
+}
+
+/// `diff` meets the SAME state, and unlike `log` has nothing to answer with: it reads a copy, and
+/// there is none. So it refuses with the same classification `revert` uses — the update that
+/// lands the row, as prose and as a runnable next action — instead of the bare not-found.
+#[test]
+fn diff_names_the_update_for_a_demanded_unapplied_bundle() {
+    let rig = Rig::new("zq-diff-unapplied");
+    rig.seed_session();
+    rig.write_global(&format!(
+        "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"latest\"\n"
+    ));
+    let ctx = rig.ctx_at(None);
+
+    let err = ops::diff(
+        &ctx,
+        "deploy",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+        ops::StoreScope::Machine,
+    )
+    .expect_err("no applied copy to diff");
+    assert_eq!(
+        err.to_string(),
+        "deploy is not applied on this machine yet — `topos update -g` applies it; diff reads an \
+         applied copy",
+        "{err:?}"
+    );
+    assert_eq!(err.code(), "NOT_APPLIED");
+    assert_eq!(
+        scope_ways_out("diff", &["diff", "deploy", "-g"], &err),
+        vec![(
+            "UPDATE_SKILLS".to_owned(),
+            vec![
+                "topos".to_owned(),
+                "update".to_owned(),
+                "-g".to_owned(),
+                "--json".to_owned(),
+            ],
+        )],
+        "the fix rides as a runnable argv, spelled for the scope the row lives in",
+    );
+    // A name nothing demands stays the honest miss — in the bundle vocabulary.
+    let unknown = ops::diff(
+        &ctx,
+        "never-heard-of-it",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+        ops::StoreScope::Machine,
+    )
+    .expect_err("nothing of that name is tracked");
+    assert_eq!(
+        unknown.to_string(),
+        "no tracked bundle named 'never-heard-of-it' here — `topos list -g` shows what this \
+         machine tracks",
+        "{unknown:?}"
+    );
+    assert_eq!(unknown.code(), "NO_SUCH_SKILL");
+}
+
 /// The SAME untracked name with the workspace named: the pick is made, so exactly that workspace
 /// is read — the flag beats the missing default rather than widening the search.
 #[test]
@@ -1685,9 +1810,10 @@ fn an_untracked_name_with_a_named_workspace_reads_only_that_one() {
     )
     .expect_err("the name still resolves to nothing");
     assert!(
-        matches!(err, ClientError::NoSuchSkill { .. }),
+        matches!(err, ClientError::NoTrackedBundle { .. }),
         "the answer is the not-found, not a workspace pick: {err:?}"
     );
+    assert_eq!(err.code(), "NO_SUCH_SKILL", "{err:?}");
     assert_eq!(
         *seen.lock().unwrap(),
         vec!["w_ops".to_owned()],

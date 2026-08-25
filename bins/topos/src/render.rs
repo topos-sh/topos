@@ -2179,6 +2179,15 @@ pub(crate) fn log_tty(data: &LogData) -> String {
             crate::ops::StaleReason::from(f.kind).clause()
         ));
     }
+    // A history read from the WORKSPACE because no copy is applied here: say which state answered,
+    // and name the one command that turns the row into a copy. Without it the rows below read as
+    // this machine's own history of a bundle it has never held.
+    if let Some(n) = &data.not_applied {
+        out.push_str(&format!(
+            "note: {} — the history below is the workspace's\n",
+            crate::error::not_applied_clause(&n.bundle, n.global)
+        ));
+    }
     if data.events.is_empty() {
         return if out.is_empty() {
             "No history.".to_owned()
@@ -9983,6 +9992,7 @@ mod tests {
             truncated: false,
             total: None,
             sync_fault: None,
+            not_applied: None,
         };
         let out = log_tty(&data);
         assert!(
@@ -10040,6 +10050,7 @@ mod tests {
             truncated: false,
             total: None,
             sync_fault: None,
+            not_applied: None,
         };
         let out = log_tty(&data);
         // Columns: human timestamp, action, name, short id.

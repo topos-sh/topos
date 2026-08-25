@@ -850,14 +850,24 @@ fn a_revert_from_a_project_needs_no_machine_wide_copy() {
         "{preview}"
     );
 
-    // `-g` names the machine outright — which holds nothing, and says so.
+    // `-g` names the machine outright — which holds no copy, and says so. The login wrote this
+    // machine's own feed row, so the honest answer is not "never heard of it": one command would
+    // make the copy real, and the refusal carries it as prose AND as a runnable argv.
     let refused = reviewer
         .run_in(
             &checkout,
             &["revert", "-g", BUNDLE, "--to", short, "--json"],
         )
-        .refusal("a machine-scope revert over an untracked bundle");
-    assert_eq!(refused["error"]["code"], "NO_SUCH_SKILL", "{refused}");
+        .refusal("a machine-scope revert over a bundle no update has applied there");
+    assert_eq!(refused["error"]["code"], "NOT_APPLIED", "{refused}");
+    assert_eq!(
+        refused["error"]["context"]["message"],
+        format!(
+            "{BUNDLE} is not applied on this machine yet — {}",
+            "`topos update -g` applies it; revert acts on an applied copy"
+        ),
+        "{refused}"
+    );
 
     // Applied from the checkout: the team moves back, THIS copy converges onto the restored
     // content, and the checkout's lock records the forward commit.

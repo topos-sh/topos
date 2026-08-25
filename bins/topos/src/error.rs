@@ -328,19 +328,28 @@ fn already_tracked_message(name: &str, dir: &str, claim: &Option<TrackedBy>) -> 
     }
 }
 
-/// The [`ClientError::NotAppliedHere`] sentence: the bundle, the update that would apply it, and
-/// why the verb still cannot act. Spelled for the scope whose `update` owns the row, because that
-/// is the command that changes anything — the machine's row is only ever applied by `-g`.
-fn not_applied_here_message(name: &str, global: bool) -> String {
+/// The SHARED clause every "this scope carries a row for it, and no copy behind it" line opens
+/// with: the bundle, where, and the update that lands it. Spelled for the scope whose `update`
+/// owns the row, because that is the command that changes anything — the machine's row is only
+/// ever applied by `-g`. Named as a runnable command, so the envelope's `next_actions` mirror it.
+pub(crate) fn not_applied_clause(name: &str, global: bool) -> String {
     let (where_, flag) = if global {
         ("on this machine", " -g")
     } else {
         ("here", "")
     };
-    format!(
-        "{name} is not applied {where_} yet — `topos update{flag}` applies it; revert acts on an \
-         applied copy"
-    )
+    format!("{name} is not applied {where_} yet — `topos update{flag}` applies it")
+}
+
+/// The [`ClientError::NotAppliedHere`] sentence: the shared clause, plus (where the door has one)
+/// the clause naming what THIS verb wanted and this state has not got.
+fn not_applied_here_message(name: &str, global: bool, needs: &str) -> String {
+    let clause = not_applied_clause(name, global);
+    if needs.is_empty() {
+        clause
+    } else {
+        format!("{clause}; {needs}")
+    }
 }
 
 /// The [`ClientError::NoTrackedBundle`] sentence: nothing of this name is tracked, and the one
@@ -640,18 +649,30 @@ pub(crate) enum ClientError {
     /// A name resolved to more than one tracked skill; the caller must disambiguate by id.
     #[error("the name '{name}' is ambiguous across {count} tracked skills")]
     AmbiguousName { name: String, count: usize },
-    /// No tracked skill matches the given name.
-    #[error("no tracked skill named '{name}'")]
+    /// No tracked bundle matches the given name — the bare resolution miss every by-name verb
+    /// answers with. The noun is `bundle`: a workspace shares skills, MCP servers and more, and a
+    /// refusal that calls all of them skills is telling a person about a vocabulary this CLI
+    /// stopped using.
+    #[error("no tracked bundle named '{name}'")]
     NoSuchSkill { name: String },
     /// The scope DOES carry a row for this name — `list` prints it — but no `update` has applied
     /// it here yet, so there is no copy for a version verb to act on. Its own state, because it
     /// has its own next step: the one command that turns the row into a copy, which the listing
     /// already spells beside the row. `global` picks the scope the update names (`-g`).
-    #[error("{}", not_applied_here_message(.name, *.global))]
-    NotAppliedHere { name: String, global: bool },
+    #[error("{}", not_applied_here_message(.name, *.global, .needs))]
+    NotAppliedHere {
+        name: String,
+        global: bool,
+        /// What THIS verb wanted and this state has not got — `"revert acts on an applied copy"`.
+        /// One state, several doors: each says what it was after, and an empty clause closes the
+        /// sentence after the shared one.
+        needs: &'static str,
+    },
     /// The scope tracks nothing of this name at all — the honest miss, pointing at the listing
-    /// that says what it DOES track. The name-oriented sibling of [`ClientError::NotAppliedHere`];
-    /// both wear `NO_SUCH_SKILL` on the wire, so an agent branches exactly as it always has.
+    /// that says what it DOES track. The name-oriented sibling of [`ClientError::NotAppliedHere`],
+    /// and the one that wears `NO_SUCH_SKILL`: the two states are not the same answer, and an
+    /// agent that met one code for both had to parse prose to tell "run the update" apart from
+    /// "this name is nowhere".
     #[error("{}", no_tracked_bundle_message(.name, *.global))]
     NoTrackedBundle { name: String, global: bool },
     /// `add <skill>` resolved a name against discovery and found nothing adoptable — no untracked skill of
@@ -1268,13 +1289,16 @@ impl ClientError {
             ClientError::AmbiguousName { .. } | ClientError::AmbiguousSource { .. } => {
                 "AMBIGUOUS_NAME"
             }
-            // One wire code for the whole "this scope has no copy of that name" family: the plain
-            // miss, the better-worded miss, and the demanded-but-unapplied row. The MESSAGE tells
-            // them apart for a reader; an agent branches on the code it always has (and on the
-            // `next_actions` the unapplied one carries).
-            ClientError::NoSuchSkill { .. }
-            | ClientError::NoTrackedBundle { .. }
-            | ClientError::NotAppliedHere { .. } => "NO_SUCH_SKILL",
+            // A name this scope has no copy of, and never asked for: the plain miss and the
+            // better-worded miss are the same answer, so they share the code an agent has always
+            // branched on.
+            ClientError::NoSuchSkill { .. } | ClientError::NoTrackedBundle { .. } => {
+                "NO_SUCH_SKILL"
+            }
+            // A DEMANDED row with no copy behind it is a different answer with a different fix —
+            // `list` prints the row and ONE command turns it into a copy — so it carries its own
+            // code rather than making an agent read prose to tell it from a miss.
+            ClientError::NotAppliedHere { .. } => "NOT_APPLIED",
             ClientError::NoUntrackedSkill { .. } => "NO_UNTRACKED_SKILL",
             // The name-oriented twins of AlreadyTracked share its code (agents branch the same on
             // any) — including a claim over a folder another record already holds, which is that

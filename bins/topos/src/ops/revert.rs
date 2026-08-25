@@ -104,7 +104,12 @@ pub(crate) fn revert(
         match resolve_followed_skill_in_scope(ctx, skill_name, workspace, scope) {
             Ok(hit) => hit,
             Err(ClientError::NoSuchSkill { name }) => {
-                return Err(super::unapplied_or_unknown(ctx, &name, scope));
+                return Err(super::unapplied_or_unknown(
+                    ctx,
+                    &name,
+                    scope,
+                    "revert acts on an applied copy",
+                ));
             }
             Err(e) => return Err(e),
         };
