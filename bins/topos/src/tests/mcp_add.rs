@@ -91,17 +91,23 @@ struct Rig {
 }
 impl Rig {
     fn new(tag: &str) -> Self {
-        Self {
+        let rig = Self {
             home: Scratch::new(&format!("{tag}-home")),
             work: Scratch::new(&format!("{tag}-work")),
             fs: RealFs,
             ids: SeqIds::new("s"),
             clock: FixedClock(1_700_000_000_000),
             harness: no_harness(),
-        }
+        };
+        rig.pick(&["*"]);
+        rig
     }
     fn layout(&self) -> Layout {
         Layout::new(&self.home.0.join(".topos"))
+    }
+    /// Replace this machine's agents pick.
+    fn pick(&self, agents: &[&str]) {
+        crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&self.layout()), agents);
     }
     fn ctx_at<'a>(&'a self, cwd: Option<&Path>) -> Ctx<'a> {
         Ctx {

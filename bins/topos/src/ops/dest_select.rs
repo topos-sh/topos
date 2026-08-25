@@ -368,8 +368,9 @@ fn unusable_copy(display: &str, status: &ScanStatus) -> ClientError {
 }
 
 /// The `unknown agent: <typed> — known: …` refusal — real registry slugs, alphabetical, ellipsis
-/// past a handful.
-fn unknown_agent(slug: &str, mcp: bool) -> ClientError {
+/// past a handful. Shared with the agents pick (`crate::agents_pick::validate`), so a slug typed
+/// into `-a` and one typed into a pick refuse in the same words.
+pub(crate) fn unknown_agent(slug: &str, mcp: bool) -> ClientError {
     let known = if mcp {
         known_mcp_agents()
     } else {

@@ -16,6 +16,7 @@
 /// The ONE owner of next-action construction + safety metadata. `pub` because the fixture
 /// generator (xtask) builds its golden envelopes through the SAME constructor — no second table.
 pub mod actions;
+pub(crate) mod agents_pick;
 mod app;
 pub(crate) mod atomic;
 pub(crate) mod bundle_kind;

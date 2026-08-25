@@ -1281,14 +1281,19 @@ struct Rig {
 
 impl Rig {
     fn new(tag: &str) -> Self {
-        Self {
+        let rig = Self {
             home: Scratch::new(&format!("{tag}-home")),
             work: Scratch::new(&format!("{tag}-work")),
             fs: RealFs,
             ids: SeqIds::new("s"),
             clock: FixedClock(1_700_000_000_000),
             harness: MockHarness::joining(""),
-        }
+        };
+        crate::agents_pick::write_pick(&crate::agents_pick::machine_path(&rig.layout()), &["*"]);
+        rig
+    }
+    fn layout(&self) -> Layout {
+        Layout::new(&self.home.0.join(".topos"))
     }
     fn ctx(&self) -> Ctx<'_> {
         Ctx {
@@ -1297,7 +1302,7 @@ impl Rig {
             ids: &self.ids,
             clock: &self.clock,
             device_id: "d_test".into(),
-            layout: Layout::new(&self.home.0.join(".topos")),
+            layout: self.layout(),
             harness: &self.harness,
             triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &InertPlane,

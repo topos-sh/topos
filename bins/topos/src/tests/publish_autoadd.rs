@@ -52,7 +52,7 @@ struct Rig {
 }
 impl Rig {
     fn new(tag: &str) -> Self {
-        Self {
+        let rig = Self {
             home: Scratch::new(tag),
             fs: RealFs,
             ids: SeqIds::new("t"),
@@ -60,7 +60,12 @@ impl Rig {
             harness: no_harness(),
             plane: crate::plane::InertPlane,
             follow: crate::plane::InertFollow,
-        }
+        };
+        crate::agents_pick::write_pick(
+            &crate::agents_pick::machine_path(&Layout::new(&rig.home.0)),
+            &["*"],
+        );
+        rig
     }
     fn ctx(&self) -> Ctx<'_> {
         Ctx {

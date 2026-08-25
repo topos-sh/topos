@@ -30,6 +30,11 @@ pub(crate) struct Layout {
     /// person scope). Scope-dependent behavior (the placement self-ignore) keys off this — the
     /// layout IS the scope.
     project_root: Option<PathBuf>,
+    /// The MACHINE store this layout was reached from, when it is a project store re-rooted under
+    /// one (`None` = this layout IS the machine store, or a project store nobody has re-rooted a
+    /// ctx into yet). What [`Self::machine_home`] answers: a fact about the machine (the agents
+    /// pick, `crate::agents_pick`) is read from the machine store whichever store a ctx stands in.
+    machine_home: Option<PathBuf>,
 }
 
 /// The per-skill paths under a base directory (a published `skills/<id>/` or a staging dir).
@@ -184,11 +189,29 @@ impl Layout {
         Self {
             home: home.to_path_buf(),
             project_root: None,
+            machine_home: None,
         }
     }
 
     pub(crate) fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// The MACHINE store's root — `home` itself for the person scope's store, the home store a
+    /// project store was re-rooted under (`ops::pull::ctx_with_layout` stamps it) otherwise. A
+    /// project layout that never went through a ctx answers its own root, which holds no machine
+    /// document: a caller reading a machine fact through it finds nothing, never someone else's.
+    pub(crate) fn machine_home(&self) -> &Path {
+        self.machine_home.as_deref().unwrap_or(&self.home)
+    }
+
+    /// This layout, remembering `machine` as the machine store it is reached from (see
+    /// [`Self::machine_home`]). A no-op on the machine store itself.
+    pub(crate) fn under_machine(mut self, machine: &Path) -> Self {
+        if self.project_root.is_some() && machine != self.home {
+            self.machine_home = Some(machine.to_path_buf());
+        }
+        self
     }
 
     /// Whether this layout is a PROJECT's store (its placements land inside a checkout and
@@ -481,6 +504,7 @@ pub(crate) fn project_store_layout(project_dir: &Path) -> Layout {
             .join("state")
             .join(store_user()),
         project_root: Some(project_dir.to_path_buf()),
+        machine_home: None,
     }
 }
 
