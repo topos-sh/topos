@@ -18,9 +18,30 @@ use topos_harness::registry::{self, KnownHarness};
 
 /// The behavior verbs grouped by SCOPE — the KNOWN verb lists drive the grouping (not clap metadata),
 /// so the reference reads the way the tool is taught: self-scoped, then team-scoped, then maintenance.
-const SELF_SCOPED: [&str; 12] = [
-    "status", "login", "logout", "init", "fmt", "add", "remove", "update", "list", "diff",
-    "verify", "log",
+///
+/// Between them these three lists must name EVERY visible verb in the clap tree: a verb missing
+/// from all of them renders nowhere, and the reference goes on looking complete. `workspace`,
+/// `install`, and `relay` all spent releases in exactly that hole — named by the `--workspace`
+/// flag, by the multi-login refusal, by the CI and topos.toml pages, and by the `topos relay`
+/// line sitting in a reader's own MCP config, with no entry of their own to look up. A verb the
+/// binary shows in `--help` belongs on the page that promises to be the same text. The render
+/// asserts the cover both ways now, so the next verb cannot repeat it.
+const SELF_SCOPED: [&str; 15] = [
+    "status",
+    "login",
+    "logout",
+    "workspace",
+    "init",
+    "fmt",
+    "add",
+    "remove",
+    "install",
+    "update",
+    "list",
+    "diff",
+    "verify",
+    "log",
+    "relay",
 ];
 const TEAM_SCOPED: [&str; 5] = ["publish", "review", "revert", "protect", "invite"];
 const MAINTENANCE: [&str; 3] = ["self-update", "auth", "uninstall"];
@@ -450,6 +471,20 @@ fn render_md(table: &[&'static KnownHarness]) -> String {
          and exits, reading nothing and dialing nothing.\n\n",
         &standalone,
     );
+
+    // Every visible verb has to be in one of the three lists — a verb in none of them renders
+    // nowhere, and nothing about the finished page says a command is missing from it.
+    for sub in root.get_subcommands() {
+        let name = sub.get_name();
+        assert!(
+            sub.is_hide_set()
+                || SELF_SCOPED.contains(&name)
+                || TEAM_SCOPED.contains(&name)
+                || MAINTENANCE.contains(&name),
+            "the `{name}` verb is in no reference group — add it to SELF_SCOPED, TEAM_SCOPED, \
+             or MAINTENANCE in cli_ref.rs, or hide it in the clap tree"
+        );
+    }
 
     // The verbs, grouped by scope (the known verb lists, not clap metadata).
     for (title, blurb, names) in [
