@@ -1,4 +1,4 @@
-import { Form, Link, useActionData } from "react-router";
+import { Form, Link, useActionData, useSearchParams } from "react-router";
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime } from "@/components/format";
 import { BusyFields, buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
@@ -386,12 +386,25 @@ function usageSummary(usage: McpGatewayUsage): string {
   return `${sessions}, newest activity first.`;
 }
 
-/** Prev/next, and nothing else — the position is on the summary line, said once. Rendered only
- *  where there is a second page to go to. */
+/**
+ * Prev/next, and nothing else — the position is on the summary line, said once. Rendered only
+ * where there is a second page to go to.
+ *
+ * A page link REWRITES `page` and carries everything else on the address through. A bare
+ * `?page=2` would have replaced the whole query, so paging the Usage table would silently drop
+ * whatever else the URL was saying — the post-publish placement note this page reads, and any
+ * parameter added later. Turning a page is a move within the page, not a fresh arrival at it.
+ */
 function UsagePager({ usage }: { usage: McpGatewayUsage }) {
+  const [params] = useSearchParams();
   if (usage.pageCount <= 1) {
     return null;
   }
+  const pageHref = (page: number): string => {
+    const next = new URLSearchParams(params);
+    next.set("page", String(page));
+    return `?${next.toString()}`;
+  };
   return (
     <nav
       aria-label="Usage pages"
@@ -399,12 +412,12 @@ function UsagePager({ usage }: { usage: McpGatewayUsage }) {
       className="flex flex-wrap items-center gap-2 border-line-soft border-t pt-3"
     >
       {usage.page > 1 && (
-        <Link to={`?page=${usage.page - 1}`} className={buttonClasses("quiet")}>
+        <Link to={pageHref(usage.page - 1)} className={buttonClasses("quiet")}>
           Previous
         </Link>
       )}
       {usage.page < usage.pageCount && (
-        <Link to={`?page=${usage.page + 1}`} className={buttonClasses("quiet")}>
+        <Link to={pageHref(usage.page + 1)} className={buttonClasses("quiet")}>
           Next
         </Link>
       )}
