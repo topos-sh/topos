@@ -111,8 +111,17 @@ impl Rig {
         Layout::new(&self.home.0.join(".topos"))
     }
     pub(super) fn ctx_at<'a>(&'a self, cwd: Option<&std::path::Path>) -> Ctx<'a> {
+        self.ctx_with_progress(cwd, crate::progress::silent())
+    }
+    /// The same context carrying a NAMED progress sink — for the suites that assert the activity
+    /// lines themselves rather than what the run left on disk.
+    pub(super) fn ctx_with_progress<'a>(
+        &'a self,
+        cwd: Option<&std::path::Path>,
+        progress: &'a dyn crate::progress::ProgressSink,
+    ) -> Ctx<'a> {
         Ctx {
-            progress: crate::progress::silent(),
+            progress,
             fs: &self.fs,
             ids: &self.ids,
             clock: &self.clock,

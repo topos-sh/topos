@@ -209,6 +209,23 @@ impl<W: Write> Plain<W> {
     }
 }
 
+/// A [`Plain`] over an in-memory buffer — the sink a suite carries when the ACTIVITY LINES are
+/// what it is asserting (a verb's counter, the workspaces a lookup names).
+#[cfg(test)]
+pub(crate) fn captured() -> Plain<Vec<u8>> {
+    Plain::new(Vec::new())
+}
+
+/// Everything a [`captured`] sink has printed, one `topos: <label>` line each.
+#[cfg(test)]
+pub(crate) fn captured_lines(p: &Plain<Vec<u8>>) -> Vec<String> {
+    String::from_utf8(p.out.borrow().clone())
+        .expect("progress lines are UTF-8")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
 impl<W: Write> ProgressSink for Plain<W> {
     fn begin(&self, label: &str) {
         self.active.set(true);
@@ -339,7 +356,8 @@ fn byte_line(label: &str, done: u64, total: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Plain, ProgressSink, Silent, SinkKind, byte_line, phase, phase_if_idle, silent, sink_kind,
+        Plain, ProgressSink, Silent, SinkKind, byte_line, captured, phase, phase_if_idle, silent,
+        sink_kind,
     };
 
     #[test]
@@ -354,10 +372,6 @@ mod tests {
         assert_eq!(sink_kind(false, false), SinkKind::Plain);
     }
 
-    /// A `Plain` over an in-memory buffer, so the emitted shape is asserted byte-for-byte.
-    fn captured() -> Plain<Vec<u8>> {
-        Plain::new(Vec::new())
-    }
 
     fn text(p: &Plain<Vec<u8>>) -> String {
         String::from_utf8(p.out.borrow().clone()).expect("progress lines are UTF-8")

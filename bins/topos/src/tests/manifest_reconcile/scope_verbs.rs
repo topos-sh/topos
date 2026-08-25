@@ -1788,3 +1788,89 @@ fn list_remote_with_a_named_workspace_reads_that_one() {
         .collect();
     assert_eq!(also, vec![WS_NAME]);
 }
+
+// =================================================================================================
+// ONE counter per RUN. The activity line counts how far this invocation has got — not how far it
+// has got through whichever workspace it happens to be reading.
+// =================================================================================================
+
+/// `update -g` over TWO workspace feeds counts once, straight through: `(1 of 5)` … `(5 of 5)`.
+/// Before this each feed started its own counter, so a run converging 2 bundles and then 3 read
+/// `(1 of 2) (2 of 2) (1 of 3) (2 of 3) (3 of 3)` and then `Checked 5 bundles` — a person watching
+/// it was told the run had finished twice.
+#[test]
+fn the_activity_counter_runs_once_across_every_workspace() {
+    let rig = Rig::new("ws-one-counter");
+    rig.seed_session();
+    rig.seed_other_session("w_ops", "ops");
+    rig.write_global(&format!(
+        "[workspaces]\n\"{HOST}/{WS_NAME}\" = \"latest\"\n\"{HOST}/ops\" = \"latest\"\n"
+    ));
+
+    // Two feeds, different bundles: 2 from the first workspace, 3 from the second.
+    let v = one_file(b"# body\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let first = ["alpha", "beta"];
+    let second = ["gamma", "delta", "epsilon"];
+    let mut plane_a = FakePlane::new(Arc::clone(&log));
+    let mut plane_b = FakePlane::new(log);
+    for name in first {
+        plane_a = plane_a.with_version(&format!("s_{name}"), &v);
+    }
+    for name in second {
+        plane_b = plane_b.with_version(&format!("s_{name}"), &v);
+    }
+    plane_a.serves(
+        first
+            .iter()
+            .map(|n| delivered(&format!("s_{n}"), n, &v))
+            .collect(),
+    );
+    plane_b.serves(
+        second
+            .iter()
+            .map(|n| delivered(&format!("s_{n}"), n, &v))
+            .collect(),
+    );
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let lanes = |s: &Session| ops::SessionTransports {
+        plane: if s.workspace_id == WS {
+            Box::new(plane_a.clone())
+        } else {
+            Box::new(plane_b.clone())
+        },
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+
+    let progress = crate::progress::captured();
+    let ctx = rig.ctx_with_progress(Some(&rig.work.0), &progress);
+    let out = ops::manifest_update(
+        &ctx,
+        &lanes,
+        None,
+        &ops::ManifestUpdateOpts {
+            lock: ops::LockMode::Update,
+            scope: ops::UpdateScope::Machine,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(out.data.skills.len(), 5, "the run converged all five: {out:?}");
+
+    let counted: Vec<String> = crate::progress::captured_lines(&progress)
+        .into_iter()
+        .filter(|l| l.contains(" of "))
+        .collect();
+    let positions: Vec<String> = counted
+        .iter()
+        .map(|l| l[l.rfind('(').expect("a counter")..].to_owned())
+        .collect();
+    assert_eq!(
+        positions,
+        ["(1 of 5)", "(2 of 5)", "(3 of 5)", "(4 of 5)", "(5 of 5)"],
+        "one counter, one total, across both workspaces: {counted:?}"
+    );
+}
