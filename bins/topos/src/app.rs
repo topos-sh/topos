@@ -1698,8 +1698,9 @@ fn run_command(
             // answer is exit 2 naming `topos init -a`; the quiet hook sweep asks nothing and
             // places nothing for a scope it cannot pick for. Recorded at the driven scope, then
             // read back by the reconcile like any pick.
+            let project_here = ops::agent_hooks::cwd_project(&ctx);
             if !(keep_mine || goback_target.is_some()) {
-                let project = ops::agent_hooks::cwd_project(&ctx);
+                let project = project_here.clone();
                 let driven: Vec<crate::agents_pick::PickScope> = match (quiet, global, project) {
                     (true, _, Some(dir)) => vec![
                         crate::agents_pick::PickScope::Machine,
@@ -1791,17 +1792,29 @@ fn run_command(
             // so. A SOFT failure is not that refusal: the built-in is rendered from this binary
             // and owes nothing to a reachable plane, so an offline sweep still lands the meta-skill
             // a fresh `self-update` brought. Best-effort either way — a built-in hiccup must never
-            // fail the team sweep; its byte changes count as a changed sweep below.
+            // fail the team sweep; its byte changes count as a changed sweep below. The built-in
+            // follows the pick AT ITS SCOPE, so a sweep that drove the checkout (the scope rule
+            // above: `Here` in a project, or the quiet sweep's both) re-converges the checkout's
+            // own copies through the project store as well.
             let builtin_changed = if bare_sweep
                 && (result.is_ok() || result.as_ref().is_err_and(ops::quiet_soft_failure))
             {
-                match ops::ensure_builtin(&ctx) {
+                let mut changed = match ops::ensure_builtin(&ctx) {
                     Ok(r) => r.changed,
                     Err(e) => {
                         let _ = diag.note(cmd_name, &e);
                         false
                     }
+                };
+                if let Some(dir) = project_here.as_deref().filter(|_| quiet || !global) {
+                    match ops::ensure_builtin_for_project_pick(&ctx, dir) {
+                        Ok(r) => changed |= r.changed,
+                        Err(e) => {
+                            let _ = diag.note(cmd_name, &e);
+                        }
+                    }
                 }
+                changed
             } else {
                 false
             };

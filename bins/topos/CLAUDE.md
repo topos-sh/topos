@@ -59,7 +59,11 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   advertisement — outside the REST allowance) and downloaded only on a real change, with a
   per-round circuit breaker and a clock that advances on failure too. A reconcile registers NO
   agent's auto-update trigger: hooks follow the agents pick (`ops::agent_hooks`), and nothing
-  else writes one. `update --quiet` is the harness-hook sweep: self-throttled,
+  else writes one. The built-in `topos` skill rides the bare sweep BESIDE the reconcile, at the
+  pick's own scope (`ops::builtin`): the machine pick's copies under `~`, and a checkout holding
+  a pick of its own re-converges its copies through the project store; no manifest row names it,
+  so the undemanded clean skips its record. `update --quiet` is the harness-hook sweep:
+  self-throttled,
   schema-conservative stdout (`--hook claude-code` opts that harness into `reloadSkills`).
 - **`add`/`remove` are exact file inverses** (property-tested). `add` is source-polymorphic
   (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE

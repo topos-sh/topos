@@ -2494,6 +2494,69 @@ fn a_fresh_clone_uses_the_machine_pick() {
     let _ = std::fs::remove_dir_all(&rig.root);
 }
 
+/// The PROJECT SWEEP keeps the built-in in place for the checkout's picked agents. No manifest
+/// row names it, so a sweep that judged it by rows would retire it as undemanded: after
+/// `init -a claude-code -a codex` and `agents remove codex`, a plain `install` and the hook's
+/// `install --quiet` both leave Claude Code's copy standing, name no removal, and put back a copy
+/// that went missing. The same holds with no `agents remove` at all.
+#[test]
+fn a_project_sweep_keeps_the_built_in_for_the_pick() {
+    let rig = pick_rig("sweep-keeps-builtin", &["claude-code", "codex"]);
+    rig.stdout(&["init", "-a", "claude-code", "-a", "codex"]);
+    let claude_copy = rig.project.join(".claude/skills/topos/SKILL.md");
+    let codex_copy = rig.project.join(".agents/skills/topos/SKILL.md");
+    assert!(claude_copy.is_file() && codex_copy.is_file());
+
+    // No remove yet: the sweep after an init is already the shape that must keep the copies.
+    let receipt = rig.stdout(&["install"]);
+    assert!(!receipt.contains("removed"), "{receipt}");
+    assert!(claude_copy.is_file() && codex_copy.is_file(), "{receipt}");
+
+    rig.stdout(&["agents", "remove", "codex", "--yes"]);
+    assert!(claude_copy.is_file(), "the remaining agent keeps its copy");
+    assert!(!codex_copy.exists(), "the leaving agent's copy is gone");
+
+    let receipt = rig.stdout(&["install"]);
+    assert!(!receipt.contains("removed"), "{receipt}");
+    assert!(
+        claude_copy.is_file(),
+        "a plain install keeps the built-in for the pick: {receipt}"
+    );
+    assert!(
+        !codex_copy.exists(),
+        "and does not bring the removed one back"
+    );
+    let (status, v) = rig.json(&["--json", "install"]);
+    assert!(status.success(), "{v}");
+    let rows = v["data"]["skills"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r["skill"] == "topos" || r["action"] == "removed"),
+        "{rows:?}"
+    );
+
+    let out = rig.run(&["install", "--quiet", "--ttl", "0", "--hook", "claude-code"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        claude_copy.is_file(),
+        "the hook's sweep keeps it too: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(!codex_copy.exists());
+
+    // The sweep re-converges it: a copy that went missing comes back.
+    std::fs::remove_dir_all(rig.project.join(".claude/skills/topos")).unwrap();
+    rig.stdout(&["install"]);
+    assert!(claude_copy.is_file(), "the sweep put the copy back");
+    assert!(!codex_copy.exists());
+    let _ = std::fs::remove_dir_all(&rig.root);
+}
+
 #[test]
 fn install_in_a_project_with_no_pick_exits_2_naming_init() {
     let rig = pick_rig("install-no-pick", &["claude-code", "cursor"]);
