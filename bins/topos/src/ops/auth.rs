@@ -84,11 +84,14 @@ pub(crate) fn status(
     let reporting = status_doc
         .workspaces
         .iter()
-        .map(|(ws, e)| AuthReportingStatus {
+        // The delivery cache OUTLIVES a logout, so a workspace this installation no longer holds
+        // a session for kept a posture line here — a raw id and a bare epoch about a workspace
+        // nothing dials any more. A posture is about a standing connection; without one there is
+        // nothing to report about.
+        .filter_map(|(ws, e)| Some((ws, e, crate::ops::workspace_ref(ctx, ws)?)))
+        .map(|(ws, e, workspace)| AuthReportingStatus {
             workspace_id: ws.clone(),
-            // The local document keys by id alone, so the address comes from the session — and
-            // a workspace this installation no longer holds one for honestly names none.
-            workspace: crate::ops::workspace_ref(ctx, ws),
+            workspace: Some(workspace),
             last_delivery_at: e.last_delivery_at,
             last_report_at: e.last_report_at,
             staleness_window_ms: e.staleness_window_ms,
