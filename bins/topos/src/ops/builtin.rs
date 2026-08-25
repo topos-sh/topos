@@ -6,7 +6,7 @@
 //! and a binary-placed copy carry the same authored bytes. The bundle's last file is the generated
 //! verb reference `docs/cli.md`
 //! carries, rendered from this binary's real clap tree. It lands through the ordinary placement
-//! engine at the moments the auto-update triggers arm, and re-syncs on every bare sweep. It is
+//! engine when a pick is applied, and re-syncs on every bare sweep. It is
 //! FORCE-SYNCED to the binary: it documents THIS binary's verb surface, so any divergence — a
 //! hand edit, an old binary's bytes — is overwritten on the next sweep (an edited copy is still
 //! snapshotted into the sidecar store first; it just never becomes a draft). A pre-existing

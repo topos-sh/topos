@@ -620,8 +620,7 @@ pub(super) fn write_row(
             ),
         );
     }
-    let in_reach = reach_already_held(ctx, target, reference, prior.as_ref(), value)?;
-    let (value, extend) = extend_dest(prior.as_ref(), value, &in_reach);
+    let (value, extend) = extend_dest(prior.as_ref(), value);
     let value = &value;
     if prior.as_ref() == Some(value) {
         // The redundancy disclosure: the file already spells exactly this row — which is also how
@@ -708,17 +707,20 @@ pub(super) fn write_row(
     Ok(())
 }
 
-/// DESTINATIONS EXTEND. A `-a`/`--dest` add over a standing row unions its entries onto what the
-/// row already names, kind-correct array by kind-correct array (`dest` for a bundle's folders or
-/// an mcp bundle's config files, `mcp_dest` for a channel's mcp members) and preserving the file's
-/// own entry order — appending is the only edit; nothing already recorded is dropped.
+/// DESTINATIONS EXTEND — over a row that already names some. A `-a`/`--dest` add unions its
+/// entries onto what the row spells, kind-correct array by kind-correct array (`dest` for a
+/// bundle's folders or an mcp bundle's config files, `mcp_dest` for a channel's mcp members) and
+/// preserving the file's own entry order — appending is the only edit; nothing already recorded
+/// is dropped.
 ///
-/// AN ADD NEVER NARROWS. A row that names NO destinations reaches every agent, now and later, so
-/// the entries join the DEFAULT-REACH token rather than replacing what the row already had:
-/// `dest = ["*", <new>]` keeps that reach as a live plan-time answer (a machine that installs
-/// another agent tomorrow still gets the bundle) and adds the named destinations on top. Writing
-/// out the resolved set instead — a list of folders one machine happened to hold on one day —
-/// froze the row to that day.
+/// A ROW THAT NAMED NO DESTINATIONS IS REPLACED, NOT EXTENDED. Such a row reaches the agents the
+/// person picked, and `-a` says which of them this bundle is for — so the row lands with exactly
+/// the folders the ask named, and the agents left out lose their copies on the same converge.
+/// (An earlier build seeded the DEFAULT-REACH token here, so an add could only ever widen; with
+/// the pick, narrowing to some of your own agents is the point of the flag.) It is not a
+/// destination-only act either: what the row reaches CHANGED, so the write takes the ordinary
+/// replaced-prior path, whose undo re-spells the prior value exactly (`topos add <ref>`, or the
+/// pin it carried) instead of a subtraction that would delete a row the add did not create.
 ///
 /// AN `"off"` SWITCH IS NOT A DESTINATION SET. It is the row's own negation — the bundle is not
 /// delivered here at all — so an add over one is a re-activation, never an extend, and it takes
@@ -727,20 +729,9 @@ pub(super) fn write_row(
 /// the last destination, drops the row, and resumes the feed EVERYWHERE — the opposite of the
 /// state it claimed to restore.
 ///
-/// A DESTINATION THE ROW ALREADY REACHES IS NOT AN ADDITION. `in_reach` is the row's own default
-/// reach ([`reach_already_held`]), non-empty only while the row still stands for it, and an asked
-/// entry inside it is a request for nothing: recording it would leave the receipt's undo a
-/// NARROWING, because subtracting an in-reach entry is exactly what makes the collapse materialize
-/// the token into an exact list. Such an entry drops like a string the line already spells, and an
-/// ask that drops whole is the ordinary redundancy no-op.
-///
-/// Returns the value to write and, when this WAS a destination-only act over a standing row, what
-/// it changed.
-fn extend_dest(
-    prior: Option<&EntryValue>,
-    value: &EntryValue,
-    in_reach: &[String],
-) -> (EntryValue, Option<DestExtend>) {
+/// Returns the value to write and, when this WAS a destination-only act over a row already naming
+/// destinations, what it changed.
+fn extend_dest(prior: Option<&EntryValue>, value: &EntryValue) -> (EntryValue, Option<DestExtend>) {
     let (Some(prior), EntryValue::Fields(fields)) = (prior, value) else {
         return (value.clone(), None);
     };
@@ -764,23 +755,18 @@ fn extend_dest(
     };
     let mut added: Vec<String> = Vec::new();
     let mut mcp_dest_touched = false;
+    // A row that named NO destinations of the asked kind is being told what it reaches for the
+    // first time: the ask REPLACES what the row stood for, and the write says so rather than
+    // reporting an addition. Both arms start from what the file spells, and from nothing when it
+    // spells none.
+    let replaces_reach = fields.dest.is_some() && prior_fields.dest.is_none();
     for (asked, standing, is_row_dest) in [
         (&fields.dest, &prior_fields.dest, true),
         (&fields.mcp_dest, &prior_fields.mcp_dest, false),
     ] {
         let Some(asked) = asked else { continue };
-        let mut base = match standing {
-            Some(standing) => standing.clone(),
-            // A row's OWN `dest` starts from the token that stands for what it reaches today, so
-            // the add is purely additive. A channel's `mcp_dest` is a FILTER over members, not a
-            // reach the token could speak for, and starts empty exactly as it always has.
-            None if is_row_dest => vec![crate::manifest::dest::DEFAULT_REACH.to_owned()],
-            None => Vec::new(),
-        };
+        let mut base = standing.clone().unwrap_or_default();
         for entry in asked {
-            if is_row_dest && in_reach.contains(entry) {
-                continue;
-            }
             if !base.contains(entry) {
                 base.push(entry.clone());
                 added.push(entry.clone());
@@ -792,6 +778,9 @@ fn extend_dest(
             mcp_dest_touched = true;
             merged.mcp_dest = Some(base);
         }
+    }
+    if replaces_reach {
+        return (EntryValue::Fields(merged), None);
     }
     // A MIXED MUTATION IS NOT A DESTINATION-ONLY ACT. `add <ref>@<new-pin> --dest B` moves the pin
     // AND adds a folder; a receipt that spoke only of the folder left the moved pin unsaid, and
@@ -819,17 +808,10 @@ fn extend_dest(
     if !dest_only {
         return (EntryValue::Fields(merged), None);
     }
-    let default_reach = merged
-        .dest
-        .as_deref()
-        .is_some_and(crate::manifest::dest::carries_default_reach);
     (
         EntryValue::Fields(merged),
         Some(DestExtend {
-            change: DestChange {
-                added,
-                default_reach,
-            },
+            change: DestChange { added },
             mcp_dest: mcp_dest_touched,
         }),
     )
@@ -2622,61 +2604,6 @@ fn default_reach_roots(
         }
     }
     Ok(out)
-}
-
-/// WHAT AN ADD MUST NOT RECORD on a standing row: its DEFAULT REACH, asked only while the row
-/// still stands for it (no `dest` at all, or a `dest` carrying the token). Empty everywhere else —
-/// a row born by this add records what it was asked for, an `"off"` switch is no destination set,
-/// and a row naming its own destinations reaches exactly what it names, so every asked entry there
-/// is a real addition.
-///
-/// The reach is [`default_reach_roots`]' answer, the same one the collapse consults, so an add and
-/// the `remove` its receipt prints cannot disagree about which entries the token already holds.
-///
-/// # Errors
-/// A store read failure, or a manifest the grammar refuses.
-fn reach_already_held(
-    ctx: &Ctx<'_>,
-    target: &EditTarget,
-    reference: &str,
-    prior: Option<&EntryValue>,
-    value: &EntryValue,
-) -> Result<Vec<String>, ClientError> {
-    let (Some(prior), EntryValue::Fields(fields)) = (prior, value) else {
-        return Ok(Vec::new());
-    };
-    if fields.dest.is_none() || matches!(prior, EntryValue::Off) {
-        return Ok(Vec::new());
-    }
-    if !prior
-        .fields()
-        .dest
-        .as_deref()
-        .is_none_or(crate::manifest::dest::carries_default_reach)
-    {
-        return Ok(Vec::new());
-    }
-    let Ok(shape) = crate::manifest::keys::classify_key(reference) else {
-        return Ok(Vec::new());
-    };
-    let ws = match &shape {
-        KeyShape::WorkspaceBundle {
-            host, workspace, ..
-        } => Some((host.clone(), workspace.clone())),
-        _ => None,
-    };
-    let row = PlanRow {
-        reference: reference.to_owned(),
-        shape,
-        section: match prior.declared_kind() {
-            Some(BundleKind::Mcp) => crate::manifest::document::SectionKind::Mcp,
-            _ => crate::manifest::document::SectionKind::Skills,
-        },
-        value: prior.clone(),
-    };
-    let name = row.display_name();
-    let kind = row_kind(ctx, target, Some(&row), ws.as_ref(), &name);
-    default_reach_roots(ctx, target, Some(&row), &name, kind)
 }
 
 /// WHAT A SET LINE CAN NEVER REACH: the asked destinations that are no agent's own — a folder a

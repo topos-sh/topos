@@ -796,7 +796,7 @@ fn run_command(
             // REMOTE import — which members land, into which destinations. They pass through the
             // SAME describe-first shape and the SAME per-scope store as a bare `add owner/repo`:
             // a selector narrows what lands, never what a person gets to read first. `-s *`
-            // expands to every skill in the repo; `-a *` to every harness DETECTED on this machine.
+            // expands to every skill in the repo; `-a *` to this scope's picked agents.
             let has_selectors = !skill.is_empty() || !selection.is_empty();
             let looks_remote = matches!(
                 crate::source::classify(&source),
@@ -1006,8 +1006,9 @@ fn run_command(
                             return Ok(d);
                         }
                         // The selection resolves (and refuses) BEFORE the adopt, so an unknown
-                        // agent leaves nothing half-landed.
+                        // agent — or one outside this scope's pick — leaves nothing half-landed.
                         let entries = selection.skill_entries(scope.target.scope)?;
+                        selection.check_picked(&ctx, &scope.target)?;
                         // The server-bundle guard arms on SILENCE: `--kind skill` on a
                         // `server.json`-rooted folder adopts it as a skill, the person's own word.
                         let mut d = ops::adopt_path(&ctx, &scope, &p, declared)?;
@@ -1148,6 +1149,7 @@ fn run_command(
                             }) => ops::add_scope(&ctx, global).and_then(|scope| {
                                 let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
                                 let entries = selection.skill_entries(scope.target.scope)?;
+                                selection.check_picked(&ctx, &scope.target)?;
                                 // The server-bundle guard arms on SILENCE here exactly as it does
                                 // on the path arm: a folder a name resolved to can be an MCP
                                 // bundle too, and adopting one as a skill delivers raw JSON into

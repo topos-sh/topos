@@ -203,6 +203,7 @@ pub(crate) fn add_mcp(
     // a side effect nobody asked for and no receipt names.
     let scope = medit::add_scope(ctx, global)?;
     selection.mcp_entries(scope.target.scope)?;
+    selection.check_picked(ctx, &scope.target)?;
     let session = pick_session(ctx, workspace)?;
     let added = (connect)(&session)
         .directory

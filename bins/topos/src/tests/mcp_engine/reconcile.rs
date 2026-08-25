@@ -1372,19 +1372,28 @@ fn a_set_delivered_add_writes_no_row_and_converges_the_missing_copy() {
     assert_eq!(json["set_delivery"]["asked"][0], "claude-code");
     assert!(json.get("manifest").is_none(), "{json}");
 
-    // AN AGENT THIS MACHINE DOES NOT RUN gets no row either — and no sentence claiming the bundle
-    // reaches it. The surface reads in the standing `not placed` vocabulary, with its reason.
-    let data = add("cursor");
+    // AN AGENT OUTSIDE THE PICK is not something `-a` may name: the add refuses, names the
+    // command that picks it, and writes nothing.
+    let err = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("{HOST}/{WS_NAME}/sentry"),
+        false,
+        false,
+        &crate::ops::dest_select::Selection::new(&["cursor".to_owned()], &[]),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "AGENT_NOT_PICKED", "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "cursor is not one of this project's agents. Add it: topos agents add cursor"
+    );
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         channel_row,
         "still no row"
-    );
-    assert_eq!(
-        crate::render::add_tty(&data),
-        "sentry already reaches every agent here through channels/everyone — no row to \
-         record.\n  cursor: not placed — it is not set up here\nnothing changed",
-        "{data:?}"
     );
 }
 

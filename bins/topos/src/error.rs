@@ -1230,6 +1230,16 @@ pub(crate) enum ClientError {
     /// what still stands.
     #[error("{}", remove_incomplete_message(agent, left))]
     AgentRemoveIncomplete { agent: String, left: Vec<String> },
+    /// An `add -a <agent>` naming an agent OUTSIDE the pick at the scope the row lands in. `-a`
+    /// narrows what the pick already allows; it never widens it, because widening would write
+    /// into an agent the person did not pick. `add_argv` is the command that picks it — the
+    /// whole way out, so the sentence ends in something runnable. Nothing was read past the
+    /// argv; the TTY closes with `nothing changed`.
+    #[error("{}", agent_not_picked_message(agent, add_argv))]
+    AgentNotPicked {
+        agent: String,
+        add_argv: Vec<String>,
+    },
 }
 
 /// The [`ClientError::PickRequired`] sentence: the fact, the installed list (or its absence),
@@ -1254,6 +1264,31 @@ fn pick_required_message(installed: &[String], global: bool) -> String {
 /// The way out of [`ClientError::PickRequired`], spelled for the scope.
 pub(crate) fn pick_command(global: bool) -> String {
     format!("topos init{} -a <agent>", scope_flag(global))
+}
+
+/// The [`ClientError::AgentNotPicked`] sentence: the agent, the scope it is not picked in, and
+/// the command that picks it. The scope word and the command come from the SAME argv, so the
+/// sentence cannot name one scope and offer the other's spelling.
+fn agent_not_picked_message(agent: &str, add_argv: &[String]) -> String {
+    let where_ = if add_argv.iter().any(|a| a == "-g") {
+        "machine"
+    } else {
+        "project"
+    };
+    format!(
+        "{agent} is not one of this {where_}'s agents. Add it: {}",
+        add_argv.join(" ")
+    )
+}
+
+/// The command that picks `agent` at the scope: the way out of [`ClientError::AgentNotPicked`].
+pub(crate) fn agents_add_argv(agent: &str, global: bool) -> Vec<String> {
+    let mut argv = vec!["topos".to_owned(), "agents".to_owned(), "add".to_owned()];
+    if global {
+        argv.push("-g".to_owned());
+    }
+    argv.push(agent.to_owned());
+    argv
 }
 
 fn remove_incomplete_message(agent: &str, left: &[String]) -> String {
@@ -1441,6 +1476,8 @@ impl ClientError {
             ClientError::GitignoreNeedsProject => "GITIGNORE_NEEDS_PROJECT",
             // A cleanup that left something standing: the pick is unchanged, the message names it.
             ClientError::AgentRemoveIncomplete { .. } => "AGENT_REMOVE_INCOMPLETE",
+            // A `-a` slug outside the pick: the fix is picking it, and the message spells it.
+            ClientError::AgentNotPicked { .. } => "AGENT_NOT_PICKED",
         }
     }
 

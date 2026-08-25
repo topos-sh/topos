@@ -1211,6 +1211,8 @@ fn a_selector_imports_harness_choice_rides_the_row_into_the_next_update() {
     // Without the field, the next commit move re-lands the copy through the DEFAULT agent dir and
     // the person's `-a` choice quietly evaporates.
     let rig = Rig::new("harness-row");
+    // THE PREMISE: codestudio is one of this machine's agents, so `-a codestudio` may name it.
+    rig.pick(&["claude-code", "codestudio"]);
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());

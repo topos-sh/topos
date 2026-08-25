@@ -281,6 +281,11 @@ fn add_workspace(
     } else {
         selection.skill_entries(scope)?
     };
+    // `-a` STAYS INSIDE THE PICK — asked over the file this row will land in. A project with no
+    // manifest has no target to ask about; that add refuses below, where it always has.
+    if let Some(target) = medit::edit_target(ctx, global)? {
+        selection.check_picked(ctx, &target)?;
+    }
     let mut data = match &resolved.entry {
         Some(e) => AddData {
             skill_id: Some(e.skill_id.clone()),
@@ -869,7 +874,6 @@ fn shape_dest_receipt(
     if let Some(set) = set_line {
         data.dest_change = Some(topos_types::results::DestChange {
             added: dest_entries.to_vec(),
-            default_reach: true,
         });
         data.undo = Vec::new();
         medit::push_note(
@@ -1421,7 +1425,9 @@ fn add_forge(
     let dest_entries = if selection.is_empty() {
         Vec::new()
     } else {
-        selection.skill_entries(target.scope)?
+        let entries = selection.skill_entries(target.scope)?;
+        selection.check_picked(ctx, &target)?;
+        entries
     };
     let pin = match (&parsed.pin, &parsed.ref_hint) {
         (Some(p), _) => Some(p.clone()),
@@ -1710,7 +1716,8 @@ pub(crate) enum AddManyOutcome {
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] for a non-remote source, no resolvable directory, or `-a '*'`
-/// matching no detected harness; [`ClientError::NoSkillInSource`]; the remote-import family; a
+/// matching no picked agent that takes skills here; [`ClientError::AgentNotPicked`] for a named
+/// agent outside the pick; [`ClientError::NoSkillInSource`]; the remote-import family; a
 /// filesystem failure.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_forge_selected(
@@ -1770,23 +1777,26 @@ pub(crate) fn add_forge_selected(
     } else {
         skills.iter().cloned().map(Some).collect()
     };
-    // `-a '*'` → every harness DETECTED here with a skills dir at the chosen scope. Named slugs
-    // (and the literal `--dest` folders) validate UP FRONT — an unknown agent refuses before a
-    // byte moves, with the registry's own list.
+    // `-a '*'` → every PICKED agent with a skills dir at the chosen scope. Named slugs (and the
+    // literal `--dest` folders) validate UP FRONT — an unknown agent refuses before a byte moves,
+    // with the registry's own list, and one outside the pick with the command that picks it.
     let named: Vec<String> = agents.iter().filter(|a| *a != "*").cloned().collect();
-    super::dest_select::Selection::new(&named, dests).skill_entries(target.scope)?;
+    let named_selection = super::dest_select::Selection::new(&named, dests);
+    named_selection.skill_entries(target.scope)?;
+    named_selection.check_picked(ctx, &target)?;
     let literal_entries =
         super::dest_select::Selection::new(&[], dests).skill_entries(target.scope)?;
     let agent_opts: Vec<Option<String>> = if agents.iter().any(|a| a == "*") {
-        let detected = detected_harness_slugs(&roots, global);
-        if detected.is_empty() {
-            return Err(ClientError::InvalidArgument(
-                "`-a '*'` found no harness on this machine to place into at the chosen scope — \
-                 name one with `-a <slug>` (or drop `--global` for project scope)"
-                    .into(),
-            ));
+        let picked = picked_harness_slugs(ctx, &target, &roots, global);
+        if picked.is_empty() {
+            return Err(ClientError::InvalidArgument(format!(
+                "`-a '*'` stands for this {}'s agents, and none of them takes skills at this \
+                 scope. Pick one with: {}",
+                if global { "machine" } else { "project" },
+                crate::error::agents_add_argv("<agent>", global).join(" ")
+            )));
         }
-        detected.into_iter().map(Some).collect()
+        picked.into_iter().map(Some).collect()
     } else if agents.is_empty() {
         vec![None]
     } else {
@@ -1910,24 +1920,30 @@ pub(crate) fn add_forge_selected(
     Ok(AddManyOutcome::Applied(out))
 }
 
-/// The harness slugs DETECTED on this machine (the same registry discovery `list` uses) that have a
-/// skills directory at the chosen scope — the fan-out set for `add -a '*'`. Deduped + sorted; a
-/// harness with no writable dir at this scope is dropped (so the loop never fails on it).
-fn detected_harness_slugs(roots: &super::DiscoveryRoots, global: bool) -> Vec<String> {
+/// The PICKED agents that have a skills directory at the chosen scope — the fan-out set for
+/// `add -a '*'`. The token is the pick's own breadth, never detection: an import that fanned out
+/// to every agent found on disk would write into agents nobody picked, which is the one thing this
+/// build never does. Deduped + sorted; a picked agent with no writable dir at this scope is
+/// dropped (so the loop never fails on it).
+fn picked_harness_slugs(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    roots: &super::DiscoveryRoots,
+    global: bool,
+) -> Vec<String> {
     let scope = if global {
         topos_harness::registry::SkillScope::User
     } else {
         topos_harness::registry::SkillScope::Project
     };
-    let mut slugs: Vec<String> =
-        topos_harness::registry::discover_all(&roots.home, roots.cwd.as_deref())
-            .into_iter()
-            .map(|d| d.harness_slug)
-            .filter(|slug| {
-                topos_harness::registry::skills_root(slug, scope, &roots.home, roots.cwd.as_deref())
-                    .is_some()
-            })
-            .collect();
+    let project_dir = (!global).then_some(target.dir.as_path());
+    let mut slugs: Vec<String> = crate::agents_pick::picked_slugs(ctx, project_dir)
+        .into_iter()
+        .filter(|slug| {
+            topos_harness::registry::skills_root(slug, scope, &roots.home, roots.cwd.as_deref())
+                .is_some()
+        })
+        .collect();
     slugs.sort();
     slugs.dedup();
     slugs

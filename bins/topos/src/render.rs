@@ -253,6 +253,12 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 retry_machine_wide(command, argv),
             ),
         ],
+        // A `-a` slug outside the pick: the one way out is picking it, at the scope that asked
+        // — the same argv the sentence ends in.
+        ClientError::AgentNotPicked { add_argv, .. } => vec![crate::actions::next_action(
+            ActionCode::from("PICK_AGENTS".to_owned()),
+            add_argv.clone(),
+        )],
         // No pick: the one way out is naming an agent, at the scope that asked.
         ClientError::PickRequired { global, .. } => {
             let mut argv: Vec<String> = vec!["topos".into(), "init".into()];
@@ -1494,15 +1500,10 @@ fn add_dest_receipt(data: &AddData) -> String {
     s
 }
 
-/// The lead line of an add that changed a STANDING row's destinations — what it gained, and (on a
-/// row that had reached every agent) that it still does. An add never costs a row an agent, and
-/// the row a person opens says so with a `"*"` they may otherwise have to look up.
+/// The lead line of an add that changed a STANDING row's destinations — what it gained. The row
+/// already named destinations, so this is an addition to them and nothing else moved.
 fn dest_change_lead(name: &str, change: &topos_types::results::DestChange) -> String {
-    let mut lead = format!("added {} to {name}'s destinations", change.added.join(", "));
-    if change.default_reach {
-        lead.push_str("\n(it keeps reaching every agent — \"*\" holds its default reach)");
-    }
-    lead
+    format!("added {} to {name}'s destinations", change.added.join(", "))
 }
 
 /// The describe an `add` of a git source always returns: what the source holds, what would be
@@ -5420,6 +5421,7 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
     // the argv.
     if let ClientError::ManifestInvalid(_)
     | ClientError::UnknownAgent { .. }
+    | ClientError::AgentNotPicked { .. }
     | ClientError::SelectionRefused(_) = err
     {
         return format!("error: {}\nnothing changed", safe_message(err));
@@ -5530,8 +5532,9 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
         err,
         ClientError::PlacementsDiverged { .. }
             | ClientError::PublishBehind { .. }
-            // The pick answer already ends in its one command.
+            // The pick answers already end in their one command.
             | ClientError::PickRequired { .. }
+            | ClientError::AgentNotPicked { .. }
     ) {
         return None;
     }
@@ -6110,7 +6113,6 @@ mod tests {
         ];
         extended.dest_change = Some(topos_types::results::DestChange {
             added: vec!["~/.cursor/skills".to_owned()],
-            default_reach: false,
         });
         assert_eq!(
             add_tty(&extended),
@@ -6119,28 +6121,21 @@ mod tests {
              (undo: topos remove -g coolify-deploy --dest ~/.cursor/skills)"
         );
 
-        // THE FIRST destination on a row that reached every agent costs it nothing: the `"*"` the
-        // row now carries holds that reach, and the second line is where a reader learns it.
-        let mut kept = local(vec!["prompts/skills".to_owned()]);
-        kept.name = "code-review".to_owned();
-        kept.source = Some("topos.sh/ideamotive/code-review".to_owned());
-        kept.undo = vec![
+        // A ROW BORN WITH A DESTINATION — or one whose reach this add REPLACED — carries no
+        // change: it is an ordinary install, and the folder it landed in is the column.
+        let mut born = local(vec!["prompts/skills".to_owned()]);
+        born.name = "code-review".to_owned();
+        born.source = Some("topos.sh/ideamotive/code-review".to_owned());
+        born.undo = vec![
             "topos".to_owned(),
-            "remove".to_owned(),
-            "code-review".to_owned(),
-            "--dest".to_owned(),
-            "prompts/skills".to_owned(),
+            "add".to_owned(),
+            "topos.sh/ideamotive/code-review".to_owned(),
         ];
-        kept.dest_change = Some(topos_types::results::DestChange {
-            added: vec!["prompts/skills".to_owned()],
-            default_reach: true,
-        });
         assert_eq!(
-            add_tty(&kept),
-            "added prompts/skills to code-review's destinations\n\
-             (it keeps reaching every agent — \"*\" holds its default reach)\n\
+            add_tty(&born),
+            "+ code-review   installed (prompts/skills)\n\
              source: topos.sh/ideamotive/code-review\n\
-             (undo: topos remove code-review --dest prompts/skills)"
+             (undo: topos add topos.sh/ideamotive/code-review)"
         );
 
         // THE SECOND CHECKOUT: a machine-wide add of a bundle the project already delivers says

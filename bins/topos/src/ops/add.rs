@@ -2177,6 +2177,7 @@ pub(crate) fn extend_folder_dest(
     } else {
         selection.skill_entries(scope.target.scope)?
     };
+    selection.check_picked(ctx, &scope.target)?;
     // The bundle standing here may be a workspace's; the follow state is what knows.
     let workspace =
         super::followed_workspace(ctx, sid.as_str()).and_then(|ws| super::workspace_ref(ctx, &ws));
