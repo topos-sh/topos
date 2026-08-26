@@ -208,6 +208,12 @@ is the destination set. The choice is recorded on the line itself (`dest = ["~/.
 every later update keeps the copy where you asked. For an MCP server, `-a` picks whose config file
 gets the entry.
 
+Claude Code is the one agent whose project entries sit outside the checkout: they go in your own
+`~/.claude.json`, in the section for this exact directory, so a session started in a subdirectory
+does not see them and a teammate who clones the repo has none. `--dest .mcp.json` writes the
+committed file in the repo root instead, which every session under the repo reads, and committing
+that file is how the server reaches your teammates.
+
 The same flags on a later `add` **set** the destinations again: the line ends up with exactly what
 that run named, which is how you re-aim a line as well as how you first aim it. Naming what the
 line already has changes nothing, and says so.
@@ -219,7 +225,7 @@ places the copy the agent you named was missing and says which line delivers it:
 ```
 sentry already reaches every agent here through channels/everyone — no row to record.
 Placed the copy that was missing:
-  opencode: opencode.json — created
+  opencode: .opencode/opencode.json — created
 ```
 
 A folder no agent owns is the one exception: nothing but a line reaches it, so `--dest <that

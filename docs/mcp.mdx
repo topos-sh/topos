@@ -227,7 +227,7 @@ how you sign in — without a gateway, that stays the agent's own business:
 
 | Agent | Picking up the change | Signing in |
 |---|---|---|
-| Claude Code | loads next session; `/reload-plugins` reloads live | `/mcp` |
+| Claude Code | loads next session | `/mcp` |
 | Claude Desktop | quit completely and reopen | in the app, on first use |
 | Cline | picked up automatically | Cline's own, on first use |
 | Codex | restart `codex` | `codex mcp login <name>` |
@@ -376,12 +376,16 @@ weather: the version this workspace pins was withdrawn from the catalog. topos s
 
 The two scopes work as they do for skills: your own `~/.topos/topos.toml` (or, with no such file,
 what your workspaces give you) follows you, and a repo's committed `topos.toml` governs that
-checkout. An MCP row in a project file lands **only in project-level config** — `.mcp.json`,
-`.codex/config.toml`, `.cursor/mcp.json`, `.gemini/settings.json`, `.roo/mcp.json`,
-`.vscode/mcp.json`, `opencode.json` — and never falls back to your home config, so a committed file
-can't quietly reconfigure a contributor's machine.
+checkout. An MCP row in a project file lands **only where that agent reads a project's servers**:
+`.codex/config.toml`, `.cursor/mcp.json`, `.gemini/settings.json`, `.opencode/opencode.json`,
+`.roo/mcp.json`, `.vscode/mcp.json`, and for Claude Code the section of your own `~/.claude.json`
+that belongs to this checkout. It never falls back to your machine-wide config, so a committed
+file can't quietly reconfigure a contributor's machine. Claude Code's is the only one outside the
+repo, because that is the only place it reads a project's servers from; `--dest .mcp.json` puts
+one in the committed root file instead, which is how you share it with teammates through git
+([Supported agents](/docs/harnesses#mcp-servers)).
 
-Those seven files are the whole of it: nine of the sixteen agents have no project-level MCP config
+Those seven places are the whole of it: nine of the sixteen agents have no project-level MCP config
 at all — the table in [Supported agents](/docs/harnesses#mcp-servers) marks each of them
 `— (none)` — and the receipt that places a project row says so for every one it finds on the
 machine, instead of pretending:

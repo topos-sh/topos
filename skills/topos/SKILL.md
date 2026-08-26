@@ -71,17 +71,27 @@ topos agents remove <agent>       # drop one AND delete what topos wrote for it 
 Name YOURSELF: run `topos init -a claude-code` when you are Claude Code, `-a codex` for Codex,
 `-a cursor` for Cursor, `-a opencode` for OpenCode. Repeat `-a` for more; `-a '*'` is every agent
 installed on this machine; `topos agents --json` names the ones that are. The pick is PERSONAL and
-per project (`<project>/.topos/agents.json`, never committed), and a project with no pick of its
-own falls back to the machine's. `init` on a folder no `topos.toml` covers CREATES that file, which the
-repo commits, so ask the human first; on an existing one it only records the pick and installs.
+per project (`<project>/.topos/agents.json`, never committed). The machine pick
+(`~/.topos/agents.json`, written by `-g`) is a SEPARATE decision: neither scope falls back to the
+other, so a fresh clone has no pick until somebody records one there. `init` on a folder no
+`topos.toml` covers CREATES that file, which the repo commits, so ask the human first; on an
+existing one it only records the pick and installs.
 
 Each picked agent gets its own folder, its own MCP config file and its own session-start hook:
 inside the project for claude-code, cursor, codex and opencode, machine-wide (`-g`) for every
-other agent, whose receipt says so and names `topos update` as the other way to stay fresh.
+other agent, whose receipt says so and names `topos update` as the other way to stay fresh. In a
+checkout each agent's files sit under one dot-folder of its own: `.claude/`, `.cursor/`,
+`.codex/`, `.opencode/`. The ONE thing that lands outside the checkout is Claude Code's MCP
+entries. They go in the person's own `~/.claude.json`, under
+`projects."<the checkout's path>".mcpServers`, which only a session started in that EXACT
+directory reads. `--dest .mcp.json` writes the committed root file instead, which every session
+under the repo reads and which git carries to teammates.
 
-A verb that needs a pick and cannot ask exits `2` with error code `PICK_REQUIRED`,
-`data.installed` naming the agents installed here and `next_actions` carrying
-`topos init -a <agent>`. Answer it by picking, never by writing `agents.json` yourself.
+topos NEVER prompts. A verb that needs a pick where several agents are installed exits `2` with
+error code `PICK_REQUIRED`, `data.installed` naming the agents installed here and `next_actions`
+carrying `topos init -a <agent>`. Answer it by picking one of THOSE slugs, never by writing
+`agents.json` yourself. One installed agent is used without asking; a machine with none installed
+places nothing and says so; `install --frozen` places nothing rather than choosing.
 
 ## What the CLI does NOT write
 

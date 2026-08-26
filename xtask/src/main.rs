@@ -1028,7 +1028,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     },
                     Surface {
                         agent: "claude-code".to_owned(),
-                        target: Some(".mcp.json".to_owned()),
+                        target: Some("~/.claude.json".to_owned()),
                         state: TargetOutcome::Current,
                         note: None,
                     },

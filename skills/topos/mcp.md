@@ -75,9 +75,17 @@ the server is reached through the workspace that shares it, and nothing here hol
 that workspace — `topos login` is the fix.
 
 RELAY the receipt's per-agent lines to the human, because the last step is theirs: Claude Code
-loads next session (`/reload-plugins` reloads live, sign in with `/mcp`) · Codex needs a restart
-and `codex mcp login <name>` · Cursor a restart · OpenCode a restart (it signs in on the first
-401) · OpenClaw picks it up automatically (`openclaw mcp login <name>`) · Hermes takes
-`/reload-mcp`. In a PROJECT scope only project-level configs are written — openclaw and
-hermes-agent have none and report `not placed`, receiving the server through the machine scope
-instead.
+loads next session (sign in with `/mcp`) · Codex needs a restart and `codex mcp login <name>` ·
+Cursor a restart · OpenCode a restart (it signs in on the first 401) · OpenClaw picks it up
+automatically (`openclaw mcp login <name>`) · Hermes takes `/reload-mcp`. In a PROJECT scope only
+the file each agent reads a project's servers from is written; openclaw and hermes-agent have none
+and report `not placed`, receiving the server through the machine scope instead.
+
+WHERE a project entry lands is that agent's own file: `.codex/config.toml`, `.cursor/mcp.json`,
+`.gemini/settings.json`, `.opencode/opencode.json`, `.roo/mcp.json`, `.vscode/mcp.json`. Claude
+Code is the exception and reads a project's servers only from the person's own `~/.claude.json`,
+under `projects."<the checkout's path>".mcpServers`. A session started in a SUBDIRECTORY of the
+repo does not see them, and a teammate who clones the repo has none. `--dest .mcp.json` (or
+`dest = [".mcp.json"]` on the row) writes the committed root file instead, which every session
+under the repo reads and which git carries to teammates. Machine scope (`-g`) writes the same
+file's top-level `mcpServers`, which every session sees.
