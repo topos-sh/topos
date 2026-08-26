@@ -346,9 +346,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   planner did not compute; the targeted converge builds its own demand from a reach it re-derives
   from the record immediately before the lock, because a verb plans at its top and converges after
   a materialize — a stale reach would claw back an entry a sweep placed in that window. An add
-  never places where the next sweep would claw it back. Removal and
-  key retirement resolve their surfaces from the descriptor table and their reach from the
-  recorded rows — prior-matched keys, with drift left in place. ONE converge path serves every
+  never places where the next sweep would claw it back. Removal and key retirement resolve their
+  reach from the RECORDED rows, and each row's surface from the file that row names
+  (`surfaces_of` — every surface the harness can hold this scope's entries at, retired ones
+  included, matched by resolved path): an entry is read, written, verified and removed at the
+  surface that HOLDS it, because "which harness, at which scope" stopped identifying a file the
+  day an agent got two. Prior-matched keys, with drift left in place. ONE converge path serves every
   surface, and it runs first over the RETIRED ones (`retired_surfaces`): the surfaces an older
   topos wrote this harness's entries into and this one does not — Claude Code's wholly-owned
   plugin folder, and the checkout-root files two rows used to write (`.mcp.json` for Claude Code,
@@ -359,7 +362,11 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   table must never aim a cleanup. Every entry
   point — the sweep, add's inline converge, a targeted accept/go-back, `remove` — serializes on
   the per-scope `locks/mcp.lock` (unavailable = a refusal, never a fallback), over the ONE
-  scope-store resolution (`manifest_edit::mcp_scope_target`).
+  scope-store resolution (`manifest_edit::mcp_scope_target`); and INSIDE that, the read-modify-write
+  of one config FILE takes that file's own lock (`surface_lock`, named by the file's resolved path,
+  in the MACHINE store's `locks/`), because a file holding a slot per checkout beside the machine's
+  own has writers in more than one scope, and two scopes locking their own stores would each
+  replace it over the other's edit.
 - `config_custody` — WHO OWNS WHICH CONFIG ENTRY. Placement ownership is the BUNDLE's, recorded
   in `skills/<id>/entries.json` — the SIBLING of its `map.json`, so the record directory is still
   the one place a bundle's custody lives and deleting the record deletes both halves. Two files,
@@ -382,8 +389,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   unparseable one keeping the lot, because absence is what has to be proven. A different address
   keeps the reservation and takes a `-2`, because harness auth state outlives config entries and no
   config file can rule a sign-in out), and the intent journal every config write rides (one write covers many
-  bundles' entries; crash recovery promotes or drops per bundle record by OBSERVING the file, and
-  an unreadable file keeps the standing row). `ScopeEntries` is the read-modify-write view that
+  bundles' entries; crash recovery promotes or drops per bundle record by OBSERVING the file the
+  intent NAMED, at that file's own dialect and slot, and an unreadable file keeps the standing
+  row). `ScopeEntries` is the read-modify-write view that
   joins the scope document onto every bundle's rows as the one index the converge asks its
   ownership questions of; a record write that fails puts its intents BACK in the journal, so the
   durable journal always describes exactly the work that has not landed. A bundle with no record

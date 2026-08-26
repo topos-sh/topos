@@ -575,19 +575,25 @@ fn relayed_url(command: &str, args: &[String]) -> Option<String> {
 /// cannot make on its own ([`observe`] answers only for managed-LOOKING keys, so an entry under
 /// somebody else's name pointing at the same server is invisible to it).
 ///
-/// `selector` names the slot when it is not the dialect's own: a `.`-separated path whose `*`
-/// stands for every key at that level (`projects.*.mcpServers`). `None` reads the dialect's
-/// native slot.
+/// `slot` names the key path when it is not the dialect's own — the SAME components every write
+/// and every ownership read is aimed with ([`apply`], [`observe`]), a `*` component standing for
+/// every key at that level (`projects` / `*` / `mcpServers`). `None` reads the dialect's native
+/// slot. Components, never a joined string: a slot key is a checkout's own absolute path, and the
+/// dots in one are part of the key rather than a level below it.
 ///
-/// `None` means UNREADABLE — the surface could not be parsed in its dialect, or the selector
-/// cannot be honoured here. It is not an empty answer: a caller may not conclude that nothing is
-/// there.
+/// `None` means UNREADABLE — the surface could not be parsed in its dialect, or the slot cannot be
+/// honoured here. It is not an empty answer: a caller may not conclude that nothing is there.
 #[must_use]
 pub fn observe_entries(
     dialect: McpDialect,
     current: Option<&[u8]>,
-    selector: Option<&str>,
+    slot: Option<&[&str]>,
 ) -> Option<Vec<SeenEntry>> {
+    // An EMPTY slot names no entries object at all; answering the dialect's own would read a
+    // different place than the caller asked for.
+    if slot.is_some_and(<[&str]>::is_empty) {
+        return None;
+    }
     match dialect {
         McpDialect::ClaudeProjectJson
         | McpDialect::CursorJson
@@ -602,10 +608,10 @@ pub fn observe_entries(
         | McpDialect::WindsurfJson
         | McpDialect::ClineJson
         | McpDialect::RooJson
-        | McpDialect::ZedJson => jsonc_edit::observe_entries(dialect, current, selector),
-        McpDialect::CodexToml => toml_patch::observe_entries(current, selector),
+        | McpDialect::ZedJson => jsonc_edit::observe_entries(dialect, current, slot),
+        McpDialect::CodexToml => toml_patch::observe_entries(current, slot),
         McpDialect::HermesYaml | McpDialect::GooseYaml => {
-            yaml_splice::observe_entries(dialect, current, selector)
+            yaml_splice::observe_entries(dialect, current, slot)
         }
     }
 }
@@ -2485,10 +2491,12 @@ mod tests {
         );
     }
 
-    /// A SELECTOR reads a slot that is not the dialect's own — the shape `~/.claude.json` keeps,
-    /// where every project the file remembers holds its own `mcpServers` map.
+    /// A NAMED SLOT is read where it is, and not where the dialect's own sits — the shape
+    /// `~/.claude.json` keeps, where every project the file remembers holds its own `mcpServers`
+    /// map. The components are taken as given: a project key is an absolute PATH, and the dots in
+    /// one are part of the key, never a level below it.
     #[test]
-    fn a_selector_reads_the_slot_it_names_including_a_wildcard_level() {
+    fn a_named_slot_is_read_where_it_names_including_a_wildcard_level() {
         const CLAUDE_JSON: &str = r#"{
   "mcpServers": { "user-scope": { "type": "http", "url": "https://mcp.example/one" } },
   "projects": {
@@ -2498,11 +2506,11 @@ mod tests {
   }
 }
 "#;
-        let at = |selector: &str| {
+        let at = |slot: &[&str]| {
             observe_entries(
                 McpDialect::ClaudeProjectJson,
                 Some(CLAUDE_JSON.as_bytes()),
-                Some(selector),
+                Some(slot),
             )
             .expect("readable")
             .into_iter()
@@ -2510,14 +2518,14 @@ mod tests {
             .collect::<Vec<_>>()
         };
         assert_eq!(
-            at("mcpServers"),
+            at(&["mcpServers"]),
             [(
                 "user-scope".to_owned(),
                 "https://mcp.example/one".to_owned()
             )]
         );
         assert_eq!(
-            at("projects.*.mcpServers"),
+            at(&["projects", "*", "mcpServers"]),
             [
                 ("in-a".to_owned(), "https://mcp.example/two".to_owned()),
                 ("in-b".to_owned(), "https://mcp.example/three".to_owned()),
@@ -2526,35 +2534,68 @@ mod tests {
         );
         // A path that does not exist holds nothing; a path that is present but wrong-shaped is
         // unreadable, never empty.
-        assert_eq!(at("nowhere.at.all"), Vec::new());
+        assert_eq!(at(&["nowhere", "at", "all"]), Vec::new());
         assert_eq!(
             observe_entries(
                 McpDialect::ClaudeProjectJson,
                 Some(b"{\"mcpServers\": 7}"),
-                Some("mcpServers")
+                Some(&["mcpServers"])
             ),
             None
         );
-        // The TOML dialect reads a dotted table path, and refuses a wildcard it cannot mean.
+        // A project key holding DOTS is one component, read where it is — the spelling every
+        // checkout under a dot-directory has.
+        assert_eq!(
+            observe_entries(
+                McpDialect::ClaudeProjectJson,
+                Some(
+                    br#"{"projects":{"/home/me/.work/repo":{"mcpServers":{"in-dotted":{"url":"https://mcp.example/four"}}}}}"#
+                ),
+                Some(&["projects", "/home/me/.work/repo", "mcpServers"])
+            )
+            .expect("readable")
+            .into_iter()
+            .map(|e| e.name)
+            .collect::<Vec<_>>(),
+            ["in-dotted".to_owned()]
+        );
+        // The TOML dialect reads a named table path, and refuses a wildcard it cannot mean.
         assert_eq!(
             observe_entries(
                 McpDialect::CodexToml,
                 Some(b"[projects.a.mcp_servers.x]\nurl = \"https://mcp.example/x\"\n"),
-                Some("projects.a.mcp_servers")
+                Some(&["projects", "a", "mcp_servers"])
             )
             .expect("readable")
             .len(),
             1
         );
         assert_eq!(
-            observe_entries(McpDialect::CodexToml, Some(b""), Some("a.*.b")),
+            observe_entries(McpDialect::CodexToml, Some(b""), Some(&["a", "*", "b"])),
             None
         );
-        // The Hermes splicer reads exactly one block — a selector there is refused, not guessed.
+        // The Hermes splicer reads exactly one block — a named slot there is refused, not guessed.
         assert_eq!(
-            observe_entries(McpDialect::HermesYaml, Some(b"mcp_servers:\n"), Some("x")),
+            observe_entries(
+                McpDialect::HermesYaml,
+                Some(b"mcp_servers:\n"),
+                Some(&["x"])
+            ),
             None
         );
+        // A slot with NO components names no entries object at all — unreadable in every dialect,
+        // never the dialect's own read under another name.
+        for dialect in [
+            McpDialect::ClaudeProjectJson,
+            McpDialect::CodexToml,
+            McpDialect::HermesYaml,
+        ] {
+            assert_eq!(
+                observe_entries(dialect, Some(b"{}"), Some(&[])),
+                None,
+                "{dialect:?}"
+            );
+        }
     }
 
     #[test]

@@ -308,13 +308,13 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>, slot: Option<&[Strin
 }
 
 /// Every entry in the surface's slot — foreign ones included (see
-/// [`super::observe_entries`]). `selector` overrides the dialect's own key path with a
-/// `.`-separated one whose `*` stands for every key at that level.
+/// [`super::observe_entries`]). `slot` overrides the dialect's own key path with the components of
+/// another, a `*` component standing for every key at that level.
 #[must_use]
 pub fn observe_entries(
     dialect: McpDialect,
     current: Option<&[u8]>,
-    selector: Option<&str>,
+    slot: Option<&[&str]>,
 ) -> Option<Vec<super::SeenEntry>> {
     let spec = dialect_spec(dialect)?;
     if effectively_absent(current) {
@@ -323,12 +323,9 @@ pub fn observe_entries(
     let text = std::str::from_utf8(current.unwrap_or_default()).ok()?;
     let view = parse_view(&spec, text).ok()?;
     let mut out = Vec::new();
-    match selector {
+    match slot {
         None => collect_entries(entries_view(&view, spec.path).ok()?, &mut out),
-        Some(selector) => {
-            let path: Vec<&str> = selector.split('.').collect();
-            walk_selector(&view, &path, &mut out)?;
-        }
+        Some(path) => walk_selector(&view, path, &mut out)?,
     }
     Some(out)
 }

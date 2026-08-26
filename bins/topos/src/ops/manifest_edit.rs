@@ -4259,8 +4259,17 @@ pub(crate) fn mcp_scope_target(
 ) -> Option<(crate::sidecar::Layout, Option<PathBuf>)> {
     match target.scope {
         ManifestScope::Global => Some((ctx.layout.clone(), None)),
-        ManifestScope::Project => crate::sidecar::existing_project_store(ctx.fs, &target.dir)
-            .map(|l| (l, Some(target.dir.clone()))),
+        // `under_machine`: the MCP converge locks a shared config file in the machine store's
+        // `locks/`, and a project store that did not know its machine would lock inside the
+        // checkout instead.
+        ManifestScope::Project => {
+            crate::sidecar::existing_project_store(ctx.fs, &target.dir).map(|l| {
+                (
+                    l.under_machine(ctx.layout.machine_home()),
+                    Some(target.dir.clone()),
+                )
+            })
+        }
     }
 }
 

@@ -300,11 +300,15 @@ fn retire_mcp_entries(
     }
     let project_root = layout.project_root().map(std::path::Path::to_path_buf);
     let picked = crate::agents_pick::picked_slugs(ctx, project_root.as_deref());
+    // The store REMEMBERS the machine it was reached from: the converge locks a shared config file
+    // in the machine store's `locks/`, and a project store that did not know its machine would
+    // lock inside the checkout instead.
+    let layout = layout.clone().under_machine(ctx.layout.machine_home());
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
         runtimes: &crate::mcp_render::PathRuntimes,
         relay_program: crate::mcp_engine::relay_program(),
-        layout,
+        layout: &layout,
         home: roots.home.clone(),
         project_root,
     };

@@ -741,13 +741,20 @@ impl<'a> ScopeEntries<'a> {
     /// Recovery over the intent journal, at converge start: for each pending intent, OBSERVE the
     /// intended file — the intended state present means the config write landed (promote the intent
     /// into the bundle's record); anything else means it did not (drop the intent, the standing row
-    /// stays authoritative). `dialect_of` maps the pending key's harness slug to the dialect that
-    /// file speaks in THIS scope (`None` = an unknown slug: the intent is dropped — the standing
-    /// rows stay, which fails toward keeping what is provable).
+    /// stays authoritative).
+    ///
+    /// `surface_of` answers for the intent's OWN FILE — the dialect it speaks and the slot the
+    /// entries sit in there — and is asked with that file, never with the slug alone. An agent has
+    /// more than one config file now, and a recovery that resolved the agent's default surface
+    /// observed a slot the write never touched, judged a landed write never to have landed, and
+    /// dropped the intent — leaving a live entry with nothing left to prove it was topos's.
+    /// `None` = the file is no surface this build knows (an unknown slug, a surface path that
+    /// moved): the intent drops and the standing rows stay, which fails toward keeping what is
+    /// provable.
     pub(crate) fn recover(
         &mut self,
         fs: &dyn FsOps,
-        dialect_of: &dyn Fn(&str) -> Option<EntrySlot>,
+        surface_of: &dyn Fn(&str, &Path) -> Option<EntrySlot>,
     ) -> bool {
         if self.doc.pending.is_empty() {
             return false;
@@ -758,7 +765,7 @@ impl<'a> ScopeEntries<'a> {
             let Some((slug, entry_key)) = custody_key.split_once('/') else {
                 continue;
             };
-            let Some((dialect, slot)) = dialect_of(slug) else {
+            let Some((dialect, slot)) = surface_of(slug, Path::new(&intent.file)) else {
                 continue;
             };
             // A read ERROR is not absence: whether the write landed is unknowable, so the intent
@@ -1020,31 +1027,12 @@ pub(crate) fn entries_of_any(
         .unwrap_or_default()
 }
 
-/// **Where one harness's entries sit at a scope**, for the READ half of recovery: the dialect the
-/// file speaks, and the key path the entries sit under inside it (`None` = the dialect's own). Two
-/// facts, never one: a file whose entries can sit in more than one slot is read wrong under the
-/// wrong path, and reads wrong silently.
+/// **How one recorded FILE is read**: the dialect it speaks, and the key path the entries sit
+/// under inside it (`None` = the dialect's own). Two facts, never one: a file whose entries can sit
+/// in more than one slot is read wrong under the wrong path, and reads wrong silently. The engine
+/// answers it from the file itself (`crate::mcp_engine`'s surface lookup), because which file is
+/// no longer decided by which harness.
 pub(crate) type EntrySlot = (topos_harness::mcp::McpDialect, Option<Vec<String>>);
-
-/// The engine's "where does this slug's entries sit in this scope" recovery lookup, resolved
-/// through the ONE surface resolution the planner and the converge use (see
-/// [`ScopeEntries::recover`]).
-pub(crate) fn dialect_lookup<'a>(
-    descriptors: &'a [&'static topos_harness::registry::KnownHarness],
-    home: &'a Path,
-    project_root: Option<&'a Path>,
-) -> impl Fn(&str) -> Option<EntrySlot> + 'a {
-    move |slug: &str| {
-        let h = descriptors.iter().find(|h| h.slug == slug)?;
-        // The one resolution the planner and the converge use, so a recovery reads the intended
-        // file under exactly the key path the write used. The intent journal records the driver
-        // surface FILE, which observes through the same dialect as every other surface.
-        match crate::placement::config_surface(h, home, project_root) {
-            crate::placement::ConfigSurface::Ready { at, .. } => Some((at.dialect, at.slot)),
-            _ => None,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

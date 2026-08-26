@@ -127,6 +127,15 @@ impl SurfaceAt {
     pub(crate) fn slot(&self) -> Option<&[String]> {
         self.slot.as_deref()
     }
+
+    /// The same slot as the whole-surface READERS take it ([`topos_harness::mcp::observe_entries`],
+    /// which sees foreign entries too). One spelling, borrowed twice — a reader aimed at a slot
+    /// the writer did not use is how a duplicate lands beside an entry nobody saw.
+    pub(crate) fn slot_parts(&self) -> Option<Vec<&str>> {
+        self.slot
+            .as_ref()
+            .map(|s| s.iter().map(String::as_str).collect())
+    }
 }
 
 /// **One agent a plan REACHES, and WHICH of that agent's surfaces at this scope.** Reach is a list
@@ -691,16 +700,12 @@ pub(crate) fn config_surface_at(
                             note: "no project-level config",
                         };
                     };
-                    // The slot key IS the directory the agent will see itself started in — the
-                    // checkout with every symlink resolved, which is what a process reports as its
-                    // own working directory.
-                    let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-                    let Some(key) = key.to_str() else {
+                    let Some(key) = project_key(root) else {
                         return ConfigSurface::NotSupported {
                             note: "this checkout's path cannot be spelled in the agent's config",
                         };
                     };
-                    let slot = topos_harness::mcp::project_slot(dialect, key);
+                    let slot = topos_harness::mcp::project_slot(dialect, &key);
                     Some((path, dialect, slot, false))
                 }
                 None => None,
@@ -729,6 +734,58 @@ pub(crate) fn config_surface_at(
             },
         },
     }
+}
+
+/// **The checkout, spelled as the AGENT spells it** — the key its own configuration files this
+/// project's servers under.
+///
+/// The directory an agent sees itself started in is the checkout with every symlink resolved,
+/// which is what a process reports as its own working directory — so the key is the canonical
+/// path. On Windows canonicalization answers in the VERBATIM extended-length spelling
+/// (`\\?\C:\src\repo`) and the agent is a Node process keying its projects by an ordinary
+/// `process.cwd()` (`C:\src\repo`); a slot written under the verbatim spelling is a slot that
+/// agent never reads. So the prefix comes off HERE, the one place the key is built. `None` when
+/// the path cannot be spelled at all (not valid UTF-8), which no config file can carry.
+fn project_key(root: &Path) -> Option<String> {
+    let resolved = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    Some(plain_path_spelling(resolved.to_str()?).into_owned())
+}
+
+/// A path string with Windows's verbatim extended-length prefix taken off: `\\?\C:\src\repo`
+/// is `C:\src\repo`, and `\\?\UNC\server\share` is the `\\server\share` the prefix stands
+/// in for. Every other string — every path any POSIX machine produces — is itself.
+fn plain_path_spelling(key: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(unc) = key.strip_prefix(r"\\?\UNC\") {
+        return std::borrow::Cow::Owned(format!(r"\\{unc}"));
+    }
+    std::borrow::Cow::Borrowed(key.strip_prefix(r"\\?\").unwrap_or(key))
+}
+
+/// **Every config surface one harness can hold this scope's entries at**: the surface a row with
+/// no `dest` writes, and the SECOND project file a row's own `dest` names instead. Deduplicated by
+/// FILE, so a scope where the two resolve to one file answers once.
+///
+/// It exists because "which harness, at which scope" stopped identifying a file the day an agent
+/// got two of them. A caller holding only a RECORDED file — the removal that must reach the entry
+/// custody says is there, the recovery that must observe the file its own journal named, the
+/// teardown preview that must name what its apply will touch — resolves the rest of that surface's
+/// identity (dialect, slot, containment) by finding the file HERE, instead of asking the
+/// descriptor for its default and reading one place while the entry sits in another.
+pub(crate) fn scope_surfaces(
+    h: &registry::KnownHarness,
+    home: &Path,
+    project_root: Option<&Path>,
+) -> Vec<SurfaceAt> {
+    let mut out: Vec<SurfaceAt> = Vec::new();
+    for dest_named in [false, true] {
+        if let ConfigSurface::Ready { at, .. } =
+            config_surface_at(h, home, project_root, dest_named)
+            && !out.iter().any(|s| s.file == at.file)
+        {
+            out.push(at);
+        }
+    }
+    out
 }
 
 /// The DRIVER surface file for a resolved descriptor surface: the plugin DIR's `.mcp.json` for
@@ -2020,6 +2077,24 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use topos_types::HarnessId;
+
+    /// **The slot key is the spelling the AGENT writes, never the platform's fully-resolved one.**
+    /// Windows canonicalization answers with the verbatim extended-length prefix; the agent is a
+    /// Node process keying its projects by an ordinary working directory. A slot written under the
+    /// verbatim spelling would be one that agent never reads — so the prefix comes off, the UNC
+    /// form goes back to the `\\server\share` it stands in for, and every POSIX path is itself.
+    #[test]
+    fn a_project_slot_key_drops_the_verbatim_path_prefix() {
+        for (canonical, agent) in [
+            (r"\\?\C:\src\repo", r"C:\src\repo"),
+            (r"\\?\UNC\server\share\repo", r"\\server\share\repo"),
+            (r"C:\src\repo", r"C:\src\repo"),
+            ("/Users/me/src/repo", "/Users/me/src/repo"),
+            ("/Users/me/.work/repo", "/Users/me/.work/repo"),
+        ] {
+            assert_eq!(plain_path_spelling(canonical), agent, "{canonical}");
+        }
+    }
 
     /// A self-cleaning temp dir (RAII) — a stand-in machine home.
     struct Scratch(PathBuf);
