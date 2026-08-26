@@ -24,15 +24,20 @@ itself out of git, so a teammate who clones the same repo picks their own agents
 several, or write `-a '*'` for every agent installed on this machine. Add `-g` to any of these
 commands and the choice is your machine's instead, recorded in `~/.topos/agents.json`.
 
-With no `-a`, the one agent installed here is used and Topos says which. With several you are
-asked, and inside an agent that announces itself, such as Claude Code, that agent is picked
-silently. A run that cannot ask, because it is piped or uses `--json`, prints the list of
-installed agents and stops with exit `2`, naming `topos init -a <agent>`. In a fresh clone with no
-pick of its own, your machine pick applies.
+The two scopes are independent. A project reads its own file, `-g` reads the machine's, and
+neither falls back to the other. A machine-wide pick never decides what a checkout gets, so a
+fresh clone picks for itself.
 
-With no agent installed at all there is nothing to ask about, so Topos asks nothing. The command
-runs, records what you asked it to record, places nothing, and says so. Pick an agent later and
-the next run places everything for it.
+With no `-a`, the one agent installed here is used and Topos says which. Topos never prompts.
+With several installed and none picked here it names the installed agents and the command that
+records the choice, then stops with exit `2`. That is the same answer on a terminal, in a pipe,
+and under `--json`. Inside an agent that announces itself, such as Claude Code, that agent is
+picked silently, so nothing stops there.
+
+With no agent installed at all there is nothing to choose from. The command runs, records what
+you asked it to record, places nothing, and says so. Pick an agent later and the next run places
+everything for it. `install --frozen` behaves the same way where several agents are installed and
+none is picked: it fetches and verifies what the lock records, places none of it, and exits `0`.
 
 ## Three tiers of support
 
@@ -117,29 +122,31 @@ shape can't be proven, Topos reports it honestly and writes nothing.
 ## One folder per agent
 
 Each agent you pick gets its own folder: its skills sit next to its MCP config and its
-auto-update hook. Codex is the one documented exception, because it reads no project skills
-folder of its own.
+auto-update hook. Claude Code is the one exception, and only for MCP servers, which it reads from
+a file of its own outside the checkout.
 
 Per project, rooted at the checkout:
 
 | Agent | Skills | MCP servers | Auto-update hook | `--gitignore` adds |
 |---|---|---|---|---|
-| Claude Code | `.claude/skills/` | `.mcp.json` | `.claude/settings.local.json` | `.claude/`, `.mcp.json` |
+| Claude Code | `.claude/skills/` | `~/.claude.json`, in its section for this checkout | `.claude/settings.local.json` | `.claude/` |
 | Cursor | `.cursor/skills/` | `.cursor/mcp.json` | `.cursor/hooks.json` | `.cursor/` |
-| Codex | `.agents/skills/` | `.codex/config.toml` | `.codex/hooks.json` | `.codex/`, `.agents/` |
-| OpenCode | `.opencode/skills/` | `opencode.json` | `.opencode/plugin/topos.ts` | `.opencode/`, `opencode.json` |
+| Codex | `.codex/skills/` | `.codex/config.toml` | `.codex/hooks.json` | `.codex/` |
+| OpenCode | `.opencode/skills/` | `.opencode/opencode.json` | `.opencode/plugin/topos.ts` | `.opencode/` |
 
 Machine-wide (`-g`) is the same shape per agent under `$HOME`: `~/.claude/skills` with
-`~/.claude/settings.json`; `~/.cursor/skills` with `~/.cursor/hooks.json` and `~/.cursor/mcp.json`;
-`~/.codex/skills` with `~/.codex/hooks.json` and `~/.codex/config.toml`;
+`~/.claude/settings.json` and `~/.claude.json`; `~/.cursor/skills` with `~/.cursor/hooks.json` and
+`~/.cursor/mcp.json`; `~/.codex/skills` with `~/.codex/hooks.json` and `~/.codex/config.toml`;
 `~/.config/opencode/skills` with `~/.config/opencode/plugin/topos.ts` and
 `~/.config/opencode/opencode.json`.
 
-A project pick writes inside that checkout and nowhere else: no skills folder, no MCP entry and no
-hook under your home directory. `-g` is the mirror image, writing under `$HOME` and never into a
-checkout. In both scopes an agent you did not pick gets nothing at all, whether or not it is
-installed here. A directory is only chosen when it is free or already Topos-managed: a
-byte-identical occupant is adopted in place, never duplicated.
+A project pick writes inside that checkout, with one exception. Claude Code reads project MCP
+servers only from `~/.claude.json`, so that is where they go, and [MCP servers](#mcp-servers)
+below says what that looks like and how to get a committed file in the repo instead. No skills
+folder and no hook is ever written under your home directory for a project pick. `-g` is the
+mirror image, writing under `$HOME` and never into a checkout. In both scopes an agent you did not
+pick gets nothing at all, whether or not it is installed here. A directory is only chosen when it
+is free or already Topos-managed: a byte-identical occupant is adopted in place, never duplicated.
 
 Any other agent from the [table below](#the-agent-table) can be picked too. It gets its skills
 folder, and its MCP entry where it has a project config. No project hook exists for it, so the
@@ -202,7 +209,7 @@ left alone.
 
 | Agent | User-scope config | Project-scope config | Picked up | Sign-in |
 |---|---|---|---|---|
-| Claude Code | `~/.claude/skills/topos-mcp/` † (a Topos-owned plugin directory) | `.mcp.json` | next session; `/reload-plugins` reloads live | `/mcp` |
+| Claude Code | `~/.claude.json` † | `~/.claude.json`, in its section for this checkout | next session | `/mcp` |
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` ◊ | — (none) | quit completely and reopen | in the app, on first use |
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` | — (none) | automatically; Cline watches the file | Cline's own, on first use |
 | Codex | `~/.codex/config.toml` † | `.codex/config.toml` ‡ | restart `codex` | `codex mcp login <name>` |
@@ -212,7 +219,7 @@ left alone.
 | Goose | `~/.config/goose/config.yaml` † | — (none) | restart your goose session | Goose's own, on first use |
 | Hermes Agent | `~/.hermes/config.yaml` † | — (none) | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
 | LM Studio | `~/.lmstudio/mcp.json` | — (none) | automatically, when the file is saved | LM Studio's own, on first use |
-| OpenCode | `~/.config/opencode/opencode.json` † | `opencode.json` (repo root) | restart `opencode` | automatic on the first `401` |
+| OpenCode | `~/.config/opencode/opencode.json` † | `.opencode/opencode.json` | restart `opencode` | automatic on the first `401` |
 | OpenClaw | `~/.openclaw/openclaw.json` | — (none) | automatically | `openclaw mcp login <name>` |
 | Roo Code | VS Code's storage for the Roo extension ◊ | `.roo/mcp.json` | automatically; Roo watches the file | Roo's own, on first use |
 | VS Code | `~/Library/Application Support/Code/User/mcp.json` ◊ | `.vscode/mcp.json` | restart the server from the MCP view | VS Code's own, on first use |
@@ -220,7 +227,8 @@ left alone.
 | Zed | `~/.config/zed/settings.json` † | — (none) | automatically | Zed's own, on first use |
 
 † `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`, and `$XDG_CONFIG_HOME` move these roots,
-exactly as they move the skills directories above.
+exactly as they move the skills directories above. By default `.claude.json` sits beside
+`~/.claude/`; with `$CLAUDE_CONFIG_DIR` set it moves inside that directory.
 
 ‡ Codex reads a project config only once you have trusted that repository inside Codex.
 
@@ -231,10 +239,33 @@ cannot name it at machine scope — write the path out with `--dest` instead.
 
 Each file is written in its own dialect and nothing else in it is disturbed: JSON stays JSON,
 VS Code's and Zed's and OpenClaw's keep their comments and trailing commas, Codex gets a
-`[mcp_servers.…]` table, Hermes and Goose get a one-line entry under their own key. The Claude Code
-user surface is a directory Topos creates and owns, and its `.mcp.json` is patched entry by entry
-like every other JSON config — put something of your own in that directory and Topos stops writing
-there at all rather than write over it.
+`[mcp_servers.…]` table, Hermes and Goose get a one-line entry under their own key.
+
+Claude Code keeps both scopes in that one file. `mcpServers` at the top level is what every
+session sees; `projects."<the checkout's own path>".mcpServers` is what only a session started in
+that exact directory sees. Topos edits the slot for the scope it is acting in and leaves every
+other byte alone, sign-in and trust decisions included.
+
+Two things come out of "that exact directory". A session you start in a subdirectory of the repo
+does not see those servers. Neither does a teammate who clones the repo, because that file is
+yours and is not in git. `--dest .mcp.json` writes the committed file in the repo root instead,
+which every session under the repo reads. Committing that file is how a server reaches your
+teammates:
+
+```bash
+topos add weather --dest .mcp.json
+```
+
+A `topos.toml` row spells the same choice as `dest = [".mcp.json"]`. Re-aiming a row that already
+placed an entry moves later writes only: the entry standing in `~/.claude.json` is left where it
+is, named on the receipt, and deleting it is yours.
+
+An entry an older Topos put somewhere else moves on the next update. Claude Code's comes out of
+the `~/.claude/skills/topos-mcp/` directory Topos used to create, and lands under the same
+`topos-` key every other agent gets, so the tools are named for the server rather than for that
+directory. OpenCode's comes out of the `opencode.json` in the repo root. Nothing is said on the
+receipt, because the bundle did not leave. The old file goes with the last entry Topos put there,
+and one holding anything of yours stays exactly as it is.
 
 The entry's exact shape is each agent's own, down to details that decide whether it works at all:
 VS Code keeps servers under `servers` rather than `mcpServers`, Windsurf spells the address
@@ -286,7 +317,7 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Amp | `amp` | `~/.config/agents/skills` † | `.agents/skills` | auto-update |
 | Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | auto-update |
 | Cline | `cline` | `~/.agents/skills` | `.agents/skills` | auto-update |
-| Codex | `codex` | `~/.codex/skills` † | `.agents/skills` | auto-update * |
+| Codex | `codex` | `~/.codex/skills` † | `.codex/skills` | auto-update * |
 | Cursor | `cursor` | `~/.cursor/skills` | `.cursor/skills` | auto-update |
 | Devin for Terminal | `devin` | `~/.config/devin/skills` † | `.devin/skills` | auto-update |
 | Droid | `droid` | `~/.factory/skills` | `.factory/skills` | auto-update |
@@ -382,12 +413,17 @@ servers — and their config files are in [MCP servers](#mcp-servers) above.
 `.agents/skills` and `~/.agents/skills` are cross-agent conventions, and several rows above name
 them. Two picked agents whose folders are the same get one copy, not two.
 
-Agents also overlap in what they read beyond their own folder: Cursor reads `.claude/skills` and
-`.codex/skills` as well as its own, and OpenCode reads `.claude/skills` and `.agents/skills`. So
-with several agents picked, one of them may list the same skill twice. That is their behaviour,
-not a conflict: the bytes are identical everywhere, and frontmatter fields an agent does not know
-are ignored, never run. The layout in the table above is the one that keeps each agent's own
-folder to itself.
+Agents also overlap in what they read beyond their own folder. Codex reads both `.codex/skills`
+and `.agents/skills` and deduplicates nothing between them, which is exactly why Topos writes
+Codex's own folder and only that one: a skill sitting in both would be listed twice in Codex
+alone. Cursor reads `.claude/skills` and `.codex/skills` as well as its own, and OpenCode reads
+`.claude/skills` and `.agents/skills`.
+
+So with several agents picked, one of them may list the same skill twice. Pick both Cursor and
+Codex in one project and Cursor lists each skill twice, once from `.cursor/skills` and once from
+`.codex/skills`. That is their behaviour, not a conflict: the bytes are identical everywhere, and
+frontmatter fields an agent does not know are ignored, never run. The layout in the table above is
+the one that keeps each agent's own folder to itself.
 
 ## Adding your harness
 

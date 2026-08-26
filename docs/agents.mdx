@@ -4,14 +4,17 @@ description: The machine surface — entry points, the JSON envelope, exit codes
 sidebar_label: For agents
 ---
 
-`--json` prints exactly one machine-readable object and never prompts, and every refusal names its
-own fix. Exactly one question exists, and it only ever reaches a terminal: which agents Topos may
-touch here. On a terminal, a run that needs a pick and finds several agents installed offers a
-numbered list. Piped or under `--json` the same run prints the installed agents in `data` and exits
-`2` instead, carrying `topos init -a <agent>` as the way through; inside Claude Code it picks
-Claude Code without asking. `install --frozen` never asks either: with no pick it verifies and fetches the lock's bundles and places nothing (`NO_PICK`). A machine with no agent installed at all is never asked: the run goes
-through, places nothing, and says so (`NO_AGENT_INSTALLED`), so a build box still installs and
-edits its manifest. Five rules cover almost everything:
+`--json` prints exactly one machine-readable object, and every refusal names its own fix. Topos
+never prompts, on a terminal or anywhere else. There is one thing it will not decide for you:
+which agents it may touch here. A run that needs a pick and finds several agents installed names
+them in `data.installed`, carries `topos init -a <agent>` in `next_actions`, and exits `2`. That
+is the same answer whatever the run is attached to. Inside Claude Code it picks Claude Code
+without asking. `install --frozen` never stops on it either: with no pick it fetches and verifies
+the lock's bundles, places nothing, and exits `0` (`NO_PICK`). A machine with no agent installed
+at all is never stopped: the run goes through, places nothing, and says so
+(`NO_AGENT_INSTALLED`), so a build box still installs and edits its manifest. The pick is per
+project and per machine, and neither falls back to the other: a fresh clone has none until
+somebody records one. Five rules cover almost everything:
 
 1. **Use `--json` on every command** and read the envelope rather than parsing prose.
 2. **Follow `next_actions`** — each carries a complete `argv`.
@@ -98,6 +101,44 @@ the error's:
 - Every error whose prose names a concrete command carries that command structurally in
   `next_actions`, so you never parse English to find the fix.
 
+### The pick answer
+
+The one refusal that exits `2` rather than `1`. Nothing was read past it, so it is an answer to
+act on rather than a failure to report:
+
+```json
+{
+  "schema_version": 2,
+  "command": "init",
+  "ok": false,
+  "data": {
+    "installed": ["claude-code", "codex", "cursor"],
+    "next": "topos init -a <agent>"
+  },
+  "warnings": [],
+  "next_actions": [
+    { "code": "PICK_AGENTS", "argv": ["topos", "init", "-a", "<agent>"], "needs": ["agent"] }
+  ],
+  "error": {
+    "code": "PICK_REQUIRED",
+    "outcome": "PERMANENT_FAILURE",
+    "retryable": false,
+    "affected": {},
+    "context": {
+      "message": "Several agents are installed here: claude-code, codex, cursor.\nPick with: topos init -a claude-code [-a codex]"
+    },
+    "next_actions": [
+      { "code": "PICK_AGENTS", "argv": ["topos", "init", "-a", "<agent>"], "needs": ["agent"] }
+    ]
+  }
+}
+```
+
+`data.installed` is what this machine has, and it is the whole set to choose from. Substitute one
+of those slugs for `<agent>` in the `argv`, repeat `-a` for more, and run it; a `-g` in the argv
+means the answer was for the machine scope. Ask the person which agents they want if you cannot
+tell. Never write `.topos/agents.json` yourself.
+
 ### Messages
 
 `messages` is the typed line channel — one entry per line the run produced, in order:
@@ -142,7 +183,7 @@ under `contracts/fixtures/json/`.
 |---|---|---|
 | `0` | Success | Continue |
 | `1` | Refused or failed | Read `error`; `outcome` + `retryable` separate a refusal from a transport fault. Run the named fix, retry **once** |
-| `2` | Usage error | Fix the command. Do not retry unchanged |
+| `2` | Usage error, or `PICK_REQUIRED` | Fix the command, or run the `next_actions` argv to record a pick. Do not retry unchanged |
 
 <Warning>
   A bare `topos` with no verb is exit `2` when piped or under `--json` (on a terminal it

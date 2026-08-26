@@ -21,7 +21,7 @@
         {
           "agent": "claude-code",
           "state": "current",
-          "target": ".mcp.json"
+          "target": "~/.claude.json"
         }
       ]
     },

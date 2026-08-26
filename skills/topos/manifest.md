@@ -29,9 +29,10 @@ A project also commits the generated `topos.lock` — exactly which version each
 An unknown section warns and is skipped (a newer topos wrote it), never a refusal.
 
 Placement is ONE field: `dest`, an array of destinations. A row without it reaches every agent
-PICKED at that scope, now and later (`<project>/.topos/agents.json`, else `~/.topos/agents.json`;
-`topos agents` prints it); a row with it lands at exactly what it names, picked or not (skill rows:
-folders; MCP rows: the agents' config files). One entry is not a destination:
+PICKED at that scope, now and later (a project file answers to `<project>/.topos/agents.json` and
+the machine file to `~/.topos/agents.json`, and neither falls back to the other; `topos agents`
+prints the one where you stand); a row with it lands at exactly what it names, picked or not
+(skill rows: folders; MCP rows: the agents' config files). One entry is not a destination:
 **`"*"`** stands for the reach the row would have with no `dest` at all, recomputed on every run —
 so `dest = ["*", "~/.codex/skills"]` reads "every agent picked here, plus that folder always".
 `topos add … -a <agent>` SETS the row to exactly the folders that run names, and every agent it

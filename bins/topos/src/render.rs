@@ -1476,8 +1476,8 @@ fn surface_line(s: &topos_types::results::Surface) -> String {
     format!("{}: {what}", s.agent)
 }
 
-/// The same facts folded into a sentence's tail — ` (opencode.json — current)`. Empty where
-/// there is nothing provable to put in it.
+/// The same facts folded into a sentence's tail — ` (.opencode/opencode.json — current)`. Empty
+/// where there is nothing provable to put in it.
 fn surface_parenthetical(s: &topos_types::results::Surface) -> String {
     match (s.target.as_deref(), s.note.as_deref()) {
         (Some(t), Some(note)) => format!(" ({t} — {} — {note})", s.state.word()),
