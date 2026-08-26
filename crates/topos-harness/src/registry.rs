@@ -621,15 +621,17 @@ impl KnownHarness {
         resolve_spec(&self.mcp.as_ref()?.user?.dir, home, None)
     }
 
-    /// This row's READ-ONLY conflict files, resolved under `home`: `(path, dialect, selector)`,
-    /// where the selector is `None` for the dialect's own slot. Empty for every row that names
-    /// none — which is every row but the ones whose harness reads servers from a file topos does
-    /// not write.
+    /// This row's READ-ONLY conflict files, resolved under `home`: `(path, dialect, slot)`, where
+    /// the slot is `None` for the dialect's own. Empty for every row that names none — which is
+    /// every row but the ones whose harness reads servers from a file topos does not write.
+    ///
+    /// The table spells a slot with dots and this is where that spelling ENDS: every reader below
+    /// takes the components, because a component can itself hold a dot.
     #[must_use]
     pub fn mcp_conflict_paths(
         &self,
         home: &Path,
-    ) -> Vec<(PathBuf, McpDialect, Option<&'static str>)> {
+    ) -> Vec<(PathBuf, McpDialect, Option<Vec<&'static str>>)> {
         let Some(mcp) = self.mcp.as_ref() else {
             return Vec::new();
         };
@@ -637,8 +639,8 @@ impl KnownHarness {
             .iter()
             .filter_map(|c| {
                 let path = resolve_spec(&c.file, home, None)?;
-                let selector = (!c.selector.is_empty()).then_some(c.selector);
-                Some((path, c.dialect, selector))
+                let slot = (!c.selector.is_empty()).then(|| c.selector.split('.').collect());
+                Some((path, c.dialect, slot))
             })
             .collect()
     }

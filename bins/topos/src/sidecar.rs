@@ -278,6 +278,15 @@ impl Layout {
         self.home.join("locks")
     }
 
+    /// `locks/` in the MACHINE store ([`Self::machine_home`]) — where a lock on something THE
+    /// WHOLE MACHINE shares lives, so every scope acting on it waits on the same one. A per-scope
+    /// lock cannot serialize writers of a file that is not per-scope: an agent's own configuration
+    /// holds one slot per checkout beside the machine's own, and two scopes locking their own
+    /// stores would each replace that file over the other's edit.
+    pub(crate) fn machine_locks_dir(&self) -> PathBuf {
+        self.machine_home().join("locks")
+    }
+
     pub(crate) fn lock_file(&self, id: &SkillId) -> PathBuf {
         self.locks_dir().join(format!("{id}.lock"))
     }

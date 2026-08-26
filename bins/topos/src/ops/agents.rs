@@ -499,7 +499,11 @@ struct Footprint {
 fn store_of(ctx: &Ctx<'_>, scope: &PickScope) -> Option<crate::sidecar::Layout> {
     match scope {
         PickScope::Machine => Some(ctx.layout.clone()),
-        PickScope::Project(dir) => crate::sidecar::existing_project_store(ctx.fs, dir),
+        // `under_machine`: the MCP converge locks a shared config file in the machine store's
+        // `locks/`, and a project store that did not know its machine would lock inside the
+        // checkout instead.
+        PickScope::Project(dir) => crate::sidecar::existing_project_store(ctx.fs, dir)
+            .map(|l| l.under_machine(ctx.layout.machine_home())),
     }
 }
 

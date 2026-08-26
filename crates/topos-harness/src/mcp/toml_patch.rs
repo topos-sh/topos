@@ -173,17 +173,17 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
 }
 
 /// Every entry under the servers table — foreign ones included (see
-/// [`super::observe_entries`]). `selector` overrides `mcp_servers` with a `.`-separated table
-/// path; a `*` component has no meaning in this dialect and answers UNREADABLE rather than
+/// [`super::observe_entries`]). `slot` overrides `mcp_servers` with another table path's
+/// components; a `*` component has no meaning in this dialect and answers UNREADABLE rather than
 /// guessing at one.
 #[must_use]
 pub fn observe_entries(
     current: Option<&[u8]>,
-    selector: Option<&str>,
+    slot: Option<&[&str]>,
 ) -> Option<Vec<super::SeenEntry>> {
-    // The selector is judged FIRST: one this dialect cannot mean is unreadable whatever the file
+    // The slot is judged FIRST: one this dialect cannot mean is unreadable whatever the file
     // holds — an empty answer would read as "nothing is there".
-    let path: Vec<&str> = selector.map_or_else(|| vec![SERVERS_KEY], |s| s.split('.').collect());
+    let path: Vec<&str> = slot.map_or_else(|| vec![SERVERS_KEY], <[&str]>::to_vec);
     if path.iter().any(|c| *c == "*" || c.is_empty()) {
         return None;
     }

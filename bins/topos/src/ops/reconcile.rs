@@ -6687,6 +6687,11 @@ fn run_mcp_converge(
     }
 
     for (label, layout, project_root, person_scope) in scopes_to_run {
+        // The store REMEMBERS the machine it was reached from: the converge locks a shared config
+        // file in the machine store's `locks/`, and a project store that did not know its machine
+        // would lock inside the checkout — which serializes nothing against the machine scope
+        // writing the very same file.
+        let layout = layout.under_machine(env.ctx.layout.machine_home());
         let rows = sweep.mcp_demands.remove(&label).unwrap_or_default();
         // The common non-mcp machine: no demands and no custody document — nothing to converge,
         // read.

@@ -233,8 +233,8 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
 }
 
 /// Every entry under the dialect's own key — sentinel-marked and plain alike (see
-/// [`super::observe_entries`]). A `selector` cannot be honoured in this dialect (the splicer reads
-/// exactly one block, by construction), so one answers UNREADABLE rather than a wrong slot.
+/// [`super::observe_entries`]). Another `slot` cannot be honoured in this dialect (the splicer
+/// reads exactly one block, by construction), so one answers UNREADABLE rather than a wrong slot.
 ///
 /// An entry whose line is outside the flow grammar this file parses keeps its NAME and answers no
 /// address: a name collision is still provable, and an address that was never read is never
@@ -243,9 +243,9 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
 pub fn observe_entries(
     dialect: McpDialect,
     current: Option<&[u8]>,
-    selector: Option<&str>,
+    slot: Option<&[&str]>,
 ) -> Option<Vec<super::SeenEntry>> {
-    if selector.is_some() {
+    if slot.is_some() {
         return None;
     }
     if effectively_absent(current) {

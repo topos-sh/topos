@@ -788,7 +788,7 @@ fn a_commented_file_is_edited_only_where_that_agents_parser_reads_comments() {
 /// names — including the two agents that spell an address as something other than `url`.
 #[test]
 fn every_entry_is_seen_whatever_its_agent_calls_an_address() {
-    let seen = |dialect, text: &str, slot: Option<&str>| {
+    let seen = |dialect, text: &str, slot: Option<&[&str]>| {
         super::observe_entries(dialect, Some(text.as_bytes()), slot)
             .expect("readable")
             .into_iter()

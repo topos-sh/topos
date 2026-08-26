@@ -365,9 +365,8 @@ pub(crate) fn converge(
 
     // Crash recovery over the intent journal, BEFORE any prior map is built (a landed-but-
     // unpromoted write would otherwise read as user drift forever).
-    let dialect_of =
-        config_custody::dialect_lookup(descriptors, &io.home, io.project_root.as_deref());
-    if custody.recover(io.fs, &dialect_of) {
+    let surface_of = surface_lookup(io, descriptors);
+    if custody.recover(io.fs, &surface_of) {
         let failures = custody.flush(io.fs, io.layout);
         if !failures.is_empty() {
             out.warnings.extend(failures);
@@ -692,7 +691,7 @@ pub(crate) fn converge(
             // entries that LOOK like topos's. A server the agent already has under somebody else's
             // name, here or in a file this harness also reads, is not something to write over or
             // beside: the placement is skipped whole and the reason is said with the way out.
-            let blocked = collisions(io, &custody, h, &file, dialect, &desired);
+            let blocked = collisions(io, &custody, h, &at, &desired);
             for (key, hit) in &blocked {
                 if let Some(i) = desired_bundles.get(key) {
                     push_state(
@@ -904,9 +903,8 @@ pub(crate) fn remove_bundle(
     // removal below journals its own intents, and `journal` replaces `pending` wholesale. A
     // recovery left only in memory would be overwritten by that write and the crashed run's
     // outstanding intent lost — so the promotion lands on disk here or this run does nothing.
-    let dialect_of =
-        config_custody::dialect_lookup(descriptors, &io.home, io.project_root.as_deref());
-    if custody.recover(io.fs, &dialect_of) {
+    let surface_of = surface_lookup(io, descriptors);
+    if custody.recover(io.fs, &surface_of) {
         let failures = custody.flush(io.fs, io.layout);
         if !failures.is_empty() {
             out.warnings.extend(failures);
@@ -924,44 +922,64 @@ pub(crate) fn remove_bundle(
     };
 
     for h in descriptors {
-        // A removal resolves its surfaces from the DESCRIPTOR table and its reach from the
-        // RECORDED rows — never from a plan. A bundle being removed has no demand left to plan
-        // from, and custody is the only thing that knows where its entries actually went.
-        let crate::placement::ConfigSurface::Ready { root, at } =
-            crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
-        else {
-            continue;
-        };
-        if !(picked.contains(h.slug) || io.fs.exists(&root)) {
-            continue;
-        }
         if !custody.holds(&placement_key(h.slug, &key)) {
-            continue; // nothing recorded on this surface
+            continue; // this harness holds nothing of this bundle's, anywhere
         }
-        // Prior scoped to ONLY this bundle's key: the drivers remove prior-matched undesired
-        // keys, and every other entry — ours or not — reads foreign and stays byte-identical.
-        let only_this = |_l: &ScopeEntries, entry_key: &str| entry_key != key;
-        let provenance = BTreeMap::new();
-        let surface_out = converge_file(
-            io,
-            &mut custody,
-            h,
-            &at,
-            &[],
-            &only_this,
-            &provenance,
-            &names,
-        );
-        out.warnings.extend(surface_out.warnings);
-        out.notices.extend(surface_out.notices);
-        for (state_key, state) in surface_out.states {
-            if state_key == key
-                && matches!(state.state, TargetOutcome::Removed | TargetOutcome::Drifted)
-            {
-                out.removed.push(RemovedEntry {
-                    bundle_id: bundle_id.to_owned(),
-                    state,
-                });
+        // A removal resolves its reach from the RECORDED rows — never from a plan (a bundle being
+        // removed has no demand left to plan from) and never from the descriptor's DEFAULT surface
+        // (an agent has two files now, and the default is a guess). Every surface this harness can
+        // hold entries at is considered, and each one that actually RECORDS this bundle's key is
+        // converged: the file a row's own `dest` named, and the surface an older topos wrote, are
+        // exactly where the entries a default-surface removal walked past are sitting.
+        let mut surfaces: Vec<crate::placement::SurfaceAt> = surfaces_of(io, h)
+            .into_iter()
+            .filter(|at| {
+                custody
+                    .rows_at(h.slug, &at.file)
+                    .iter()
+                    .any(|(_, e)| e.key == key)
+            })
+            .collect();
+        // A row recorded at NO surface this build knows (a surface path that moved) is the stale
+        // class: the disclosure names the old file and leaves the entry standing, and it is spoken
+        // where it always was — over the surface this harness's config is at now.
+        if surfaces.is_empty() {
+            let crate::placement::ConfigSurface::Ready { root, at } =
+                crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
+            else {
+                continue;
+            };
+            if !(picked.contains(h.slug) || io.fs.exists(&root)) {
+                continue;
+            }
+            surfaces.push(at);
+        }
+        for at in surfaces {
+            // Prior scoped to ONLY this bundle's key: the drivers remove prior-matched undesired
+            // keys, and every other entry — ours or not — reads foreign and stays byte-identical.
+            let only_this = |_l: &ScopeEntries, entry_key: &str| entry_key != key;
+            let provenance = BTreeMap::new();
+            let surface_out = converge_file(
+                io,
+                &mut custody,
+                h,
+                &at,
+                &[],
+                &only_this,
+                &provenance,
+                &names,
+            );
+            out.warnings.extend(surface_out.warnings);
+            out.notices.extend(surface_out.notices);
+            for (state_key, state) in surface_out.states {
+                if state_key == key
+                    && matches!(state.state, TargetOutcome::Removed | TargetOutcome::Drifted)
+                {
+                    out.removed.push(RemovedEntry {
+                        bundle_id: bundle_id.to_owned(),
+                        state,
+                    });
+                }
             }
         }
     }
@@ -1090,14 +1108,14 @@ fn collisions(
     io: &ScopeIo<'_>,
     custody: &ScopeEntries<'_>,
     h: &KnownHarness,
-    file: &Path,
-    dialect: McpDialect,
+    at: &crate::placement::SurfaceAt,
     desired: &[McpEntry],
 ) -> BTreeMap<String, Collision> {
     let mut out = BTreeMap::new();
     if desired.is_empty() {
         return out;
     }
+    let file = at.file.as_path();
     // The keys topos's own record puts in THIS file — both the entries that are not collisions and
     // the placements that must not be blocked.
     let ours_here: BTreeSet<String> = custody
@@ -1114,19 +1132,22 @@ fn collisions(
     if wanted.is_empty() {
         return out; // every desired entry is already topos's here
     }
-    // The dest file first (its entries may be topos's), then the read-only files, in table order.
-    let mut surfaces: Vec<(PathBuf, McpDialect, Option<&str>, bool)> =
-        vec![(file.to_path_buf(), dialect, None, true)];
+    // The surface topos is about to write first — READ AT ITS OWN SLOT, which for a checkout's
+    // entries in Claude Code's own configuration is not the top-level one. Reading the dialect's
+    // default there would look past every entry actually in the way and insert a duplicate beside
+    // one. Then the read-only files, in table order.
+    let mut surfaces: Vec<(PathBuf, McpDialect, Option<Vec<&str>>, bool)> =
+        vec![(file.to_path_buf(), at.dialect, at.slot_parts(), true)];
     surfaces.extend(
         h.mcp_conflict_paths(&io.home)
             .into_iter()
-            .map(|(path, dialect, selector)| (path, dialect, selector, false)),
+            .map(|(path, dialect, slot)| (path, dialect, slot, false)),
     );
-    for (path, dialect, selector, may_be_ours) in surfaces {
+    for (path, dialect, slot, may_be_ours) in surfaces {
         let Ok(Some(bytes)) = io.fs.read_opt(&path) else {
             continue; // absent, or unreadable — nothing is provable there
         };
-        let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), selector) else {
+        let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), slot.as_deref()) else {
             continue;
         };
         for entry in seen {
@@ -1195,11 +1216,11 @@ fn shadows(
     if wanted.is_empty() {
         return out;
     }
-    for (path, dialect, selector) in h.mcp_conflict_paths(&io.home) {
+    for (path, dialect, slot) in h.mcp_conflict_paths(&io.home) {
         let Ok(Some(bytes)) = io.fs.read_opt(&path) else {
             continue;
         };
-        let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), selector) else {
+        let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), slot.as_deref()) else {
             continue;
         };
         for entry in seen {
@@ -1243,9 +1264,7 @@ fn standing_keys(
 ) -> Option<BTreeSet<String>> {
     let mut keys = BTreeSet::new();
     for h in descriptors {
-        if let crate::placement::ConfigSurface::Ready { at, .. } =
-            crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
-        {
+        for at in crate::placement::scope_surfaces(h, &io.home, io.project_root.as_deref()) {
             let Ok(current) = io.fs.read_opt(&at.file) else {
                 return None; // unreadable: nothing about this scope's names is provable
             };
@@ -1258,14 +1277,14 @@ fn standing_keys(
                 keys.extend(observed.entries.into_keys());
             }
         }
-        for (path, dialect, selector) in h.mcp_conflict_paths(&io.home) {
+        for (path, dialect, slot) in h.mcp_conflict_paths(&io.home) {
             let Ok(current) = io.fs.read_opt(&path) else {
                 return None;
             };
             let Some(bytes) = current else {
                 continue;
             };
-            let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), selector) else {
+            let Some(seen) = mcp::observe_entries(dialect, Some(&bytes), slot.as_deref()) else {
                 return None; // unparseable: the same unprovable absence
             };
             keys.extend(seen.into_iter().map(|e| e.name));
@@ -1350,6 +1369,48 @@ fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, Message>
             ),
         )
     })
+}
+
+/// **The lock every writer of ONE PHYSICAL CONFIG FILE waits on, whatever scope it is acting in.**
+///
+/// The per-scope converge lock serializes a scope against itself, and that was the whole answer
+/// while a harness had one config file per scope. It is not one any more: Claude Code's own
+/// configuration is a SINGLE file holding a slot for each checkout beside the machine's own, so a
+/// machine sweep and a project sweep — or the sweeps of two different checkouts — read the same
+/// preimage, edit different slots, and each atomically replace the file. The later rename discards
+/// the earlier edit while both custody journals record success, which is an entry that is recorded
+/// as placed and is not in the file.
+///
+/// So the lock is named by the FILE and kept in the MACHINE store's `locks/`
+/// ([`crate::sidecar::Layout::machine_locks_dir`]), never by the scope acting: two scopes with
+/// locks of their own for one shared file serialize nothing. The name is the file's RESOLVED path
+/// hashed, so two spellings of one file (a symlinked home) take one lock, and nothing derived from
+/// a path can name a file outside the locks directory.
+///
+/// LOCK ORDER, fixed and one-way: the scope's `locks/mcp.lock` is taken first and this one INSIDE
+/// it, released before the next surface is converged. Nothing acquires a scope lock while holding
+/// one of these, and no surface holds two.
+fn surface_lock(io: &ScopeIo<'_>, path: &Path) -> std::io::Result<crate::fs_seam::LockGuard> {
+    let lock = surface_lock_path(io, path);
+    let locks = io.layout.machine_locks_dir();
+    // Created only when absent so the common case adds no mutating op.
+    if !io.fs.exists(&locks) {
+        io.fs.create_dir_all(&locks)?;
+    }
+    io.fs.lock_exclusive(&lock)
+}
+
+/// The lock FILE one physical config file's writers share — `mcp-file-<digest>.lock` in the
+/// machine store's `locks/`, the digest over the file's RESOLVED path
+/// ([`config_custody::canonical_file`], the same spelling rule every custody row is written and
+/// compared with). Two scopes converging one file answer the same path here, which is the whole of
+/// what makes them serialize.
+pub(crate) fn surface_lock_path(io: &ScopeIo<'_>, path: &Path) -> PathBuf {
+    let canon = config_custody::canonical_file(io.fs, path);
+    let digest = topos_core::digest::sha256(canon.as_os_str().as_encoded_bytes());
+    io.layout
+        .machine_locks_dir()
+        .join(format!("mcp-file-{}.lock", hex::encode(&digest[..16])))
 }
 
 /// A program-run target with nothing in it — the probe that asks a DIALECT whether it has any
@@ -1612,9 +1673,21 @@ fn converge_file(
     names: &BTreeMap<String, String>,
 ) -> SurfaceOutcome {
     let path = at.file.as_path();
-    let stale: Vec<Message> = custody
-        .stale_rows(h.slug, path)
+    let recorded_elsewhere = custody.stale_rows(h.slug, path);
+    // A row at ANOTHER of this harness's OWN surfaces is not stale — it is an entry in the other
+    // file this agent keeps servers in, converged in its own pass. Only a row at a file that is no
+    // surface of this harness at this scope is the moved-path class this line is about.
+    let known: Vec<PathBuf> = if recorded_elsewhere.is_empty() {
+        Vec::new()
+    } else {
+        surfaces_of(io, h)
+            .into_iter()
+            .map(|s| custody.canonical(&s.file))
+            .collect()
+    };
+    let stale: Vec<Message> = recorded_elsewhere
         .into_iter()
+        .filter(|(_, _, old)| !known.contains(&custody.canonical(Path::new(old))))
         .map(|(key, bundle, old)| {
             // The BUNDLE is what a person recognizes. `key` is the config key topos minted
             // (`topos-<ws>-<name>`, collision-suffixed) — an internal identity that this line
@@ -1662,6 +1735,22 @@ fn converge_surface(
     for k in &kept {
         prior.remove(k);
     }
+    // THE PHYSICAL FILE'S OWN LOCK, held from the preimage read to the last byte written (the
+    // whole-file delete included). See [`surface_lock`]: one file, one lock, whatever scope is
+    // writing it.
+    let _file_lock = match surface_lock(io, path) {
+        Ok(guard) => guard,
+        Err(e) => {
+            return SurfaceOutcome::unprovable(
+                desired,
+                h,
+                path,
+                &format!(
+                    "topos could not take its lock on it ({e}) — another topos may be running"
+                ),
+            );
+        }
+    };
     let current = match io.fs.read_opt(path) {
         Ok(c) => c,
         Err(e) => {
@@ -1897,6 +1986,47 @@ fn retired_surfaces(io: &ScopeIo<'_>, h: &KnownHarness) -> Vec<crate::placement:
         _ => return Vec::new(),
     };
     vec![at]
+}
+
+/// **Every surface of one harness that can hold this scope's entries, retired ones included** —
+/// the surfaces a plan writes ([`crate::placement::scope_surfaces`]: the default one and the
+/// second project file a row's own `dest` names) followed by the ones an older topos wrote
+/// ([`retired_surfaces`]). Deduplicated by file, in that order.
+///
+/// It is the answer to "where can an entry topos recorded for this harness actually BE", and every
+/// caller that holds a recorded FILE and needs the rest of its identity asks it: the removal, the
+/// journal recovery, the teardown preview. Asking the descriptor for its default surface instead
+/// reads one file while the entry sits in another.
+fn surfaces_of(io: &ScopeIo<'_>, h: &KnownHarness) -> Vec<crate::placement::SurfaceAt> {
+    let mut out = crate::placement::scope_surfaces(h, &io.home, io.project_root.as_deref());
+    for old in retired_surfaces(io, h) {
+        if !out.iter().any(|s| s.file == old.file) {
+            out.push(old);
+        }
+    }
+    out
+}
+
+/// **The surface identity of a file topos itself recorded** — the dialect it speaks and the slot
+/// the entries sit in, found by matching the file against [`surfaces_of`] rather than by asking
+/// the descriptor for its default. `None` when no surface of that harness is that file (a surface
+/// path that moved), which the callers read as "unknowable here" and leave alone.
+///
+/// The compare is on the RESOLVED path, the one spelling custody and the journal are written with
+/// ([`config_custody::canonical_file`]) — two spellings of one file are one surface, or a recovery
+/// would judge its own write never to have landed.
+fn surface_lookup<'a>(
+    io: &'a ScopeIo<'a>,
+    descriptors: &'a [&'static KnownHarness],
+) -> impl Fn(&str, &Path) -> Option<config_custody::EntrySlot> + 'a {
+    move |slug: &str, file: &Path| {
+        let h = descriptors.iter().find(|h| h.slug == slug)?;
+        let canon = config_custody::canonical_file(io.fs, file);
+        surfaces_of(io, h)
+            .into_iter()
+            .find(|at| at.file == canon || config_custody::canonical_file(io.fs, &at.file) == canon)
+            .map(|at| (at.dialect, at.slot))
+    }
 }
 
 /// Belt one, at the delete boundary: re-read the just-written post-image and answer whether
@@ -2196,37 +2326,37 @@ pub(crate) fn recorded_surfaces(
         return out;
     };
     for h in descriptors {
-        let crate::placement::ConfigSurface::Ready { at, .. } =
-            crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
-        else {
-            continue;
-        };
-        let recorded = custody.prior_for(h.slug, &at.file);
-        if recorded.is_empty() {
-            continue;
-        }
-        let Ok(current) = io.fs.read_opt(&at.file) else {
-            continue;
-        };
-        let observed = mcp::observe(at.dialect, current.as_deref(), at.slot());
-        if !observed.parseable {
-            continue;
-        }
-        let path = at.file.to_string_lossy().into_owned();
-        let mut owned = false;
-        let mut drifted = false;
-        for (key, fingerprint) in &recorded {
-            match observed.entries.get(key) {
-                Some(live) if live == fingerprint => owned = true,
-                Some(_) => drifted = true,
-                None => {} // already gone — nothing to remove and nothing to leave
+        // EVERY surface this harness can hold entries at, and the ones an older topos wrote —
+        // the same set the apply removes from, so the preview promises exactly the files that
+        // apply will touch.
+        for at in surfaces_of(io, h) {
+            let recorded = custody.prior_for(h.slug, &at.file);
+            if recorded.is_empty() {
+                continue;
             }
-        }
-        if owned {
-            out.owned.push(path.clone());
-        }
-        if drifted {
-            out.drifted.push(path);
+            let Ok(current) = io.fs.read_opt(&at.file) else {
+                continue;
+            };
+            let observed = mcp::observe(at.dialect, current.as_deref(), at.slot());
+            if !observed.parseable {
+                continue;
+            }
+            let path = at.file.to_string_lossy().into_owned();
+            let mut owned = false;
+            let mut drifted = false;
+            for (key, fingerprint) in &recorded {
+                match observed.entries.get(key) {
+                    Some(live) if live == fingerprint => owned = true,
+                    Some(_) => drifted = true,
+                    None => {} // already gone — nothing to remove and nothing to leave
+                }
+            }
+            if owned {
+                out.owned.push(path.clone());
+            }
+            if drifted {
+                out.drifted.push(path);
+            }
         }
     }
     out.owned.sort();
