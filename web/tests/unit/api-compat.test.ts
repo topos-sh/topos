@@ -45,8 +45,8 @@ describe("the floor under the shipped constants", () => {
   });
 
   it("passes the floor release itself and everything after it", () => {
-    expect(decide("topos/0.1.45")).toEqual({ refused: false, clientVersion: "0.1.45" });
-    expect(decide("topos/0.1.50")).toEqual({ refused: false, clientVersion: "0.1.50" });
+    expect(decide("topos/0.1.60")).toEqual({ refused: false, clientVersion: "0.1.60" });
+    expect(decide("topos/0.1.61")).toEqual({ refused: false, clientVersion: "0.1.61" });
     expect(decide("topos/1.0.0")).toEqual({ refused: false, clientVersion: "1.0.0" });
   });
 
@@ -74,9 +74,9 @@ describe("the floor under the shipped constants", () => {
   });
 
   it("decides on the semver core — a pre-release/build suffix never moves the boundary", () => {
-    expect(decide("topos/0.1.45-rc.1")).toEqual({ refused: false, clientVersion: "0.1.45" });
-    expect(decide("topos/0.1.44-rc.1")).toEqual({ refused: true, clientVersion: "0.1.44" });
-    expect(decide("topos/0.1.50+build.7")).toEqual({ refused: false, clientVersion: "0.1.50" });
+    expect(decide("topos/0.1.60-rc.1")).toEqual({ refused: false, clientVersion: "0.1.60" });
+    expect(decide("topos/0.1.59-rc.1")).toEqual({ refused: true, clientVersion: "0.1.59" });
+    expect(decide("topos/0.1.61+build.7")).toEqual({ refused: false, clientVersion: "0.1.61" });
   });
 
   it("reads the version off the FIRST product token and re-renders it from its own digits", () => {
@@ -113,15 +113,14 @@ describe("the future rule — when the floor outruns the header", () => {
 
 describe("day-one quiet — the shipped constants, asserted", () => {
   it("has crossed the header line, so silence is refused with the rest", () => {
-    // DELIBERATE, and the reason is the break this floor carries: every MCP lane now routes on the
-    // workspace's settings alone — the old per-caller version question is gone — so a client that
-    // cannot read `_meta["sh.topos/gateway"]` would place a bare gateway URL, with no credential
-    // and no relay command, into every agent config on the machine and break servers that were
-    // working. That is not a degradation a client rides out, and the release that CAN read it
-    // (0.1.45, which brought `topos relay`) is well past the one that started sending a version —
-    // so a caller that names none is refused with the rest.
+    // DELIBERATE, and the reason is the break this floor carries: a catalog row may now arrive
+    // with no `document` key — the spelling of a WITHHELD server — and every client before 0.1.60
+    // declares that field required, so one such row fails to deserialize and takes the whole
+    // catalog read down with it. That is not a degradation a client rides out, and the floor is
+    // well past the release that started sending a version — so a caller that names none is
+    // refused with the rest.
     expect(decide(null).refused).toBe(true);
-    expect(compat.MIN_CLI_VERSION).toBe("0.1.45");
+    expect(compat.MIN_CLI_VERSION).toBe("0.1.60");
   });
 
   it("keeps the floor at or below this build's own release", () => {

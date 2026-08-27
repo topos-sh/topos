@@ -23,15 +23,30 @@ import { upgradeRequired } from "./wire.server";
  * one best-effort field and no more. A break with no graceful degradation moves this floor in the
  * same change as the break.
  *
- * 0.1.45 IS THAT RELEASE — the one whose renderer speaks `topos relay`. Routing used to ask each
- * caller version whether it could be handed a gateway address, and hand an older machine the
- * server own address instead. That question is gone: every lane now routes on the workspace
- * settings alone. So a client that does not understand `_meta["sh.topos/gateway"]` would write the
- * gateway URL into an agent config bare - no credential, no relay command - and a server that was
- * working directly would stop working on its next sweep, silently. There is no degrading through
- * that, so the floor carries it: a machine below 0.1.45 is told to update instead.
+ * 0.1.60 IS THAT RELEASE, and it carries two breaks at once.
+ *
+ * The SHAPE break, the one with nothing beneath it: a catalog row may now arrive with no
+ * `document` key at all — that absence is how a WITHHELD server is spelled (see `withheld` on
+ * `WireMcpIndexEntry`). Every client before this release declares that field required, so such a
+ * row fails to deserialize; and because the row arrives inside the workspace catalog, the failure
+ * takes the WHOLE read with it. One withheld server would read as "this workspace shares nothing"
+ * for every bundle on the machine. Nothing degrades through that.
+ *
+ * The RENDERING break, which this one subsumes: routing used to ask each caller's version whether
+ * it could be handed a gateway address, and hand an older machine the server's own address
+ * instead. That question is gone — every lane now routes on the workspace's settings alone — so a
+ * client that cannot read `_meta["sh.topos/gateway"]` would write the gateway URL into an agent
+ * config bare, no credential and no relay command, and a server that was working directly would
+ * stop working on its next sweep, in silence. Alone that would have put the floor at 0.1.45, the
+ * release whose renderer speaks `topos relay`; the shape break sits above it, so the floor carries
+ * the higher of the two.
+ *
+ * The CLI's own floor (`MIN_SERVER_VERSION`) deliberately does NOT move with this, because the
+ * break runs server-to-client only: an older server never omits `document`, so a 0.1.60 client
+ * reading one gets exactly the shape it expects and simply sees no routing — the behaviour it had
+ * all along. A difference a client rides out on its own does not move that boundary.
  */
-export const MIN_CLI_VERSION = "0.1.45";
+export const MIN_CLI_VERSION = "0.1.60";
 
 /**
  * The first CLI release that identifies itself on the session lane. A client sending no parseable

@@ -70,8 +70,12 @@ caller.
   land — and the client resolves that ambiguity by KEEPING what it has, which would leave every
   early machine bypassing the mandate forever. The FEED is the exception and carries no marker:
   it is the demand list, so absence from it already means "not yours".
-  The floor (`MIN_CLI_VERSION`) carries the other half: routing no longer asks a caller's version,
-  so it sits at 0.1.45, the release whose renderer speaks `topos relay`. Unset,
+  The floor (`MIN_CLI_VERSION`) carries the rest: a withheld row arrives with NO `document` key,
+  which every client before 0.1.60 declares required — one such row would fail to deserialize and
+  take the whole catalog read with it — so the floor sits at 0.1.60. (Routing no longer asking a
+  caller's version would alone have put it at 0.1.45, the release whose renderer speaks `topos
+  relay`; the shape break sits above that.) The CLI's own `MIN_SERVER_VERSION` does NOT move: an
+  older server never omits the key, so a new client rides that difference out. Unset,
   every one of those surfaces is
   simply absent and delivery carries the stored document — the whole rollback is clearing a
   variable.

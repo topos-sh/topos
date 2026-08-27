@@ -4,7 +4,7 @@
  */
 
 /** The release version of the build serving this app — what the protocol card declares. */
-export const SERVER_RELEASE_VERSION = "0.1.59";
+export const SERVER_RELEASE_VERSION = "0.1.60";
 
 /** The wire contract's version — stamped on every document this tier emits. */
 export const WIRE_SCHEMA_VERSION = 2;
