@@ -42,11 +42,11 @@ describe("the rewrite itself", () => {
     const { GATEWAY_META_KEY, gatewayDeliveryDocument } = await delivery();
     const out = gatewayDeliveryDocument({ ...ADDRESSED } as Record<string, unknown>, {
       base: "https://gw.example.com",
-      sessionId: "cs_laptop",
+      sessionId: "sn_laptop",
       serverId: "mcps_weather",
     });
     expect(out.remotes).toEqual([
-      { type: "streamable-http", url: "https://gw.example.com/cs_laptop/mcps_weather" },
+      { type: "streamable-http", url: "https://gw.example.com/sn_laptop/mcps_weather" },
     ]);
     expect((out._meta as Record<string, unknown>)[GATEWAY_META_KEY]).toBe(true);
     // The tier is REWRITTEN to none beside the flag: the machine-side question the key answers
@@ -61,7 +61,7 @@ describe("the rewrite itself", () => {
     const original = JSON.parse(JSON.stringify(ADDRESSED)) as Record<string, unknown>;
     gatewayDeliveryDocument(original, {
       base: "https://gw.example.com",
-      sessionId: "cs_laptop",
+      sessionId: "sn_laptop",
       serverId: "mcps_weather",
     });
     expect(original).toEqual(ADDRESSED);
@@ -71,11 +71,11 @@ describe("the rewrite itself", () => {
     const { gatewayDeliveryDocument } = await delivery();
     const out = gatewayDeliveryDocument({ ...ADDRESSED } as Record<string, unknown>, {
       base: "https://gw.example.com",
-      sessionId: "cs/../evil",
+      sessionId: "sn/../evil",
       serverId: "a b",
     });
     expect((out.remotes as { url: string }[])[0]?.url).toBe(
-      "https://gw.example.com/cs%2F..%2Fevil/a%20b",
+      "https://gw.example.com/sn%2F..%2Fevil/a%20b",
     );
   });
 
@@ -84,7 +84,7 @@ describe("the rewrite itself", () => {
     const input = { ...PACKAGED } as Record<string, unknown>;
     const out = gatewayDeliveryDocument(input, {
       base: "https://gw.example.com",
-      sessionId: "cs_laptop",
+      sessionId: "sn_laptop",
       serverId: "mcps_local",
     });
     expect(out).toBe(input);

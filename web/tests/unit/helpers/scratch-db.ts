@@ -1,7 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { Client } from "pg";
-import type { MemberActor, OwnerActor, SessionActor, UserActor } from "@/lib/auth/guards.server";
+import type {
+  MemberActor,
+  OwnerActor,
+  SessionActor,
+  TokenActor,
+  UserActor,
+} from "@/lib/auth/guards.server";
 import { applyPlaneDdl } from "../../helpers/plane-ddl";
 import { installTestEnv } from "./test-env";
 
@@ -112,6 +118,19 @@ export function asSession(
     role,
     sessionStatus: "active",
   } as SessionActor;
+}
+
+/**
+ * A MACHINE TOKEN's actor — the read lanes' other door. Not a person: no user id, no seat, no
+ * role; the service session is the run the token is appearing as, and is what an address names.
+ */
+export function asToken(
+  workspaceId: string,
+  serviceSessionId: string,
+  tokenId = "mt_test",
+  tokenName = "ci",
+): TokenActor {
+  return { machine: true, workspaceId, tokenId, tokenName, serviceSessionId } as TokenActor;
 }
 
 // ── Row seeds (raw SQL — the scratch database is superuser-owned) ────────────────────────────

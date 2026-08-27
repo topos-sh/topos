@@ -231,6 +231,13 @@
       "when": 1787607277587,
       "tag": "0032_version-author",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1787693677587,
+      "tag": "0033_gateway_reads_machine_tokens",
+      "breakpoints": true
     }
   ]
 }

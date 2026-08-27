@@ -404,8 +404,21 @@ pub(super) struct FakeDirectory {
     /// workspace whose server predates the lane.
     pub(super) revisions: Vec<WireMcpIndexEntry>,
     pub(super) channels: Vec<WireChannelEntry>,
+    /// How many times the by-revision lane was ASKED. Shared across the clones `connect` hands
+    /// each session, so a fixture can assert what a sweep COSTS — a locked row is decided more
+    /// than once per sweep (the counting pass, then the real one) and must still make ONE
+    /// request, which is the whole reason the run caches that lane's answers.
+    pub(super) revision_calls: Arc<Mutex<usize>>,
+    /// When set, the catalog read FAILS — a transport fault, which says nothing about what the
+    /// workspace serves. The fixtures that tell a fetch failure apart from a withhold flip it.
+    pub(super) unavailable: Arc<Mutex<bool>>,
 }
 impl FakeDirectory {
+    /// How many by-revision reads this workspace has answered.
+    pub(super) fn revision_calls(&self) -> usize {
+        *self.revision_calls.lock().unwrap()
+    }
+
     /// A catalog holding these connected servers and nothing else. Every served row is readable
     /// by its own revision id too, as a workspace's stored revisions are.
     pub(super) fn of_servers(servers: Vec<WireMcpIndexEntry>) -> Self {
@@ -434,12 +447,32 @@ pub(super) fn mcp_catalog_entry(skill_id: &str, name: &str, s: &ServedServer) ->
         status: "active".into(),
         display_name: None,
         revision_id: s.revision_id.clone(),
-        document: serde_json::from_str(&s.document).expect("a fixture document is JSON"),
+        document: Some(serde_json::from_str(&s.document).expect("a fixture document is JSON")),
+        withheld: None,
         pinned: None,
         revoked: None,
         updated_at: 0,
     }
 }
+/// The reason a workspace withholds a server today: it mandates its gateway for this connection
+/// and has no gateway address to give this caller.
+pub(super) const GATEWAY_REQUIRED: &str = "gateway_required";
+
+/// **A WITHHELD row, as the workspace serves it** — the connection is real and every identity
+/// field is populated; what is absent is the document. It is an ANSWER, and the whole point of it
+/// is that a client can tell it apart from a row the lane simply did not carry.
+pub(super) fn withheld_catalog_entry(
+    skill_id: &str,
+    name: &str,
+    s: &ServedServer,
+) -> WireMcpIndexEntry {
+    WireMcpIndexEntry {
+        document: None,
+        withheld: Some(GATEWAY_REQUIRED.to_owned()),
+        ..mcp_catalog_entry(skill_id, name, s)
+    }
+}
+
 /// One FILE bundle in the catalog index.
 pub(super) fn skill_catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
     WireSkillIndexEntry {
@@ -481,6 +514,9 @@ impl DirectorySource for FakeDirectory {
         })
     }
     fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
+        if *self.unavailable.lock().unwrap() {
+            return Err(ClientError::Plane("directory unreachable".into()));
+        }
         Ok(WireSkillIndex {
             mcp_servers: self.servers.clone(),
             skills: self.skills.clone(),
@@ -492,6 +528,7 @@ impl DirectorySource for FakeDirectory {
         skill_id: &str,
         revision_id: &str,
     ) -> Result<Option<WireMcpIndexEntry>, ClientError> {
+        *self.revision_calls.lock().unwrap() += 1;
         Ok(self
             .revisions
             .iter()

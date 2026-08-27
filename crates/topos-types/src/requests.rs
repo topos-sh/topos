@@ -423,8 +423,32 @@ pub struct WireMcpIndexEntry {
     /// The catalog revision this connection resolves to (see [`WireDeliveryMcpServer::revision_id`]).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^mcpr_[0-9a-f]{32}$")))]
     pub revision_id: String,
-    /// The `server.json` verbatim, in the official registry format.
-    pub document: serde_json::Value,
+    /// The `server.json` verbatim, in the official registry format. ABSENT exactly when
+    /// [`Self::withheld`] is present — a workspace that withholds a server hands out no document
+    /// for it at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<serde_json::Value>,
+    /// **THE WORKSPACE WITHHELD THIS SERVER FROM THIS CALLER** — an ANSWER, never a miss. The
+    /// connection stands and the row is real (every identity field above is populated); what the
+    /// workspace declines is handing this machine a document to reach the server with.
+    ///
+    /// Omitting the row instead would be indistinguishable from a fetch that did not land, and a
+    /// client cannot tell "you may not have this" from "I could not ask" — so it would keep the
+    /// entry it already holds, which is precisely the bypass this field exists to close.
+    ///
+    /// An OPEN string, deliberately: `"gateway_required"` (the workspace mandates its gateway for
+    /// this server, and this caller has no gateway address to be given) is today's only value, and
+    /// a client that does not recognise a value must still honour the WITHHOLD — an unknown token
+    /// is the ruling all the same, and only shapes the sentence a person reads.
+    ///
+    /// A ruling must SAY something: a present-but-blank value is not one, and a client reads it as
+    /// no withhold at all. That asymmetry is deliberate and runs toward safety. A withhold REMOVES
+    /// entries, so an emitter that blanked this field by accident — an ORM writing `""` where it
+    /// meant null, across every row — would wipe every MCP entry on every machine that asked. Far
+    /// better to leave one server's entry standing than to strip a fleet's on a serializer's slip,
+    /// so the blank falls through to the ordinary document read. Send the token, or omit the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<String>,
     /// This connection follows ONE revision rather than the server's current. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,

@@ -182,13 +182,32 @@ fn gateway(replies: Vec<Reply>) -> Gateway {
 }
 
 /// Spawn `topos relay <url>` with the scratch home, feed it `input` lines, close stdin, and
-/// collect stdout lines + stderr whole.
+/// collect stdout lines + stderr whole. The machine token is UNSET here: a store-backed
+/// conversation and every refusal below is about the session store alone, and a developer whose
+/// shell exports `TOPOS_TOKEN` must not get a different suite.
 fn run_relay(home: &PathBuf, url: &str, input: &[&str]) -> (Vec<String>, String) {
-    let mut child: Child = Command::new(bin())
+    run_relay_as(home, url, input, None)
+}
+
+/// The same, on a BUILD MACHINE: `token` is what `TOPOS_TOKEN` holds for the child, `None` unsets
+/// it.
+fn run_relay_as(
+    home: &PathBuf,
+    url: &str,
+    input: &[&str],
+    token: Option<&str>,
+) -> (Vec<String>, String) {
+    let mut command = Command::new(bin());
+    command
         .arg("relay")
         .arg(url)
         .env("TOPOS_HOME", home)
-        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_CONFIG_DIR");
+    match token {
+        Some(token) => command.env("TOPOS_TOKEN", token),
+        None => command.env_remove("TOPOS_TOKEN"),
+    };
+    let mut child: Child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -229,6 +248,7 @@ fn a_conversation_round_trips_with_the_credential_attached_and_never_printed() {
         .arg(&url)
         .env("TOPOS_HOME", &home)
         .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("TOPOS_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -374,6 +394,101 @@ fn a_stale_entry_is_told_apart_from_a_signed_out_machine() {
         reply["error"]["message"],
         "topos: this entry belongs to an earlier sign-in. It updates automatically on the next \
          sweep — or run `topos update`."
+    );
+}
+
+/// **A BUILD MACHINE.** CI holds no session — `TOPOS_TOKEN` is how it reaches its workspace, and
+/// the reconcile never writes that to the store — and the address it is served names a SERVICE
+/// session (`ss_…`), which no store could hold either. Both misses used to answer refusals, so a
+/// placed gateway entry refused every call on a runner. The token is read here per message,
+/// exactly as a stored credential is, and reaches the wire and nothing else.
+#[test]
+fn a_build_machines_service_session_address_forwards_the_machine_token() {
+    let home = scratch_home("ci", "sn_unused", "sc-x");
+    std::fs::remove_file(home.join("identity/sessions.json")).unwrap();
+    let gw = gateway(vec![Reply::Json(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"mock"}}}"#,
+    )]);
+    let url = format!("{}/ss_ci1/mcps_x", gw.base);
+    let (stdout, stderr) = run_relay_as(&home, &url, &[INITIALIZE], Some("tpt_ci-secret"));
+    assert_eq!(stdout.len(), 1, "{stdout:?}");
+    assert!(stdout[0].contains("serverInfo"), "{stdout:?}");
+    let seen = gw.seen.lock().unwrap();
+    let posts: Vec<_> = seen.iter().filter(|s| s.method == "POST").collect();
+    assert_eq!(posts.len(), 1, "{seen:?}");
+    assert_eq!(posts[0].auth.as_deref(), Some("Bearer tpt_ci-secret"));
+    assert!(
+        !stdout[0].contains("tpt_ci-secret") && !stderr.contains("tpt_ci-secret"),
+        "{stdout:?} {stderr}"
+    );
+}
+
+/// **A SERVICE ADDRESS IS NEVER SATISFIED BY A PERSON'S STORED SIGN-IN.** Whoever the machine is
+/// signed in as, an `ss_…` address is the machine's call — answering it with a member's
+/// credential would put their name on it — so with no `TOPOS_TOKEN` it refuses, and the sentence
+/// names the variable rather than sending a runner to `topos login`.
+#[test]
+fn a_service_address_is_never_satisfied_by_a_persons_stored_sign_in() {
+    for tag in ["ci-signed-in", "ci-bare"] {
+        let home = scratch_home(tag, "sn_current", "sc-person-secret");
+        if tag == "ci-bare" {
+            std::fs::remove_file(home.join("identity/sessions.json")).unwrap();
+        }
+        let (stdout, stderr) = run_relay(&home, "https://gw.example/ss_ci1/mcps_x", &[INITIALIZE]);
+        assert_eq!(stdout.len(), 1, "{stdout:?}");
+        let reply: serde_json::Value = serde_json::from_str(&stdout[0]).unwrap();
+        assert_eq!(reply["id"], 1);
+        assert_eq!(
+            reply["error"]["message"], "topos: TOPOS_TOKEN is not set on this machine.",
+            "{tag}"
+        );
+        // …and the person's credential went nowhere near it.
+        assert!(
+            !stdout[0].contains("sc-person-secret") && !stderr.contains("sc-person-secret"),
+            "{tag}: {stdout:?} {stderr}"
+        );
+    }
+}
+
+/// **AND THE REVERSE: a person's address is never satisfied by a machine token.** A runner
+/// credential standing in the environment must not quietly answer an entry rendered for a
+/// member — that would forward their agent's call as the machine, attributed to the machine and
+/// reaching the server through the workspace's own sign-in. Both refusals keep their exact
+/// wording with the variable exported.
+#[test]
+fn a_persons_address_is_never_satisfied_by_a_machine_token() {
+    // OTHER live sign-ins here, and the entry names none of them: the stale-entry sentence.
+    let signed_in = scratch_home("tok-stale", "sn_current", "sc-x");
+    let (stdout, _) = run_relay_as(
+        &signed_in,
+        "https://gw.example/sn_old/mcps_x",
+        &[INITIALIZE],
+        Some("tpt_ci-secret"),
+    );
+    let reply: serde_json::Value = serde_json::from_str(&stdout[0]).unwrap();
+    assert_eq!(
+        reply["error"]["message"],
+        "topos: this entry belongs to an earlier sign-in. It updates automatically on the next \
+         sweep — or run `topos update`."
+    );
+
+    // No sign-in at all: the not-signed-in sentence, token or no token.
+    let bare = scratch_home("tok-none", "sn_unused", "sc-x");
+    std::fs::remove_file(bare.join("identity/sessions.json")).unwrap();
+    let (stdout, stderr) = run_relay_as(
+        &bare,
+        "https://gw.example/sn_gone/mcps_x",
+        &[INITIALIZE],
+        Some("tpt_ci-secret"),
+    );
+    let reply: serde_json::Value = serde_json::from_str(&stdout[0]).unwrap();
+    assert_eq!(
+        reply["error"]["message"],
+        "topos: not signed in on this machine. Run `topos login`."
+    );
+    assert!(
+        !stdout[0].contains("tpt_ci-secret") && !stderr.contains("tpt_ci-secret"),
+        "the machine token never rode a person's address: {stdout:?} {stderr}"
     );
 }
 

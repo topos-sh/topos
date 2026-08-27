@@ -33,11 +33,13 @@ import {
 import { user } from "@/lib/db/schema.auth";
 import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody";
 import {
-  gatewayDeliveryDocument,
-  gatewayPublicBase,
-  hasStreamableRemote,
-  sanitizeReservedMeta,
-} from "@/lib/gateway/delivery.server";
+  mcpGatewayBaseFor,
+  mcpRoutingFactsSql,
+  type RoutedMcpDocument,
+  type RoutingCaller,
+  routeMcpDocument,
+  routingCallerOf,
+} from "@/lib/gateway/routing.server";
 import { WIRE_SCHEMA_VERSION } from "@/lib/plane/contract/version";
 
 /**
@@ -202,34 +204,15 @@ function isoSeconds(date: Date): string {
  * and a connection is the one thing that decides which list a row lands in, so the `via`
  * attribution, the ordering and the snapshot are shared rather than asked for twice.
  */
-export async function deliveryFor(
-  actor: FeedActor,
-  /**
-   * Whether the CALLING machine's renderer can attach its credential to a gateway address
-   * (`clientPlacesGatewayEntries`). Defaults to false: a caller that cannot say — a page's own
-   * feed read, a test — is never handed an address that needs a credential it may not attach.
-   */
-  placesGatewayEntries = false,
-): Promise<DeliveryBody> {
+export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
   const ws = actor.workspaceId;
   // THE GATEWAY, resolved once per delivery rather than per row: an address can be handed out
-  // only where a gateway is deployed AND the caller is a session (a page's own feed read has no
-  // machine to address) AND that machine's renderer can attach its credential to a gateway
-  // address. Per-ROW routing is decided below, from this plus the workspace switch, the
-  // connection's own policy, the member's choice, and whether a sign-in stands.
-  const gatewayBase =
-    actor.sessionId === undefined || !placesGatewayEntries ? null : gatewayPublicBase();
-  // WHETHER A SIGN-IN STANDS at the gateway for each connected server — the member's own or the
-  // workspace's. Asked only where a gateway is deployed: on an install with none the `gateway`
-  // schema does not exist, and the constant false keeps the query off it entirely.
-  const credentialSql =
-    gatewayBase === null
-      ? sql`false`
-      : sql`EXISTS (
-               SELECT 1 FROM gateway.credential gc
-               WHERE gc.workspace_id = ${ws} AND gc.server_id = bm.server_id
-                 AND (gc.user_id = ${actor.userId} OR gc.user_id IS NULL)
-             )`;
+  // only where a gateway is deployed AND a machine is asking (a page's own feed read has no
+  // machine to address). Per-ROW routing is the shared ruling's (routing.server.ts), from this
+  // plus the workspace switch, the connection's own policy, the member's choice, and whether a
+  // sign-in stands.
+  const caller: RoutingCaller = { userId: actor.userId, sessionId: actor.sessionId ?? null };
+  const gatewayBase = await mcpGatewayBaseFor(caller);
   return await getDb().transaction(
     async (tx) => {
       const rows = await tx.execute(sql`
@@ -239,20 +222,15 @@ export async function deliveryFor(
                (extract(epoch from cp.moved_at) * 1000)::bigint AS updated_at,
                vd.bundle_digest AS current_digest,
                -- The catalog half: the revision this connection resolves to, and its document.
-               r.id AS revision_id, r.document AS document, bm.server_id AS server_id,
+               r.id AS revision_id, r.document AS document,
                (bm.pinned_revision_id IS NOT NULL) AS pinned,
                (extract(epoch from r.published_at) * 1000)::bigint AS revision_at,
-               -- The routing facts: the workspace switch, the connection's mandate, whether
-               -- THIS member routed the server direct, and whether a sign-in stands.
-               w.mcp_gateway AS ws_gateway,
-               bm.gateway_policy AS gateway_policy,
-               EXISTS (
-                 SELECT 1 FROM web.mcp_gateway_optout go
-                 WHERE go.workspace_id = ${ws} AND go.server_id = bm.server_id
-                   AND go.user_id = ${actor.userId}
-               ) AS gateway_optout,
-               ${credentialSql} AS gateway_credential,
-               ms.auth_mode AS auth_mode,
+               -- The routing facts, spelled once for every lane that routes (routing.server.ts).
+               ${mcpRoutingFactsSql({
+                 workspaceId: ws,
+                 userId: actor.userId,
+                 gatewayDeployed: gatewayBase !== null,
+               })},
                COALESCE((
                  SELECT array_agg(DISTINCT ch.name ORDER BY ch.name)
                  FROM web.channel_bundle cb
@@ -323,44 +301,23 @@ export async function deliveryFor(
           ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
         };
         if (r.revision_id !== null) {
-          // Sanitize FIRST — a stored document may carry a reserved `sh.topos/*` control key (an
-          // older row, or a path that predates the gate); the trusted rewrite adds its own flag
-          // only after. So a machine never receives a gateway flag the delivery side did not put
-          // there, gateway deployed or not.
-          const document = sanitizeReservedMeta(r.document as Record<string, unknown>);
-          // HOW THIS ROW IS ROUTED, first answer wins: the workspace switch off = direct ·
-          // the connection's 'direct' mandate = direct · its 'required' mandate = the gateway
-          // for every machine, or NO ROW AT ALL for a machine that cannot be handed a gateway
-          // address (too old, or a deployment running none) — a mandate that quietly fell back
-          // to direct would not be one · no mandate = the gateway where one is deployed AND the
-          // member has not chosen direct AND either the server needs no sign-in or one already
-          // stands at the gateway (theirs or the workspace's). Until a sign-in stands the
-          // machine keeps the server's own address, so turning the gateway on never breaks a
-          // working server — the route follows the sign-in, in both directions.
-          const wsGatewayOn = r.ws_gateway === "on";
-          const policy = (r.gateway_policy as string | null) ?? null;
-          const mandated = wsGatewayOn && policy === "required" && hasStreamableRemote(document);
-          if (mandated && gatewayBase === null && actor.sessionId !== undefined) {
+          // THE ONE ROUTING RULING — sanitize, decide, rewrite, all of it in routing.server.ts so
+          // the catalog and lock lanes answer this row exactly as this one does. A `required`
+          // connection no machine can be handed an address for is WITHHELD, never quietly
+          // delivered direct.
+          const routed = routeMcpDocument({
+            stored: r.document as Record<string, unknown>,
+            facts: r,
+            caller,
+            gatewayBase,
+          });
+          if (routed.kind === "withheld") {
             continue;
           }
-          const routed =
-            gatewayBase !== null &&
-            wsGatewayOn &&
-            (mandated ||
-              (policy === null &&
-                r.gateway_optout !== true &&
-                (r.auth_mode === "none" || r.gateway_credential === true)));
           mcpServers.push({
             ...common,
             revision_id: r.revision_id as string,
-            document: !routed
-              ? document
-              : gatewayDeliveryDocument(document, {
-                  base: gatewayBase as string,
-                  // Non-null by construction: gatewayBase is null unless the actor is a session.
-                  sessionId: actor.sessionId as string,
-                  serverId: r.server_id as string,
-                }),
+            document: routed.document,
             ...(r.pinned === true ? { pinned: true as const } : {}),
             updated_at: Number(r.revision_at),
             via: via(r),
@@ -937,16 +894,36 @@ export interface LaneSkillIndexEntry {
   upstream_path?: string;
 }
 
-/** One connected MCP server in the workspace catalog — the document, resolved as delivery
- *  resolves it, so a project reference to a server this caller does not follow still renders. */
+/**
+ * One connected MCP server in the workspace catalog — the document, resolved AND ROUTED as
+ * delivery resolves and routes it, so a project reference to a server this caller does not
+ * follow still renders, and renders the road this caller's machine actually takes.
+ *
+ * That makes the document PER-PERSON (a member's own opt-out and standing sign-in weigh in) and
+ * PER-SESSION (a gateway address names the calling session). It is never a cacheable answer, and
+ * the routes that serve it say `no-store`.
+ *
+ * A WITHHELD row is the other shape this entry takes: identity, custody handle and `withheld`,
+ * and NO document — nothing placeable, and nothing a client could mistake for one. The two are
+ * mutually exclusive by construction, on the wire as here.
+ */
 export interface LaneMcpIndexEntry {
   skill_id: string;
   name: string;
   kind: string;
   status: string;
   display_name?: string;
+  /** The revision this connection RESOLVES TO — real on a withheld row too, so a client can
+   *  match the row against the custody it already holds. */
   revision_id: string;
-  document: Record<string, unknown>;
+  /** Absent exactly when `withheld` is present. */
+  document?: Record<string, unknown>;
+  /**
+   * WHY this caller is served no document — the workspace's own ruling, said out loud so a client
+   * can tell "withdrawn from you" from "I could not read it". Omitted on a served row; today's
+   * only value is `gateway_required`.
+   */
+  withheld?: string;
   pinned?: true;
   revoked?: true;
   updated_at: number;
@@ -1036,29 +1013,63 @@ export async function laneSkillsIndex(
  * would receive. It carries the document for the same reason delivery does — a project that
  * references a server nobody in the room follows still has to render its config, and there is no
  * second lane to fetch bytes from.
+ *
+ * IT ROUTES, exactly as delivery does. This is the lane behind every explicit `[mcp]` manifest
+ * row and every `[channels]` member, in BOTH the machine and the project scope — and a project
+ * manifest has no other way in, because the feed walk is the machine scope's alone. A server the
+ * workspace set 'required' is therefore required here too, and one this caller cannot be handed
+ * an address for is SAID — the row comes back carrying `withheld` and no document, never dropped.
+ * Dropping it would read as a fetch that did not land, which a client answers by keeping what it
+ * already has: the mandate would then be bypassed forever by every machine that got in early.
  */
-export async function laneMcpServersIndex(actor: {
-  readonly workspaceId: string;
-}): Promise<LaneMcpIndexEntry[]> {
+export async function laneMcpServersIndex(
+  // The BRANDED read actor, never a bare `{ workspaceId }`: routing is per-person and
+  // per-session, so the caller's identity is part of the answer, and only a guard mints one.
+  actor: ReadActor,
+): Promise<LaneMcpIndexEntry[]> {
   const ws = actor.workspaceId;
+  const caller = routingCallerOf(actor);
+  const gatewayBase = await mcpGatewayBaseFor(caller);
   const rows = await getDb().execute(sql`
     SELECT b.id AS skill_id, b.name, b.kind, b.status, b.display_name,
            r.id AS revision_id, r.document,
            (bm.pinned_revision_id IS NOT NULL) AS pinned,
-           (extract(epoch from r.published_at) * 1000)::bigint AS revision_at
+           (extract(epoch from r.published_at) * 1000)::bigint AS revision_at,
+           ${mcpRoutingFactsSql({
+             workspaceId: ws,
+             userId: caller.userId,
+             gatewayDeployed: gatewayBase !== null,
+           })}
     FROM web.bundle_mcp bm
     JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
+    JOIN web.workspace w ON w.id = bm.workspace_id
     JOIN web.mcp_server ms ON ms.id = bm.server_id
     JOIN web.mcp_server_revision r ON r.id = ${MCP_RESOLVED_REVISION}
     WHERE bm.workspace_id = ${ws} AND b.status <> 'deleted'
     ORDER BY b.id
   `);
-  return (rows.rows as Record<string, unknown>[]).map(laneMcpEntryOf);
+  return (rows.rows as Record<string, unknown>[]).map((r) =>
+    laneMcpEntryOf(
+      r,
+      routeMcpDocument({
+        stored: r.document as Record<string, unknown>,
+        facts: r,
+        caller,
+        gatewayBase,
+      }),
+    ),
+  );
 }
 
-/** One connected-server row as the lane spells it — written once, for the index and the
- *  by-revision read, which answer with the same facts about the same columns. */
-function laneMcpEntryOf(r: Record<string, unknown>): LaneMcpIndexEntry {
+/**
+ * One connected-server row as the lane spells it — written once, for the index and the
+ * by-revision read, which answer with the same facts about the same columns. The ROUTING is
+ * passed in rather than read off the row, and it decides which of the entry's two shapes this is:
+ * the routed document, or the withhold that stands in its place. The document key is OMITTED on a
+ * withheld row (never null): absence is the wire's spelling for "no document", and a withheld row
+ * must carry nothing a client could place.
+ */
+function laneMcpEntryOf(r: Record<string, unknown>, routed: RoutedMcpDocument): LaneMcpIndexEntry {
   return {
     skill_id: r.skill_id as string,
     name: r.name as string,
@@ -1066,7 +1077,7 @@ function laneMcpEntryOf(r: Record<string, unknown>): LaneMcpIndexEntry {
     status: r.status as string,
     ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
     revision_id: r.revision_id as string,
-    document: r.document as Record<string, unknown>,
+    ...(routed.kind === "withheld" ? { withheld: routed.reason } : { document: routed.document }),
     ...(r.pinned === true ? { pinned: true as const } : {}),
     updated_at: Number(r.revision_at),
   };
@@ -1078,9 +1089,9 @@ function laneMcpEntryOf(r: Record<string, unknown>): LaneMcpIndexEntry {
  * catalog serves today.
  *
  * It answers with what DELIVERY WOULD HAVE ANSWERED while that revision was current: the same
- * columns, the same shaping, the stored document verbatim (a public row's document was trimmed to
- * the delivered shape and stamped with the verified tier when it was written, which is why there
- * is nothing to re-shape here). `null` — the lane's uniform 404 — for everything else:
+ * columns, the same shaping, the same ROUTING (a public row's document was trimmed to the
+ * delivered shape and stamped with the verified tier when it was written, which is why there is
+ * nothing else to re-shape here). `null` — the lane's uniform 404 — for everything else:
  *
  *  - a bundle this workspace does not connect, or one it deleted;
  *  - a revision of ANOTHER server (the join pins the revision to the connection's own server), so
@@ -1089,6 +1100,17 @@ function laneMcpEntryOf(r: Record<string, unknown>): LaneMcpIndexEntry {
  *    ever delivered, and a lock cannot name one;
  *  - a document today's gate would refuse — RE-VALIDATED on the way out, exactly as the vault's
  *    own document read is, because the rules can tighten between a publish and a read.
+ *
+ * A WITHHELD connection is NOT one of those: it answers 200 with the withheld entry (identity,
+ * revision id, `withheld`, no document). The difference is the point — this lane's `null` is the
+ * uniform 404, which a client reads as "could not reach it" and answers by keeping the entry it
+ * already has. A mandate delivered as a 404 would be no mandate at all on exactly the machines it
+ * is aimed at.
+ *
+ * ORDER: VALIDATE THE STORED DOCUMENT, THEN ROUTE. A gateway-routed document carries
+ * `sh.topos/gateway`, which the document gate refuses outright (`MCP_RESERVED_META`) — validating
+ * the routed one would 404 every routed lock read, which is a silent breakage of the whole lane
+ * on a deployment that runs a gateway.
  */
 export async function laneMcpRevision(
   // The BRANDED read actor, never a bare `{ workspaceId }`: only a guard mints one, and the
@@ -1097,13 +1119,21 @@ export async function laneMcpRevision(
   bundleId: string,
   revisionId: string,
 ): Promise<LaneMcpIndexEntry | null> {
+  const caller = routingCallerOf(actor);
+  const gatewayBase = await mcpGatewayBaseFor(caller);
   const rows = await getDb().execute(sql`
     SELECT b.id AS skill_id, b.name, b.kind, b.status, b.display_name,
            r.id AS revision_id, r.document,
            (bm.pinned_revision_id IS NOT NULL) AS pinned,
-           (extract(epoch from r.published_at) * 1000)::bigint AS revision_at
+           (extract(epoch from r.published_at) * 1000)::bigint AS revision_at,
+           ${mcpRoutingFactsSql({
+             workspaceId: actor.workspaceId,
+             userId: caller.userId,
+             gatewayDeployed: gatewayBase !== null,
+           })}
     FROM web.bundle_mcp bm
     JOIN web.bundle b ON b.id = bm.bundle_id AND b.workspace_id = bm.workspace_id
+    JOIN web.workspace w ON w.id = bm.workspace_id
     JOIN web.mcp_server ms ON ms.id = bm.server_id
     JOIN web.mcp_server_revision r ON r.server_id = ms.id
     WHERE bm.workspace_id = ${actor.workspaceId} AND b.status <> 'deleted'
@@ -1115,10 +1145,12 @@ export async function laneMcpRevision(
   if (row === undefined) {
     return null;
   }
-  const entry = laneMcpEntryOf(row);
-  return mcpRevisionFacts(entry.document, { requireVersion: false }).refusal === null
-    ? entry
-    : null;
+  // THE STORED document is what the gate judges — never the routed one (see above).
+  const stored = row.document as Record<string, unknown>;
+  if (mcpRevisionFacts(stored, { requireVersion: false }).refusal !== null) {
+    return null;
+  }
+  return laneMcpEntryOf(row, routeMcpDocument({ stored, facts: row, caller, gatewayBase }));
 }
 
 // ── The shared helpers other DAL modules use ────────────────────────────────────────────────

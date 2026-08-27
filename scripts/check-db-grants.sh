@@ -142,9 +142,10 @@ probe_real() {
   expect_denied topos_web web "CREATE TABLE gateway.intruder (id text)" \
     "web CREATE IN gateway refused"
 
-  # The gateway reads exactly the eight tables a proxied call resolves against — no more.
-  for table in cli_session workspace bundle bundle_mcp mcp_server mcp_server_revision \
-    mcp_tool_policy mcp_tool_selection; do
+  # The gateway reads exactly the ten tables a proxied call resolves against — no more. The two
+  # machine-token tables are its SECOND caller door (CI calling with the workspace's sign-in).
+  for table in cli_session machine_token service_session workspace bundle bundle_mcp \
+    mcp_server mcp_server_revision mcp_tool_policy mcp_tool_selection; do
     expect_ok topos_gateway gateway "SELECT count(*) FROM web.$table" "gateway reads web.$table"
   done
   # And NOT the identity store, nor custody: the blanket grant that would have swept these in is

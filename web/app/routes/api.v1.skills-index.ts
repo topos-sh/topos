@@ -12,6 +12,13 @@ import { laneMcpServersIndex, laneSkillsIndex } from "@/lib/db/queries.lane.serv
  * A bundle is named here by its CATALOG name, whatever its kind: an MCP server's embedded
  * registry name is the registry lane's business (`…/registry/v0.1/servers`), which serves it in
  * the shape a registry client expects.
+ *
+ * The `mcp_servers` half is PER-PERSON AND PER-SESSION, not a workspace-wide constant: each
+ * document is ROUTED for this caller (the member's own gateway opt-out and standing sign-in
+ * weigh in, and a gateway address names the calling session), and a connection mandated through
+ * a gateway this caller cannot be handed an address for is absent rather than served direct.
+ * Which is why this answer is `no-store` and must stay that way — a shared cache of it would
+ * hand one person's road, and one machine's address, to another.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const gated = laneGate(request);

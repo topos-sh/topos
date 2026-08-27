@@ -82,10 +82,13 @@ ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane
 -- The gateway resolves every proxied call against a FIXED set of web rows it may only READ. Those
 -- grants are NOT made here: a blanket "SELECT on all of web" (or the ALTER DEFAULT PRIVILEGES that
 -- would cover a fresh volume) would also hand the most-exposed component the identity store — the
--- Better Auth account tokens, session tokens, and emails. Instead the web lineage migration
--- 0028_gateway_web_reads grants exactly the eight tables the gateway reads, guarded on this role
--- existing, once the tables are real and topos_web owns them. Creating the role here is enough; the
--- next web boot-migration makes the precise grants (and re-affirms them idempotently).
+-- Better Auth account tokens, session tokens, and emails. Instead the web lineage grants exactly
+-- the ten tables the gateway reads, guarded on this role existing, once the tables are real and
+-- topos_web owns them: migration 0028_gateway_web_reads for the eight a proxied call resolves
+-- against, and 0033_gateway_reads_machine_tokens for the two that are its SECOND caller door (a
+-- workspace machine token and the service session one of its runs appears as — CI calling tools
+-- with the workspace's sign-in). Creating the role here is enough; the next web boot-migration
+-- makes the precise grants (and re-affirms them idempotently).
 
 -- The app renders sign-in state, the tools checklist and the usage page straight out of the
 -- gateway's schema — so it needs to REACH the schema. WHICH TABLES it may read is decided in

@@ -176,6 +176,39 @@ export async function seedSession(
   );
 }
 
+/**
+ * A workspace MACHINE TOKEN and one run of it — the gateway's second caller door. Revocation is a
+ * DELETE of the token row (the service sessions CASCADE), which is what the store's liveness
+ * check rests on, so tests revoke by deleting exactly as the web lane does.
+ */
+export async function seedMachineToken(
+  db: ServiceDb,
+  tokenId: string,
+  ws: string,
+  bearer: string,
+  name = "ci",
+): Promise<void> {
+  await db.q(
+    `INSERT INTO web.machine_token (id, workspace_id, name, token_sha256)
+     VALUES ($1, $2, $3, decode($4, 'hex'))`,
+    [tokenId, ws, name, bearerSha256Hex(bearer)],
+  );
+}
+
+export async function seedServiceSession(
+  db: ServiceDb,
+  id: string,
+  tokenId: string,
+  ws: string,
+  displayName = id,
+): Promise<void> {
+  await db.q(
+    `INSERT INTO web.service_session (id, token_id, workspace_id, display_name)
+     VALUES ($1, $2, $3, $4)`,
+    [id, tokenId, ws, displayName],
+  );
+}
+
 export interface SeedServerOptions {
   url?: string | null;
   authMode?: "none" | "oauth" | "manual" | null;

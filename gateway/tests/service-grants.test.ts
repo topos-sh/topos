@@ -97,9 +97,13 @@ describe("as topos_web", () => {
 });
 
 describe("as topos_gateway", () => {
-  it("reads exactly the eight web tables the store needs", async () => {
+  it("reads exactly the ten web tables the store needs", async () => {
     for (const table of [
       "cli_session",
+      // The second caller door: a workspace machine token and the service session one of its
+      // runs appears as — CI calling tools with the workspace's sign-in.
+      "machine_token",
+      "service_session",
       "bundle_mcp",
       "mcp_server",
       "mcp_server_revision",

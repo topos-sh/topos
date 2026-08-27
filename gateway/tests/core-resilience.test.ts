@@ -119,7 +119,7 @@ describe("recovery and the 2024-11-05 channels", () => {
     const t = await seed({ [UPSTREAM_URL]: upstream.handler });
     const client = await open2411Client(t);
     // A POST addressed to a token that is not an open stream is refused.
-    const bad = await rpc(t, { jsonrpc: "2.0", id: nextId(), method: "tools/list" }, {}, { url: `https://gw.test/sess1/srv1?sse=forged-token` });
+    const bad = await rpc(t, { jsonrpc: "2.0", id: nextId(), method: "tools/list" }, {}, { url: `https://gw.test/sn_laptop/srv1?sse=forged-token` });
     expect(bad.status).toBe(404);
     await client.cancel();
   });
@@ -127,14 +127,14 @@ describe("recovery and the 2024-11-05 channels", () => {
   it("refuses the 2024-11-05 endpoint stream of another topos session", async () => {
     const upstream = legacyFake("2025-06-18");
     const t = await seed({ [UPSTREAM_URL]: upstream.handler });
-    await store.addBearer("other-bearer", { sessionId: "sess2", workspaceId: WS, userId: "user2", displayName: "other" });
+    await store.addBearer("other-bearer", { sessionId: "sn_desktop", workspaceId: WS, userId: "user2", displayName: "other" });
     const client = await open2411Client(t);
     // The other session tries to ride the first session's stream token.
     const resp = await rpc(
       t,
       { jsonrpc: "2.0", id: nextId(), method: "tools/list" },
       {},
-      { url: client.endpoint.replace("/sess1/", "/sess2/"), bearer: "other-bearer", sessionId: "sess2" },
+      { url: client.endpoint.replace("/sn_laptop/", "/sn_desktop/"), bearer: "other-bearer", sessionId: "sn_desktop" },
     );
     expect(resp.status).toBe(404);
     await client.cancel();
