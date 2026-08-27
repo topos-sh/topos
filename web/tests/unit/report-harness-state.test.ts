@@ -37,7 +37,7 @@ const HARNESSES = [
 /** The stored jsonb for one bundle on the seeded session (undefined = no row). */
 async function storedHarnessState(bundleId: string): Promise<unknown> {
   const rows = await db.q<{ harness_state: unknown }>(
-    `SELECT harness_state FROM web.session_bundle_state WHERE session_id = 'cs_box' AND bundle_id = $1`,
+    `SELECT harness_state FROM web.session_bundle_state WHERE session_id = 'sn_box' AND bundle_id = $1`,
     [bundleId],
   );
   return rows.length === 0 ? undefined : rows[0]?.harness_state;
@@ -51,7 +51,7 @@ async function report(
   }[],
 ): Promise<string> {
   const lane = await import("@/lib/db/queries.lane.server");
-  return await lane.reportApplied(asSession(wsId, "u_dev", "cs_box", "owner"), applied);
+  return await lane.reportApplied(asSession(wsId, "u_dev", "sn_box", "owner"), applied);
 }
 
 beforeAll(async () => {
@@ -59,7 +59,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, "u_dev", "Dev", "dev@example.com");
   await seatUser(db, wsId, "u_dev", "owner");
-  await seedSession(db, "cs_box", wsId, "u_dev", "active", "laptop");
+  await seedSession(db, "sn_box", wsId, "u_dev", "active", "laptop");
   await seedBundle(db, wsId, "s_srv", "srv", { kind: "mcp" });
   await seedBundle(db, wsId, "s_doc", "doc");
 }, 60000);
@@ -142,7 +142,7 @@ describe("what a machine may report holding", () => {
       method: "PUT",
       headers: laneHeaders({
         "content-type": "application/json",
-        authorization: "Bearer cs_box",
+        authorization: "Bearer sn_box",
       }),
       body: JSON.stringify({ schema_version: 1, applied: [row] }),
     });
@@ -223,7 +223,7 @@ describe("the report door shape-checks the block — an authenticated member's 4
       // uniform 404 and never makes the tier buffer a body.
       headers: laneHeaders({
         "content-type": "application/json",
-        authorization: "Bearer cs_box",
+        authorization: "Bearer sn_box",
       }),
       body: JSON.stringify({
         schema_version: 1,
@@ -295,7 +295,7 @@ describe("the report door shape-checks the block — an authenticated member's 4
       // The seeded session's credential — this one goes all the way to the row.
       headers: laneHeaders({
         "content-type": "application/json",
-        authorization: "Bearer cs_box",
+        authorization: "Bearer sn_box",
       }),
       body: JSON.stringify({
         schema_version: 1,
@@ -324,7 +324,7 @@ describe("the report door shape-checks the block — an authenticated member's 4
       method: "PUT",
       headers: laneHeaders({
         "content-type": "application/json",
-        authorization: "Bearer cs_box",
+        authorization: "Bearer sn_box",
       }),
       body: JSON.stringify({
         schema_version: 1,
@@ -372,7 +372,7 @@ describe("the report door shape-checks the block — an authenticated member's 4
       method: "PUT",
       headers: laneHeaders({
         "content-type": "application/json",
-        authorization: "Bearer cs_box",
+        authorization: "Bearer sn_box",
       }),
       body,
     });
@@ -388,7 +388,7 @@ describe("the report door shape-checks the block — an authenticated member's 4
       method: "PUT",
       headers: laneHeaders({
         "content-type": "application/json",
-        authorization: "Bearer cs_box",
+        authorization: "Bearer sn_box",
       }),
       body: "x".repeat(20 * 1024 * 1024),
     });

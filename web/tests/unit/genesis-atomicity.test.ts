@@ -40,7 +40,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, MEMBER.id, MEMBER.name, MEMBER.email);
   await seatUser(db, wsId, MEMBER.id, "owner");
-  await seedSession(db, "cs_auth", wsId, MEMBER.id);
+  await seedSession(db, "sn_auth", wsId, MEMBER.id);
   session = { user: MEMBER };
 }, 60000);
 
@@ -60,7 +60,7 @@ async function laneGenesis(args: {
   const { publishFlow } = await import("@/lib/api/publish-flow.server");
   const raw = JSON.stringify({ skill_id: args.bundleId });
   const res = await publishFlow({
-    actor: asSession(wsId, MEMBER.id, "cs_auth", "owner"),
+    actor: asSession(wsId, MEMBER.id, "sn_auth", "owner"),
     raw,
     opId: args.opId ?? crypto.randomUUID(),
     skillId: args.bundleId,

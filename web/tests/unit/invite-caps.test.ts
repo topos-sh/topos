@@ -63,7 +63,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, "u_owner", "Owner", "owner@example.com");
   await seatUser(db, wsId, "u_owner", "owner");
-  await seedSession(db, "cred_owner", wsId, "u_owner");
+  await seedSession(db, "sn_owner", wsId, "u_owner");
 }, 60000);
 
 afterAll(async () => {
@@ -76,7 +76,7 @@ describe("the per-submission cap (10 addresses)", () => {
     const r = await (await roster()).createInvitations(asOwner(wsId, "u_owner"), emails);
     expect(r.outcome).toBe("too_many_addresses");
     const l = await (await lane()).laneInvite(
-      asSession(wsId, "u_owner", "cred_owner", "owner"),
+      asSession(wsId, "u_owner", "sn_owner", "owner"),
       emails,
       {},
     );
@@ -106,7 +106,7 @@ describe("the rolling-day cap (floored: young account 10/day, else 50; a present
     ]);
     expect(r.outcome).toBe("invite_limit");
     const l = await (await lane()).laneInvite(
-      asSession(wsId, "u_owner", "cred_owner", "owner"),
+      asSession(wsId, "u_owner", "sn_owner", "owner"),
       ["eleventh@example.com"],
       {},
     );
@@ -146,7 +146,7 @@ describe("the member cap at invite creation (seats + live pending invitations)",
       ]);
       expect(r.outcome).toBe("member_limit");
       const l = await (await lane()).laneInvite(
-        asSession(wsId, "u_owner", "cred_owner", "owner"),
+        asSession(wsId, "u_owner", "sn_owner", "owner"),
         ["overflow@example.com"],
         {},
       );
@@ -236,7 +236,7 @@ describe("the per-address cooldown (3 invites in 7 days, server-wide → skip)",
 
   it("the lane door skips identically, and the cooldown reads across workspaces", async () => {
     const l = await (await lane()).laneInvite(
-      asSession(wsId, "u_owner", "cred_owner", "owner"),
+      asSession(wsId, "u_owner", "sn_owner", "owner"),
       ["hammered@example.com"],
       {},
     );

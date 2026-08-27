@@ -128,7 +128,7 @@ beforeAll(async () => {
   await seedUser(db, "u_mem", "Member", "mem@example.com");
   await seedUser(db, "u_out", "Stranger", "out@example.com");
   await seatUser(db, wsId, "u_mem", "member");
-  await seedSession(db, "cs_mem", wsId, "u_mem");
+  await seedSession(db, "sn_mem", wsId, "u_mem");
 
   // A catalog server the workspace follows at its current revision.
   await seedServer("mcps_weather", "io.github.acme/weather", { authMode: "oauth" });
@@ -214,7 +214,7 @@ describe("the door", () => {
 
   it("a live session bearer reads the catalog", async () => {
     session = null;
-    const res = await get("/registry/v0.1/servers", { authorization: "Bearer cs_mem" });
+    const res = await get("/registry/v0.1/servers", { authorization: "Bearer sn_mem" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { metadata: { count: number } };
     expect(body.metadata.count).toBe(3);
