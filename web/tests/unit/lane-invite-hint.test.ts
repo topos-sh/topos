@@ -37,7 +37,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, "u_own", "Owner", "owner@example.com");
   await seatUser(db, wsId, "u_own", "owner");
-  await seedSession(db, "cs_own", wsId, "u_own");
+  await seedSession(db, "sn_own", wsId, "u_own");
   await seedBundle(db, wsId, "s_deploy", "deploy");
   await seedBundle(db, wsId, "s_linear", "linear", { kind: "mcp" });
   await seedChannel(db, wsId, "ch_ops", "ops");
@@ -50,7 +50,7 @@ afterAll(async () => {
 describe("laneInvite — the hint says what the destination IS", () => {
   it("records and returns the bundle's OWN kind, so an mcp server is never called a skill", async () => {
     const { laneInvite } = await import("@/lib/db/queries.lane.server");
-    const actor = asSession(wsId, "u_own", "cs_own", "owner");
+    const actor = asSession(wsId, "u_own", "sn_own", "owner");
 
     const mcp = await laneInvite(actor, ["ann@example.com"], { skill: "linear" });
     expect(mcp.outcome).toBe("invited");
@@ -68,7 +68,7 @@ describe("laneInvite — the hint says what the destination IS", () => {
 
   it("a channel hint stays a channel; no hint records none", async () => {
     const { laneInvite } = await import("@/lib/db/queries.lane.server");
-    const actor = asSession(wsId, "u_own", "cs_own", "owner");
+    const actor = asSession(wsId, "u_own", "sn_own", "owner");
 
     const channel = await laneInvite(actor, ["cy@example.com"], { channel: "ops" });
     expect(channel.outcome === "invited" && channel.hint).toEqual({
@@ -84,7 +84,7 @@ describe("laneInvite — the hint says what the destination IS", () => {
 
   it("an unresolvable destination refuses before any invitation row is written", async () => {
     const { laneInvite } = await import("@/lib/db/queries.lane.server");
-    const actor = asSession(wsId, "u_own", "cs_own", "owner");
+    const actor = asSession(wsId, "u_own", "sn_own", "owner");
     expect((await laneInvite(actor, ["ed@example.com"], { skill: "ghost" })).outcome).toBe(
       "unknown_skill",
     );

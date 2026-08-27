@@ -36,7 +36,7 @@ let db: ScratchDb;
 const WS_REAL = "w_real";
 const WS_OTHER = "w_other";
 /** The stranger's enrolled device id doubles as its credential plaintext (seedDevice hashes it). */
-const STRANGER_DEVICE = "d_stranger";
+const STRANGER_DEVICE = "sn_stranger";
 
 async function seedWorkspace(id: string, name: string): Promise<void> {
   await db.q(

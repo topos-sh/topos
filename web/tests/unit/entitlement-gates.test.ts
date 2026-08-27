@@ -49,7 +49,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, "u_owner", "Owner", "owner@example.com");
   await seatUser(db, wsId, "u_owner", "owner");
-  await seedSession(db, "cred_owner", wsId, "u_owner");
+  await seedSession(db, "sn_owner", wsId, "u_owner");
 }, 60000);
 
 afterAll(async () => {
@@ -62,7 +62,7 @@ describe("the reviews gate (`allows('reviews')`)", () => {
     const lifecycle = await import("@/lib/db/queries.lifecycle.server");
     const queries = await import("@/lib/db/queries.server");
     const owner = asOwner(wsId, "u_owner");
-    const session = asSession(wsId, "u_owner", "cred_owner", "owner");
+    const session = asSession(wsId, "u_owner", "sn_owner", "owner");
     await seedBundle(db, wsId, "b_guarded", "guarded");
     // A bundle protected BEFORE the entitlement was withdrawn.
     await db.q(`UPDATE web.bundle SET protection = 'reviewed' WHERE id = 'b_guarded'`);
@@ -99,7 +99,7 @@ describe("the reviews gate (`allows('reviews')`)", () => {
     const lane = await import("@/lib/db/queries.lane.server");
     expect(
       await lane.laneProtectBundle(
-        asSession(wsId, "u_owner", "cred_owner", "owner"),
+        asSession(wsId, "u_owner", "sn_owner", "owner"),
         "b_guarded",
         "reviewed",
       ),
@@ -110,7 +110,7 @@ describe("the reviews gate (`allows('reviews')`)", () => {
 describe("the bundle cap (`bundles`)", () => {
   it("a NEW identity at the cap refuses before any custody call; absent limit is a no-op", async () => {
     const genesis = await import("@/lib/api/genesis.server");
-    const session = asSession(wsId, "u_owner", "cred_owner", "owner");
+    const session = asSession(wsId, "u_owner", "sn_owner", "owner");
     const candidate = {
       files: [{ path: "SKILL.md", mode: "100644", content_base64: "aGVsbG8=" }],
       attribution: "Owner",
@@ -144,7 +144,7 @@ describe("the bundle cap (`bundles`)", () => {
 
   it("a retry naming an id already ACTIVE here is no growth — never refused at the cap", async () => {
     const custody = await import("@/lib/db/queries.custody.server");
-    const session = asSession(wsId, "u_owner", "cred_owner", "owner");
+    const session = asSession(wsId, "u_owner", "sn_owner", "owner");
     // ONE active bundle (b_guarded) at a limit of 1: a duplicated/lost-ack retry of THAT
     // bundle's genesis registers nothing new and must not read BUNDLE_LIMIT_REACHED…
     seam.limits.bundles = 1;
@@ -165,7 +165,7 @@ describe("the bundle cap (`bundles`)", () => {
     );
     try {
       seam.limits.bundles = 1;
-      const session = asSession(wsId, "u_owner", "cred_owner", "owner");
+      const session = asSession(wsId, "u_owner", "sn_owner", "owner");
       expect(await custody.bundleCapRefusal(session, "b_fresh")).toBeNull();
       seam.limits.bundles = 0;
       const refused = await custody.bundleCapRefusal(session, "b_fresh");
@@ -212,7 +212,7 @@ describe("the bundle cap covers UNARCHIVE (archived→active is the same step pa
 describe("the history window (`history-days`)", () => {
   it("older-than-window reads outside; inside and absent-limit do not; unknown versions never do", async () => {
     const custody = await import("@/lib/db/queries.custody.server");
-    const session = asSession(wsId, "u_owner", "cred_owner", "owner");
+    const session = asSession(wsId, "u_owner", "sn_owner", "owner");
     const oldV = "a1".repeat(32);
     const newV = "b2".repeat(32);
     await db.q(

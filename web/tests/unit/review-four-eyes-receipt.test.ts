@@ -35,7 +35,7 @@ beforeAll(async () => {
 
   await seedUser(db, "u_rev", "Reviewer", "rev@example.com");
   await seatUser(db, wsId, "u_rev", "reviewer");
-  await seedSession(db, "dk_rev", wsId, "u_rev"); // Bearer plaintext = "dk_rev"
+  await seedSession(db, "sn_rev", wsId, "u_rev"); // Bearer plaintext = "sn_rev"
 
   // A `reviewed` bundle + an OPEN proposal the reviewer themselves authored: the self-approve.
   await seedBundle(db, wsId, "s_fe", "four-eyes", {
@@ -58,7 +58,7 @@ describe("device-lane review: an author's self-approve on a reviewed bundle", ()
     const request = new Request(`${ORIGIN}/api/v1/reviews`, {
       method: "POST",
       headers: laneHeaders({
-        authorization: "Bearer dk_rev",
+        authorization: "Bearer sn_rev",
         "content-type": "application/json",
       }),
       body: JSON.stringify({

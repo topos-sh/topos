@@ -130,7 +130,7 @@ async function runFlow(args: {
   const { publishFlow } = await import("@/lib/api/publish-flow.server");
   const raw = JSON.stringify({ skill_id: args.skillId, op: opSeq });
   const res = await publishFlow({
-    actor: asSession(wsId, "u_auth", "cs_auth", "member"),
+    actor: asSession(wsId, "u_auth", "sn_auth", "member"),
     raw,
     opId: opId(),
     skillId: args.skillId,
@@ -158,7 +158,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, "u_auth", "Author", "author@example.com");
   await seatUser(db, wsId, "u_auth", "member");
-  await seedSession(db, "cs_auth", wsId, "u_auth");
+  await seedSession(db, "sn_auth", wsId, "u_auth");
 }, 60000);
 
 afterAll(async () => {
@@ -304,7 +304,7 @@ describe("the door refuses an unknown kind — before any custody call", () => {
       // refusal is a member's 400 — an unauthenticated caller meets only the uniform 404.
       headers: laneHeaders({
         "content-type": "application/json",
-        authorization: "Bearer cs_auth",
+        authorization: "Bearer sn_auth",
       }),
       body: JSON.stringify(body(kind)),
     });

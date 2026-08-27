@@ -113,7 +113,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, "u_owner", "Owner", "owner@example.com");
   await seatUser(db, wsId, "u_owner", "owner");
-  await seedSession(db, "cred_owner", wsId, "u_owner");
+  await seedSession(db, "sn_owner", wsId, "u_owner");
 }, 60000);
 
 afterAll(async () => {
@@ -178,7 +178,7 @@ describe("unauthenticated writes never buffer a body", () => {
     const request = new Request("http://x/api/v1/publish", {
       method: "POST",
       headers: laneHeaders({
-        authorization: "Bearer cred_owner",
+        authorization: "Bearer sn_owner",
         "content-type": "application/json",
         "content-length": String(200 * 1024 * 1024),
       }),
@@ -202,7 +202,7 @@ describe("the workspace bind behind the credential-first resolve", () => {
       new Request("http://x/api/v1/publish", {
         method: "POST",
         headers: laneHeaders({
-          authorization: "Bearer cred_owner",
+          authorization: "Bearer sn_owner",
           "content-type": "application/json",
         }),
         body: publishBody("w_someone_elses"),
@@ -225,7 +225,7 @@ describe("the storage quota (`storage-bytes`)", () => {
         new Request("http://x/api/v1/publish", {
           method: "POST",
           headers: laneHeaders({
-            authorization: "Bearer cred_owner",
+            authorization: "Bearer sn_owner",
             "content-type": "application/json",
           }),
           body: publishBody(wsId),
@@ -252,7 +252,7 @@ describe("the storage quota (`storage-bytes`)", () => {
     seam.limits["storage-bytes"] = 10;
     try {
       const landed = await publishGenesisBundle({
-        actor: asSession(wsId, "u_owner", "cred_owner", "owner"),
+        actor: asSession(wsId, "u_owner", "sn_owner", "owner"),
         kind: "skill",
         candidate: {
           // "hello" — 5 decoded bytes: 8 + 5 > 10. No vault runs in this suite, so the typed
@@ -298,7 +298,7 @@ describe("the storage quota (`storage-bytes`)", () => {
   it("a failed stat read ALLOWS (fail-open); an absent limit never reads the stat at all", async () => {
     const { storageQuotaRefusal } = await import("@/lib/api/storage-quota.server");
     const { asSession } = await import("./helpers/scratch-db");
-    const actor = asSession(wsId, "u_owner", "cred_owner", "owner");
+    const actor = asSession(wsId, "u_owner", "sn_owner", "owner");
     // Stat failure under a tight limit: allow (the ingest shares the backend and fails there).
     seam.storedBytes = null;
     seam.limits["storage-bytes"] = 1;

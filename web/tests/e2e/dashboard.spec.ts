@@ -20,8 +20,8 @@ import { gotoSettled } from "./sign-in";
  * surface. The same op_id replayed answers the stored receipt byte-for-byte.
  */
 
-const CREDENTIAL = "cred-dk_e2e_publisher";
-const DEVICE_ID = "dk_e2e_publisher";
+const CREDENTIAL = "cred-sn_e2e_publisher";
+const DEVICE_ID = "sn_e2e_publisher";
 
 test.describe.configure({ mode: "serial" });
 

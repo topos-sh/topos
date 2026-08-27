@@ -50,9 +50,9 @@ const CURRENT_REVISION = mcpRevisionId("fleet_current");
 const OLD_REVISION = mcpRevisionId("fleet_old");
 
 /** The machine that just ran `topos update` — it reports what the workspace serves. */
-const UPDATED = "cs_updated";
+const UPDATED = "sn_updated";
 /** The stale machine that still reports the pointer the catalog superseded. */
-const STALE = "cs_stale";
+const STALE = "sn_stale";
 
 async function report(
   sessionId: string,

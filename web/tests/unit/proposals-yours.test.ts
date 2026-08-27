@@ -36,8 +36,8 @@ beforeAll(async () => {
   await seedUser(db, "u_bo", "Bo", "bo@example.com");
   await seatUser(db, wsId, "u_ana", "reviewer");
   await seatUser(db, wsId, "u_bo", "member");
-  await seedSession(db, "dk_ana", wsId, "u_ana"); // Bearer plaintext = "dk_ana"
-  await seedSession(db, "dk_bo", wsId, "u_bo");
+  await seedSession(db, "sn_ana", wsId, "u_ana"); // Bearer plaintext = "sn_ana"
+  await seedSession(db, "sn_bo", wsId, "u_bo");
 
   await seedBundle(db, wsId, "s_p", "planner");
   // ONE open proposal, authored by Ana.
@@ -68,11 +68,11 @@ async function proposalsFor(cred: string): Promise<{ yours: boolean; proposer: s
 
 describe("proposals index: server-computed `yours` (user-id equality, never the display)", () => {
   it("is true for the author's own device and false for another member's", async () => {
-    const forAuthor = await proposalsFor("dk_ana");
+    const forAuthor = await proposalsFor("sn_ana");
     expect(forAuthor).toHaveLength(1);
     expect(forAuthor[0]?.yours).toBe(true);
 
-    const forOther = await proposalsFor("dk_bo");
+    const forOther = await proposalsFor("sn_bo");
     expect(forOther).toHaveLength(1);
     expect(forOther[0]?.yours).toBe(false);
     // Same proposal, same display for both readers — only `yours` differs.
