@@ -1051,6 +1051,58 @@ fn a_locked_install_books_its_delivery_so_the_fleet_and_the_offline_surfaces_kee
 }
 
 #[test]
+fn a_scope_holding_the_locked_revision_resolves_from_its_record_when_the_lane_goes_quiet() {
+    // The locked revision is FETCHED every run, because routing is live state the workspace
+    // re-decides — but a run that cannot have it must not become a REFUSAL for a machine that
+    // already holds exactly what the lock names. The record is the offline answer: `--frozen`
+    // still succeeds, nothing is disclosed as swapped, and the entry stands where it stood.
+    let rig = Rig::new("lock-mcp-offline");
+    rig.seed_session();
+    let (old, new) = (rev("a"), rev("b"));
+    let proj = locked_mcp_project("lock-mcp-offline-proj", &old);
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let served = FakeDirectory::new(Vec::new(), Vec::new())
+        .with_server(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v2",
+            &new,
+        ))
+        .with_revision(catalog_server_at(
+            "s_linear",
+            "linear",
+            "https://mcp.example/v1",
+            &old,
+        ));
+    let ctx = rig.ctx_at(Some(&proj.0));
+    install(&ctx, &plane, &served, ops::LockMode::Install).unwrap();
+    assert_eq!(recorded(&rig, &proj.0, "s_linear").revision_id, old);
+
+    // The by-revision lane goes quiet — a revision retired, or a workspace this run cannot ask.
+    let quiet = served.clone().serving_no_revisions();
+    for mode in [ops::LockMode::Frozen, ops::LockMode::Install] {
+        let out = install(&ctx, &plane, &quiet, mode)
+            .unwrap_or_else(|e| panic!("{mode:?} refused a machine that holds it: {}", e.detail()));
+        assert!(
+            !out.disclosures
+                .iter()
+                .any(|m| m.code.as_deref() == Some("MCP_FILLED")),
+            "{mode:?} swapped a revision this checkout already holds: {:?}",
+            out.disclosures
+        );
+        assert!(out.warnings.is_empty(), "{mode:?}: {:?}", out.warnings);
+        let record = recorded(&rig, &proj.0, "s_linear");
+        assert_eq!(record.revision_id, old);
+        assert_eq!(
+            record.document["remotes"][0]["url"], "https://mcp.example/v1",
+            "the record still answers for the entry: {record:?}"
+        );
+        assert!(lock_text(&proj.0).contains(&old), "the lock never moved");
+    }
+}
+
+#[test]
 fn a_locked_install_that_reaches_no_agent_says_so_instead_of_reading_installed() {
     // The lock decides WHICH document; `dest` decides WHERE it goes. A dest naming no MCP config
     // file places nothing, and the row must say that on the honored path exactly as it does on

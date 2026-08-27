@@ -317,10 +317,23 @@ yours or the workspace's — so turning the gateway on never breaks a server tha
 working. The moment one stands, the next update reroutes; disconnect it and the next update routes
 direct again.
 
-Required is the one setting that refuses rather than falls back: a machine that cannot use the
-gateway — a `topos` too old to place gateway entries, or an install running none — receives no
-entry for that server at all. Direct and the workspace switch are enforced by the gateway itself:
-a server routed direct is refused there even if something still dials the old address.
+Required is the one setting that refuses rather than falls back: where there is no gateway to
+route through — an install running none — a machine places no entry for that server at all, and
+one it had is removed on the next update. The catalog SAYS so rather than going quiet, so `topos`
+can tell "your workspace has withdrawn this from you" from "I could not reach the server", and a
+machine that already had a direct entry does not get to keep it. Direct and the workspace switch
+are enforced by the gateway itself: a server routed direct is refused there even if something
+still dials the old address.
+
+The route is decided the same way however a server reaches a machine: your own machine's update,
+a project's `topos.toml` entry, a channel a project follows, or a `topos.lock` install of an
+older revision. All four carry the road your workspace and you chose, so a server set Required is
+required everywhere, and a project checkout is never quietly handed the direct address.
+
+**A machine token routes too.** A CI runner holds a workspace credential rather than a person's,
+so it has no member toggle of its own and rides the WORKSPACE sign-in — never a member's. Where
+one stands, the runner calls the server through the gateway with no vendor secret anywhere in the
+build.
 
 ## Checking that a server actually works
 

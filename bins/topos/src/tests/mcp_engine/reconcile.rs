@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use topos_types::requests::{WireChannelEntry, WireChannelSkill};
+use topos_types::requests::{WireChannelEntry, WireChannelSkill, WireMcpIndexEntry};
 use topos_types::results::TargetOutcome;
 
 use crate::config_custody::ScopeEntries;
@@ -1532,6 +1532,387 @@ fn a_delivered_gateway_server_is_placed_as_this_binarys_own_relay() {
     assert!(
         row.harnesses.iter().all(|h| h.state.wrote()),
         "a fresh placement everywhere the row reaches: {row:?}"
+    );
+}
+
+// =================================================================================================
+// The same flip at PROJECT scope. A project `[mcp]` row and a `topos.lock` read the workspace
+// CATALOG and the by-revision lane — not the delivery feed — so the routing the workspace decided
+// reaches a checkout through those, and every fixture below serves them apart.
+// =================================================================================================
+
+/// A checkout that picks the three agents whose project surfaces are hermetic, holding `body` as
+/// its `topos.toml`. `.git` makes it a checkout; the pick is its own, because a project never
+/// reads the machine's.
+fn gateway_checkout(rig: &Rig, tag: &str, body: &str) -> Scratch {
+    let proj = Scratch::new(tag);
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    rig.project_pick(&proj.0, &["claude-code", "codex", "opencode"]);
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), body).unwrap();
+    proj
+}
+
+/// The project manifest a one-row `[mcp]` checkout carries, resolved against the workspace line.
+fn project_mcp_manifest() -> String {
+    format!("workspace = \"{HOST}/{WS_NAME}\"\n\n[mcp]\nlinear = \"latest\"\n")
+}
+
+/// Every PROJECT config surface the pick above writes, as text: Claude Code's slot in its own
+/// machine file (keyed by this checkout's path — nothing is written in the repository), and the
+/// two files that live in the checkout. Absent files read `""`, so an assertion about what a
+/// surface holds fails on the surface and not on the read.
+fn project_surfaces(rig: &Rig, proj: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = vec![(
+        "~/.claude.json".to_owned(),
+        claude_project_servers(&rig.home.0, proj),
+    )];
+    for rel in [".codex/config.toml", ".opencode/opencode.json"] {
+        out.push((
+            rel.to_owned(),
+            std::fs::read_to_string(proj.join(rel)).unwrap_or_default(),
+        ));
+    }
+    out
+}
+
+/// The relay entry every gateway placement is, asserted surface by surface: this binary's own
+/// path, the `relay` verb, the workspace's address in the open — and NO credential in any
+/// rendered byte, which is the whole reason the shape exists.
+fn assert_relayed(surfaces: &[(String, String)], url: &str) {
+    let this_binary = std::env::current_exe().expect("this test binary has a path");
+    let this_binary = this_binary.to_str().expect("a UTF-8 path");
+    for (name, text) in surfaces {
+        assert!(text.contains(url), "{name} names the address: {text}");
+        assert!(
+            text.contains("relay") && text.contains(this_binary),
+            "{name} runs this binary's relay: {text}"
+        );
+        assert!(
+            !text.contains("cred-1"),
+            "{name} carries no session credential: {text}"
+        );
+    }
+}
+
+/// **THE WHOLE FLIP AT PROJECT SCOPE.** The machine-scope proof above cannot answer for a
+/// checkout: a project row resolves through the workspace CATALOG rather than the delivery feed,
+/// and writes different files through a different store. A catalog document carrying the gateway
+/// claim must land in every one of the checkout's surfaces as this binary relaying the
+/// workspace's address, with the credential in none of them.
+#[test]
+fn a_project_rows_gateway_server_is_placed_as_this_binarys_own_relay() {
+    let rig = Rig::new("gateway-project");
+    rig.seed_session();
+    let proj = gateway_checkout(&rig, "gateway-project-co", &project_mcp_manifest());
+    let s = served(&gateway_server_json("https://gw.example/sn_1/srv_linear"));
+    let plane = FakePlane::new();
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &s)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
+    rig.write_global("schema = 1\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.warnings);
+
+    assert_relayed(
+        &project_surfaces(&rig, &proj.0),
+        "https://gw.example/sn_1/srv_linear",
+    );
+    // The PROJECT's own store recorded the document exactly as it arrived — no credential rode
+    // in with it, and the record is what every later converge here reads.
+    let layout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).expect("a project store");
+    let record = server_record(&rig.fs, &layout, "s_linear").expect("the record");
+    let stored = serde_json::to_string(&record.document).unwrap();
+    assert!(
+        stored.contains("sh.topos/gateway") && !stored.contains("cred-1"),
+        "{stored}"
+    );
+}
+
+/// **THE FAKES ARE ALLOWED TO DISAGREE, and the project row follows the CATALOG.** Every earlier
+/// fixture seeded one document into both lanes, which is exactly why a delivery feed and a
+/// catalog that route a server differently looked like no difference at all. Here they diverge —
+/// the catalog reaches the server through the workspace, the feed still names the vendor — and
+/// the checkout must take the lane it actually reads.
+#[test]
+fn a_project_row_follows_the_catalogs_routing_and_not_the_delivery_feeds() {
+    let rig = Rig::new("gateway-lanes");
+    rig.seed_session();
+    let proj = gateway_checkout(&rig, "gateway-lanes-co", &project_mcp_manifest());
+    let routed = served(&gateway_server_json("https://gw.example/sn_1/srv_linear"));
+    let direct = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    // The feed's answer for the SAME server, routed the other way — what the delivery lane served
+    // before the web side applied routing to the catalog too.
+    plane.serves_servers(vec![delivered_mcp("s_linear", "linear", &direct)]);
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &routed)]);
+    rig.write_global("schema = 1\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.warnings);
+
+    let surfaces = project_surfaces(&rig, &proj.0);
+    assert_relayed(&surfaces, "https://gw.example/sn_1/srv_linear");
+    for (name, text) in &surfaces {
+        assert!(
+            !text.contains("https://mcp.example/linear"),
+            "{name} took the feed's document instead of the catalog's: {text}"
+        );
+    }
+}
+
+/// **A LOCKED ROW PICKS UP A ROUTE CHANGE WITHOUT THE REVISION MOVING.** `topos.lock` pins WHAT
+/// the server is; HOW this machine reaches it is live state the workspace re-decides and re-states
+/// on every read of that revision. A decision that short-circuited on the recorded revision id
+/// would freeze the route a checkout first received — the revision never moves, so nothing would
+/// ever re-ask, and a locked project would keep a stale direct entry forever.
+#[test]
+fn a_locked_row_takes_the_workspaces_new_route_though_its_revision_never_moved() {
+    let rig = Rig::new("gateway-locked");
+    rig.seed_session();
+    let proj = gateway_checkout(&rig, "gateway-locked-co", &project_mcp_manifest());
+    let locked = format!("mcpr_{}", "a".repeat(32));
+    std::fs::write(
+        proj.0.join(crate::manifest::lock::LOCK_FILE),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[mcp.linear]\nrevision = \"{locked}\"\n"
+        ),
+    )
+    .unwrap();
+    rig.write_global("schema = 1\n");
+    // The catalog has moved on; the lock names an older revision the workspace still serves by id.
+    let current = served_at("https://mcp.example/v2");
+    let at_lock = |document: String| ServedServer {
+        revision_id: locked.clone(),
+        document,
+    };
+    let workspace = |served: &ServedServer| FakeDirectory {
+        servers: vec![mcp_catalog_entry("s_linear", "linear", &current)],
+        revisions: vec![mcp_catalog_entry("s_linear", "linear", served)],
+        ..FakeDirectory::default()
+    };
+    let plane = FakePlane::new();
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // Reached DIRECTLY at first: the locked revision's document names the vendor's own address.
+    let dir = workspace(&at_lock(server_json("https://mcp.example/v1")));
+    sweep(&ctx, &plane, &dir);
+    for (name, text) in project_surfaces(&rig, &proj.0) {
+        assert!(
+            text.contains("https://mcp.example/v1"),
+            "{name}: {text} — {:?}",
+            std::fs::read_to_string(proj.0.join(crate::manifest::lock::LOCK_FILE)),
+        );
+    }
+
+    // The workspace now reaches it for the agent. SAME revision, a document that says so.
+    let dir = workspace(&at_lock(gateway_server_json(
+        "https://gw.example/sn_1/srv_linear",
+    )));
+    sweep(&ctx, &plane, &dir);
+    // …and asking again cost ONE request. The row is decided twice a sweep (the counting pass,
+    // then the real one), so the run has to share the lane's answer or re-asking would double
+    // every locked project's traffic.
+    assert_eq!(dir.revision_calls(), 1, "one by-revision read per sweep");
+    let surfaces = project_surfaces(&rig, &proj.0);
+    assert_relayed(&surfaces, "https://gw.example/sn_1/srv_linear");
+    for (name, text) in &surfaces {
+        assert!(
+            !text.contains("https://mcp.example/v1"),
+            "{name} still dials the vendor: {text}"
+        );
+    }
+    // …and the lock did not move: the route changed, the revision did not.
+    let layout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).expect("a project store");
+    let record = server_record(&rig.fs, &layout, "s_linear").expect("the record");
+    assert_eq!(record.revision_id, locked);
+    let lock_text = std::fs::read_to_string(proj.0.join(crate::manifest::lock::LOCK_FILE)).unwrap();
+    assert!(
+        lock_text.contains(&locked) && !lock_text.contains(&current.revision_id),
+        "{lock_text}"
+    );
+}
+
+/// The withhold line's text, by its code. The SCOPE LABEL inside it is the checkout's own pretty
+/// path — what every scope-labelled line in this sweep carries, because several checkouts can be
+/// open at once — so the assertions pin the whole sentence around it rather than the label the
+/// fixture's temp dir happens to produce.
+fn withheld_text(out: &ops::PullOutcome) -> String {
+    out.warnings
+        .iter()
+        .find(|m| m.code.as_deref() == Some("MCP_WITHHELD"))
+        .unwrap_or_else(|| panic!("a withhold line: {:?}", out.warnings))
+        .text
+        .clone()
+}
+
+/// **THE BYPASS THIS INCREMENT EXISTS TO CLOSE.** A machine that already converged a DIRECT entry
+/// keeps it forever if a withhold reads as a miss — and the machines that already hold one are
+/// exactly the population an owner is trying to reach when they mandate the gateway. So the
+/// withheld row must take the entry away: start from a placed direct entry, withhold, and every
+/// surface loses it.
+#[test]
+fn a_withheld_server_removes_the_entry_a_direct_document_had_already_placed() {
+    let rig = Rig::new("withheld-removes");
+    rig.seed_session();
+    let proj = gateway_checkout(&rig, "withheld-removes-co", &project_mcp_manifest());
+    rig.write_global("schema = 1\n");
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // It stands, reached directly.
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
+    sweep(&ctx, &plane, &dir);
+    for (name, text) in project_surfaces(&rig, &proj.0) {
+        assert!(
+            text.contains("https://mcp.example/linear"),
+            "{name}: {text}"
+        );
+    }
+
+    // The workspace now withholds it — same connection, no document.
+    let dir = FakeDirectory::of_servers(vec![withheld_catalog_entry("s_linear", "linear", &s)]);
+    let out = sweep(&ctx, &plane, &dir);
+    for (name, text) in project_surfaces(&rig, &proj.0) {
+        assert!(
+            !text.contains("https://mcp.example/linear") && !text.contains("linear"),
+            "{name} kept the withheld server: {text}"
+        );
+    }
+    let text = withheld_text(&out);
+    assert!(text.starts_with("\"linear\" ("), "{text}");
+    assert!(
+        text.ends_with(
+            "): eng requires the gateway for this server, which this machine cannot use. Ask a \
+             workspace owner."
+        ),
+        "{text}"
+    );
+}
+
+/// A withheld LOCKED row must not resolve from its RECORD. The record is the offline answer for a
+/// lane that could not speak; a withhold is the lane speaking, and falling back to the stored copy
+/// would keep the entry on precisely the machines that already have one — the same bypass, reached
+/// by the other road.
+#[test]
+fn a_withheld_locked_row_does_not_resolve_from_the_record_it_already_holds() {
+    let rig = Rig::new("withheld-locked");
+    rig.seed_session();
+    let proj = gateway_checkout(&rig, "withheld-locked-co", &project_mcp_manifest());
+    let locked = format!("mcpr_{}", "a".repeat(32));
+    std::fs::write(
+        proj.0.join(crate::manifest::lock::LOCK_FILE),
+        format!(
+            "schema = 1\nworkspace = \"{HOST}/{WS_NAME}\"\n\n[mcp.linear]\nrevision = \"{locked}\"\n"
+        ),
+    )
+    .unwrap();
+    rig.write_global("schema = 1\n");
+    let current = served_at("https://mcp.example/v2");
+    let at_lock = ServedServer {
+        revision_id: locked.clone(),
+        document: server_json("https://mcp.example/v1"),
+    };
+    let plane = FakePlane::new();
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // The locked revision is served with its document: the entry stands and the record holds it.
+    let dir = FakeDirectory {
+        servers: vec![mcp_catalog_entry("s_linear", "linear", &current)],
+        revisions: vec![mcp_catalog_entry("s_linear", "linear", &at_lock)],
+        ..FakeDirectory::default()
+    };
+    sweep(&ctx, &plane, &dir);
+    let layout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).expect("a project store");
+    assert_eq!(
+        server_record(&rig.fs, &layout, "s_linear")
+            .expect("the record")
+            .revision_id,
+        locked
+    );
+
+    // The SAME revision is now withheld. The record still stands at it — and must not answer.
+    let dir = FakeDirectory {
+        servers: vec![mcp_catalog_entry("s_linear", "linear", &current)],
+        revisions: vec![withheld_catalog_entry("s_linear", "linear", &at_lock)],
+        ..FakeDirectory::default()
+    };
+    let out = sweep(&ctx, &plane, &dir);
+    for (name, text) in project_surfaces(&rig, &proj.0) {
+        assert!(
+            !text.contains("https://mcp.example/v1"),
+            "{name} resolved a withheld revision from its record: {text}"
+        );
+    }
+    assert!(
+        withheld_text(&out).contains("requires the gateway for this server"),
+        "{:?}",
+        out.warnings
+    );
+}
+
+/// …and the fault it must NOT be confused with. A catalog that could not be READ says nothing
+/// about what the workspace serves, so the standing entry is HELD exactly as before — the hold is
+/// right for a miss and wrong only for a ruling.
+#[test]
+fn a_catalog_that_could_not_be_read_still_holds_the_entry_it_placed() {
+    let rig = Rig::new("withheld-vs-fault");
+    rig.seed_session();
+    let proj = gateway_checkout(&rig, "withheld-vs-fault-co", &project_mcp_manifest());
+    rig.write_global("schema = 1\n");
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep(&ctx, &plane, &dir);
+
+    *dir.unavailable.lock().unwrap() = true;
+    sweep(&ctx, &plane, &dir);
+    for (name, text) in project_surfaces(&rig, &proj.0) {
+        assert!(
+            text.contains("https://mcp.example/linear"),
+            "{name} dropped an entry over a fetch that merely failed: {text}"
+        );
+    }
+}
+
+/// **A BLANK REASON IS NOT A RULING, AND THAT DIRECTION IS DELIBERATE.** A withhold REMOVES
+/// entries, so reading a present-but-empty string as one would let an emitter that blanked the
+/// field by accident — an ORM writing an empty string where it meant null, across every row —
+/// strip every MCP entry on every machine that asked. Leaving one server's entry standing is the
+/// cheaper mistake, so a blank falls through to the ordinary document read.
+#[test]
+fn a_blank_withhold_reason_is_not_a_ruling_and_takes_no_entry_away() {
+    let rig = Rig::new("withheld-blank");
+    rig.seed_session();
+    let proj = gateway_checkout(&rig, "withheld-blank-co", &project_mcp_manifest());
+    rig.write_global("schema = 1\n");
+    let s = served_at("https://mcp.example/linear");
+    let plane = FakePlane::new();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let dir = FakeDirectory::of_servers(vec![mcp_catalog_entry("s_linear", "linear", &s)]);
+    sweep(&ctx, &plane, &dir);
+
+    // A row carrying an EMPTY reason and no document — the accident, not the ruling.
+    let blank = WireMcpIndexEntry {
+        document: None,
+        withheld: Some(String::new()),
+        ..mcp_catalog_entry("s_linear", "linear", &s)
+    };
+    let out = sweep(&ctx, &plane, &FakeDirectory::of_servers(vec![blank]));
+    for (name, text) in project_surfaces(&rig, &proj.0) {
+        assert!(
+            text.contains("https://mcp.example/linear"),
+            "{name} stripped an entry over a blank reason: {text}"
+        );
+    }
+    // …and it is not narrated as a withhold, because it was not one.
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|m| m.code.as_deref() == Some("MCP_WITHHELD")),
+        "{:?}",
+        out.warnings
     );
 }
 

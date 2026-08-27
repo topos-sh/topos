@@ -51,7 +51,7 @@ function upstreamOf(handle: Sse2024Handle): UpstreamSession {
   return { version: "2024-11-05", mcpSessionId: null, initialized: true, sse2024: handle, credentialId: null };
 }
 
-function session(mcpSessionId: string, toposSessionId = "sess1", serverId = "srv1"): ClientSession {
+function session(mcpSessionId: string, toposSessionId = "sn_laptop", serverId = "srv1"): ClientSession {
   return {
     mcpSessionId,
     toposSessionId,
@@ -63,7 +63,7 @@ function session(mcpSessionId: string, toposSessionId = "sess1", serverId = "srv
   };
 }
 
-function channel(token: string, toposSessionId = "sess1", serverId = "srv1"): LegacySseChannel {
+function channel(token: string, toposSessionId = "sn_laptop", serverId = "srv1"): LegacySseChannel {
   return {
     token,
     toposSessionId,
@@ -92,19 +92,19 @@ afterEach(() => resetEngineMemoryForTests());
 describe("evicting a client session past the cap", () => {
   it("releases the conversation it was the last reference to, aborting its pump", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putClientSession(session("mcp-1"), 0);
 
     fillPastTheCap(1, 0);
 
     expect(memory.clientSession("mcp-1", 0)).toBeNull();
-    expect(memory.upstream("sess1", "srv1", 0)).toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", 0)).toBeNull();
     expect(handle.abort.signal.aborted).toBe(true);
   });
 
   it("keeps a conversation another client session of the same pair is still using", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putClientSession(session("mcp-1"), 0);
     // A second session of the SAME machine against the same server — a client that re-initialized
     // without a DELETE, which is the ordinary way two of these exist at once.
@@ -114,20 +114,20 @@ describe("evicting a client session past the cap", () => {
 
     expect(memory.clientSession("mcp-1", 1)).toBeNull(); // The oldest still fell out...
     expect(memory.clientSession("mcp-2", 1)).not.toBeNull();
-    expect(memory.upstream("sess1", "srv1", 1)).not.toBeNull(); // ...but it took nothing with it.
+    expect(memory.upstream("sn_laptop", "srv1", 1)).not.toBeNull(); // ...but it took nothing with it.
     expect(handle.abort.signal.aborted).toBe(false);
   });
 
   it("keeps a conversation an open 2024-11-05 channel is still using", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putClientSession(session("mcp-1"), 0);
     memory.putLegacyChannel(channel("tok-1"));
 
     fillPastTheCap(1, 0);
 
     expect(memory.clientSession("mcp-1", 0)).toBeNull();
-    expect(memory.upstream("sess1", "srv1", 0)).not.toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", 0)).not.toBeNull();
     expect(handle.abort.signal.aborted).toBe(false);
   });
 
@@ -146,33 +146,33 @@ describe("evicting a client session past the cap", () => {
 describe("the idle TTL", () => {
   it("sweeps an idle conversation on the next insert, aborting its pump", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
 
     // Nothing touches it for the whole window; the next establishment is what notices.
     memory.setUpstream("sess2", "srv1", upstreamOf(pump()), TTL);
 
-    expect(memory.upstream("sess1", "srv1", TTL)).toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", TTL)).toBeNull();
     expect(handle.abort.signal.aborted).toBe(true);
     expect(memory.upstream("sess2", "srv1", TTL)).not.toBeNull();
   });
 
   it("leaves a recently used conversation alone", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
 
     memory.setUpstream("sess2", "srv1", upstreamOf(pump()), TTL - 1);
 
-    expect(memory.upstream("sess1", "srv1", TTL - 1)).not.toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", TTL - 1)).not.toBeNull();
     expect(handle.abort.signal.aborted).toBe(false);
   });
 
   it("restamps a conversation on every access, so use keeps it resident indefinitely", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
 
     // A call every seven hours, for a week: never idle for a whole window, never swept.
     for (let at = TTL - 3_600_000; at < TTL * 21; at += TTL - 3_600_000) {
-      expect(memory.upstream("sess1", "srv1", at)).not.toBeNull();
+      expect(memory.upstream("sn_laptop", "srv1", at)).not.toBeNull();
       memory.setUpstream("sess2", "srv1", upstreamOf(pump()), at); // Something else inserts, sweeping.
     }
     expect(handle.abort.signal.aborted).toBe(false);
@@ -180,37 +180,37 @@ describe("the idle TTL", () => {
 
   it("counts a touch on the client session as a touch on the conversation it speaks for", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putClientSession(session("mcp-1"), 0);
 
     // The client is busy on its session without reaching upstream — a notification, a local ping.
     memory.clientSession("mcp-1", TTL - 1);
     memory.setUpstream("sess2", "srv1", upstreamOf(pump()), TTL + 1);
 
-    expect(memory.upstream("sess1", "srv1", TTL + 1)).not.toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", TTL + 1)).not.toBeNull();
     expect(handle.abort.signal.aborted).toBe(false);
   });
 
   it("counts a touch on an open 2024-11-05 channel the same way", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putLegacyChannel(channel("tok-1"));
 
     memory.legacyChannel("tok-1", TTL - 1);
     memory.setUpstream("sess2", "srv1", upstreamOf(pump()), TTL + 1);
 
-    expect(memory.upstream("sess1", "srv1", TTL + 1)).not.toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", TTL + 1)).not.toBeNull();
   });
 
   it("sweeps an idle client session through the reference-counted teardown", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putClientSession(session("mcp-1"), 0);
 
     memory.putClientSession(session("mcp-2", "other-sess"), TTL);
 
     expect(memory.clientSession("mcp-1", TTL)).toBeNull();
-    expect(memory.upstream("sess1", "srv1", TTL)).toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", TTL)).toBeNull();
     expect(handle.abort.signal.aborted).toBe(true);
   });
 
@@ -226,13 +226,13 @@ describe("the idle TTL", () => {
 
 describe("the reference rule", () => {
   it("answers a DELETE that was the last reference with a release", () => {
-    memory.setUpstream("sess1", "srv1", upstreamOf(pump()), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(pump()), 0);
     memory.putClientSession(session("mcp-1"), 0);
     expect(memory.dropClientSession("mcp-1")).toBe(true);
   });
 
   it("refuses to release while a sibling session, a channel, or a listen stream stands", () => {
-    memory.setUpstream("sess1", "srv1", upstreamOf(pump()), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(pump()), 0);
 
     memory.putClientSession(session("mcp-1"), 0);
     memory.putClientSession(session("mcp-2"), 0);
@@ -243,7 +243,7 @@ describe("the reference rule", () => {
     memory.dropLegacyChannel("tok-1");
 
     memory.putClientSession(session("mcp-3"), 0);
-    const removeListen = memory.addListen("sess1", "srv1", { tools: true, send: () => {} });
+    const removeListen = memory.addListen("sn_laptop", "srv1", { tools: true, send: () => {} });
     expect(memory.dropClientSession("mcp-3")).toBe(false);
     removeListen();
 
@@ -253,7 +253,7 @@ describe("the reference rule", () => {
 
   it("releases the conversation when the last 2024-11-05 channel closes", () => {
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putLegacyChannel(channel("tok-1"));
     memory.putLegacyChannel(channel("tok-2"));
 
@@ -261,7 +261,7 @@ describe("the reference rule", () => {
     expect(handle.abort.signal.aborted).toBe(false); // tok-2 is still on this conversation.
 
     memory.dropLegacyChannel("tok-2");
-    expect(memory.upstream("sess1", "srv1", 0)).toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", 0)).toBeNull();
     expect(handle.abort.signal.aborted).toBe(true);
   });
 
@@ -269,13 +269,13 @@ describe("the reference rule", () => {
     // A changed credential or a dead upstream session makes the conversation useless to every
     // client that shares it — `dropUpstream` is never reference-counted.
     const handle = pump();
-    memory.setUpstream("sess1", "srv1", upstreamOf(handle), 0);
+    memory.setUpstream("sn_laptop", "srv1", upstreamOf(handle), 0);
     memory.putClientSession(session("mcp-1"), 0);
     memory.putLegacyChannel(channel("tok-1"));
 
-    memory.dropUpstream("sess1", "srv1");
+    memory.dropUpstream("sn_laptop", "srv1");
 
-    expect(memory.upstream("sess1", "srv1", 0)).toBeNull();
+    expect(memory.upstream("sn_laptop", "srv1", 0)).toBeNull();
     expect(handle.abort.signal.aborted).toBe(true);
   });
 });

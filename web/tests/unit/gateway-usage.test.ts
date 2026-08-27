@@ -55,8 +55,12 @@ const SERVER = "mcps_usage";
 const QUIET_SERVER = "mcps_quiet";
 const BUNDLE_NAME = "deepwiki";
 
-const LAPTOP = "cs_laptop";
-const RUNNER = "cs_runner";
+const CI_SERVER = "mcps_ci";
+/** The service session a machine token's run appears as — an `ss_` id, never a person's. */
+const CI_RUN = "ss_ci_runner";
+
+const LAPTOP = "sn_laptop";
+const RUNNER = "sn_runner";
 
 const member = () => asMember(ws, MEMBER.id, "member", MEMBER.name);
 
@@ -93,7 +97,8 @@ async function connect(bundleId: string, bundleName: string, serverId: string): 
 async function call(
   serverId: string,
   sessionId: string,
-  userId: string,
+  /** NULL is a machine token's call — the ledger records the run, and there is no person. */
+  userId: string | null,
   toolName: string | null,
   outcome: string,
   minutesAgo: number,
@@ -132,6 +137,20 @@ beforeAll(async () => {
   await connect("b_deepwiki", BUNDLE_NAME, SERVER);
   await seedServer(QUIET_SERVER, "com.example/quiet");
   await connect("b_quiet", "quiet-server", QUIET_SERVER);
+  await seedServer(CI_SERVER, "com.example/ci");
+  await connect("b_ci", "ci-server", CI_SERVER);
+  // A workspace machine token and one run of it — the caller that is NOT a person. Its calls
+  // carry a service session id where a person's carry a cli_session id, and no user at all.
+  await db.q(
+    `INSERT INTO web.machine_token (id, workspace_id, name, token_sha256)
+     VALUES ('mt_ci', $1, 'ci', sha256(convert_to('tpt-ci', 'UTF8')))`,
+    [ws],
+  );
+  await db.q(
+    `INSERT INTO web.service_session (id, token_id, workspace_id, display_name)
+     VALUES ($1, 'mt_ci', $2, 'ci runner')`,
+    [CI_RUN, ws],
+  );
   session = { user: MEMBER };
 }, 60000);
 
@@ -206,15 +225,15 @@ describe("aggregating the ledger per session", () => {
   });
 
   it("orders the failure kinds by how many, so the biggest problem reads first", async () => {
-    await seedSession(db, "cs_flaky", ws, MEMBER.id, "active", "flaky box");
+    await seedSession(db, "sn_flaky", ws, MEMBER.id, "active", "flaky box");
     for (let i = 0; i < 3; i += 1) {
-      await call(SERVER, "cs_flaky", MEMBER.id, "search", "upstream_error", 40 + i);
+      await call(SERVER, "sn_flaky", MEMBER.id, "search", "upstream_error", 40 + i);
     }
-    await call(SERVER, "cs_flaky", MEMBER.id, "create_issue", "denied_tool", 39);
-    await call(SERVER, "cs_flaky", MEMBER.id, null, "unauthorized", 38);
+    await call(SERVER, "sn_flaky", MEMBER.id, "create_issue", "denied_tool", 39);
+    await call(SERVER, "sn_flaky", MEMBER.id, null, "unauthorized", 38);
 
     const page = await (await dal()).mcpUsageSessions(member(), SERVER);
-    const flaky = page.sessions.find((row) => row.sessionId === "cs_flaky");
+    const flaky = page.sessions.find((row) => row.sessionId === "sn_flaky");
     expect(flaky?.failed).toBe(5);
     // Biggest first; the two ones tie and break by name, so the row never reorders itself.
     expect(flaky?.failures).toEqual([
@@ -225,7 +244,7 @@ describe("aggregating the ledger per session", () => {
   });
 
   it("stands in for a gone account and a removed machine rather than dropping the row", async () => {
-    await call(SERVER, "cs_ghost", "u_ghost", "search", "unauthorized", 1);
+    await call(SERVER, "sn_ghost", "u_ghost", "search", "unauthorized", 1);
     const page = await (await dal()).mcpUsageSessions(member(), SERVER);
     expect(page.sessions[0]).toMatchObject({
       person: "former member",
@@ -247,13 +266,59 @@ describe("aggregating the ledger per session", () => {
   });
 
   it("sees nothing of another workspace's calls against the same server", async () => {
-    await call(SERVER, "cs_elsewhere", MEMBER.id, "search", "ok", 1);
+    await call(SERVER, "sn_elsewhere", MEMBER.id, "search", "ok", 1);
     await db.q(
       `UPDATE gateway.usage_event SET workspace_id = 'ws_elsewhere' WHERE session_id = $1`,
-      ["cs_elsewhere"],
+      ["sn_elsewhere"],
     );
     const page = await (await dal()).mcpUsageSessions(member(), SERVER);
-    expect(page.sessions.map((row) => row.sessionId)).not.toContain("cs_elsewhere");
+    expect(page.sessions.map((row) => row.sessionId)).not.toContain("sn_elsewhere");
+  });
+});
+
+/**
+ * A CALL NO PERSON MADE. The gateway serves a second kind of caller — a workspace machine token
+ * (CI), which resolves to no user at all — so its rows carry `user_id IS NULL` and a session id
+ * that names a `web.service_session` rather than a `web.cli_session`.
+ *
+ * Three things in the read hang on that null, and each is silent when it breaks: the person
+ * column would name a phantom "former member", the machine column would read "a removed machine"
+ * for a runner that is right there, and the failure breakdown — joined per (session, person) —
+ * would come back EMPTY, because `NULL = NULL` is not true.
+ */
+describe("a machine token's calls, which have no person behind them", () => {
+  it("names the caller for what it is, resolves the run's own machine, and keeps the failures", async () => {
+    await call(CI_SERVER, CI_RUN, null, "search", "ok", 9);
+    await call(CI_SERVER, CI_RUN, null, "search", "upstream_error", 8);
+    await call(CI_SERVER, CI_RUN, null, "create_issue", "denied_tool", 7);
+
+    const page = await (await dal()).mcpUsageSessions(member(), CI_SERVER);
+    expect(page.total).toBe(1);
+    const [run] = page.sessions;
+    expect(run).toMatchObject({
+      sessionId: CI_RUN,
+      // Not "former member": nobody is missing, and no person was ever involved.
+      person: "a machine token",
+      // The label the run reported, read off web.service_session — not "a removed machine".
+      machine: "ci runner",
+      calls: 3,
+      ok: 1,
+      failed: 2,
+      tools: ["create_issue", "search"],
+    });
+    // The subtle one: the per-failure join matches a null user only under IS NOT DISTINCT FROM.
+    // Plain equality drops every one of these rows and the cell reads "2 failed" with no why.
+    expect(run?.failures).toEqual([
+      { kind: "denied_tool", count: 1 },
+      { kind: "upstream_error", count: 1 },
+    ]);
+  });
+
+  it("does not blend into a person's row on the same server", async () => {
+    await call(CI_SERVER, LAPTOP, MEMBER.id, "search", "ok", 3);
+    const page = await (await dal()).mcpUsageSessions(member(), CI_SERVER);
+    expect(page.total).toBe(2);
+    expect(page.sessions.map((row) => row.person)).toEqual(["Mo Member", "a machine token"]);
   });
 });
 
@@ -267,7 +332,7 @@ describe("the server page's Usage pages", () => {
     await seedServer(PAGED_SERVER, "com.example/linear");
     await connect("b_linear", PAGED_BUNDLE, PAGED_SERVER);
     for (let i = 0; i < MACHINES; i += 1) {
-      const id = `cs_fleet_${String(i).padStart(2, "0")}`;
+      const id = `sn_fleet_${String(i).padStart(2, "0")}`;
       await seedSession(db, id, ws, MEMBER.id, "active", `fleet ${i}`);
       // Machine 0 called most recently, machine 25 longest ago — so the oldest is the page-2 row.
       await call(PAGED_SERVER, id, MEMBER.id, "search", "ok", i + 1);
@@ -342,7 +407,7 @@ async function renderPanel(usage: unknown, search = ""): Promise<string> {
 
 function usageRow(overrides: Record<string, unknown>) {
   return {
-    sessionId: "cs_laptop",
+    sessionId: "sn_laptop",
     person: "Mo Member",
     machine: "Mo's laptop",
     calls: 5,
@@ -362,14 +427,14 @@ function usageRow(overrides: Record<string, unknown>) {
 describe("what the Usage table renders", () => {
   it("says how many sessions there are in total, and where in them the reader stands", async () => {
     const html = await renderPanel({
-      sessions: [usageRow({}), usageRow({ sessionId: "cs_runner", machine: "release runner" })],
+      sessions: [usageRow({}), usageRow({ sessionId: "sn_runner", machine: "release runner" })],
       page: 2,
       pageCount: 4,
       total: 84,
     });
     expect(html).toContain("84 sessions, newest activity first — page 2 of 4.");
     // Two rows for two sessions, whatever the call count on them.
-    expect(html.match(/data-testid="mcp-usage-cs_/g)).toHaveLength(2);
+    expect(html.match(/data-testid="mcp-usage-sn_/g)).toHaveLength(2);
     // The cell names the kinds: "3 failed" alone is a number nobody can act on.
     expect(html).toContain("3 ok · 2 failed (2 no sign-in, 1 server error)");
     expect(html).toContain("create_issue, search");
@@ -433,7 +498,7 @@ describe("what the Usage table renders", () => {
       pageCount: 1,
       total: 1,
     });
-    const row = html.slice(html.indexOf('data-testid="mcp-usage-cs_laptop"'));
+    const row = html.slice(html.indexOf('data-testid="mcp-usage-sn_laptop"'));
     const cells = row.slice(0, row.indexOf("</tr>"));
     // One dash in the whole row: the Tools cell. Every other cell carries a real number.
     expect(cells.match(/—/g)).toHaveLength(1);

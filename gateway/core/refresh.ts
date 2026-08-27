@@ -15,7 +15,9 @@ import type { Credential, GatewayContext } from "./ports";
 export interface RefreshScope {
   workspaceId: string;
   serverId: string;
-  userId: string;
+  /** Null where the caller is a machine token — the re-read then finds the workspace credential,
+   *  which is the only one such a caller could have been given in the first place. */
+  userId: string | null;
 }
 
 /** True when the credential carries everything a refresh_token grant needs. */

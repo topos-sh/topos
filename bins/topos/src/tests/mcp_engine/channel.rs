@@ -36,6 +36,7 @@ fn channel_of(skills: Vec<WireSkillIndexEntry>, servers: Vec<WireMcpIndexEntry>)
         skills,
         revisions: servers.clone(),
         servers,
+        ..FakeDirectory::default()
     }
 }
 

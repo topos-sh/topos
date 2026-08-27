@@ -36,8 +36,13 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   timestamps). `install` (and EVERY `--quiet` hook run, either verb spelling) converges to the
   lock: entries pin the fetch — an `[mcp]` entry included, whose locked revision is fetched BY ID
   from the workspace and rendered, so a checkout writes the configuration its lock names rather
-  than today's catalog (a workspace that cannot serve that revision is the degraded path: frozen
-  refuses, a plain install takes the served one and discloses the swap) — a channel takes exactly
+  than today's catalog (the fetch happens on EVERY run, because a lock pins what the server is
+  and never how this machine reaches it — routing is live state the workspace re-states on each
+  read of the revision; a scope whose record already stands at that revision is what answers when
+  the lane cannot, which is the offline path, and a workspace that cannot serve it to a checkout
+  holding neither is the degraded one: frozen
+  refuses, a plain install takes the served one and discloses the swap; a revision the workspace
+  WITHHOLDS is neither — it is a ruling, so it never falls back to the record) — a channel takes exactly
   its locked member list, a row the lock lacks resolves once and its entry is written, an existing
   entry never moves; `--frozen` refuses
   on any gap or failure and writes nothing (the CI mode). A typed `update` re-resolves follow
@@ -310,8 +315,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   outcome and not a property of the machine running the suite.
 - `ops/relay` — the stdio half of a gateway entry: a per-conversation process the AGENT spawns,
   forwarding each JSON-RPC line as one POST to the entry's own URL with the session credential
-  read LIVE from the store (the `sn_…` URL segment names which session; sign-out refuses the next
-  call in plain words, sign-in answers it, no config rewrite either way). Transport only — SSE
+  read LIVE from the store (sign-out refuses the next call in plain words, sign-in answers it, no
+  config rewrite either way). THE ADDRESS'S OWN SEGMENT decides which credential may satisfy it,
+  and the two kinds never cover for each other: `sn_…` is a person's sign-in, satisfied by that
+  stored session alone (a miss is the stale-entry or not-signed-in sentence); `ss_…` is a build
+  machine's service session, satisfied by `TOPOS_TOKEN` alone — read per message like everything
+  else here — and its miss says `TOPOS_TOKEN is not set on this machine.` Crossing them would
+  forward a call as somebody else, and the gateway refuses the crossing on its side too.
+  Transport only — SSE
   replies unwrap as they arrive, a minted `mcp-session-id` is echoed, and the FIRST message
   completes alone (stdin-ordered gate) so a pipelined burst cannot race past the reply that
   establishes the conversation. Errors are id-matched JSON-RPC answers, never exits; stdout is

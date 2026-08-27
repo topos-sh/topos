@@ -56,13 +56,18 @@ export const gatewayObservedTool = gateway.table("observed_tool", {
  * ONE CALL THROUGH THE GATEWAY — person, machine, tool, outcome, when. Never arguments, never
  * results, never a header value: the ledger records that a call happened and how it ended, which
  * is the whole of what the Usage table shows.
+ *
+ * `user_id` is NULL for a call a MACHINE TOKEN made (CI holding the workspace's sign-in): the
+ * session id then names a `web.service_session` rather than a `web.cli_session`, and there is no
+ * person to attribute it to.
  */
 export const gatewayUsageEvent = gateway.table("usage_event", {
   id: bigint("id", { mode: "number" }).primaryKey(),
   workspaceId: text("workspace_id").notNull(),
   serverId: text("server_id").notNull(),
   sessionId: text("session_id").notNull(),
-  userId: text("user_id").notNull(),
+  /** NULL = a machine token's call; set = the person whose session made it. */
+  userId: text("user_id"),
   /** NULL for a non-tool method (initialize, a listing, a notification). */
   toolName: text("tool_name"),
   method: text("method").notNull(),

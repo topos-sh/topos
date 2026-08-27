@@ -18,12 +18,20 @@ import { upgradeRequired } from "./wire.server";
 
 /**
  * The oldest CLI release this server still speaks to. The floor sits at the last release that
- * broke the wire in a way a client CANNOT DEGRADE THROUGH — the login wire going server-first.
- * Later removals that a client rides out on its own do not move it: a lane route has since been
- * deleted whose loss costs an older client one best-effort field and no more. A break with no
- * graceful degradation moves this floor in the same change as the break.
+ * broke the wire in a way a client CANNOT DEGRADE THROUGH. Later removals that a client rides out
+ * on its own do not move it: a lane route has since been deleted whose loss costs an older client
+ * one best-effort field and no more. A break with no graceful degradation moves this floor in the
+ * same change as the break.
+ *
+ * 0.1.45 IS THAT RELEASE — the one whose renderer speaks `topos relay`. Routing used to ask each
+ * caller version whether it could be handed a gateway address, and hand an older machine the
+ * server own address instead. That question is gone: every lane now routes on the workspace
+ * settings alone. So a client that does not understand `_meta["sh.topos/gateway"]` would write the
+ * gateway URL into an agent config bare - no credential, no relay command - and a server that was
+ * working directly would stop working on its next sweep, silently. There is no degrading through
+ * that, so the floor carries it: a machine below 0.1.45 is told to update instead.
  */
-export const MIN_CLI_VERSION = "0.1.42";
+export const MIN_CLI_VERSION = "0.1.45";
 
 /**
  * The first CLI release that identifies itself on the session lane. A client sending no parseable
@@ -106,28 +114,6 @@ export function decideClientFloor(
   const refused =
     clientVersion === null ? below(headerSince, minCli) : below(clientVersion, minCli);
   return { refused, clientVersion };
-}
-
-/**
- * The first release whose renderer understands a gateway-addressed document — it attaches this
- * machine's own session credential to that address. An OLDER client places the same address with
- * NO credential, so its agents would dial the gateway unauthenticated and get nothing.
- *
- * That is why delivery asks this question rather than the floor doing it: turning the gateway on
- * for a deployment must not lock out, or silently break, machines that have not updated yet. They
- * keep receiving the document's OWN address and keep signing in per machine — the behaviour they
- * already had — and the flip reaches them when they update.
- */
-export const GATEWAY_MIN_CLI_VERSION = "0.1.43";
-
-/**
- * Whether THIS caller's renderer can be handed a gateway address. Unidentified clients (no
- * readable product token) answer NO: an address that needs a credential the client may not attach
- * is not something to hand out on a guess.
- */
-export function clientPlacesGatewayEntries(request: Request): boolean {
-  const version = parseClientVersion(request.headers.get("user-agent"));
-  return version !== null && !below(version, GATEWAY_MIN_CLI_VERSION);
 }
 
 /** The 426 to answer a below-floor client, or null to pass. */

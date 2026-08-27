@@ -17,8 +17,18 @@
 //! ever lives in ([`crate::sessions`]). Signing out mid-conversation refuses the next call;
 //! signing back in answers it; nothing is cached to go stale and nothing has to be rewritten in
 //! any config when a session changes. The URL names the session it was rendered for (its `sn_…`
-//! path segment), so a config entry left over from an earlier sign-in is told apart from a
-//! machine that is not signed in at all, and each earns its own plain-words answer.
+//! or `ss_…` path segment), so a config entry left over from an earlier sign-in is told apart
+//! from a machine that is not signed in at all, and each earns its own plain-words answer.
+//!
+//! **THE ADDRESS DECIDES WHOSE CREDENTIAL MAY ANSWER IT** ([`Addressed`]), and the two kinds
+//! never cover for each other. A person's address (`sn_…`) is satisfied by that stored session
+//! and nothing else. A BUILD MACHINE's (`ss_…`) is satisfied by `TOPOS_TOKEN` and nothing else —
+//! CI holds no stored session at all, because the reconcile synthesizes one from that variable in
+//! memory and never writes it. Crossing them would forward a person's call as the machine (or the
+//! reverse): a different identity in the workspace's ledger, reaching the server through a
+//! different sign-in, invisibly. The gateway refuses the crossing too — it matches the address's
+//! segment and rejects a bearer resolving to another caller — so the local refusal is the same
+//! answer, one round trip sooner and in words that name the fix.
 //!
 //! **Errors are answers, not exits.** A request that cannot be forwarded is answered with an
 //! id-matched JSON-RPC error carrying one honest sentence; a notification (no id) has no reply
@@ -54,10 +64,19 @@ fn unreachable_copy(host: &str) -> String {
     format!("topos: can't reach the gateway at {host}.")
 }
 const BROKEN_REPLY: &str = "topos: the gateway's reply broke off before it finished.";
+/// The BUILD MACHINE's own refusal — FINAL copy. A service-session address is satisfied by the
+/// machine credential and nothing else, so "not signed in… run `topos login`" would send a runner
+/// after the wrong fix; the environment variable IS the fix, and the line names it.
+const NO_MACHINE_TOKEN: &str = "topos: TOPOS_TOKEN is not set on this machine.";
 
 /// The JSON-RPC error code every relay-side refusal carries — the server-defined range's first,
 /// the same code the gateway's own refusals use, so an agent branches on one number.
 const RELAY_ERROR_CODE: i64 = -32000;
+
+/// A PERSON's sign-in, as a gateway address spells it.
+const SIGN_IN_SEGMENT: &str = "sn_";
+/// A BUILD MACHINE's service session, as a gateway address spells it.
+const SERVICE_SEGMENT: &str = "ss_";
 
 /// How long a dial may take before the gateway is called unreachable. Response and body carry NO
 /// deadline: a tool call runs as long as the agent is willing to wait, and the agent owns the
@@ -119,8 +138,9 @@ struct Relay {
     url: String,
     /// The address's host, for the unreachable sentence.
     host: String,
-    /// The `sn_…` path segment — which session this entry was rendered for.
-    session_segment: Option<String>,
+    /// WHOSE call this entry makes — and therefore which credential may satisfy it. Read once,
+    /// from the address itself ([`Addressed`]).
+    addressed: Addressed,
     /// The `~/.topos` root the session store resolves under (the app's `resolve_home` answer).
     home: std::path::PathBuf,
     /// The conversation id the gateway minted, if it minted one — echoed on every later request.
@@ -135,6 +155,58 @@ struct Relay {
     /// How many messages are in flight — the exit drains this to zero (or the grace deadline).
     in_flight: Mutex<usize>,
     drained: Condvar,
+}
+
+/// **WHO an address says the call is from** — the one thing that decides which credential may
+/// satisfy it. The gateway makes the same decision on its side: it matches the address's segment
+/// and refuses a bearer resolving to a different caller, so a fallback across the two kinds would
+/// earn a 401 there anyway. Refusing it here costs a round trip less and says why in plain words.
+///
+/// It is an IDENTITY question before it is a transport one: letting a machine token answer a
+/// PERSON's address would forward their agent's call as the machine — attributed to the machine in
+/// the workspace's ledger, and reaching the server through the workspace's sign-in rather than
+/// their own — a switch the person never asked for and cannot see.
+enum Addressed {
+    /// `sn_…` — one PERSON's sign-in, by id. Only that stored session satisfies it.
+    SignIn(String),
+    /// `ss_…` — a build machine's service session. Only `TOPOS_TOKEN` satisfies it, and no store
+    /// ever holds one: the reconcile synthesizes that session in memory and never writes it.
+    Service,
+    /// No session segment at all — an address this build cannot attribute to either, so neither
+    /// credential may answer it.
+    Unattributed,
+}
+
+impl Addressed {
+    /// **Read the caller out of a gateway address, BY POSITION.** The shape is fixed —
+    /// `{base}/{sessionId}/{serverId}` — so the caller is always the second-to-last path
+    /// component, and only that component is classified.
+    ///
+    /// Scanning for the first `sn_`/`ss_`-looking component instead would let the BASE decide: a
+    /// gateway mounted under a path whose own component starts that way turns every person's
+    /// address into a machine's, and the relay then refuses for a missing token or sends a bearer
+    /// the gateway 401s. A component that is neither prefix — and an address with no such slot at
+    /// all — is [`Self::Unattributed`], which refuses rather than guesses: mis-attributing a call
+    /// is worse than not placing one.
+    fn of_url(url: &str) -> Self {
+        // A query or fragment is not path, and neither may be mistaken for the server slot.
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        path.rsplit('/')
+            .nth(1)
+            .and_then(Self::of_segment)
+            .unwrap_or(Self::Unattributed)
+    }
+
+    /// Classify THE caller segment. `None` = neither prefix, so nobody is named.
+    fn of_segment(segment: &str) -> Option<Self> {
+        if segment.starts_with(SIGN_IN_SEGMENT) {
+            Some(Self::SignIn(segment.to_owned()))
+        } else if segment.starts_with(SERVICE_SEGMENT) {
+            Some(Self::Service)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -153,10 +225,7 @@ impl Relay {
             .and_then(|rest| rest.split('/').next())
             .unwrap_or(&url)
             .to_owned();
-        let session_segment = url
-            .split('/')
-            .find(|segment| segment.starts_with("sn_"))
-            .map(ToOwned::to_owned);
+        let addressed = Addressed::of_url(&url);
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .http_status_as_error(false)
@@ -167,7 +236,7 @@ impl Relay {
             agent,
             url,
             host,
-            session_segment,
+            addressed,
             home,
             mcp_session: Mutex::new(None),
             gate: Mutex::new(Gate::Held),
@@ -250,29 +319,46 @@ impl Relay {
         }
     }
 
-    /// **The live credential lookup** — the session whose id the URL names, read from the store
-    /// at every message so sign-in state is always current.
+    /// **The live credential lookup** — read at every message, so sign-in state is always current.
+    ///
+    /// THE ADDRESS DECIDES WHICH SOURCE MAY ANSWER, never which one this machine happens to have
+    /// ([`Addressed`]): a person's address is satisfied by that stored session alone, a build
+    /// machine's by `TOPOS_TOKEN` alone. Neither falls back to the other — that would forward a
+    /// call as somebody else — so each kind earns its own sentence when it cannot be satisfied.
     fn credential(&self) -> Result<String, &'static str> {
+        if matches!(self.addressed, Addressed::Service) {
+            // A BUILD MACHINE. The variable is read here, per message, exactly as the store is
+            // below: a runner that unsets it refuses the next call.
+            return Self::machine_token().ok_or(NO_MACHINE_TOKEN);
+        }
         let fs = RealFs;
         let layout = Layout::new(&self.home);
-        let Ok(sessions) = read_sessions(&fs, &layout) else {
-            return Err(NOT_SIGNED_IN);
-        };
-        if let Some(segment) = &self.session_segment
+        // A store that cannot be read answers like an empty one: what a person signed in as is
+        // unknown either way.
+        let sessions = read_sessions(&fs, &layout)
+            .map(|s| s.sessions)
+            .unwrap_or_default();
+        if let Addressed::SignIn(segment) = &self.addressed
             && let Some(session) = sessions
-                .sessions
                 .iter()
                 .find(|s| s.status == SESSION_ACTIVE && &s.session_id == segment)
         {
             return Ok(session.credential.clone());
         }
-        // No session matches the entry. A machine with OTHER live sign-ins holds a stale entry
-        // (the sweep rewrites it); a machine with none is simply not signed in.
-        if sessions.sessions.iter().any(|s| s.status == SESSION_ACTIVE) {
+        // No stored session matches the entry. A machine with OTHER live sign-ins holds a stale
+        // entry (the sweep rewrites it); a machine with none is simply not signed in.
+        if sessions.iter().any(|s| s.status == SESSION_ACTIVE) {
             Err(STALE_ENTRY)
         } else {
             Err(NOT_SIGNED_IN)
         }
+    }
+
+    /// The build machine's credential, when this process was given one. Blank is absent: an
+    /// unset variable and one set to nothing are the same machine.
+    fn machine_token() -> Option<String> {
+        let token = std::env::var(crate::plane_http::MACHINE_TOKEN_VAR).ok()?;
+        (!token.trim().is_empty()).then_some(token)
     }
 
     /// POST one message; write every reply line as it arrives.
@@ -547,13 +633,69 @@ mod tests {
             "https://gateway.example.com/sn_abc123/mcps_def".to_owned(),
         );
         assert_eq!(relay.host, "gateway.example.com");
-        assert_eq!(relay.session_segment.as_deref(), Some("sn_abc123"));
+        let Addressed::SignIn(segment) = &relay.addressed else {
+            panic!("a person's address");
+        };
+        assert_eq!(segment, "sn_abc123");
+    }
+
+    /// **A BASE PATH NEVER DECIDES WHO IS CALLING.** A gateway mounted under a component that
+    /// itself begins `ss_` used to make every person's address read as a machine's — which then
+    /// refuses for a missing token, or sends a bearer the gateway 401s. The caller is the
+    /// second-to-last component, and only that one is read.
+    #[test]
+    fn a_prefixed_base_path_does_not_capture_the_caller_slot() {
+        let relay = Relay::new(
+            std::path::PathBuf::new(),
+            "https://gateway.example.com/ss_gateway/sn_abc123/mcps_def".to_owned(),
+        );
+        let Addressed::SignIn(segment) = &relay.addressed else {
+            panic!("the person's own slot, not the base");
+        };
+        assert_eq!(segment, "sn_abc123");
+    }
+
+    /// …and the same in reverse: a base component beginning `sn_` must not make a BUILD MACHINE's
+    /// address read as a person's, which would send it looking in a store it never has.
+    #[test]
+    fn a_prefixed_base_path_does_not_capture_a_service_callers_slot() {
+        let relay = Relay::new(
+            std::path::PathBuf::new(),
+            "https://gateway.example.com/sn_mount/ss_ci1/mcps_def".to_owned(),
+        );
+        assert!(matches!(relay.addressed, Addressed::Service));
+    }
+
+    /// A query string is not path, so it may not stand in for the server slot and shift the
+    /// caller one component to the left.
+    #[test]
+    fn a_query_string_does_not_shift_the_caller_slot() {
+        let relay = Relay::new(
+            std::path::PathBuf::new(),
+            "https://gateway.example.com/sn_abc123/mcps_def?trace=1".to_owned(),
+        );
+        let Addressed::SignIn(segment) = &relay.addressed else {
+            panic!("the caller survives a query");
+        };
+        assert_eq!(segment, "sn_abc123");
+    }
+
+    /// A BUILD MACHINE's address reads as the SERVICE kind — the whole of what decides that
+    /// only `TOPOS_TOKEN` may satisfy it. The home is never touched: this is URL reading.
+    #[test]
+    fn relay_reads_a_service_session_segment_as_the_machines_own() {
+        let relay = Relay::new(
+            std::path::PathBuf::new(),
+            "https://gateway.example.com/ss_ci1/mcps_def".to_owned(),
+        );
+        assert!(matches!(relay.addressed, Addressed::Service));
     }
 
     #[test]
     fn relay_survives_a_url_with_no_session_segment() {
         let relay = Relay::new(std::path::PathBuf::from("/nowhere"), "not-a-url".to_owned());
         assert_eq!(relay.host, "not-a-url");
-        assert_eq!(relay.session_segment, None);
+        // Attributable to nobody, so neither credential may answer it.
+        assert!(matches!(relay.addressed, Addressed::Unattributed));
     }
 }

@@ -174,6 +174,7 @@ function fixtureStore(urlByServerId: Map<string, string>): GatewayStore & OauthS
     takeOauthFlow: (state) => realStore.takeOauthFlow(state),
     storeCredential: (input) => realStore.storeCredential(input),
     sessionByTokenSha256: (hex) => realStore.sessionByTokenSha256(hex),
+    machineSessionByTokenSha256: (hex, ss) => realStore.machineSessionByTokenSha256(hex, ss),
     toolPolicy: (ws, serverId) => realStore.toolPolicy(ws, serverId),
     credentialFor: (ws, serverId, userId) => realStore.credentialFor(ws, serverId, userId),
     saveRotatedCredential: (id, next) => realStore.saveRotatedCredential(id, next),

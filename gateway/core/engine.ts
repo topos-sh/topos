@@ -777,7 +777,14 @@ export async function handleGatewayRequest(ctx: GatewayContext, greq: GatewayReq
     ctx.env.log("warn", "request without bearer refused", { serverId: greq.serverId });
     return refuse(jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 401));
   }
-  const session = await ctx.store.sessionByTokenSha256(await sha256Hex(greq.bearer));
+  // THE TWO DOORS of a read credential, in the order the web lane resolves them: a person's
+  // session first, then a workspace machine token (CI) — a build machine may call tools through
+  // the gateway, holding a workspace credential rather than any vendor secret of its own. A
+  // person's bearer never reaches the second query; a token never matches the first.
+  const bearerHash = await sha256Hex(greq.bearer);
+  const session =
+    (await ctx.store.sessionByTokenSha256(bearerHash)) ??
+    (await ctx.store.machineSessionByTokenSha256(bearerHash, greq.sessionId));
   if (session === null) {
     ctx.env.log("warn", "unknown bearer refused", { serverId: greq.serverId });
     return refuse(jsonResponse(rpcError(null, ERR_GATEWAY, copy.unauthorized()), 401));
@@ -794,7 +801,9 @@ export async function handleGatewayRequest(ctx: GatewayContext, greq: GatewayReq
   };
 
   if (session.sessionId !== greq.sessionId) {
-    // A valid bearer under a foreign path is attributable — and refused.
+    // A valid bearer under a foreign path is attributable — and refused. (A machine token's
+    // door matched the path segment to resolve at all, so this is the person path's check; a
+    // token under a foreign segment was already refused above, unattributed.)
     rc.server = {
       serverId: greq.serverId,
       displayName: "",

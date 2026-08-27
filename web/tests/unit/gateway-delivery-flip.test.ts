@@ -25,8 +25,10 @@ import {
  *    the gateway on never breaks a working server. Unestablished auth counts as needing one.
  *  - a member's opt-out row routes THEIR delivery direct, and only under Auto;
  *  - the connection's 'direct' mandate routes everyone direct; its 'required' mandate routes
- *    everyone through the gateway with no sign-in gating — and a machine that cannot be handed
- *    a gateway address receives NO ROW for that server at all, never a quiet direct fallback;
+ *    everyone through the gateway with no sign-in gating. (The other half of `required` — a
+ *    machine that cannot be handed an address receives NO ROW, never a quiet direct fallback —
+ *    needs a deployment running NO gateway, so it is proved in mcp-delivery.test.ts, which runs
+ *    with the variable unset; this file's env is armed for every case in it.)
  *  - the workspace switch off routes everything direct, mandates included;
  *  - a PACKAGE-ONLY server is never rewritten and never withheld — there is no address to route;
  *  - the address names the CALLING session, and a read with no session behind it (a web page's
@@ -101,8 +103,8 @@ async function credential(id: string, serverId: string, userId: string | null) {
   );
 }
 
-async function delivered(session = "cs_laptop", places = true) {
-  const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, session), places);
+async function delivered(session = "sn_laptop") {
+  const body = await (await lane()).deliveryFor(asSession(ws, MEMBER, session));
   return body.mcp_servers;
 }
 
@@ -132,8 +134,8 @@ beforeAll(async () => {
   await seatUser(db, ws, MEMBER, "member");
   await seedUser(db, OTHER, "Oa Other", "oa@example.com");
   await seatUser(db, ws, OTHER, "member");
-  await seedSession(db, "cs_laptop", ws, MEMBER, "active", "Mo's laptop");
-  await seedSession(db, "cs_desktop", ws, MEMBER, "active", "Mo's desktop");
+  await seedSession(db, "sn_laptop", ws, MEMBER, "active", "Mo's laptop");
+  await seedSession(db, "sn_desktop", ws, MEMBER, "active", "Mo's desktop");
 
   // Auto, sign-in required, NO sign-in stands.
   await seedServer("mcps_oauth", "com.example/oauth", remoteServer("com.example/oauth"), "oauth");
@@ -230,7 +232,7 @@ describe("routing under Auto (no mandate)", () => {
 
   it("routes through the gateway once the caller's own sign-in stands", async () => {
     const rows = await delivered();
-    expect(urlOf(rows, "b_cred")).toBe(`${BASE}/cs_laptop/mcps_cred`);
+    expect(urlOf(rows, "b_cred")).toBe(`${BASE}/sn_laptop/mcps_cred`);
     const meta = rows.find((r) => r.skill_id === "b_cred")?.document._meta as Record<
       string,
       unknown
@@ -241,7 +243,7 @@ describe("routing under Auto (no mandate)", () => {
   });
 
   it("routes through the gateway on the workspace sign-in alone", async () => {
-    expect(urlOf(await delivered(), "b_wscred")).toBe(`${BASE}/cs_laptop/mcps_wscred`);
+    expect(urlOf(await delivered(), "b_wscred")).toBe(`${BASE}/sn_laptop/mcps_wscred`);
   });
 
   it("does not route on a sign-in that is somebody else's alone", async () => {
@@ -249,7 +251,7 @@ describe("routing under Auto (no mandate)", () => {
   });
 
   it("routes a server that needs no sign-in immediately", async () => {
-    expect(urlOf(await delivered(), "b_none")).toBe(`${BASE}/cs_laptop/mcps_none`);
+    expect(urlOf(await delivered(), "b_none")).toBe(`${BASE}/sn_laptop/mcps_none`);
   });
 
   it("treats unestablished auth as needing a sign-in", async () => {
@@ -261,14 +263,14 @@ describe("routing under Auto (no mandate)", () => {
   });
 
   it("gives a second machine its own address", async () => {
-    expect(urlOf(await delivered("cs_desktop"), "b_cred")).toBe(`${BASE}/cs_desktop/mcps_cred`);
+    expect(urlOf(await delivered("sn_desktop"), "b_cred")).toBe(`${BASE}/sn_desktop/mcps_cred`);
   });
 
   it("follows a revoked sign-in back to the server's own address", async () => {
     await db.q(`DELETE FROM gateway.credential WHERE id = 'cred_mine'`);
     expect(urlOf(await delivered(), "b_cred")).toBe(UPSTREAM);
     await credential("cred_mine", "mcps_cred", MEMBER);
-    expect(urlOf(await delivered(), "b_cred")).toBe(`${BASE}/cs_laptop/mcps_cred`);
+    expect(urlOf(await delivered(), "b_cred")).toBe(`${BASE}/sn_laptop/mcps_cred`);
   });
 });
 
@@ -278,7 +280,7 @@ describe("routing under a mandate", () => {
   });
 
   it("'required' routes through the gateway with no sign-in standing", async () => {
-    expect(urlOf(await delivered(), "b_req")).toBe(`${BASE}/cs_laptop/mcps_req`);
+    expect(urlOf(await delivered(), "b_req")).toBe(`${BASE}/sn_laptop/mcps_req`);
   });
 
   it("'required' overrides a member's opt-out", async () => {
@@ -286,18 +288,11 @@ describe("routing under a mandate", () => {
       `INSERT INTO web.mcp_gateway_optout (workspace_id, server_id, user_id) VALUES ($1, $2, $3)`,
       [ws, "mcps_req", MEMBER],
     );
-    expect(urlOf(await delivered(), "b_req")).toBe(`${BASE}/cs_laptop/mcps_req`);
-  });
-
-  it("'required' WITHHOLDS from a machine that cannot place gateway entries", async () => {
-    const rows = await delivered("cs_laptop", false);
-    expect(rows.find((r) => r.skill_id === "b_req")).toBeUndefined();
-    // The rest of the feed is untouched — Auto falls back to the server's own address instead.
-    expect(urlOf(rows, "b_cred")).toBe(UPSTREAM);
+    expect(urlOf(await delivered(), "b_req")).toBe(`${BASE}/sn_laptop/mcps_req`);
   });
 
   it("'required' never withholds a package-only server — nothing to route", async () => {
-    const rows = await delivered("cs_laptop", false);
+    const rows = await delivered();
     expect(rows.find((r) => r.skill_id === "b_reqpkg")?.document.packages).toBeDefined();
   });
 });

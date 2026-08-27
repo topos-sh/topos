@@ -12,12 +12,19 @@ import { DELIVERED_AUTH_KEY } from "@/lib/db/queries.mcp-catalog.server";
  * attaches the machine's OWN standing credential to that address (the server never delivers a
  * secret), and stops teaching a per-machine sign-in that no longer happens.
  *
- * WHETHER a given row is rewritten is the delivery query's ruling (queries.lane.server.ts): the
- * workspace switch, the connection's `gateway_policy`, the member's own choice — and, where no
- * mandate stands, whether a sign-in ALREADY EXISTS at the gateway. That last part is a deliberate
- * reversal of this module's original stance that delivery never reads sign-in state: an address
- * whose first call can only answer "sign in first" breaks a server that was working directly, so
- * the un-mandated route follows the credential, in both directions.
+ * WHETHER a given row is rewritten is `routing.server.ts`'s ruling, and it applies to EVERY lane
+ * that hands a machine a document — the machine's own feed, the workspace catalog behind every
+ * explicit `[mcp]` row and every channel member (in both the machine and the project scope), and
+ * the `topos.lock` read. The inputs are the workspace switch, the connection's `gateway_policy`,
+ * the member's own choice — and, where no mandate stands, whether a sign-in ALREADY EXISTS at the
+ * gateway. That last part is a deliberate reversal of this module's original stance that delivery
+ * never reads sign-in state: an address whose first call can only answer "sign in first" breaks a
+ * server that was working directly, so the un-mandated route follows the credential, in both
+ * directions.
+ *
+ * The caller a rewritten address names may be a person's session or a MACHINE TOKEN's service
+ * session (CI): the gateway resolves both, so a build machine calls tools with the workspace's
+ * sign-in and holds no vendor secret of its own.
  *
  * Two things this still deliberately does NOT do:
  *  - it does not touch a PACKAGE-ONLY document. A server a machine installs and runs over its own

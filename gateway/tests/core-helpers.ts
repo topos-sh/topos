@@ -28,6 +28,9 @@ export class FakeUsage implements UsageSink {
 
 export class FakeStore implements GatewayStore {
   sessions = new Map<string, SessionRef>();
+  /** Machine-token callers, keyed by `${bearerHash}|${serviceSessionId}` — a token names one
+   *  runner only together with the address it was delivered for. */
+  machineSessions = new Map<string, SessionRef>();
   servers = new Map<string, ResolvedServer>();
   policies = new Map<string, ToolPolicy>();
   credentials = new Map<string, Credential>();
@@ -39,6 +42,11 @@ export class FakeStore implements GatewayStore {
 
   async addBearer(bearer: string, ref: SessionRef): Promise<void> {
     this.sessions.set(await sha256Hex(bearer), ref);
+  }
+  /** A workspace machine token: one bearer, one live service session per runner. */
+  async addMachineBearer(bearer: string, ref: SessionRef): Promise<void> {
+    const hash = await sha256Hex(bearer);
+    this.machineSessions.set(`${hash}|${ref.sessionId}`, { ...ref, userId: null });
   }
   setServer(workspaceId: string, server: ResolvedServer): void {
     this.servers.set(`${workspaceId}|${server.serverId}`, server);
@@ -57,15 +65,21 @@ export class FakeStore implements GatewayStore {
     this.seenTokenHashes.push(hex);
     return this.sessions.get(hex) ?? null;
   }
+  async machineSessionByTokenSha256(
+    hex: string,
+    serviceSessionId: string,
+  ): Promise<SessionRef | null> {
+    return this.machineSessions.get(`${hex}|${serviceSessionId}`) ?? null;
+  }
   async connectedServer(workspaceId: string, serverId: string): Promise<ResolvedServer | null> {
     return this.servers.get(`${workspaceId}|${serverId}`) ?? null;
   }
   async toolPolicy(workspaceId: string, serverId: string): Promise<ToolPolicy> {
     return this.policies.get(`${workspaceId}|${serverId}`) ?? { mode: "all", selected: new Set() };
   }
-  async credentialFor(workspaceId: string, serverId: string, userId: string): Promise<Credential | null> {
+  async credentialFor(workspaceId: string, serverId: string, userId: string | null): Promise<Credential | null> {
     return (
-      this.credentials.get(`${workspaceId}|${serverId}|${userId}`) ??
+      this.credentials.get(`${workspaceId}|${serverId}|${userId ?? ""}`) ??
       this.credentials.get(`${workspaceId}|${serverId}|`) ??
       null
     );
@@ -144,7 +158,7 @@ export function makeCtx(store: FakeStore, usage: FakeUsage, routes: Record<strin
 
 export const WS = "ws1";
 export const USER = "user1";
-export const TOPOS_SESSION = "sess1";
+export const TOPOS_SESSION = "sn_laptop";
 export const SERVER_ID = "srv1";
 export const BEARER = "tok-abc-standing";
 export const UPSTREAM_URL = "https://up.test/mcp";

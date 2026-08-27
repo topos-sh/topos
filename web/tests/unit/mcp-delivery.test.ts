@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mcpRevisionId } from "../helpers/mcp-ids";
 import {
   assignBundleRow,
+  asToken,
   bootWorkspace,
   createScratchDb,
   type ScratchDb,
@@ -34,7 +35,7 @@ const session = () =>
   ({
     userId: MEMBER,
     workspaceId: ws,
-    sessionId: "cs_one",
+    sessionId: "sn_one",
     role: "member",
     display: "Mo",
     sessionStatus: "active",
@@ -127,6 +128,14 @@ beforeAll(async () => {
   // has not reached yet.
   await seedBundle(db, ws, "b_stale", "stale-server", { kind: "mcp" });
   await assignBundleRow(db, ws, "b_stale", MEMBER);
+
+  // A connection the workspace MANDATED through the gateway, on a deployment that runs none.
+  await seedServer("mcps_req", "com.example/required", null);
+  await seedRevision("mcps_req", mcpRevisionId("req_1"), 1, "1.0.0", { current: true });
+  await seedBundle(db, ws, "b_req", "required-server", { kind: "mcp", withPointer: false });
+  await connect("b_req", "mcps_req");
+  await db.q(`UPDATE web.bundle_mcp SET gateway_policy = 'required' WHERE bundle_id = 'b_req'`);
+  await assignBundleRow(db, ws, "b_req", MEMBER);
 }, 60000);
 
 afterAll(async () => {
@@ -185,11 +194,89 @@ describe("the workspace catalog splits the same way", () => {
     const skills = await l.laneSkillsIndex(session());
     expect(skills.map((row) => row.skill_id)).toEqual(["b_skill"]);
 
+    // Every connection the workspace holds, id-ordered — including the one whose mandate this
+    // machine cannot honor, which stands in the list saying so rather than going missing.
     const servers = await l.laneMcpServersIndex(session());
-    expect(servers.map((row) => row.skill_id)).toEqual(["b_glob", "b_pin"]);
+    expect(servers.map((row) => row.skill_id)).toEqual(["b_glob", "b_pin", "b_req"]);
+    expect(servers.filter((row) => row.document !== undefined).map((row) => row.skill_id)).toEqual([
+      "b_glob",
+      "b_pin",
+    ]);
     expect(servers.find((row) => row.skill_id === "b_pin")?.pinned).toBe(true);
     expect(servers.find((row) => row.skill_id === "b_glob")?.document).toMatchObject({
       name: "com.example/global",
     });
+  });
+});
+
+/**
+ * THE OTHER HALF OF `required`, which needs a deployment running NO gateway — this suite's, with
+ * `GATEWAY_PUBLIC_URL` unset. A mandate that quietly fell back to the server's own address would
+ * not be a mandate, so every lane a MACHINE reads withholds the row instead. A read with no
+ * machine behind it is not a delivery and still sees the stored document.
+ */
+describe("a 'required' connection with no gateway to route through", () => {
+  it("is SAID by the catalog — the row stands, carrying the reason and no document", async () => {
+    const index = await (await lane()).laneMcpServersIndex(session());
+    const row = index.find((entry) => entry.skill_id === "b_req");
+    // PRESENT, not dropped. A dropped row reads to a client as a fetch that did not land, and it
+    // answers that by keeping the entry it already has — so the mandate would be bypassed
+    // forever by every machine that got its direct entry in before the flip.
+    expect(row).toBeDefined();
+    expect(row?.withheld).toBe("gateway_required");
+    // Identity and custody survive, so the client can NAME the row and match what it holds.
+    expect(row).toMatchObject({
+      skill_id: "b_req",
+      name: "required-server",
+      kind: "mcp",
+      status: "active",
+      revision_id: mcpRevisionId("req_1"),
+    });
+    expect(row?.updated_at).toBeGreaterThan(0);
+    // And nothing placeable rides with it — the key is ABSENT, not null.
+    expect(row?.document).toBeUndefined();
+    expect(Object.hasOwn(row as object, "document")).toBe(false);
+  });
+
+  it("is SAID by the lock lane too — a body, never the uniform 404", async () => {
+    const locked = await (await lane()).laneMcpRevision(session(), "b_req", mcpRevisionId("req_1"));
+    // The whole difference: `null` here is the 404 a client reads as "could not reach it".
+    expect(locked).not.toBeNull();
+    expect(locked?.withheld).toBe("gateway_required");
+    expect(locked?.revision_id).toBe(mcpRevisionId("req_1"));
+    expect(locked?.document).toBeUndefined();
+    expect(Object.hasOwn(locked as object, "document")).toBe(false);
+  });
+
+  it("says the same thing to a machine token, which is nobody", async () => {
+    const l = await lane();
+    const token = asToken(ws, "ss_ci_runner");
+    const row = (await l.laneMcpServersIndex(token)).find((entry) => entry.skill_id === "b_req");
+    expect(row?.withheld).toBe("gateway_required");
+    expect(row?.document).toBeUndefined();
+    const locked = await l.laneMcpRevision(token, "b_req", mcpRevisionId("req_1"));
+    expect(locked?.withheld).toBe("gateway_required");
+    expect(locked?.document).toBeUndefined();
+  });
+
+  it("is absent from the FEED, which needs no marker", async () => {
+    // The feed IS the demand list, so absence from it already means "not yours" and the client
+    // reads it that way. The ambiguity this reason exists for is the catalog's alone.
+    const delivery = await (await lane()).deliveryFor(session());
+    expect(delivery.mcp_servers.map((row) => row.skill_id)).not.toContain("b_req");
+  });
+
+  it("still 404s the genuine misses, which must stay indistinguishable from nothing", async () => {
+    const l = await lane();
+    // A revision of another server under this bundle, and one nobody ever published: neither is
+    // a workspace ruling, and answering them with a withheld body would be a lie.
+    expect(await l.laneMcpRevision(session(), "b_req", mcpRevisionId("glob_1"))).toBeNull();
+    expect(await l.laneMcpRevision(session(), "b_nonesuch", mcpRevisionId("req_1"))).toBeNull();
+  });
+
+  it("is still shown to a read with no machine behind it", async () => {
+    const body = await (await lane()).deliveryFor(member());
+    const served = body.mcp_servers.find((row) => row.skill_id === "b_req");
+    expect(served?.document).toMatchObject({ remotes: [{ url: "https://mcp.example.com/mcp" }] });
   });
 });

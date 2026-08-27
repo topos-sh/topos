@@ -350,6 +350,28 @@ struct SessionRun {
     /// per-row reads share ONE fetch instead of deep-cloning the index each time.
     skills_index: std::cell::RefCell<Option<Option<Rc<WireSkillIndex>>>>,
     channels_index: std::cell::RefCell<Option<Option<Rc<WireChannelIndex>>>>,
+    /// The by-revision lane's answers this run, keyed `(skill_id, revision_id)` — the lane a
+    /// locked `[mcp]` row reads. The same row is decided MORE THAN ONCE per sweep (the counting
+    /// pass, then the real one — see [`RunSteps`] — and both scopes may name it), and the fetch
+    /// cannot be skipped on the recorded revision because routing is live state
+    /// ([`locked_mcp_decision`]). Sharing it here is what keeps one locked row to one request,
+    /// exactly as the two indexes above are fetched once and shared.
+    mcp_revisions: std::cell::RefCell<HashMap<(String, String), RevisionAnswer>>,
+}
+
+/// What the by-revision lane said about ONE revision — cached, so it is asked once a run.
+#[derive(Clone)]
+enum RevisionAnswer {
+    /// The workspace served it, and this build can write the document back out.
+    Served(ServerDelivery),
+    /// The workspace WITHHELD it, for the reason it names. Kept apart from `Unavailable` because
+    /// the two lead opposite ways: unavailable falls back to what this machine holds, and a
+    /// withhold must never — falling back is exactly how a withheld server would keep its entry.
+    Withheld(String),
+    /// It could not be had: the clause naming WHY, in the workspace's own terms. One shape for
+    /// both ways that happens (the lane answered a miss, or could not be reached), because the
+    /// caller's next move is the same for each — the record, or the degraded moves.
+    Unavailable(String),
 }
 
 /// The offline-degraded run: no snapshot, so the feed is fed from the local delivery cache and the
@@ -361,6 +383,7 @@ fn offline_run(s: &Session, transports: SessionTransports) -> SessionRun {
         snapshot: None,
         skills_index: std::cell::RefCell::new(None),
         channels_index: std::cell::RefCell::new(None),
+        mcp_revisions: std::cell::RefCell::new(HashMap::new()),
     }
 }
 
@@ -429,6 +452,40 @@ impl SessionRun {
             *slot = Some(fetched);
         }
         slot.as_ref().and_then(Clone::clone)
+    }
+
+    /// ONE server revision, BY ID — the lane a committed `topos.lock` converges an `[mcp]` entry
+    /// through, asked once a run per revision and shared from there (see [`Self::mcp_revisions`]).
+    /// It answers no `Result`: every way the revision cannot be had reads the same to the caller,
+    /// and the sentence saying which is built here, in the workspace's own terms, so the cache
+    /// holds a decided answer rather than a fault nobody can clone.
+    fn mcp_revision(&self, skill_id: &str, revision_id: &str) -> RevisionAnswer {
+        let key = (skill_id.to_owned(), revision_id.to_owned());
+        if let Some(answer) = self.mcp_revisions.borrow().get(&key) {
+            return answer.clone();
+        }
+        let ws = &self.session.workspace_name;
+        let answer = match self.transports.directory.mcp_revision(
+            &self.session.workspace_id,
+            skill_id,
+            revision_id,
+        ) {
+            Ok(Some(entry)) => match served_document(&entry) {
+                ServedDocument::Delivered(delivered) => RevisionAnswer::Served(delivered),
+                ServedDocument::Withheld(reason) => RevisionAnswer::Withheld(reason),
+                // A served row this build cannot write back out is not a revision it can honor.
+                ServedDocument::Unreadable => RevisionAnswer::Unavailable(format!(
+                    "{ws} served a revision topos could not read"
+                )),
+            },
+            Ok(None) => RevisionAnswer::Unavailable(format!("{ws} does not serve that revision")),
+            Err(e) => RevisionAnswer::Unavailable(format!(
+                "{ws} could not be reached for it ({})",
+                crate::render::safe_message(&e)
+            )),
+        };
+        self.mcp_revisions.borrow_mut().insert(key, answer.clone());
+        answer
     }
 }
 
@@ -668,6 +725,13 @@ struct Sweep {
     /// stands down. Held aside rather than applied where it is found, because the row's index is
     /// not known until the sync that pushes it has run.
     mcp_zero_reach: std::collections::BTreeSet<(String, String)>,
+    /// `(scope label, bundle identity)` the WORKSPACE WITHHELD this run — an authoritative answer,
+    /// so the opposite of a hold. The mention-hold below keeps the standing entries of any name a
+    /// row still mentions whose demand did not land, because a fetch that failed says nothing; a
+    /// withhold says something, and its entries must converge to REMOVAL like any undemanded
+    /// bundle. Without this set the two are indistinguishable at that block and a withheld server
+    /// would keep its entry on every machine that already had one.
+    mcp_withheld: HashSet<(String, String)>,
     /// The delivery cache was unreadable this run: the mcp hold computation is blind, so removal
     /// convergence is withheld entirely (freeze, never guess).
     mcp_blind: bool,
@@ -1542,7 +1606,7 @@ pub(crate) fn manifest_update(
     // the applied report, never a person's feed. Synthesized only for the project file's own
     // workspace, only where no live session already covers it; the workspace-id slot carries
     // the ADDRESS, which the server's token lane resolves to its own workspace.
-    if let Ok(token) = std::env::var("TOPOS_TOKEN")
+    if let Ok(token) = std::env::var(crate::plane_http::MACHINE_TOKEN_VAR)
         && !token.trim().is_empty()
         && let Some((t_host, t_ws)) = project.as_ref().and_then(|(_, p)| p.workspace.clone())
         && !all_sessions
@@ -1616,6 +1680,7 @@ pub(crate) fn manifest_update(
                     snapshot: Some(snap),
                     skills_index: std::cell::RefCell::new(None),
                     channels_index: std::cell::RefCell::new(None),
+                    mcp_revisions: std::cell::RefCell::new(HashMap::new()),
                 });
             }
             Err(PlaneError::NotFound) => {
@@ -3046,8 +3111,9 @@ fn reconcile_thing<'a>(
                                 picked: false,
                             },
                         ));
-                        // The lock is honored as a skill's is — silently. `delivered: None` runs
-                        // the demand from the STANDING record, which already holds this document.
+                        // The lock is honored as a skill's is — silently. `delivered: None` is the
+                        // offline fallback: the lane did not answer and the standing record
+                        // already holds this revision, so the demand runs from it.
                         let narrowing = mcp_filter(
                             sc,
                             row.fields().dest,
@@ -3076,6 +3142,10 @@ fn reconcile_thing<'a>(
                         );
                         return;
                     }
+                    LockedMcp::Withheld(reason) => {
+                        note_withheld(sc, run, &entry.skill_id, &entry.name, &reason, sweep);
+                        return;
+                    }
                     LockedMcp::RefuseUnavailable(reason) => {
                         sweep.warnings.push(crate::message::failure(
                             "LOCK_REVISION_UNAVAILABLE",
@@ -3100,6 +3170,13 @@ fn reconcile_thing<'a>(
                         ));
                     }
                     LockedMcp::Ordinary => {}
+                }
+                // The CATALOG's own ruling, read before this row books anything: a withheld
+                // server is not delivered here, so it takes no lock entry, no delivery booking
+                // and no demand — and the converge removes whatever it left behind.
+                if let ServedDocument::Withheld(reason) = served_document(entry) {
+                    note_withheld(sc, run, &entry.skill_id, &entry.name, &reason, sweep);
+                    return;
                 }
                 if sc.lock.is_some() {
                     sweep
@@ -3923,6 +4000,10 @@ fn reconcile_set<'a>(
                             );
                             continue;
                         }
+                        LockedMcp::Withheld(reason) => {
+                            note_withheld(sc, run, &server.skill_id, &server.name, &reason, sweep);
+                            continue;
+                        }
                         LockedMcp::RefuseUnavailable(reason) => {
                             sweep.warnings.push(crate::message::failure(
                                 "LOCK_REVISION_UNAVAILABLE",
@@ -3949,6 +4030,12 @@ fn reconcile_set<'a>(
                             ));
                         }
                         LockedMcp::Ordinary => {}
+                    }
+                    // A channel's member is withheld exactly as an explicit row is: the ruling is
+                    // the workspace's, not the recipe's, so the road it takes is the same one.
+                    if let ServedDocument::Withheld(reason) = served_document(server) {
+                        note_withheld(sc, run, &server.skill_id, &server.name, &reason, sweep);
+                        continue;
                     }
                     if sc.lock.is_some() {
                         sweep
@@ -4399,6 +4486,7 @@ struct SyncTarget {
 /// What one lane said about a connected server — the facts its record is written from. Both lanes
 /// answer the same thing (the delivery feed and the catalog index carry the same row), so both
 /// build this and everything downstream reads one shape.
+#[derive(Clone)]
 struct ServerDelivery {
     revision_id: String,
     document: Vec<u8>,
@@ -4423,7 +4511,7 @@ impl ServerDelivery {
     fn from_catalog(e: &topos_types::requests::WireMcpIndexEntry) -> Option<Self> {
         Some(Self {
             revision_id: e.revision_id.clone(),
-            document: serde_json::to_vec(&e.document).ok()?,
+            document: serde_json::to_vec(e.document.as_ref()?).ok()?,
             pinned: e.pinned.unwrap_or(false),
             revoked: e.revoked.unwrap_or(false),
         })
@@ -4938,16 +5026,21 @@ fn scope_recorded_revision(ctx: &Ctx<'_>, sc: &ScopeCtx<'_>, skill_id: &str) -> 
 /// What a LOCKED `[mcp]` revision meeting a DIFFERENT served one resolves to. An `install`
 /// converges an MCP entry to the revision the lock names exactly as it converges a skill to its
 /// locked version — the workspace serves one revision by id, and the entry is rendered from that.
-/// The degraded moves stay for the case the lane cannot answer (the revision is gone, or the
-/// server is older than the lane): `--frozen` refuses, a plain install takes the served revision
-/// and says so.
+/// When the lane cannot answer (the revision is gone, the server is older than the lane, the
+/// workspace is unreachable), a scope whose RECORD already stands at the locked revision resolves
+/// from it — the offline path. The degraded moves stay for the scope that holds neither:
+/// `--frozen` refuses, a plain install takes the served revision and says so.
 enum LockedMcp {
     /// No locked revision, or it matches the served one — the ordinary flow.
     Ordinary,
     /// THE LOCK IS HONORED: converge to the locked revision. `Some` = the document the workspace
-    /// just served for it; `None` = this scope's record already stands at it, so the demand runs
-    /// from the record and there was nothing to fetch.
+    /// just served for it; `None` = the lane did not answer and this scope's record already
+    /// stands at that revision, so the demand runs from the record.
     Honored(Option<ServerDelivery>),
+    /// THE WORKSPACE WITHHELD IT — an answer, not a fault of this run, and NOT a case the
+    /// record may answer for. The string is the reason it named. `--frozen` changes nothing
+    /// here: a withhold is the same ruling in every mode, and the entries go.
+    Withheld(String),
     /// The locked revision could not be had, under `--frozen`: refuse, and write nothing. The
     /// string is the clause naming WHY, in the workspace's own terms.
     RefuseUnavailable(String),
@@ -4969,31 +5062,38 @@ fn locked_mcp_decision(
     if locked == served_revision {
         return LockedMcp::Ordinary;
     }
-    // The record already holds the locked revision's own document — the fetch would answer with
-    // what this scope was given, so it is not made. This is also the offline path.
+    // THE LOCKED REVISION IS ASKED FOR EVERY SWEEP, even where this scope's record already stands
+    // at it. A revision says WHAT the server is; HOW this machine reaches it — the vendor's own
+    // address, or the workspace's gateway — is LIVE state the workspace re-decides between sweeps
+    // and re-states on every read of the revision. `topos.lock` pins the what, never the how, so
+    // a short-circuit on the recorded id would freeze the route a checkout first received: the
+    // revision never moves, so nothing would ever re-ask. One request per locked row, in the pass
+    // that already dials the catalog; the record answers for it when the lane does not.
+    match run.mcp_revision(skill_id, &locked) {
+        RevisionAnswer::Served(delivered) => LockedMcp::Honored(Some(delivered)),
+        // Straight through, past the record. A lock pins WHICH revision, and never the right to
+        // have it: resolving a withheld revision from the stored copy would keep the entry the
+        // withhold exists to remove, and would do it on exactly the machines that already hold one.
+        RevisionAnswer::Withheld(reason) => LockedMcp::Withheld(reason),
+        RevisionAnswer::Unavailable(reason) => recorded_or(env, sc, skill_id, &locked, reason),
+    }
+}
+
+/// The lane did not hand back the locked revision. A scope whose RECORD already stands at it
+/// resolves from that record and nothing degrades — THE OFFLINE PATH: a machine holding exactly
+/// what the lock names is never made to refuse because the network went away. Only a scope that
+/// holds neither the answer nor the record falls to the degraded moves.
+fn recorded_or(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    skill_id: &str,
+    locked: &str,
+    reason: String,
+) -> LockedMcp {
     if scope_recorded_revision(env.ctx, sc, skill_id).is_some_and(|rec| rec == locked) {
         return LockedMcp::Honored(None);
     }
-    let ws = &run.session.workspace_name;
-    match run
-        .transports
-        .directory
-        .mcp_revision(&run.session.workspace_id, skill_id, &locked)
-    {
-        Ok(Some(entry)) => match ServerDelivery::from_catalog(&entry) {
-            Some(delivered) => LockedMcp::Honored(Some(delivered)),
-            // A served row this build cannot write back out is not a revision it can honor.
-            None => unavailable(sc, format!("{ws} served a revision topos could not read")),
-        },
-        Ok(None) => unavailable(sc, format!("{ws} does not serve that revision")),
-        Err(e) => unavailable(
-            sc,
-            format!(
-                "{ws} could not be reached for it ({})",
-                crate::render::safe_message(&e)
-            ),
-        ),
-    }
+    unavailable(sc, reason)
 }
 
 /// The locked revision could not be had: the mode decides which honest move that is.
@@ -5151,6 +5251,101 @@ fn sync_workspace_server(
                 .or_default()
                 .insert(st.skill_id.to_owned());
         }
+    }
+}
+
+/// **What a catalog-shaped row says about the document it carries.** The three answers are
+/// genuinely different and a client that blurs them gets the withhold wrong: a WITHHOLD is the
+/// workspace ruling that this machine may not have the server, and its entries must go; an
+/// UNREADABLE row is this build's own limitation; and a row that is simply absent from the lane
+/// (not represented here at all) is a MISS, which holds what the machine already has because
+/// nothing authoritative was said.
+enum ServedDocument {
+    /// The document, ready to record.
+    Delivered(ServerDelivery),
+    /// The workspace withheld it, for the reason it names (an open vocabulary — the PRESENCE is
+    /// the ruling, and an unrecognised value is honoured exactly as a known one is).
+    Withheld(String),
+    /// Neither a document nor a withhold: a served row this build cannot write back out.
+    Unreadable,
+}
+
+/// Read one catalog-shaped row. The withhold is checked FIRST and a blank reason is not one — a
+/// ruling has to say something to be a ruling.
+fn served_document(e: &topos_types::requests::WireMcpIndexEntry) -> ServedDocument {
+    if let Some(reason) = e
+        .withheld
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        return ServedDocument::Withheld(reason.to_owned());
+    }
+    match ServerDelivery::from_catalog(e) {
+        Some(delivered) => ServedDocument::Delivered(delivered),
+        None => ServedDocument::Unreadable,
+    }
+}
+
+/// The ONE line a withheld server earns — FINAL copy. It is a FAILURE, not a disclosure: the row
+/// is entitled here and this machine now holds no entry for it, so the count has to say so, and
+/// the person is told who can change it rather than what they could try.
+fn withheld_server(name: &str, label: &str, workspace: &str, reason: &str) -> Message {
+    crate::message::failure(
+        "MCP_WITHHELD",
+        if reason == GATEWAY_REQUIRED {
+            format!(
+                "\"{name}\" ({label}): {workspace} requires the gateway for this server, which \
+                 this machine cannot use. Ask a workspace owner."
+            )
+        } else {
+            // A reason this build does not know is still authoritative, so the entry still goes —
+            // but the sentence must not claim a cause it was not told.
+            format!(
+                "\"{name}\" ({label}): {workspace} is not serving this server to this machine. \
+                 Ask a workspace owner."
+            )
+        },
+    )
+}
+
+/// The one withhold reason this build has a sentence for.
+const GATEWAY_REQUIRED: &str = "gateway_required";
+
+/// Book a WITHHELD server: say the line once, count it, and mark the identity so the mention-hold
+/// does not save its entries. Nothing is demanded and nothing is recorded — the bundle simply is
+/// not in this scope's demand, which is what makes the converge remove what it left behind.
+fn note_withheld(
+    sc: &ScopeCtx<'_>,
+    run: &SessionRun,
+    skill_id: &str,
+    name: &str,
+    reason: &str,
+    sweep: &mut Sweep,
+) {
+    sweep.warnings.push(withheld_server(
+        name,
+        &sc.label,
+        &run.session.workspace_name,
+        reason,
+    ));
+    sweep
+        .failed_bundles
+        .insert((sc.label.clone(), skill_id.to_owned()));
+    sweep
+        .mcp_withheld
+        .insert((sc.label.clone(), skill_id.to_owned()));
+    // A CHANNEL books its member's provenance before the member is resolved (a per-item failure
+    // does not unmake the fact that the channel provides the name) — but a withhold DOES unmake
+    // it: nothing was delivered, so the applied report and the offline cache must not say one was.
+    // The LAST matching booking is this iteration's own, the same "most recent wins" the honored
+    // arm corrects through. An explicit row books after this point, so there is nothing to undo.
+    if let Some(at) = sweep
+        .delivered
+        .iter()
+        .rposition(|(ws, id, _)| *ws == run.session.workspace_id && id == skill_id)
+    {
+        sweep.delivered.remove(at);
     }
 }
 
@@ -6704,11 +6899,22 @@ fn run_mcp_converge(
         // A name a row still MENTIONS whose demand did not land this run (a catalog fetch
         // failure, a refused resolution) must hold its entries too — matched through the cache's
         // name → id rows.
+        //
+        // A WITHHELD bundle is the one thing that does not qualify, and the distinction is the
+        // whole point: a demand that did not land says NOTHING, so holding is the honest move;
+        // a withhold says this machine may not have the server, so its entries have to go. Held
+        // here, they would survive every sweep forever — on exactly the machines that already
+        // hold one, which is the population the withhold is aimed at.
         if let Some(mentioned) = sweep.mentioned.get(&label) {
             let demanded: HashSet<&str> = rows.iter().map(|d| d.bundle_id.as_str()).collect();
             for entry in env.prior.workspaces.values() {
                 for (skill_id, ds) in &entry.delivered {
-                    if mentioned.contains(&ds.name) && !demanded.contains(skill_id.as_str()) {
+                    if mentioned.contains(&ds.name)
+                        && !demanded.contains(skill_id.as_str())
+                        && !sweep
+                            .mcp_withheld
+                            .contains(&(label.clone(), skill_id.clone()))
+                    {
                         hold.insert(skill_id.clone());
                     }
                 }

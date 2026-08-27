@@ -76,6 +76,11 @@ const USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
 /// service credential (`TOPOS_TOKEN`), never a person's session.
 pub(crate) const MACHINE_TOKEN_PREFIX: &str = "tpt_";
 
+/// The environment variable a service credential arrives in — ONE spelling for every lane that
+/// reads it (the reconcile synthesizes a session from it; [`crate::ops::relay`] satisfies a
+/// service-session address with it), so a runner sets one name and both agree on it.
+pub(crate) const MACHINE_TOKEN_VAR: &str = "TOPOS_TOKEN";
+
 pub(crate) struct UreqPlane {
     base_url: String,
     /// **SECRET** — the device's ONE Bearer credential (`None` = signed out; every read answers

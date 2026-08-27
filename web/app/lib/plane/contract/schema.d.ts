@@ -1838,8 +1838,12 @@ export interface components {
         WireMcpIndexEntry: {
             /** @description The unsigned, advisory display name (may be absent). */
             display_name?: string | null;
-            /** @description The `server.json` verbatim, in the official registry format. */
-            document: unknown;
+            /**
+             * @description The `server.json` verbatim, in the official registry format. ABSENT exactly when
+             *     [`Self::withheld`] is present — a workspace that withholds a server hands out no document
+             *     for it at all.
+             */
+            document?: unknown;
             /** @description The catalog's bundle kind — `"mcp"` for every row of this list. */
             kind: string;
             /** @description The catalog's user-facing name. */
@@ -1859,6 +1863,28 @@ export interface components {
              * @description When the resolved revision was published (epoch milliseconds).
              */
             updated_at: number;
+            /**
+             * @description **THE WORKSPACE WITHHELD THIS SERVER FROM THIS CALLER** — an ANSWER, never a miss. The
+             *     connection stands and the row is real (every identity field above is populated); what the
+             *     workspace declines is handing this machine a document to reach the server with.
+             *
+             *     Omitting the row instead would be indistinguishable from a fetch that did not land, and a
+             *     client cannot tell "you may not have this" from "I could not ask" — so it would keep the
+             *     entry it already holds, which is precisely the bypass this field exists to close.
+             *
+             *     An OPEN string, deliberately: `"gateway_required"` (the workspace mandates its gateway for
+             *     this server, and this caller has no gateway address to be given) is today's only value, and
+             *     a client that does not recognise a value must still honour the WITHHOLD — an unknown token
+             *     is the ruling all the same, and only shapes the sentence a person reads.
+             *
+             *     A ruling must SAY something: a present-but-blank value is not one, and a client reads it as
+             *     no withhold at all. That asymmetry is deliberate and runs toward safety. A withhold REMOVES
+             *     entries, so an emitter that blanked this field by accident — an ORM writing `""` where it
+             *     meant null, across every row — would wipe every MCP entry on every machine that asked. Far
+             *     better to leave one server's entry standing than to strip a fleet's on a serializer's slip,
+             *     so the blank falls through to the ordinary document read. Send the token, or omit the field.
+             */
+            withheld?: string | null;
         };
         /**
          * @description `GET /v1/workspaces/{ws}/me` response — the caller's own membership describe: who you are here,
@@ -3033,7 +3059,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description ONE stored revision of a server this workspace connects, in the shape the catalog index carries the current one — what a committed `topos.lock` converges an `[mcp]` entry to. */
+            /** @description ONE stored revision of a server this workspace connects, in the shape the catalog index carries the current one — what a committed `topos.lock` converges an `[mcp]` entry to. A revision WITHHELD from this caller answers here too, carrying `withheld` and no `document`: a withhold is a ruling and must be told apart from the 404 below, which a client reads as "I could not ask" and answers by keeping what it already holds. */
             200: {
                 headers: {
                     [name: string]: unknown;

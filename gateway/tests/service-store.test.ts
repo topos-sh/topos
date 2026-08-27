@@ -9,6 +9,8 @@ import {
   createServiceDb,
   seedConnectedServer,
   seedIdentity,
+  seedMachineToken,
+  seedServiceSession,
   seedSession,
   setToolPolicy,
   type ServiceDb,
@@ -70,6 +72,68 @@ describe("sessionByTokenSha256", () => {
     // A fresh session in the same workspace still resolves.
     await seedSession(db, "sn_fresh", "wsexp", "u1", "bearer-fresh");
     expect(await store.sessionByTokenSha256(bearerSha256Hex("bearer-fresh"))).not.toBeNull();
+  });
+});
+
+describe("machineSessionByTokenSha256", () => {
+  it("resolves a live run of a workspace machine token, as NOBODY", async () => {
+    await seedMachineToken(db, "mt_live", "ws1", "tpt-live");
+    await seedServiceSession(db, "ss_live", "mt_live", "ws1", "ci runner");
+    expect(await store.machineSessionByTokenSha256(bearerSha256Hex("tpt-live"), "ss_live")).toEqual(
+      { sessionId: "ss_live", workspaceId: "ws1", userId: null, displayName: "ci runner" },
+    );
+  });
+
+  it("refuses a run that is not this token's, and an unknown segment", async () => {
+    await seedMachineToken(db, "mt_a", "ws1", "tpt-a");
+    await seedServiceSession(db, "ss_a", "mt_a", "ws1");
+    await seedMachineToken(db, "mt_b", "ws1", "tpt-b");
+    await seedServiceSession(db, "ss_b", "mt_b", "ws1");
+    // Token A's bearer under token B's address — a copied config, refused.
+    expect(await store.machineSessionByTokenSha256(bearerSha256Hex("tpt-a"), "ss_b")).toBeNull();
+    expect(await store.machineSessionByTokenSha256(bearerSha256Hex("tpt-a"), "ss_none")).toBeNull();
+    expect(await store.machineSessionByTokenSha256("not-hex", "ss_a")).toBeNull();
+  });
+
+  it("stops resolving the moment the token is revoked", async () => {
+    await seedMachineToken(db, "mt_rev", "ws1", "tpt-rev");
+    await seedServiceSession(db, "ss_rev", "mt_rev", "ws1");
+    expect(
+      await store.machineSessionByTokenSha256(bearerSha256Hex("tpt-rev"), "ss_rev"),
+    ).not.toBeNull();
+    // Revocation is a DELETE of the token; the run goes with it (CASCADE), which is the whole
+    // liveness check — there is no status column to go stale.
+    await db.q("DELETE FROM web.machine_token WHERE id = 'mt_rev'");
+    expect(
+      await store.machineSessionByTokenSha256(bearerSha256Hex("tpt-rev"), "ss_rev"),
+    ).toBeNull();
+  });
+
+  it("keeps answering for a runner that has only ever relayed, however long it has been", async () => {
+    // The failure this guards is a silent one: a VM that installs once and thereafter only makes
+    // tool calls never touches the web lane, which is the only thing that bumps `last_seen_at` —
+    // and this tier cannot bump it, holding SELECT alone by design. An idle window here would
+    // 401 that machine on a working setup after a week, buying nothing the token's own DELETE
+    // does not already give.
+    await seedMachineToken(db, "mt_idle", "ws1", "tpt-idle");
+    await seedServiceSession(db, "ss_idle", "mt_idle", "ws1");
+    await db.q(
+      "UPDATE web.service_session SET last_seen_at = now() - interval '400 days' WHERE id = 'ss_idle'",
+    );
+    expect(
+      await store.machineSessionByTokenSha256(bearerSha256Hex("tpt-idle"), "ss_idle"),
+    ).not.toBeNull();
+    // And revoking the token still ends it at once — the liveness check that actually matters.
+    await db.q("DELETE FROM web.machine_token WHERE id = 'mt_idle'");
+    expect(
+      await store.machineSessionByTokenSha256(bearerSha256Hex("tpt-idle"), "ss_idle"),
+    ).toBeNull();
+  });
+
+  it("is not the person door: a machine token never resolves as a session", async () => {
+    await seedMachineToken(db, "mt_only", "ws1", "tpt-only");
+    await seedServiceSession(db, "ss_only", "mt_only", "ws1");
+    expect(await store.sessionByTokenSha256(bearerSha256Hex("tpt-only"))).toBeNull();
   });
 });
 
@@ -212,6 +276,11 @@ describe("credential custody", () => {
     const forU2 = await store.credentialFor("ws1", seeded.serverId, "u2");
     expect(forU2?.id).toBe(wsCred);
     expect(forU2?.secret).toBe("workspace-secret");
+    // NOBODY (a machine token) lands on the workspace's sign-in and can never reach u1's own —
+    // the null is honest, not a sentinel that might collide with somebody's id.
+    const forMachine = await store.credentialFor("ws1", seeded.serverId, null);
+    expect(forMachine?.id).toBe(wsCred);
+    expect(forMachine?.secret).toBe("workspace-secret");
   });
 
   it("re-connecting a slot replaces the standing credential", async () => {

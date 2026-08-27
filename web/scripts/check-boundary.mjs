@@ -398,6 +398,11 @@ for (const { rel, text, base } of files) {
 const DB_SURFACE_ALLOWED = new Set([
   join("app", "lib", "auth", "guards.server.ts"),
   join("app", "lib", "auth", "server.ts"),
+  // The MCP routing ruling: it COMPOSES a select-list fragment the three MCP lanes splice into
+  // their own reads, and holds no pool, no schema import and no query of its own — the drizzle
+  // import is the `sql` tag alone. The ruling lives outside the DAL because it is delivery
+  // policy, not data access, and it must be the ONE place a lane's routing comes from.
+  join("app", "lib", "gateway", "routing.server.ts"),
   // The two auth ceremonies whose sanctioned email LOOKUPS the email-authz gate allowlists —
   // their reads are the design (registration proof; the operator recovery hatch).
   join("app", "lib", "auth", "registration.server.ts"),

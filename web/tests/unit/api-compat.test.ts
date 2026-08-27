@@ -45,7 +45,7 @@ describe("the floor under the shipped constants", () => {
   });
 
   it("passes the floor release itself and everything after it", () => {
-    expect(decide("topos/0.1.42")).toEqual({ refused: false, clientVersion: "0.1.42" });
+    expect(decide("topos/0.1.45")).toEqual({ refused: false, clientVersion: "0.1.45" });
     expect(decide("topos/0.1.50")).toEqual({ refused: false, clientVersion: "0.1.50" });
     expect(decide("topos/1.0.0")).toEqual({ refused: false, clientVersion: "1.0.0" });
   });
@@ -64,7 +64,7 @@ describe("the floor under the shipped constants", () => {
     expect(decide("topos/garbage")).toEqual({ refused: true, clientVersion: null });
     expect(decide("topos/")).toEqual({ refused: true, clientVersion: null });
     expect(decide("topos/0.1")).toEqual({ refused: true, clientVersion: null });
-    expect(decide("topos/v0.1.42")).toEqual({ refused: true, clientVersion: null });
+    expect(decide("topos/v0.1.45")).toEqual({ refused: true, clientVersion: null });
     // A digit run no release could carry: unidentified, so the message can never show a person
     // something that is not a plain three-number version.
     expect(decide("topos/99999999999999999999.0.0")).toEqual({
@@ -74,8 +74,8 @@ describe("the floor under the shipped constants", () => {
   });
 
   it("decides on the semver core — a pre-release/build suffix never moves the boundary", () => {
-    expect(decide("topos/0.1.42-rc.1")).toEqual({ refused: false, clientVersion: "0.1.42" });
-    expect(decide("topos/0.1.41-rc.1")).toEqual({ refused: true, clientVersion: "0.1.41" });
+    expect(decide("topos/0.1.45-rc.1")).toEqual({ refused: false, clientVersion: "0.1.45" });
+    expect(decide("topos/0.1.44-rc.1")).toEqual({ refused: true, clientVersion: "0.1.44" });
     expect(decide("topos/0.1.50+build.7")).toEqual({ refused: false, clientVersion: "0.1.50" });
   });
 
@@ -113,13 +113,15 @@ describe("the future rule — when the floor outruns the header", () => {
 
 describe("day-one quiet — the shipped constants, asserted", () => {
   it("has crossed the header line, so silence is refused with the rest", () => {
-    // DELIBERATE, and the reason is the break this floor carries: the delivery answer now names a
-    // machine's connected servers in a list of their own, and a client that predates it reads its
-    // own servers as withdrawn and takes every one of them out of every agent config on the
-    // machine. That is not a degradation a client rides out — so the floor moved past the release
-    // that started sending a version, and a caller that names none is refused with the rest.
+    // DELIBERATE, and the reason is the break this floor carries: every MCP lane now routes on the
+    // workspace's settings alone — the old per-caller version question is gone — so a client that
+    // cannot read `_meta["sh.topos/gateway"]` would place a bare gateway URL, with no credential
+    // and no relay command, into every agent config on the machine and break servers that were
+    // working. That is not a degradation a client rides out, and the release that CAN read it
+    // (0.1.45, which brought `topos relay`) is well past the one that started sending a version —
+    // so a caller that names none is refused with the rest.
     expect(decide(null).refused).toBe(true);
-    expect(compat.MIN_CLI_VERSION).toBe("0.1.42");
+    expect(compat.MIN_CLI_VERSION).toBe("0.1.45");
   });
 
   it("keeps the floor at or below this build's own release", () => {
@@ -193,29 +195,5 @@ describe("laneGate — the lane's front door", () => {
     }
     expect(limited?.status).toBe(429);
     expect((belted.laneGate(lane("topos/0.1.1")) as Response).status).toBe(429);
-  });
-});
-
-describe("which machines may be handed a gateway address", () => {
-  const lane = (userAgent: string | null) =>
-    new Request(
-      "http://x/api/v1/workspaces/w/delivery",
-      userAgent === null ? {} : { headers: { "user-agent": userAgent } },
-    );
-
-  it("says yes from the release whose renderer attaches the credential, and no below it", () => {
-    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.43"))).toBe(true);
-    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.44"))).toBe(true);
-    expect(compat.clientPlacesGatewayEntries(lane("topos/0.2.0"))).toBe(true);
-    // The releases that predate the renderer flip: they would place the address with no
-    // credential, so delivery keeps handing them the server's own.
-    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.42"))).toBe(false);
-    expect(compat.clientPlacesGatewayEntries(lane("topos/0.1.15"))).toBe(false);
-  });
-
-  it("says no to anything it cannot read as a topos", () => {
-    expect(compat.clientPlacesGatewayEntries(lane("curl/8.7.1"))).toBe(false);
-    expect(compat.clientPlacesGatewayEntries(lane(null))).toBe(false);
-    expect(compat.clientPlacesGatewayEntries(lane("topos/not.a.version"))).toBe(false);
   });
 });

@@ -67,9 +67,9 @@ function probeSession(target: ProbeTarget): SessionRef {
   return {
     sessionId: `probe:${target.workspaceId}:${target.serverId}`,
     workspaceId: target.workspaceId,
-    // The store resolves a person's own credential first and the workspace's second; the empty
-    // string belongs to nobody, so a workspace-scoped probe asks with the workspace sign-in.
-    userId: target.userId ?? "",
+    // The store resolves a person's own credential first and the workspace's second; NOBODY
+    // (null) has no personal row, so a workspace-scoped probe asks with the workspace sign-in.
+    userId: target.userId ?? null,
     displayName: "tool probe",
   };
 }

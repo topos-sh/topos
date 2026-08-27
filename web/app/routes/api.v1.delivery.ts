@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { clientPlacesGatewayEntries, laneGate } from "@/lib/api/compat.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { deliveryFor, emptyDeliveryFor } from "@/lib/db/queries.lane.server";
@@ -18,9 +18,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   }
   const actor = await requireSessionActor(request, params.ws ?? "", { allowPending: true });
   const body =
-    actor.sessionStatus === "pending"
-      ? await emptyDeliveryFor(actor)
-      : await deliveryFor(actor, clientPlacesGatewayEntries(request));
+    actor.sessionStatus === "pending" ? await emptyDeliveryFor(actor) : await deliveryFor(actor);
   return Response.json(body, { headers: NO_STORE });
 }
 

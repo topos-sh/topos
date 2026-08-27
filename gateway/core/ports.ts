@@ -17,11 +17,20 @@
 
 export type AuthMode = "none" | "oauth" | "manual" | null;
 
-/** The caller a bearer token proved: one enrolled installation in one workspace, as one person. */
+/**
+ * The caller a bearer token proved: one enrolled installation in one workspace.
+ *
+ * USUALLY a person's — a CLI session, which is a person plus the machine they enrolled. It can
+ * also be a workspace MACHINE TOKEN (a CI runner), which is nobody: `userId` is then null, and
+ * that null is load bearing everywhere it flows. Such a caller has no personal sign-in to ride
+ * (only the workspace's) and no personal usage attribution, which is exactly what a build machine
+ * should have — it holds a workspace credential, not somebody's identity.
+ */
 export interface SessionRef {
   sessionId: string;
   workspaceId: string;
-  userId: string;
+  /** The person, or NULL where the caller is a machine token — see above. */
+  userId: string | null;
   /** The installation's display label — rides into usage rows, never into upstream requests. */
   displayName: string;
 }
@@ -73,7 +82,8 @@ export interface UsageEvent {
   workspaceId: string;
   serverId: string;
   sessionId: string;
-  userId: string;
+  /** Null for a machine token's call: the ledger records the machine, and there is no person. */
+  userId: string | null;
   /** Null for non-tool methods (initialize, lists, notifications). */
   toolName: string | null;
   method: string;
@@ -86,14 +96,23 @@ export interface UsageEvent {
  * what makes revocation a row change); an edge deployment answers from seeded state.
  */
 export interface GatewayStore {
-  /** Hex sha256 of the presented bearer → the active session it names, or null. */
+  /** Hex sha256 of the presented bearer → the active PERSON session it names, or null. */
   sessionByTokenSha256(hex: string): Promise<SessionRef | null>;
+  /**
+   * The OTHER read credential, tried when the first answers null: a workspace MACHINE TOKEN,
+   * which is not a person. The address's session segment rides in because a token names no single
+   * installation on its own — one token can have several live runners, each with its own service
+   * session and its own delivered address — so the caller is (token, that runner). A segment that
+   * is not this token's own resolves to null, which is how a copied address is refused.
+   */
+  machineSessionByTokenSha256(hex: string, serviceSessionId: string): Promise<SessionRef | null>;
   /** Null when the workspace has no live connection to this server. */
   connectedServer(workspaceId: string, serverId: string): Promise<ResolvedServer | null>;
   /** No stored policy row means `{ mode: "all" }`. */
   toolPolicy(workspaceId: string, serverId: string): Promise<ToolPolicy>;
-  /** Resolution is the store's: the person's own credential first, the workspace one second. */
-  credentialFor(workspaceId: string, serverId: string, userId: string): Promise<Credential | null>;
+  /** Resolution is the store's: the person's own credential first, the workspace one second. A
+   *  null `userId` (a machine token) can only ever land on the workspace's. */
+  credentialFor(workspaceId: string, serverId: string, userId: string | null): Promise<Credential | null>;
   /** Persist a rotated token (re-encrypted by the adapter); id is the credential's. */
   saveRotatedCredential(id: string, next: { secret: string; refreshToken?: string }): Promise<void>;
   /**

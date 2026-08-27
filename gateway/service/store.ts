@@ -14,8 +14,9 @@ import type { Logger } from "./log";
 
 /**
  * The container's GatewayStore — every answer read from Postgres per call, which is what makes
- * revocation a row change. Reads cross into schema `web` under SELECT grants (session, the
- * connection chain, tool policy); writes stay in schema `gateway`.
+ * revocation a row change. Reads cross into schema `web` under SELECT grants (the two caller
+ * credentials — a person's session and a workspace's machine token — the connection chain, tool
+ * policy); writes stay in schema `gateway`.
  *
  * Custody: ciphertext never leaves this module undecrypted-into-anything-but-a-Credential, and
  * plaintext never goes back out except inside one. The web-facing rows (`credential` metadata)
@@ -135,6 +136,64 @@ export class PgStore implements GatewayStore {
     };
   }
 
+  async machineSessionByTokenSha256(
+    hex: string,
+    serviceSessionId: string,
+  ): Promise<SessionRef | null> {
+    if (!HEX_64.test(hex)) {
+      return null;
+    }
+    const result = await this.pool.query<{
+      id: string;
+      workspace_id: string;
+      display_name: string;
+    }>(
+      // THE MACHINE DOOR — a workspace's headless read credential (CI, a VM, a sandbox), so a
+      // build machine can call tools through the gateway holding no vendor secret of its own.
+      //
+      // THE LIVENESS DISCIPLINE IS THE JOIN, and that is the whole of it. Where a person's
+      // session needs a status column and the workspace's max-age checked (a row that expires is
+      // left standing), a machine token's revocation is a DELETE — history lives in the audit log
+      // — and its service sessions CASCADE with it. A revoked token therefore matches nothing
+      // here on the very next call, with no clock to read.
+      //
+      // Deliberately NOT the web lane's 7-day idle window, though these rows are swept on it
+      // there. That sweep is lazy: it runs when the token next resolves ON THE WEB LANE, which is
+      // also the only thing that bumps `last_seen_at` — and this tier holds SELECT alone, by
+      // design, since the gateway is the most-exposed component and must not be handed UPDATE on
+      // the web's rows just to keep a clock warm. So a long-lived runner that installs once and
+      // thereafter only relays tool calls would age past a window it has no way to refresh, and
+      // start taking 401s on a working setup. That is a failure mode this side cannot prevent,
+      // bought for no security the DELETE does not already give.
+      //
+      // The workspace's `session_max_age_ms` does not apply either: it governs the sessions
+      // PEOPLE hold, and the web lane never applies it to a token.
+      //
+      // The address's session segment is matched, not returned-and-compared: one token can have
+      // several live runners, and only the row named by the address is this caller. The workspace
+      // comes off the TOKEN, not off the session row: the credential is what scopes access, so a
+      // service session that somehow carried another workspace's id could not widen it.
+      `SELECT ss.id, mt.workspace_id, ss.display_name
+         FROM web.service_session ss
+         JOIN web.machine_token mt ON mt.id = ss.token_id
+        WHERE mt.token_sha256 = decode($1, 'hex')
+          AND ss.id = $2`,
+      [hex, serviceSessionId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      return null;
+    }
+    return {
+      sessionId: row.id,
+      workspaceId: row.workspace_id,
+      // NOBODY. A machine token is not a person: no personal sign-in to ride, no person to
+      // attribute a call to. Every consumer of this field treats null as "the workspace's".
+      userId: null,
+      displayName: row.display_name,
+    };
+  }
+
   async connectedServer(workspaceId: string, serverId: string): Promise<ResolvedServer | null> {
     // The one resolution: a connection's pin exactly, else the server's `current` — the same
     // COALESCE the web spells, aliased the same way (bm the connection, ms the server).
@@ -213,7 +272,9 @@ export class PgStore implements GatewayStore {
   async credentialFor(
     workspaceId: string,
     serverId: string,
-    userId: string,
+    /** The person, or NULL for a machine token — which then lands on the workspace row alone
+     *  (`c.user_id = NULL` is never true, so the ORDER BY's second candidate is the only one). */
+    userId: string | null,
   ): Promise<Credential | null> {
     const result = await this.pool.query<{
       id: string;

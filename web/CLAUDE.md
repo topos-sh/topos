@@ -35,17 +35,44 @@ caller.
   defaulted: `GATEWAY_INTERNAL_URL` +
   `GATEWAY_INTERNAL_TOKEN` (paired — half a lane refuses at parse time) arm the lane and the
   server-page sections; `GATEWAY_PUBLIC_URL` arms GATEWAY DELIVERY: where set, each MCP row is
-  ROUTED per delivery (`deliveryFor` in `queries.lane.server.ts`; the rewrite itself is
+  ROUTED. **ONE RULING, THREE LANES** (`app/lib/gateway/routing.server.ts` — a select-list SQL
+  fragment plus a pure decision, `sanitize → decide → rewrite`; the rewrite itself is
   `app/lib/gateway/delivery.server.ts` — one remote at the gateway plus
-  `_meta["sh.topos/gateway"]`). Routing is three layers, first answer wins: the workspace switch
+  `_meta["sh.topos/gateway"]`): the machine's own feed (`deliveryFor`), the workspace catalog
+  (`laneMcpServersIndex` — every explicit `[mcp]` manifest row and every `[channels]` member, in
+  BOTH the machine and the project scope, which is the project manifest's only way in) and the
+  `topos.lock` read (`laneMcpRevision`, which validates the STORED document and only then routes —
+  a routed document carries a reserved key the gate refuses). Routing is three layers, first
+  answer wins: the workspace switch
   (`workspace.mcp_gateway`, off = direct for everything) · the connection's owner mandate
   (`bundle_mcp.gateway_policy`: 'direct' = direct for everyone, 'required' = gateway for
-  everyone — a machine that cannot place gateway entries gets NO row, never a quiet direct
-  fallback; both mandates are ALSO enforced in the gateway's own resolver) · NULL = Auto, where
+  everyone — a caller that can be handed no address at all, i.e. a deployment running no gateway,
+  is WITHHELD, never a quiet direct fallback; both mandates are ALSO enforced in the gateway's own
+  resolver) · NULL = Auto, where
   the member's own opt-out row (`web.mcp_gateway_optout`) and the standing sign-in decide — a
   sign-in server keeps its own address until a credential stands at the gateway (read via the
   metadata mirror; a DELIBERATE reversal of the old "delivery never reads sign-in state" stance),
-  and an `auth_mode = 'none'` server routes at once. Unset, every one of those surfaces is
+  and an `auth_mode = 'none'` server routes at once. Routing is therefore PER-PERSON and
+  PER-SESSION, and the lanes that serve it are `no-store`. A MACHINE TOKEN routes too: it is
+  nobody, so it has no opt-out, rides only the WORKSPACE's sign-in, and is addressed by its
+  service session — the gateway resolves that second caller itself
+  (`machineSessionByTokenSha256`), so CI calls tools with no vendor secret of its own. The
+  address's session segment is a CONTRACT and its prefix is the whole of it: `sn_…` is satisfied
+  only by a stored person session, `ss_…` only by `TOPOS_TOKEN`, and the relay refuses a crossed
+  address rather than dial it — so test fixtures seed real `sn_…`/`ss_…` ids, never invented
+  shapes. The ruling also asks whether `gateway.credential` is READABLE before routing anything:
+  the env var is an intention, and a set variable with no schema behind it (a self-host that runs
+  no gateway, a rolling deploy mid-flight) must route direct rather than take a parse error on
+  every routed read — which since routing became three lanes would be every project's install.
+  A WITHHOLD IS SAID, not silent: the two catalog-shaped lanes answer the row itself carrying
+  `withheld: "gateway_required"` and NO `document` key (the by-revision lane returns 200 with it,
+  never its uniform 404), because absence there is indistinguishable from a fetch that did not
+  land — and the client resolves that ambiguity by KEEPING what it has, which would leave every
+  early machine bypassing the mandate forever. The FEED is the exception and carries no marker:
+  it is the demand list, so absence from it already means "not yours".
+  The floor (`MIN_CLI_VERSION`) carries the other half: routing no longer asks a caller's version,
+  so it sits at 0.1.45, the release whose renderer speaks `topos relay`. Unset,
+  every one of those surfaces is
   simply absent and delivery carries the stored document — the whole rollback is clearing a
   variable.
 - **One identity.** A person is a `user.id` (Better Auth); email is a mutable login attribute —

@@ -348,7 +348,7 @@ pub(crate) fn list_skills() {}
         ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
     ),
     responses(
-        (status = 200, description = "ONE stored revision of a server this workspace connects, in the shape the catalog index carries the current one — what a committed `topos.lock` converges an `[mcp]` entry to.", body = WireMcpIndexEntry),
+        (status = 200, description = "ONE stored revision of a server this workspace connects, in the shape the catalog index carries the current one — what a committed `topos.lock` converges an `[mcp]` entry to. A revision WITHHELD from this caller answers here too, carrying `withheld` and no `document`: a withhold is a ruling and must be told apart from the 404 below, which a client reads as \"I could not ask\" and answers by keeping what it already holds.", body = WireMcpIndexEntry),
         (status = 404, description = "Missing/blank credential, non-member, a bundle this workspace does not connect, a revision of another server, or one nobody was ever delivered (indistinguishable).", body = JsonEnvelope),
         (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),

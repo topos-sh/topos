@@ -22,6 +22,39 @@ import { gatewayCredential, gatewayObservedTool } from "@/lib/db/schema.gateway"
  * itself is not in this schema at all and cannot be read from this tier by any query.
  */
 
+// ── Is the gateway's schema actually there? ──────────────────────────────────────────────────
+
+/** Memoized POSITIVE only: a schema that exists never stops existing, while an absent one may
+ *  appear at any moment (the gateway migrates its own lineage at boot, and web may be up first). */
+let gatewaySchemaSeen = false;
+
+/**
+ * Whether this tier can actually READ `gateway.credential` — the one gateway table the routing
+ * ruling consults.
+ *
+ * `GATEWAY_PUBLIC_URL` is a deployment's INTENTION, not proof: a self-hoster can set it without
+ * ever starting a gateway, and on any rolling deploy the web app can be serving before the
+ * gateway container has run its lineage. Naming a relation that does not exist fails at PARSE
+ * time, taking the whole read down — and since routing moved into the catalog and lock lanes,
+ * that would be every project's MCP install, not just one machine's feed. So the question is
+ * asked first, and its "no" means "route direct", which is the same shape an install with no
+ * gateway has always had.
+ *
+ * `has_table_privilege` over `to_regclass` answers existence AND the grant in one strict call:
+ * a missing relation makes the oid NULL, the function returns NULL, and the COALESCE says no.
+ */
+export async function gatewayCredentialsReadable(): Promise<boolean> {
+  if (gatewaySchemaSeen) {
+    return true;
+  }
+  const rows = await getDb().execute(sql`
+    SELECT COALESCE(has_table_privilege(to_regclass('gateway.credential'), 'SELECT'), false)
+             AS readable
+  `);
+  gatewaySchemaSeen = (rows.rows[0] as { readable: boolean } | undefined)?.readable === true;
+  return gatewaySchemaSeen;
+}
+
 // ── Sign-in state ────────────────────────────────────────────────────────────────────────────
 
 /** One stored sign-in, as the page needs it: never a secret, only who and when. */
@@ -414,6 +447,11 @@ function failureKindsOf(stored: unknown): { kind: string; count: number }[] {
  * that names one of them. The person and the machine are joined from THIS tier's rows — the
  * gateway records ids, and displays are ours.
  *
+ * A row with NO person is a MACHINE TOKEN's call (CI, calling with the workspace's sign-in): its
+ * session id names a service session instead of a person's, so both joins are tried and the
+ * person column says so outright. Grouping on a null user is why the per-failure join matches
+ * with IS NOT DISTINCT FROM — plain equality drops every machine row's failure breakdown.
+ *
  * The count is taken first so the page number can be clamped before the offset is spent: asking
  * for page 9 of a 3-page ledger reads page 3, never an empty table that looks like "no calls".
  */
@@ -470,13 +508,17 @@ export async function mcpUsageSessions(
            (extract(epoch from g.first_at) * 1000)::bigint AS first_call_ms,
            (extract(epoch from g.last_at) * 1000)::bigint AS last_call_ms,
            -- The display rule, spelled the way every other raw-SQL reader here spells it: the
-           -- profile name, else the email, else a stand-in for an account that is gone.
-           COALESCE(NULLIF(btrim(u.name), ''), u.email, 'former member') AS person,
-           COALESCE(s.display_name, 'a removed machine') AS machine
+           -- profile name, else the email, else a stand-in for an account that is gone — or, for
+           -- a call no person made, the plain truth instead of a phantom person.
+           CASE WHEN g.user_id IS NULL THEN 'a machine token'
+                ELSE COALESCE(NULLIF(btrim(u.name), ''), u.email, 'former member') END AS person,
+           COALESCE(s.display_name, ss.display_name, 'a removed machine') AS machine
     FROM per_session g
-    LEFT JOIN per_failure f ON f.session_id = g.session_id AND f.user_id = g.user_id
+    LEFT JOIN per_failure f
+      ON f.session_id = g.session_id AND f.user_id IS NOT DISTINCT FROM g.user_id
     LEFT JOIN web."user" u ON u.id = g.user_id
     LEFT JOIN web.cli_session s ON s.id = g.session_id
+    LEFT JOIN web.service_session ss ON ss.id = g.session_id
     ORDER BY g.last_at DESC, g.session_id DESC
     LIMIT ${MCP_USAGE_PAGE_SIZE} OFFSET ${(page - 1) * MCP_USAGE_PAGE_SIZE}
   `);

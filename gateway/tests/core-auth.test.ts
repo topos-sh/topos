@@ -59,10 +59,59 @@ describe("auth shell", () => {
   });
 
   it("refuses a valid bearer under a foreign path session id: 401, outcome unauthorized", async () => {
-    const resp = await handleGatewayRequest(t.ctx, gwRequest({ sessionId: "someone-elses-session", body: anyRpc }));
+    const resp = await handleGatewayRequest(t.ctx, gwRequest({ sessionId: "sn_someone_else", body: anyRpc }));
     expect(resp.status).toBe(401);
     expect(usage.events).toHaveLength(1);
     expect(usage.events[0]?.outcome).toBe("unauthorized");
+  });
+
+  it("resolves a MACHINE TOKEN's bearer as its own run, with no person on the usage row", async () => {
+    // CI's door: a workspace credential, not a person. The address names the SERVICE session the
+    // web delivered it for, and the call resolves against the workspace's own sign-in.
+    await store.addMachineBearer("tpt-ci-token", {
+      sessionId: "ss_ci",
+      workspaceId: "ws1",
+      userId: null,
+      displayName: "ci runner",
+    });
+    const resp = await handleGatewayRequest(
+      t.ctx,
+      gwRequest({
+        bearer: "tpt-ci-token",
+        sessionId: "ss_ci",
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "ci", version: "1" },
+          },
+        },
+      }),
+    );
+    expect(resp.status).toBe(200);
+    expect(usage.events).toHaveLength(1);
+    expect(usage.events[0]?.userId).toBeNull();
+    expect(usage.events[0]?.sessionId).toBe("ss_ci");
+  });
+
+  it("refuses a machine token under a path segment that is not its own run", async () => {
+    await store.addMachineBearer("tpt-ci-token", {
+      sessionId: "ss_ci",
+      workspaceId: "ws1",
+      userId: null,
+      displayName: "ci runner",
+    });
+    // Somebody else's address, dialed with a valid token: the token names no run there, so it
+    // resolves to nothing at all — refused before there is anything to attribute.
+    const resp = await handleGatewayRequest(
+      t.ctx,
+      gwRequest({ bearer: "tpt-ci-token", sessionId: "ss_someone_else", body: anyRpc }),
+    );
+    expect(resp.status).toBe(401);
+    expect(usage.events).toHaveLength(0);
   });
 
   it("answers 404 for a server the workspace is not connected to, outcome unauthorized", async () => {
