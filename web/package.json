@@ -83,7 +83,7 @@
     "typescript": "^5.9.0",
     "vite": "^7",
     "vite-tsconfig-paths": "^6.1.1",
-    "vitest": "4.1.9"
+    "vitest": "4.1.11"
   },
   "patchedDependencies": {
     "compression@1.8.1": "patches/compression@1.8.1.patch"
