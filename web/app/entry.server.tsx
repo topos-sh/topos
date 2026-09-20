@@ -2,7 +2,7 @@ import { PassThrough } from "node:stream";
 import { createReadableStreamFromReadable } from "@react-router/node";
 import * as Sentry from "@sentry/react-router";
 import { renderToPipeableStream } from "react-dom/server";
-import type { EntryContext, RouterContextProvider } from "react-router";
+import type { EntryContext, HandleErrorFunction, RouterContextProvider } from "react-router";
 import { ServerRouter } from "react-router";
 import { composition } from "@/composition.server";
 import { canonicalOriginRedirect } from "@/lib/canonical.server";
@@ -13,6 +13,7 @@ import { syncMcpCatalogAtBoot } from "@/lib/db/mcp-catalog-sync.server";
 import { runMigrations } from "@/lib/db/migrate.server";
 import { armUpstreamChecker } from "@/lib/db/upstream.server";
 import { docsNegotiatedMarkdown } from "@/lib/docs/docs.server";
+import { isClientRouteError } from "@/lib/router-error-report";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
 
 /**
@@ -65,8 +66,21 @@ Sentry.init({
   },
 });
 
-/** Loader/action/render failures → Sentry (the leaked errors already pass beforeSend's scrub). */
-export const handleError = Sentry.createSentryHandleError({ logErrors: true });
+const reportToSentry = Sentry.createSentryHandleError({ logErrors: true });
+
+/**
+ * Loader/action/render failures → Sentry (the leaked errors already pass beforeSend's scrub) —
+ * EXCEPT the router's own 4xx verdicts on malformed requests (a POST to a route with no action,
+ * a data request for no route). Those are the request's fault, not the app's, and they come in
+ * scanner-driven waves that would otherwise be the whole dashboard; the request line still
+ * lands in the access log. See `isClientRouteError` for the exact line.
+ */
+export const handleError: HandleErrorFunction = (error, args) => {
+  if (isClientRouteError(error)) {
+    return;
+  }
+  return reportToSentry(error, args);
+};
 
 /**
  * Migrations run EAGERLY, at module load — BEFORE any request is served. In production,
